@@ -44,7 +44,10 @@ int main(int argc, char **argv)
 	/* Initialize configuration parser */
 	rc = yaml_parser_initialize(&setup);
 	if (rc == 0)
+	{
+		fclose(file);
 		return -EINVAL;
+	}
 
 	yaml_parser_set_input_file(&setup, file);
 
@@ -186,7 +189,10 @@ int main(int argc, char **argv)
 
 emitter_error:
 	yaml_emitter_delete(&output);
+
 free_results:
 	yaml_parser_delete(&setup);
+	close(file);
+
 	return 0;
 }
