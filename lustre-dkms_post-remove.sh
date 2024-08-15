@@ -21,5 +21,14 @@
 #
 
 kapi=$7/$1/$2/$3/$5/kapi/include
-alternatives --remove lustre ${kapi}
+
+# add support for debian based release
+which alternatives
+if [ $? == 0 ] ; then
+	# rhel/centos
+	alternatives --remove lustre ${kapi}
+else
+	# debian/ubuntu
+	update-alternatives --remove lustre ${kapi}
+fi
 rm -fr $7/$1/$2/$3/$5/kapi
