@@ -89,5 +89,11 @@ for fname in $(find libcfs/include/libcfs -type f -name \*.h); do
     >&2 echo "installing ${fname} => ${kapi}/${target}"
 done
 
-alternatives --install /usr/src/lustre lustre ${kapi} 90
+# add support for debian based release
+which alternatives
+if [ $? == 0 ] ; then
+	alternatives --install /usr/src/lustre lustre ${kapi} 90
+else
+	update-alternatives --install /usr/src/lustre lustre ${kapi} 90
+fi
 

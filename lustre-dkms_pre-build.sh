@@ -129,8 +129,15 @@ DKMS_CONFIG_OPTS=$(
 
 echo "${DKMS_CONFIG_OPTS} " | grep -E -q -- '--disable-gss[^-]|--enable-gss[^-]'
 if [ $? != 0 ] ; then
-	# User did not force, guess for rpm distros
-	rpm -qa | grep krb5-devel >/dev/null
+	# add support for debian based release
+	which yum
+	if [ $? == 0 ] ; then
+		# User did not force, guess for rpm distros (such as rhel, centos)
+		rpm -qa | grep krb5-devel >/dev/null
+	else
+		# User did not force, guess for dpkg distros (such as debian, ubuntu)
+		dpkg -l | grep libkrb5-dev >/dev/null
+	fi
 	[[ $? == 0 ]] && GSS="--enable-gss" || GSS="--disable-gss"
 fi
 
