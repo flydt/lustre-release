@@ -1076,7 +1076,7 @@ static int mdt_refetch_lovea(struct mdt_thread_info *info,
 		return 0;
 
 	ma->ma_valid &= ~MA_LOV;
-	info->mti_big_lmm_used = 0;
+	info->mti_big_lov_used = 0;
 	ma->ma_lmm = req_capsule_server_get(info->mti_pill, &RMF_MDT_MD);
 	ma->ma_lmm_size = req_capsule_get_size(info->mti_pill, &RMF_MDT_MD,
 					       RCL_SERVER);
@@ -2007,6 +2007,8 @@ static int mdt_hsm_release(struct mdt_thread_info *info, struct mdt_object *o,
 
 	if (!(ma->ma_valid & MA_LOV)) {
 		/* Even empty file are released */
+		ma->ma_lmm = (void *)info->mti_xattr_buf;
+		LASSERT(sizeof(*ma->ma_lmm) < sizeof(info->mti_xattr_buf));
 		memset(ma->ma_lmm, 0, sizeof(*ma->ma_lmm));
 		ma->ma_lmm->lmm_magic = cpu_to_le32(LOV_MAGIC_V1_DEFINED);
 		ma->ma_lmm->lmm_pattern = cpu_to_le32(LOV_PATTERN_RAID0);
@@ -2119,7 +2121,7 @@ out_unlock:
 out_reprocess:
 	ldlm_reprocess_all(lease->l_resource,
 			   lease->l_policy_data.l_inodebits.bits);
-	LDLM_LOCK_PUT(lease);
+	ldlm_lock_put(lease);
 
 	ma->ma_valid = 0;
 	ma->ma_need = 0;
@@ -2347,7 +2349,7 @@ out_obj:
 			   lease->l_policy_data.l_inodebits.bits);
 
 out_lease:
-	LDLM_LOCK_PUT(lease);
+	ldlm_lock_put(lease);
 
 	if (ma != NULL) {
 		ma->ma_valid = 0;
@@ -2466,7 +2468,7 @@ out_unlock:
 out_reprocess:
 	ldlm_reprocess_all(lease->l_resource,
 			   lease->l_policy_data.l_inodebits.bits);
-	LDLM_LOCK_PUT(lease);
+	ldlm_lock_put(lease);
 
 	ma->ma_valid = 0;
 	ma->ma_need = 0;

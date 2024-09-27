@@ -484,6 +484,8 @@ static int osp_disconnect(struct osp_device *d)
 
 	ptlrpc_deactivate_import(imp);
 
+	ldlm_namespace_cleanup(obd->obd_namespace, LDLM_FL_LOCAL_ONLY);
+
 	/* Some non-replayable imports (MDS's OSCs) are pinged, so just
 	 * delete it regardless.  (It's safe to delete an import that was
 	 * never added.) */
@@ -1279,8 +1281,7 @@ static int osp_init0(const struct lu_env *env, struct osp_device *osp,
 	rc = ptlrpc_init_import(imp);
 	if (rc)
 		GOTO(out, rc);
-	if (osdname)
-		OBD_FREE(osdname, MAX_OBD_NAME);
+	OBD_FREE(osdname, MAX_OBD_NAME);
 	init_waitqueue_head(&osp->opd_out_waitq);
 	RETURN(0);
 
@@ -1307,8 +1308,7 @@ out_ref:
 out_disconnect:
 	obd_disconnect(osp->opd_storage_exp);
 out_fini:
-	if (osdname)
-		OBD_FREE(osdname, MAX_OBD_NAME);
+	OBD_FREE(osdname, MAX_OBD_NAME);
 	RETURN(rc);
 }
 

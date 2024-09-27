@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2001, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -1330,12 +1312,15 @@ static int ll_mdc_read_page_remote(void *data, struct page *page0)
 	int npages;
 	int i;
 	int rc;
+	gfp_t gfp;
+
 	ENTRY;
 
 	max_pages = rp->rp_exp->exp_obd->u.cli.cl_max_pages_per_rpc;
 	inode = op_data->op_data;
 	fid = &op_data->op_fid1;
 	LASSERT(inode != NULL);
+	gfp = mapping_gfp_mask(inode->i_mapping);
 
 	OBD_ALLOC_PTR_ARRAY_LARGE(page_pool, max_pages);
 	if (page_pool != NULL) {
@@ -1346,7 +1331,7 @@ static int ll_mdc_read_page_remote(void *data, struct page *page0)
 	}
 
 	for (npages = 1; npages < max_pages; npages++) {
-		page = page_cache_alloc(inode->i_mapping);
+		page = __page_cache_alloc(gfp);
 		if (page == NULL)
 			break;
 		page_pool[npages] = page;
@@ -2066,6 +2051,44 @@ out:
 	return rc;
 }
 
+static int mdc_ioc_hsm_data_version(struct obd_export *exp,
+				    struct md_op_data *op_data)
+{
+	struct ptlrpc_request	*req;
+	struct mdt_body		*b;
+	int			 rc;
+	ENTRY;
+
+	req = ptlrpc_request_alloc(class_exp2cliimp(exp),
+				   &RQF_MDS_HSM_DATA_VERSION);
+	if (req == NULL)
+		RETURN(-ENOMEM);
+
+	rc = ptlrpc_request_pack(req, LUSTRE_MDS_VERSION, MDS_HSM_DATA_VERSION);
+	if (rc) {
+		ptlrpc_request_free(req);
+		RETURN(rc);
+	}
+
+	mdc_pack_body(&req->rq_pill, &op_data->op_fid1, 0, 0,
+		      op_data->op_suppgids[0], 0);
+
+	b = req_capsule_client_get(&req->rq_pill, &RMF_MDT_BODY);
+	LASSERT(b);
+
+	b->mbo_version = op_data->op_data_version;
+
+	ptlrpc_request_set_replen(req);
+
+	ptlrpc_get_mod_rpc_slot(req);
+	rc = ptlrpc_queue_wait(req);
+	ptlrpc_put_mod_rpc_slot(req);
+
+	GOTO(out, rc);
+out:
+	ptlrpc_req_put(req);
+	return rc;
+}
 static int mdc_ioc_hsm_ct_start(struct obd_export *exp,
                                 struct lustre_kernelcomm *lk);
 static int mdc_quotactl(struct obd_device *unused, struct obd_export *exp,
@@ -2274,6 +2297,9 @@ static int mdc_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 		GOTO(out, rc);
 	case LL_IOC_HSM_REQUEST:
 		rc = mdc_ioc_hsm_request(exp, karg);
+		GOTO(out, rc);
+	case LL_IOC_HSM_DATA_VERSION:
+		rc = mdc_ioc_hsm_data_version(exp, karg);
 		GOTO(out, rc);
 	case OBD_IOC_CLIENT_RECOVER:
 		rc = ptlrpc_recover_import(imp, data->ioc_inlbuf1, 0);

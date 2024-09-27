@@ -41,16 +41,18 @@
 #endif
 
 #include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <grp.h>
 #include <mntent.h>
+#include <pwd.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stddef.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <dirent.h>
 #include <stdarg.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
@@ -85,8 +87,8 @@
 
 #define FORMATTED_BUF_LEN	1024
 
-#ifndef INVALID_PROJID
-#define INVALID_PROJID	-1
+#ifndef DEFAULT_PROJID
+#define DEFAULT_PROJID	0
 #endif
 
 static int llapi_msg_level = LLAPI_MSG_MAX;
@@ -562,6 +564,7 @@ int llapi_file_open_param(const char *name, int flags, mode_t mode,
 	char fsname[MAX_OBD_NAME + 1] = { 0 };
 	struct lov_user_md *lum = NULL;
 	const char *pool_name = param->lsp_pool;
+	bool use_default_striping = false;
 	size_t lum_size;
 	int fd, rc = 0;
 
@@ -593,7 +596,10 @@ int llapi_file_open_param(const char *name, int flags, mode_t mode,
 		return -ENOMEM;
 
 retry_open:
-	fd = open(name, flags | O_LOV_DELAY_CREATE, mode);
+	if (!use_default_striping)
+		fd = open(name, flags | O_LOV_DELAY_CREATE, mode);
+	else
+		fd = open(name, flags, mode);
 	if (fd < 0) {
 		if (errno == EISDIR && !(flags & O_DIRECTORY)) {
 			flags = O_DIRECTORY | O_RDONLY;
@@ -640,24 +646,45 @@ retry_open:
 			lumv3->lmm_objects[i].l_ost_idx = param->lsp_osts[i];
 	}
 
-	if (ioctl(fd, LL_IOC_LOV_SETSTRIPE, lum) != 0) {
-		char errmsg[512] = "stripe already set";
+	if (!use_default_striping && ioctl(fd, LL_IOC_LOV_SETSTRIPE, lum) != 0) {
+		char errbuf[512] = "stripe already set";
+		char *errmsg = errbuf;
 
 		rc = -errno;
-		if (errno != EEXIST && errno != EALREADY)
-			strncpy(errmsg, strerror(errno), sizeof(errmsg) - 1);
+		if (rc != -EEXIST && rc != -EALREADY)
+			strncpy(errbuf, strerror(errno), sizeof(errbuf) - 1);
 		if (rc == -EREMOTEIO)
-			snprintf(errmsg, sizeof(errmsg),
+			snprintf(errbuf, sizeof(errbuf),
 				 "inactive OST among your specified %d OST(s)",
 				 param->lsp_stripe_count);
-
-		llapi_err_noerrno(LLAPI_MSG_ERROR,
-				  "setstripe error for '%s': %s", name, errmsg);
-
 		close(fd);
+		/* the only reason we get EACESS on the ioctl is if setstripe
+		 * has been explicitly restricted, normal permission errors
+		 * happen earlier on open() and we never call ioctl()
+		 */
+		if (rc == -EACCES) {
+			errmsg = "Setstripe is restricted by your administrator, default striping applied";
+			llapi_err_noerrno(LLAPI_MSG_WARN,
+					  "setstripe warning for '%s': %s",
+					  name, errmsg);
+			rc = remove(name);
+			if (rc) {
+				llapi_err_noerrno(LLAPI_MSG_ERROR,
+						  "setstripe error for '%s': %s",
+						  name, strerror(errno));
+				goto out;
+			}
+			use_default_striping = true;
+			goto retry_open;
+		} else {
+			llapi_err_noerrno(LLAPI_MSG_ERROR,
+					  "setstripe error for '%s': %s", name,
+					  errmsg);
+		}
 		fd = rc;
 	}
 
+out:
 	free(lum);
 
 	return fd;
@@ -703,6 +730,7 @@ int llapi_file_create_foreign(const char *name, mode_t mode, __u32 type,
 {
 	size_t len;
 	struct lov_foreign_md *lfm;
+	bool use_default_striping = false;
 	int fd, rc;
 
 	if (foreign_lov == NULL) {
@@ -731,7 +759,11 @@ int llapi_file_create_foreign(const char *name, mode_t mode, __u32 type,
 		goto out_err;
 	}
 
-	fd = open(name, O_WRONLY|O_CREAT|O_LOV_DELAY_CREATE, mode);
+retry_open:
+	if (!use_default_striping)
+		fd = open(name, O_WRONLY|O_CREAT|O_LOV_DELAY_CREATE, mode);
+	else
+		fd = open(name, O_WRONLY|O_CREAT, mode);
 	if (fd == -1) {
 		fd = -errno;
 		llapi_error(LLAPI_MSG_ERROR, fd, "open '%s' failed", name);
@@ -744,21 +776,43 @@ int llapi_file_create_foreign(const char *name, mode_t mode, __u32 type,
 	lfm->lfm_flags = flags;
 	memcpy(lfm->lfm_value, foreign_lov, len);
 
-	if (ioctl(fd, LL_IOC_LOV_SETSTRIPE, lfm) != 0) {
-		char *errmsg = "stripe already set";
+	if (!use_default_striping && ioctl(fd, LL_IOC_LOV_SETSTRIPE, lfm) != 0) {
+		char *errmsg;
 
 		rc = -errno;
 		if (errno == ENOTTY)
 			errmsg = "not on a Lustre filesystem";
 		else if (errno == EEXIST || errno == EALREADY)
 			errmsg = "stripe already set";
+		else if (errno == EACCES)
+			errmsg = "Setstripe is restricted by your administrator, default striping applied";
 		else
 			errmsg = strerror(errno);
 
-		llapi_err_noerrno(LLAPI_MSG_ERROR,
-				  "setstripe error for '%s': %s", name, errmsg);
-
 		close(fd);
+		/* the only reason we get ENOPERM on the ioctl is if setstripe
+		 * has been explicitly restricted, normal permission errors
+		 * happen earlier on open() and we never call ioctl()
+		 */
+		if (rc == -EACCES) {
+			llapi_err_noerrno(LLAPI_MSG_WARN,
+					  "setstripe warning for '%s': %s",
+					  name, errmsg);
+			rc = remove(name);
+			if (rc) {
+				llapi_err_noerrno(LLAPI_MSG_ERROR,
+						  "setstripe error for '%s': %s",
+						  name, strerror(errno));
+				goto out_free;
+			}
+			use_default_striping = true;
+			goto retry_open;
+		} else {
+			llapi_err_noerrno(LLAPI_MSG_ERROR,
+					  "setstripe error for '%s': %s", name,
+					  errmsg);
+		}
+
 		fd = rc;
 	}
 
@@ -1621,9 +1675,15 @@ again:
 	 */
 	if (ret < 0 && errno == ENOTTY && !did_nofollow) {
 		int fd, ret2;
+		struct stat st;
 
 		did_nofollow = true;
-		fd = open(path, O_RDONLY | O_NOFOLLOW);
+		if (stat(path, &st) != 0)
+			return -errno;
+		if (S_ISFIFO(st.st_mode))
+			fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+		else
+			fd = open(path, O_RDONLY | O_NOFOLLOW);
 		if (fd < 0) {
 			/* restore original errno */
 			errno = ENOTTY;
@@ -5194,10 +5254,7 @@ static int printf_format_lustre(char *seq, char *buffer, size_t size,
 		*wrote = snprintf(buffer, size, DFID_NOBRACE, PFID(&fid));
 		goto format_done;
 	case 'P':
-		if (projid == INVALID_PROJID)
-			*wrote = snprintf(buffer, size, "-1");
-		else
-			*wrote = snprintf(buffer, size, "%u", projid);
+		*wrote = snprintf(buffer, size, "%u", projid);
 		goto format_done;
 	case 'a': /* file attributes */
 		longopt = false;
@@ -5352,6 +5409,62 @@ format_done:
 }
 
 /*
+ * Create a formated access mode string
+ *
+ * @param[in] param->fp_lmd->lmd_stx.stx_mode
+ *
+ */
+
+static int snprintf_access_mode(char *buffer, size_t size, __u16 mode)
+{
+	char access_string[16];
+	char *p = access_string;
+
+	switch (mode & S_IFMT) {
+	case S_IFREG:
+		*p++ = '-';
+		break;
+	case S_IFDIR:
+		*p++ = 'd';
+		break;
+	case S_IFLNK:
+		*p++ = 'l';
+		break;
+	case S_IFIFO:
+		*p++ = 'p';
+		break;
+	case S_IFSOCK:
+		*p++ = 's';
+		break;
+	case S_IFBLK:
+		*p++ = 'b';
+		break;
+	case S_IFCHR:
+		*p++ = 'c';
+		break;
+	default:
+		*p++ = '?';
+		break;
+	}
+
+	*p++ = (mode & S_IRUSR) ? 'r' : '-';
+	*p++ = (mode & S_IWUSR) ? 'w' : '-';
+	*p++ = (mode & S_IXUSR) ? ((mode & S_ISUID) ? 's' : 'x') :
+				  ((mode & S_ISUID) ? 'S' : '-');
+	*p++ = (mode & S_IRGRP) ? 'r' : '-';
+	*p++ = (mode & S_IWGRP) ? 'w' : '-';
+	*p++ = (mode & S_IXGRP) ? ((mode & S_ISGID) ? 's' : 'x') :
+				  ((mode & S_ISGID) ? 'S' : '-');
+	*p++ = (mode & S_IROTH) ? 'r' : '-';
+	*p++ = (mode & S_IWOTH) ? 'w' : '-';
+	*p++ = (mode & S_IXOTH) ? ((mode & S_ISVTX) ? 't' : 'x') :
+				  ((mode & S_ISVTX) ? 'T' : '-');
+	*p = '\0';
+
+	return snprintf(buffer, size, "%s", access_string);
+}
+
+/*
  * Interpret format specifiers beginning with '%'.
  *
  * @param[in]	seq	String being parsed for format specifier.  The leading
@@ -5387,9 +5500,33 @@ static int printf_format_directive(char *seq, char *buffer, size_t size,
 	case 'b':	/* file size (in 512B blocks) */
 		*wrote = snprintf(buffer, size, "%"PRIu64, blocks);
 		break;
+	case 'g': { /* groupname of owner*/
+		static char save_gr_name[LOGIN_NAME_MAX + 1];
+		static gid_t save_gid = -1;
+
+		if (save_gid != param->fp_lmd->lmd_stx.stx_gid) {
+			struct group *gr;
+
+			gr = getgrgid(param->fp_lmd->lmd_stx.stx_gid);
+			if (gr) {
+				save_gid = param->fp_lmd->lmd_stx.stx_gid;
+				strncpy(save_gr_name, gr->gr_name,
+					sizeof(save_gr_name) - 1);
+			}
+		}
+		if (save_gr_name[0]) {
+			*wrote = snprintf(buffer, size, "%s", save_gr_name);
+			break;
+		}
+		fallthrough;
+	}
 	case 'G':	/* GID of owner */
 		*wrote = snprintf(buffer, size, "%u",
 				   param->fp_lmd->lmd_stx.stx_gid);
+		break;
+	case 'i':	/* inode number */
+		*wrote = snprintf(buffer, size, "%llu",
+				  param->fp_lmd->lmd_stx.stx_ino);
 		break;
 	case 'k':	/* file size (in 1K blocks) */
 		*wrote = snprintf(buffer, size, "%"PRIu64, (blocks + 1)/2);
@@ -5400,6 +5537,9 @@ static int printf_format_directive(char *seq, char *buffer, size_t size,
 		break;
 	case 'm':	/* file mode in octal */
 		*wrote = snprintf(buffer, size, "%#o", (mode & (~S_IFMT)));
+		break;
+	case 'M':	/* file access mode */
+		*wrote = snprintf_access_mode(buffer, size, mode);
 		break;
 	case 'n':	/* number of links */
 		*wrote = snprintf(buffer, size, "%u",
@@ -5412,6 +5552,26 @@ static int printf_format_directive(char *seq, char *buffer, size_t size,
 		*wrote = snprintf(buffer, size, "%"PRIu64,
 				   (uint64_t) param->fp_lmd->lmd_stx.stx_size);
 		break;
+	case 'u': {/* username of owner */
+		static char save_username[LOGIN_NAME_MAX + 1];
+		static uid_t save_uid = -1;
+
+		if (save_uid != param->fp_lmd->lmd_stx.stx_uid) {
+			struct passwd *pw;
+
+			pw = getpwuid(param->fp_lmd->lmd_stx.stx_uid);
+			if (pw) {
+				save_uid = param->fp_lmd->lmd_stx.stx_uid;
+				strncpy(save_username, pw->pw_name,
+					sizeof(save_username) - 1);
+			}
+		}
+		if (save_username[0]) {
+			*wrote = snprintf(buffer, size, "%s", save_username);
+			break;
+		}
+		fallthrough;
+	}
 	case 'U':	/* UID of owner */
 		*wrote = snprintf(buffer, size, "%u",
 				   param->fp_lmd->lmd_stx.stx_uid);
@@ -5510,22 +5670,81 @@ static void printf_format_string(struct find_param *param, char *path,
 }
 
 /*
- * Get file/directory project id.
- * by the open fd resides on.
- * Return 0 and project id on success, or -ve errno.
+ * Gets the project id of a file, directory, or special file,
+ * and stores it at the projid memory address passed in.
+ * Returns 0 on success, or -errno for failure.
+ *
+ * @param[in]	path	The full path of the file or directory we're trying
+ *			to retrieve the project id for.
+ * @param[in]	fd	A reference to the file descriptor of either the file
+ *			or directory we're inspecting. The file/dir may or may
+ *			not have been already opened, but if not, we'll open
+ *			it here (for regular files/directories).
+ * @param[in]	mode	The mode type of the file. This will tell us if the file
+ *			is a regular file/dir or if it's a special file type.
+ * @param[out]	projid	A reference to where to store the projid of the file/dir
  */
-static int fget_projid(int fd, __u32 *projid)
+static int get_projid(const char *path, int *fd, mode_t mode, __u32 *projid)
 {
-	struct fsxattr fsx;
-	int rc;
+	struct fsxattr fsx = { 0 };
+	struct lu_project lu_project = { 0 };
+	int ret = 0;
 
-	rc = ioctl(fd, FS_IOC_FSGETXATTR, &fsx);
-	if (rc) {
-		*projid = INVALID_PROJID;
-		return -errno;
+	/* Check the mode of the file */
+	if (S_ISREG(mode) || S_ISDIR(mode)) {
+		/* This is a regular file type or directory */
+		if (*fd < 0) {
+			/* If we haven't yet opened the file,
+			 * open it in read-only mode
+			 */
+			*fd = open(path, O_RDONLY | O_NOCTTY | O_NDELAY);
+			if (*fd <= 0) {
+				llapi_error(LLAPI_MSG_ERROR, -ENOENT,
+					    "warning: %s: unable to open file \"%s\"to get project id",
+					    __func__, path);
+				return -ENOENT;
+			}
+		}
+		ret = ioctl(*fd, FS_IOC_FSGETXATTR, &fsx);
+		if (ret)
+			return -errno;
+
+		*projid = fsx.fsx_projid;
+	} else {
+		/* This is a special file type, like a symbolic link, block or
+		 * character device file. We'll have to open its parent
+		 * directory and get metadata about the file through that.
+		 */
+		char dir_path[PATH_MAX + 1] = { 0 };
+		char base_path[PATH_MAX + 1] = { 0 };
+
+		strncpy(dir_path, path, PATH_MAX);
+		strncpy(base_path, path, PATH_MAX);
+		char *dir_name = dirname(dir_path);
+		char *base_name = basename(base_path);
+		int dir_fd = open(dir_name, O_RDONLY | O_NOCTTY | O_NDELAY);
+
+		if (dir_fd < 0) {
+			llapi_error(LLAPI_MSG_ERROR, -ENOENT,
+				    "warning: %s: unable to open dir \"%s\"to get project id",
+				    __func__, path);
+			return -errno;
+		}
+		lu_project.project_type = LU_PROJECT_GET;
+		if (base_name)
+			strncpy(lu_project.project_name, base_name, NAME_MAX);
+
+		ret = ioctl(dir_fd, LL_IOC_PROJECT, &lu_project);
+		if (ret) {
+			llapi_error(LLAPI_MSG_ERROR, -ENOENT,
+				    "warning: %s: failed to get xattr for '%s': %s",
+				    __func__, path, strerror(errno));
+			return -errno;
+		}
+		*projid = lu_project.project_id;
+		close(dir_fd);
 	}
 
-	*projid = fsx.fsx_projid;
 	return 0;
 }
 
@@ -5571,7 +5790,7 @@ static int cb_find_init(char *path, int p, int *dp,
 	__u32 stripe_count = 0;
 	__u64 flags;
 	int fd = -2;
-	__u32 projid = INVALID_PROJID;
+	__u32 projid = DEFAULT_PROJID;
 	bool gather_all = false;
 
 	if (p == -1 && d == -1)
@@ -5910,24 +6129,26 @@ obd_matches:
 		}
 	}
 
+	/* Retrieve project id from file/dir */
 	if (param->fp_check_projid || gather_all) {
-		if (fd == -2)
-			fd = open(path, O_RDONLY | O_NONBLOCK);
-
-		if (fd > 0)
-			ret = fget_projid(fd, &projid);
-		else
-			ret = -errno;
+		ret = get_projid(path, &fd, lmd->lmd_stx.stx_mode, &projid);
+		if (ret) {
+			llapi_error(LLAPI_MSG_ERROR, -ENOENT,
+				    "warning: %s: failed to get project id from file \"%s\"",
+				    __func__, path);
+			goto out;
+		}
 		if (param->fp_check_projid) {
-			if (ret)
-				goto out;
-			if (projid == param->fp_projid) {
-				if (param->fp_exclude_projid)
-					goto decided;
-			} else {
-				if (!param->fp_exclude_projid)
-					goto decided;
-			}
+			/* Conditionally filter this result based on --projid
+			 * param, and whether or not we're including or
+			 * excluding matching results.
+			 * fp_exclude_projid = 0 means only include exact match.
+			 * fp_exclude_projid = 1 means exclude exact match.
+			 */
+			bool matches = projid == param->fp_projid;
+
+			if (matches == param->fp_exclude_projid)
+				goto decided;
 		}
 	}
 
@@ -6350,7 +6571,7 @@ static int validate_printf_esc(char *c)
  */
 static int validate_printf_fmt(char *c)
 {
-	char *valid_fmt_single = "abcGkmnpstUwy%";
+	char *valid_fmt_single = "abcigGkmMnpstuUwy%";
 	char *valid_fmt_double = "ACTW";
 	char *valid_fmt_lustre = "aAcFhioPpS";
 	char curr = *c, next;
@@ -6513,6 +6734,7 @@ static int cb_getstripe(char *path, int p, int *dp, void *data,
 	struct find_param *param = (struct find_param *)data;
 	int d = dp == NULL ? -1 : *dp, fd = -1;
 	int ret = 0;
+	struct stat st;
 
 	if (p == -1 && d == -1)
 		return -EINVAL;
@@ -6542,6 +6764,11 @@ static int cb_getstripe(char *path, int p, int *dp, void *data,
 
 		if (param->fp_no_follow)
 			flag = O_RDONLY | O_NOFOLLOW;
+		if (stat(path, &st) != 0)
+			return -errno;
+		if (S_ISFIFO(st.st_mode))
+			flag |= O_NONBLOCK;
+
 		fd = open(path, flag);
 
 		if (fd == -1)

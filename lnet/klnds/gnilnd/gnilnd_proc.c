@@ -1,25 +1,14 @@
-/*
- * Copyright (C) 2009-2012, 2016 Cray, Inc.
+// SPDX-License-Identifier: GPL-2.0
+
+/* Copyright (C) 2009-2012, 2016 Cray, Inc.
  *
  * Copyright (c) 2013, 2015, Intel Corporation.
+ */
+
+/* This file is part of Lustre, http://www.lustre.org.
  *
- *   Author: Nic Henke <nic@cray.com>
- *   Author: James Shimek <jshimek@cray.com>
- *
- *   This file is part of Lustre, http://www.lustre.org.
- *
- *   Lustre is free software; you can redistribute it and/or
- *   modify it under the terms of version 2 of the GNU General Public
- *   License as published by the Free Software Foundation.
- *
- *   Lustre is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with Lustre; if not, write to the Free Software
- *   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Author: Nic Henke <nic@cray.com>
+ * Author: James Shimek <jshimek@cray.com>
  */
 
 /* this code liberated and modified from lnet/lnet/router_proc.c */
@@ -150,10 +139,8 @@ unwind:
 			__free_page(dest[i].bv_page);
 	}
 
-	if (src != NULL)
-		CFS_FREE_PTR_ARRAY(src, GNILND_MAX_IOV);
-	if (dest != NULL)
-		CFS_FREE_PTR_ARRAY(dest, GNILND_MAX_IOV);
+	CFS_FREE_PTR_ARRAY(src, GNILND_MAX_IOV);
+	CFS_FREE_PTR_ARRAY(dest, GNILND_MAX_IOV);
 	return rc;
 }
 
@@ -634,8 +621,7 @@ kgnilnd_smsg_seq_stop(struct seq_file *s, void *iter)
 {
 	kgn_smsg_seq_iter_t     *gseq = iter;
 
-	if (gseq != NULL)
-		LIBCFS_FREE(gseq, sizeof(*gseq));
+	LIBCFS_FREE(gseq, sizeof(*gseq));
 }
 
 static void *
@@ -849,8 +835,7 @@ kgnilnd_conn_seq_stop(struct seq_file *s, void *iter)
 {
 	kgn_conn_seq_iter_t     *gseq = iter;
 
-	if (gseq != NULL)
-		LIBCFS_FREE(gseq, sizeof(*gseq));
+	LIBCFS_FREE(gseq, sizeof(*gseq));
 }
 
 static void *
@@ -1192,8 +1177,7 @@ kgnilnd_peer_seq_stop(struct seq_file *s, void *iter)
 {
 	kgn_peer_seq_iter_t     *gseq = iter;
 
-	if (gseq != NULL)
-		LIBCFS_FREE(gseq, sizeof(*gseq));
+	LIBCFS_FREE(gseq, sizeof(*gseq));
 }
 
 static void *

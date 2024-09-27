@@ -153,7 +153,7 @@ struct llapi_stripe_param {
 	bool			lsp_is_create;
 	__u8			lsp_max_inherit;
 	__u8			lsp_max_inherit_rr;
-	__u32			lsp_osts[0];
+	__u32			lsp_osts[];
 };
 
 #define lsp_tgts	lsp_osts
@@ -564,6 +564,7 @@ int llapi_get_version(char *buffer, int buffer_size, char **version)
 int llapi_get_data_version(int fd, __u64 *data_version, __u64 flags);
 int llapi_file_flush(int fd);
 extern int llapi_get_ost_layout_version(int fd, __u32 *layout_version);
+int llapi_hsm_data_version_set(int fd, __u64 data_version);
 int llapi_hsm_state_get_fd(int fd, struct hsm_user_state *hus);
 int llapi_hsm_state_get(const char *path, struct hsm_user_state *hus);
 int llapi_hsm_state_set_fd(int fd, __u64 setmask, __u64 clearmask,
@@ -602,6 +603,17 @@ int llapi_swap_layouts(const char *path1, const char *path2, __u64 dv1,
  */
 #define HAVE_CHANGELOG_EXTEND_REC 1
 
+enum changelog_send_extra_flag {
+	/* Pack uid/gid into the changelog record */
+	CHANGELOG_EXTRA_FLAG_UIDGID	= CLFE_UIDGID,
+	/* Pack nid into the changelog record */
+	CHANGELOG_EXTRA_FLAG_NID	= CLFE_NID,
+	/* Pack open mode into the changelog record */
+	CHANGELOG_EXTRA_FLAG_OMODE	= CLFE_OPEN,
+	/* Pack xattr name into the changelog record */
+	CHANGELOG_EXTRA_FLAG_XATTR	= CLFE_XATTR,
+};
+
 int llapi_changelog_start(void **priv, enum changelog_send_flag flags,
 			  const char *mdtname, long long startrec);
 int llapi_changelog_fini(void **priv);
@@ -612,8 +624,30 @@ int llapi_changelog_get_fd(void *priv);
 /* Allow records up to endrec to be destroyed; requires registered id. */
 int llapi_changelog_clear(const char *mdtname, const char *idstr,
 			  long long endrec);
-extern int llapi_changelog_set_xflags(void *priv,
-				    enum changelog_send_extra_flag extra_flags);
+int llapi_changelog_set_xflags(void *priv,
+			       enum changelog_send_extra_flag extra_flags);
+struct changelog_rec *
+llapi_changelog_repack_rec(const struct changelog_rec *rec,
+			   enum changelog_rec_flags crf_wanted,
+			   enum changelog_rec_extra_flags cref_want);
+
+#ifndef changelog_remap_rec
+static inline void changelog_remap_rec(struct changelog_rec *rec,
+				       enum changelog_rec_flags crf_wanted,
+				       enum changelog_rec_extra_flags cref_want)
+{
+	struct changelog_rec *new_rec;
+
+	new_rec = llapi_changelog_repack_rec((const struct changelog_rec *)rec,
+					     crf_wanted, cref_want);
+	if (new_rec) {
+		size_t len = changelog_rec_size(rec) + rec->cr_namelen;
+
+		memcpy(rec, new_rec, len);
+		free(new_rec);
+	}
+}
+#endif
 
 /* HSM copytool interface.
  * priv is private state, managed internally by these functions
@@ -875,10 +909,13 @@ int llapi_layout_merge(struct llapi_layout **dst_layout,
  * When specified or returned as the value for stripe count, all
  * available OSTs will be used.
  */
-#define LLAPI_MIN_STRIPE_COUNT    (-1)
-#define LLAPI_MAX_STRIPE_COUNT    (-32)
-#define LLAPI_LAYOUT_WIDE_MIN	(LLAPI_LAYOUT_INVALID + 2)
-#define LLAPI_LAYOUT_WIDE_MAX	(LLAPI_LAYOUT_WIDE_MIN + 32)
+#define LLAPI_OVERSTRIPE_COUNT_MIN    ((__s16)LOV_ALL_STRIPES)      /*  -1 */
+#define LLAPI_OVERSTRIPE_COUNT_MAX    ((__s16)LOV_ALL_STRIPES_WIDE) /* -32 */
+#define LLAPI_LAYOUT_WIDE_MIN (LLAPI_LAYOUT_DEFAULT - \
+				LLAPI_OVERSTRIPE_COUNT_MIN)
+#define LLAPI_LAYOUT_WIDE_MAX (LLAPI_LAYOUT_DEFAULT - \
+				LLAPI_OVERSTRIPE_COUNT_MAX)
+#define LLAPI_LAYOUT_WIDE     LLAPI_LAYOUT_WIDE_MIN /* backward compatibility */
 
 /**
  * When specified as the value for layout pattern, file objects will be

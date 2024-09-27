@@ -1,29 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2015, Intel Corporation.
  * Use is subject to license terms.
+ */
+
+/*
+ * This file is part of Lustre, http://www.lustre.org/
  *
- * Author: Niu    Yawei    <yawei.niu@intel.com>
+ * Author: Niu Yawei <yawei.niu@intel.com>
  */
 
 #define DEBUG_SUBSYSTEM S_LDLM
@@ -152,7 +137,7 @@ static int ldlm_reclaim_lock_cb(struct cfs_hash *hs, struct cfs_hash_bd *bd,
 			ldlm_set_ast_sent(lock);
 			LASSERT(list_empty(&lock->l_rk_ast));
 			list_add(&lock->l_rk_ast, &data->rcd_rpc_list);
-			LDLM_LOCK_GET(lock);
+			ldlm_lock_get(lock);
 			if (++data->rcd_added == data->rcd_total) {
 				rc = 1; /* stop the iteration */
 				break;
@@ -227,7 +212,7 @@ static void ldlm_reclaim_res(struct ldlm_namespace *ns, int *count,
 
 #define LDLM_RECLAIM_BATCH	512
 #define LDLM_RECLAIM_AGE_MIN	(300 * NSEC_PER_SEC)
-#define LDLM_RECLAIM_AGE_MAX	(LDLM_DEFAULT_MAX_ALIVE * NSEC_PER_SEC * 3 / 4)
+#define LDLM_RECLAIM_AGE_MAX	(LDLM_DEFAULT_LRU_MAX_AGE * NSEC_PER_SEC * 3/4)
 
 static inline s64 ldlm_reclaim_age(void)
 {

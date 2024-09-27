@@ -541,18 +541,17 @@ void __cl_page_disown(const struct lu_env *env, struct cl_page *cp)
 	enum cl_page_state state;
 
 	ENTRY;
-	if (cp->cp_type == CPT_CACHEABLE) {
-		cl_page_owner_clear(cp);
-		state = cp->cp_state;
-		PINVRNT(env, cp, state == CPS_OWNED || state == CPS_FREEING);
-		PINVRNT(env, cp, cl_page_invariant(cp) || state == CPS_FREEING);
-		if (state == CPS_OWNED)
-			cl_page_state_set(env, cp, CPS_CACHED);
-		vmpage = cp->cp_vmpage;
-		LASSERT(vmpage != NULL);
-		LASSERT(PageLocked(vmpage));
-		unlock_page(vmpage);
-	}
+
+	cl_page_owner_clear(cp);
+	state = cp->cp_state;
+	PINVRNT(env, cp, state == CPS_OWNED || state == CPS_FREEING);
+	PINVRNT(env, cp, cl_page_invariant(cp) || state == CPS_FREEING);
+	if (state == CPS_OWNED)
+		cl_page_state_set(env, cp, CPS_CACHED);
+	vmpage = cp->cp_vmpage;
+	LASSERT(vmpage != NULL);
+	LASSERT(PageLocked(vmpage));
+	unlock_page(vmpage);
 
 	EXIT;
 }
@@ -597,9 +596,10 @@ static int __cl_page_own(const struct lu_env *env, struct cl_io *io,
 	int result;
 
 	ENTRY;
-	PINVRNT(env, cl_page, !cl_page_is_owned(cl_page, io));
 
 	LASSERT(cl_page->cp_type != CPT_TRANSIENT);
+
+	PINVRNT(env, cl_page, !cl_page_is_owned(cl_page, io));
 
 	if (cl_page->cp_type != CPT_TRANSIENT &&
 	    cl_page->cp_state == CPS_FREEING) {
@@ -735,10 +735,10 @@ EXPORT_SYMBOL(cl_page_unassume);
 void cl_page_disown(const struct lu_env *env,
 		    struct cl_io *io, struct cl_page *pg)
 {
-	if (pg->cp_type != CPT_TRANSIENT) {
-		PINVRNT(env, pg, cl_page_is_owned(pg, cl_io_top(io)) ||
-			pg->cp_state == CPS_FREEING);
-	}
+	LASSERT(pg->cp_type != CPT_TRANSIENT);
+
+	PINVRNT(env, pg, cl_page_is_owned(pg, cl_io_top(io)) ||
+		pg->cp_state == CPS_FREEING);
 
 	__cl_page_disown(env, pg);
 }
@@ -761,21 +761,19 @@ void cl_page_discard(const struct lu_env *env,
 	const struct cl_page_slice *slice;
 	int i;
 
+	LASSERT(cp->cp_type != CPT_TRANSIENT);
+
 	cl_page_slice_for_each(cp, slice, i) {
 		if (slice->cpl_ops->cpo_discard != NULL)
 			(*slice->cpl_ops->cpo_discard)(env, slice, io);
 	}
 
-	if (cp->cp_type == CPT_CACHEABLE) {
-		PINVRNT(env, cp, cl_page_is_owned(cp, io));
-		PINVRNT(env, cp, cl_page_invariant(cp));
-		vmpage = cp->cp_vmpage;
-		LASSERT(vmpage != NULL);
-		LASSERT(PageLocked(vmpage));
-		generic_error_remove_folio(vmpage->mapping, page_folio(vmpage));
-	} else {
-		cl_page_delete(env, cp);
-	}
+	PINVRNT(env, cp, cl_page_is_owned(cp, io));
+	PINVRNT(env, cp, cl_page_invariant(cp));
+	vmpage = cp->cp_vmpage;
+	LASSERT(vmpage != NULL);
+	LASSERT(PageLocked(vmpage));
+	generic_error_remove_folio(vmpage->mapping, page_folio(vmpage));
 }
 EXPORT_SYMBOL(cl_page_discard);
 
@@ -791,15 +789,16 @@ static void __cl_page_delete(const struct lu_env *env, struct cl_page *cp)
 
 	ENTRY;
 
+	if (cp->cp_type == CPT_TRANSIENT)
+		EXIT;
+
 	/*
 	 * Severe all ways to obtain new pointers to @pg.
 	 * Transient pages already can't be found because they're not in cache.
 	 */
-	if (cp->cp_type != CPT_TRANSIENT) {
-		PASSERT(env, cp, cp->cp_state != CPS_FREEING);
-		cl_page_owner_clear(cp);
-		__cl_page_state_set(env, cp, CPS_FREEING);
-	}
+	PASSERT(env, cp, cp->cp_state != CPS_FREEING);
+	cl_page_owner_clear(cp);
+	__cl_page_state_set(env, cp, CPS_FREEING);
 
 	cl_page_slice_for_each_reverse(cp, slice, i) {
 		if (slice->cpl_ops->cpo_delete != NULL)
@@ -870,10 +869,8 @@ static void cl_page_io_start(const struct lu_env *env,
 {
 	/* Page is queued for IO, change its state. */
 	ENTRY;
-	if (pg->cp_type != CPT_TRANSIENT) {
-		cl_page_owner_clear(pg);
-		cl_page_state_set(env, pg, cl_req_type_state(crt));
-	}
+	cl_page_owner_clear(pg);
+	cl_page_state_set(env, pg, cl_req_type_state(crt));
 	EXIT;
 }
 
@@ -887,8 +884,7 @@ int cl_page_prep(const struct lu_env *env, struct cl_io *io,
 	struct page *vmpage = cp->cp_vmpage;
 	int rc;
 
-	if (cp->cp_type == CPT_TRANSIENT)
-		GOTO(start, rc = 0);
+	LASSERT(cp->cp_type != CPT_TRANSIENT);
 	PASSERT(env, cp, crt < CRT_NR);
 	PINVRNT(env, cp, cl_page_is_owned(cp, io));
 	PINVRNT(env, cp, cl_page_invariant(cp));
@@ -906,7 +902,6 @@ int cl_page_prep(const struct lu_env *env, struct cl_io *io,
 		if (cp->cp_sync_io == NULL)
 			set_page_writeback(vmpage);
 	}
-start:
 
 	cl_page_io_start(env, cp, crt);
 	rc = 0;
@@ -941,21 +936,21 @@ void cl_page_completion(const struct lu_env *env,
 	int i;
 
 	ENTRY;
-	PASSERT(env, cl_page, crt < CRT_NR);
-	if (cl_page->cp_type != CPT_TRANSIENT)
-		PASSERT(env, cl_page,
-			cl_page->cp_state == cl_req_type_state(crt));
 
 	CL_PAGE_HEADER(D_TRACE, env, cl_page, "%d %d\n", crt, ioret);
-	if (cl_page->cp_type != CPT_TRANSIENT)
-		cl_page_state_set(env, cl_page, CPS_CACHED);
-	if (crt >= CRT_NR)
-		return;
+	PASSERT(env, cl_page, crt < CRT_NR);
 
-	cl_page_slice_for_each_reverse(cl_page, slice, i) {
-		if (slice->cpl_ops->io[crt].cpo_completion != NULL)
-			(*slice->cpl_ops->io[crt].cpo_completion)(env, slice,
-								  ioret);
+	if (cl_page->cp_type != CPT_TRANSIENT) {
+		PASSERT(env, cl_page,
+			cl_page->cp_state == cl_req_type_state(crt));
+		cl_page_state_set(env, cl_page, CPS_CACHED);
+
+		cl_page_slice_for_each_reverse(cl_page, slice, i) {
+			if (slice->cpl_ops->io[crt].cpo_completion != NULL)
+				(*slice->cpl_ops->io[crt].cpo_completion)(env,
+									  slice,
+									 ioret);
+		}
 	}
 
 	if (anchor != NULL) {
@@ -983,9 +978,7 @@ int cl_page_make_ready(const struct lu_env *env, struct cl_page *cp,
 
 	ENTRY;
 	PASSERT(env, cp, crt == CRT_WRITE);
-
-	if (cp->cp_type == CPT_TRANSIENT)
-		GOTO(out, rc = 0);
+	LASSERT(cp->cp_type != CPT_TRANSIENT);
 
 	lock_page(vmpage);
 	PASSERT(env, cp, PageUptodate(vmpage));
@@ -1009,7 +1002,6 @@ int cl_page_make_ready(const struct lu_env *env, struct cl_page *cp,
 		LBUG();
 	}
 
-out:
 	if (rc == 0) {
 		PASSERT(env, cp, cp->cp_state == CPS_CACHED);
 		cl_page_io_start(env, cp, crt);
@@ -1167,6 +1159,7 @@ struct cl_client_cache *cl_cache_init(unsigned long lru_page_max)
 	refcount_set(&cache->ccc_users, 1);
 	cache->ccc_lru_max = lru_page_max;
 	atomic_long_set(&cache->ccc_lru_left, lru_page_max);
+	atomic_long_set(&cache->ccc_unevict_lru_used, 0);
 	spin_lock_init(&cache->ccc_lru_lock);
 	INIT_LIST_HEAD(&cache->ccc_lru);
 

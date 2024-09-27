@@ -25,7 +25,7 @@ If you are confident about the system consistency, or not require the full
 consistency and want to avoid blocking applications when creating the snapshot,
 then you can specify barrier
 .BR off .
-That will save your time of creating the snapshot. If the barrier is
+That will save time when creating the snapshot. If the barrier is
 .IR on ,
 then the timeout of the barrier can be specified via
 .B -t
@@ -61,7 +61,7 @@ If write barrier is
 .BR on ,
 then the
 .I timeout
-specifies the write barrier's lifetime in second. The default vaule is 30.
+specifies the write barrier's lifetime in second. The default value is 30.
 
 .SH AVAILABILITY
 .B lctl-snapshot-create

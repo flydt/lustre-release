@@ -32,10 +32,11 @@
 #ifndef LLITE_PCC_H
 #define LLITE_PCC_H
 
-#include <linux/types.h>
 #include <linux/fs.h>
-#include <linux/seq_file.h>
 #include <linux/mm.h>
+#include <linux/kref.h>
+#include <linux/types.h>
+#include <linux/seq_file.h>
 #include <uapi/linux/lustre/lustre_user.h>
 
 extern struct kmem_cache *pcc_inode_slab;
@@ -149,7 +150,7 @@ struct pcc_dataset {
 	char			pccd_pathname[PATH_MAX]; /* full path */
 	struct path		pccd_path;	 /* Root path */
 	struct list_head	pccd_linkage;  /* Linked to pccs_datasets */
-	atomic_t		pccd_refcount; /* Reference count */
+	struct kref		pccd_refcount; /* Reference count */
 	enum hsmtool_type	pccd_hsmtool_type; /* HSM copytool type */
 };
 
@@ -171,6 +172,7 @@ struct pcc_super {
 	/* Size threshold for asynchrous PCC-RO attach in background. */
 	__u64			 pccs_async_threshold;
 	bool			 pccs_async_affinity;
+	umode_t			 pccs_mode;
 };
 
 struct pcc_inode {
@@ -286,6 +288,7 @@ int pcc_ioctl_detach(struct inode *inode, __u32 *flags);
 int pcc_ioctl_state(struct file *file, struct inode *inode,
 		    struct lu_pcc_state *state);
 void pcc_file_init(struct pcc_file *pccf);
+bool pcc_inode_permission(struct inode *inode);
 int pcc_file_open(struct inode *inode, struct file *file);
 void pcc_file_release(struct inode *inode, struct file *file);
 ssize_t pcc_file_read_iter(struct kiocb *iocb, struct iov_iter *iter,
@@ -295,11 +298,9 @@ ssize_t pcc_file_write_iter(struct kiocb *iocb, struct iov_iter *iter,
 int pcc_inode_getattr(struct inode *inode, u32 request_mask,
 		      unsigned int flags, bool *cached);
 int pcc_inode_setattr(struct inode *inode, struct iattr *attr, bool *cached);
-#ifdef HAVE_DEFAULT_FILE_SPLICE_READ_EXPORT
 ssize_t pcc_file_splice_read(struct file *in_file, loff_t *ppos,
 			     struct pipe_inode_info *pipe, size_t count,
 			     unsigned int flags);
-#endif
 int pcc_fsync(struct file *file, loff_t start, loff_t end,
 	      int datasync, bool *cached);
 int pcc_file_mmap(struct file *file, struct vm_area_struct *vma, bool *cached);
@@ -316,6 +317,7 @@ void pcc_create_attach_cleanup(struct super_block *sb,
 struct pcc_dataset *pcc_dataset_match_get(struct pcc_super *super,
 					  enum lu_pcc_type type,
 					  struct pcc_matcher *matcher);
+void pcc_dataset_free(struct kref *kref);
 void pcc_dataset_put(struct pcc_dataset *dataset);
 void pcc_inode_free(struct inode *inode);
 void pcc_layout_invalidate(struct inode *inode);

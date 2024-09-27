@@ -297,7 +297,7 @@ static void osd_idc_dump_lma(const struct lu_env *env,
 	struct inode *inode;
 	int rc;
 
-	inode = osd_ldiskfs_iget(osd_sb(osd), ino);
+	inode = osd_ldiskfs_iget(osd_sb(osd), ino, 0);
 	if (IS_ERR(inode)) {
 		CERROR("%s: can't get inode %lu: rc = %d\n",
 		       osd->od_svname, ino, (int)PTR_ERR(inode));
@@ -485,7 +485,7 @@ int osd_get_lma(struct osd_thread_info *info, struct inode *inode,
  **/
 static struct inode *osd_iget2(struct osd_thread_info *info,
 			       struct osd_device *dev, struct osd_inode_id *id,
-			       bool special, int *err)
+			       int flags, int *err)
 {
 	struct inode *inode = NULL;
 	int rc = 0;
@@ -497,7 +497,7 @@ static struct inode *osd_iget2(struct osd_thread_info *info,
 	 */
 	 /* LASSERT(current->journal_info == NULL); */
 
-	inode = osd_ldiskfs_iget_special(osd_sb(dev), id->oii_ino, special);
+	inode = osd_ldiskfs_iget(osd_sb(dev), id->oii_ino, flags);
 	if (IS_ERR(inode)) {
 		CDEBUG(D_INODE, "no inode: ino = %u, rc = %ld\n",
 		       id->oii_ino, PTR_ERR(inode));
@@ -549,12 +549,12 @@ static struct inode *osd_iget2(struct osd_thread_info *info,
 }
 
 struct inode *osd_iget(struct osd_thread_info *info, struct osd_device *dev,
-		       struct osd_inode_id *id)
+		       struct osd_inode_id *id, int flags)
 {
 	struct inode *inode;
 	int rc = 0;
 
-	inode = osd_iget2(info, dev, id, 0, &rc);
+	inode = osd_iget2(info, dev, id, flags, &rc);
 
 	if (rc) {
 		iput(inode);
@@ -612,13 +612,13 @@ int osd_ldiskfs_add_entry(struct osd_thread_info *info, struct osd_device *osd,
 
 struct inode *
 osd_iget_fid(struct osd_thread_info *info, struct osd_device *dev,
-	     struct osd_inode_id *id, struct lu_fid *fid)
+	     struct osd_inode_id *id, struct lu_fid *fid, int flags)
 {
 	struct lustre_ost_attrs *loa = &info->oti_ost_attrs;
 	struct inode *inode;
 	int rc;
 
-	inode = osd_iget(info, dev, id);
+	inode = osd_iget(info, dev, id, flags);
 	if (IS_ERR(inode))
 		return inode;
 
@@ -658,7 +658,8 @@ static struct inode *osd_iget_check(struct osd_thread_info *info,
 	if (unlikely(fid_is_acct(fid)))
 		special = true;
 again:
-	inode = osd_iget2(info, dev, id, special, &rc);
+	inode = osd_iget2(info, dev, id,
+			  special ? LDISKFS_IGET_SPECIAL : 0, &rc);
 	if (rc) {
 		if (!trusted && (rc == -ENOENT || rc == -ESTALE))
 			goto check_oi;
@@ -952,7 +953,7 @@ static int osd_stripe_dir_filldir(void *buf,
 		return 0;
 
 	osd_id_gen(id, ino, OSD_OII_NOGEN);
-	inode = osd_iget(oti, dev, id);
+	inode = osd_iget(oti, dev, id, 0);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
 
@@ -1544,7 +1545,7 @@ struct osd_xattr_entry {
 	size_t			oxe_namelen;
 	bool			oxe_exist;
 	struct rcu_head		oxe_rcu;
-	char			oxe_buf[0];
+	char			oxe_buf[];
 };
 
 static int osd_oxc_get(struct osd_object *obj, const char *name,
@@ -3232,6 +3233,8 @@ static int osd_transfer_project(struct inode *inode, __u32 projid,
 	if (projid_eq(kprojid, LDISKFS_I(inode)->i_projid))
 		return 0;
 
+	dquot_initialize(inode);
+
 	err = ldiskfs_get_inode_loc(inode, &iloc);
 	if (err)
 		return err;
@@ -3253,7 +3256,6 @@ static int osd_transfer_project(struct inode *inode, __u32 projid,
 	}
 	brelse(iloc.bh);
 
-	dquot_initialize(inode);
 	transfer_to[PRJQUOTA] = dqget(sb, make_kqid_projid(kprojid));
 	if (transfer_to[PRJQUOTA]) {
 		lock_dquot_transfer(inode);
@@ -4169,11 +4171,14 @@ static int osd_ea_fid_get(const struct lu_env *env, struct osd_object *obj,
 {
 	struct osd_thread_info *info  = osd_oti_get(env);
 	struct inode *inode;
+	struct lu_fid *parent_fid = &obj->oo_dt.do_lu.lo_header->loh_fid;
+	int flags = lu_fid_eq(parent_fid, &LU_BACKEND_LPF_FID) ?
+		    LDISKFS_IGET_NO_CHECKS : 0;
 
 	ENTRY;
 
 	osd_id_gen(id, ino, OSD_OII_NOGEN);
-	inode = osd_iget_fid(info, osd_obj2dev(obj), id, fid);
+	inode = osd_iget_fid(info, osd_obj2dev(obj), id, fid, flags);
 	if (IS_ERR(inode))
 		RETURN(PTR_ERR(inode));
 
@@ -4378,7 +4383,7 @@ static int osd_process_scheduled_agent_removals(const struct lu_env *env,
 		OBD_FREE_PTR(oor);
 
 		osd_id_gen(&id, ino, OSD_OII_NOGEN);
-		inode = osd_iget_fid(info, osd, &id, &fid);
+		inode = osd_iget_fid(info, osd, &id, &fid, 0);
 		if (IS_ERR(inode))
 			continue;
 
@@ -6176,7 +6181,7 @@ again:
 		if (inode != NULL)
 			goto trigger;
 
-		inode = osd_iget(oti, dev, id);
+		inode = osd_iget(oti, dev, id, 0);
 		/* The inode has been removed (by race maybe). */
 		if (IS_ERR(inode)) {
 			rc = PTR_ERR(inode);
@@ -6202,7 +6207,7 @@ again:
 trigger:
 	if (scrub->os_running) {
 		if (inode == NULL) {
-			inode = osd_iget(oti, dev, id);
+			inode = osd_iget(oti, dev, id, 0);
 			/* The inode has been removed (by race maybe). */
 			if (IS_ERR(inode)) {
 				rc = PTR_ERR(inode);
@@ -6258,7 +6263,7 @@ static int osd_fail_fid_lookup(struct osd_thread_info *oti,
 	int rc;
 
 	osd_id_gen(&oic->oic_lid, ino, OSD_OII_NOGEN);
-	inode = osd_iget(oti, dev, &oic->oic_lid);
+	inode = osd_iget(oti, dev, &oic->oic_lid, 0);
 	if (IS_ERR(inode)) {
 		fid_zero(&oic->oic_fid);
 		return PTR_ERR(inode);
@@ -7466,7 +7471,7 @@ osd_dirent_check_repair(const struct lu_env *env, struct osd_object *obj,
 	}
 
 	osd_id_gen(id, ent->oied_ino, OSD_OII_NOGEN);
-	inode = osd_iget(info, dev, id);
+	inode = osd_iget(info, dev, id, 0);
 	if (IS_ERR(inode)) {
 		rc = PTR_ERR(inode);
 		if (rc == -ENOENT || rc == -ESTALE) {
@@ -8145,8 +8150,7 @@ static void osd_key_fini(const struct lu_context *ctx,
 		info->oti_ins_cache = NULL;
 		info->oti_ins_cache_size = 0;
 	}
-	if (info->oti_lookup_cache)
-		OBD_FREE_PTR(info->oti_lookup_cache);
+	OBD_FREE_PTR(info->oti_lookup_cache);
 	OBD_FREE_PTR(info);
 }
 
@@ -8885,6 +8889,42 @@ static int osd_health_check(const struct lu_env *env, struct obd_device *obd)
 	return (osd->od_mnt == NULL || sb->s_flags & SB_RDONLY);
 }
 
+static int osd_get_info(const struct lu_env *env, struct obd_export *exp,
+			__u32 keylen, void *key, __u32 *vallen, void *val)
+{
+	struct osd_device *osd;
+	int rc = -EINVAL;
+
+	ENTRY;
+
+	if (!exp->exp_obd) {
+		CDEBUG(D_IOCTL, "invalid client export %p\n", exp);
+		RETURN(-EINVAL);
+	}
+	osd = osd_dev(exp->exp_obd->obd_lu_dev);
+
+	if (KEY_IS(KEY_FID2IDX)) {
+		struct lu_seq_range range;
+		struct lu_fid fid;
+
+		if (osd_seq_site(osd)->ss_server_fld == NULL)
+			RETURN(-EINPROGRESS);
+
+		LASSERT(*vallen = sizeof(struct lu_fid));
+		memcpy(&fid, val, sizeof(struct lu_fid));
+
+		fld_range_set_any(&range);
+
+		rc = osd_fld_lookup(env, osd, fid_seq(&fid), &range);
+		if (rc == 0) {
+			memcpy(val, &range, sizeof(range));
+			*vallen = sizeof(range);
+		}
+	}
+
+	RETURN(rc);
+}
+
 /*
  * lprocfs legacy support.
  */
@@ -8893,6 +8933,7 @@ static const struct obd_ops osd_obd_device_ops = {
 	.o_connect	= osd_obd_connect,
 	.o_disconnect	= osd_obd_disconnect,
 	.o_health_check = osd_health_check,
+	.o_get_info	= osd_get_info,
 };
 
 static ssize_t delayed_unlink_mb_show(struct kobject *kobj,

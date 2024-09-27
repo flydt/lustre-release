@@ -5576,6 +5576,7 @@ static int lnet_net_show_dump(struct sk_buff *msg,
 
 	list_for_each_entry(net, &the_lnet.ln_nets, net_list) {
 		struct nlattr *local_ni, *ni_attr;
+		bool send_lnd_keys = false;
 		struct lnet_ni *ni;
 		int dev = 0;
 
@@ -5592,16 +5593,16 @@ static int lnet_net_show_dump(struct sk_buff *msg,
 					       "LND not setup for NI");
 				GOTO(net_unlock, rc = -ENODEV);
 			}
-			if (net->net_lnd != lnd)
+			if (net->net_lnd != lnd) {
+				send_lnd_keys = true;
 				lnd = net->net_lnd;
-			else
-				lnd = NULL;
+			}
 		}
 
 		/* We need to resend the key table every time the base LND
 		 * changed.
 		 */
-		if (!idx || lnd) {
+		if (!idx || send_lnd_keys) {
 			const struct ln_key_list *all[] = {
 				&net_props_list, &local_ni_list,
 				&local_ni_interfaces_list,
@@ -5749,9 +5750,9 @@ skip_udsp:
 
 				send_stats = nla_nest_start(msg, LNET_NET_LOCAL_NI_ATTR_SEND_STATS);
 				send_attr = nla_nest_start(msg, 0);
-				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_PUT_COUNT,
-					    msg_stats.im_send_stats.ico_get_count);
 				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_GET_COUNT,
+					    msg_stats.im_send_stats.ico_get_count);
+				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_PUT_COUNT,
 					    msg_stats.im_send_stats.ico_put_count);
 				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_REPLY_COUNT,
 					    msg_stats.im_send_stats.ico_reply_count);
@@ -5764,9 +5765,9 @@ skip_udsp:
 
 				recv_stats = nla_nest_start(msg, LNET_NET_LOCAL_NI_ATTR_RECV_STATS);
 				recv_attr = nla_nest_start(msg, 0);
-				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_PUT_COUNT,
-					    msg_stats.im_recv_stats.ico_get_count);
 				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_GET_COUNT,
+					    msg_stats.im_recv_stats.ico_get_count);
+				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_PUT_COUNT,
 					    msg_stats.im_recv_stats.ico_put_count);
 				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_REPLY_COUNT,
 					    msg_stats.im_recv_stats.ico_reply_count);
@@ -5780,9 +5781,9 @@ skip_udsp:
 				drop_stats = nla_nest_start(msg,
 							    LNET_NET_LOCAL_NI_ATTR_DROPPED_STATS);
 				drop_attr = nla_nest_start(msg, 0);
-				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_PUT_COUNT,
-					    msg_stats.im_drop_stats.ico_get_count);
 				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_GET_COUNT,
+					    msg_stats.im_drop_stats.ico_get_count);
+				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_PUT_COUNT,
 					    msg_stats.im_drop_stats.ico_put_count);
 				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_REPLY_COUNT,
 					    msg_stats.im_drop_stats.ico_reply_count);
@@ -6344,8 +6345,7 @@ lnet_genl_parse_local_ni(struct nlattr *entry, struct genl_info *info,
 		}
 	}
 out:
-	if (tun)
-		LIBCFS_FREE(tun, sizeof(struct lnet_ioctl_config_lnd_tunables));
+	LIBCFS_FREE(tun, sizeof(struct lnet_ioctl_config_lnd_tunables));
 
 	return rc;
 }

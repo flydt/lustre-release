@@ -15,10 +15,6 @@ init_test_env $@
 init_logging
 
 ALWAYS_EXCEPT="$SANITY_SEC_EXCEPT "
-if [[ "$MDS1_OS_ID_LIKE" =~ "rhel" ]] &&
-   (( $MDS1_OS_VERSION_CODE >= $(version_code 9.3) )); then
-	always_except LU-16915 51
-fi
 
 [[ "$SLOW" == "no" ]] && EXCEPT_SLOW="26"
 
@@ -1218,7 +1214,7 @@ create_fops_nodemaps() {
 	for client in $clients; do
 		local client_ip=$(host_nids_address $client $NETTYPE)
 		local client_nid=$(h2nettype $client_ip)
-		 [[ "$client_nid" =~ ":" ]] && client_nid+="/128"
+		[[ "$client_nid" =~ ":" ]] && client_nid+="/128"
 		do_facet mgs $LCTL nodemap_add c${i} || return 1
 		do_facet mgs $LCTL nodemap_add_range 	\
 			--name c${i} --range $client_nid || {
@@ -1954,13 +1950,14 @@ test_23a() {
 run_test 23a "test mapped regular ACLs"
 
 test_23b() { #LU-9929
-	[ $num_clients -lt 2 ] && skip "Need 2 clients at least"
-	[ "$MGS_VERSION" -lt $(version_code 2.10.53) ] &&
+	(( num_clients >= 2 )) || skip "Need 2 clients at least"
+	(( $MGS_VERSION >= $(version_code 2.10.53) )) ||
 		skip "Need MGS >= 2.10.53"
 
+	stack_trap "export SK_UNIQUE_NM=$SK_UNIQUE_NM"
 	export SK_UNIQUE_NM=true
 	nodemap_test_setup
-	trap nodemap_test_cleanup EXIT
+	stack_trap nodemap_test_cleanup EXIT
 
 	local testdir=$DIR/$tdir
 	local fs_id=$((IDBASE+10))
@@ -1984,26 +1981,38 @@ test_23b() { #LU-9929
 	# set/getfacl default acl on client 1 (unmapped gid=500)
 	do_node ${clients_arr[0]} rm -rf $testdir
 	do_node ${clients_arr[0]} mkdir -p $testdir
+	echo "$testdir ACLs after mkdir:"
+	do_node ${clients_arr[0]} getfacl $testdir
 	# Here, USER0=$(getent passwd | grep :$ID0:$ID0: | cut -d: -f1)
 	do_node ${clients_arr[0]} setfacl -R -d -m group:$USER0:rwx $testdir ||
 		error "setfacl $testdir on ${clients_arr[0]} failed"
+	do_node ${clients_arr[0]} "sync && stat $testdir > /dev/null"
+	do_node ${clients_arr[0]} \
+		$LCTL set_param -t4 -n "ldlm.namespaces.*.lru_size=clear"
+	echo "$testdir ACLs after setfacl, on ${clients_arr[0]}:"
+	do_node ${clients_arr[0]} getfacl $testdir
 	unmapped_id=$(do_node ${clients_arr[0]} getfacl $testdir |
-			grep -E "default:group:.*:rwx" | awk -F: '{print $3}')
-	[ "$unmapped_id" = "$USER0" ] ||
+			grep -E "default:group:.+:rwx" | awk -F: '{print $3}')
+	echo unmapped_id=$unmapped_id
+	(( unmapped_id == USER0 )) ||
 		error "gid=$ID0 was not unmapped correctly on ${clients_arr[0]}"
 
 	# getfacl default acl on client 2 (mapped gid=60010)
+	do_node ${clients_arr[1]} \
+		$LCTL set_param -t4 -n "ldlm.namespaces.*.lru_size=clear"
+	do_node ${clients_arr[1]} "sync && stat $testdir > /dev/null"
+	echo "$testdir ACLs after setfacl, on ${clients_arr[1]}:"
+	do_node ${clients_arr[1]} getfacl $testdir
 	mapped_id=$(do_node ${clients_arr[1]} getfacl $testdir |
-			grep -E "default:group:.*:rwx" | awk -F: '{print $3}')
+			grep -E "default:group:.+:rwx" | awk -F: '{print $3}')
+	echo mapped_id=$mapped_id
+	[[ -n "$mapped_id" ]] || error "mapped_id empty"
 	fs_user=$(do_node ${clients_arr[1]} getent passwd |
 			grep :$fs_id:$fs_id: | cut -d: -f1)
-	[ -z "$fs_user" ] && fs_user=$fs_id
-	[ $mapped_id -eq $fs_id -o "$mapped_id" = "$fs_user" ] ||
-		error "Should return gid=$fs_id or $fs_user on client2"
-
-	rm -rf $testdir
-	nodemap_test_cleanup
-	export SK_UNIQUE_NM=false
+	[[ -n "$fs_user" ]] || fs_user=$fs_id
+	echo fs_user=$fs_user
+	(( mapped_id == fs_id || mapped_id == fs_user )) ||
+		error "Should return user $fs_user id $fs_id on client2"
 }
 run_test 23b "test mapped default ACLs"
 
@@ -5063,6 +5072,7 @@ test_55() {
 
 	client_ip=$(host_nids_address $HOSTNAME $NETTYPE)
 	client_nid=$(h2nettype $client_ip)
+	[[ "$client_nid" =~ ":" ]] && client_nid+="/128"
 	do_facet mgs $LCTL nodemap_add c0
 	do_facet mgs $LCTL nodemap_add_range \
 		 --name c0 --range $client_nid
@@ -5090,6 +5100,9 @@ test_55() {
 run_test 55 "access with seteuid"
 
 test_56() {
+	local filefrag_op=$(filefrag -l 2>&1 | grep "invalid option")
+	[[ -z "$filefrag_op" ]] || skip_env "filefrag missing logical ordering"
+
 	local testfile=$DIR/$tdir/$tfile
 
 	[[ $(facet_fstype ost1) == zfs ]] && skip "skip ZFS backend"
@@ -5817,6 +5830,7 @@ setup_64() {
 
 	client_ip=$(host_nids_address $HOSTNAME $NETTYPE)
 	client_nid=$(h2nettype $client_ip)
+	[[ "$client_nid" =~ ":" ]] && client_nid+="/128"
 	do_facet mgs $LCTL nodemap_add c0
 	do_facet mgs $LCTL nodemap_add_range \
 		 --name c0 --range $client_nid

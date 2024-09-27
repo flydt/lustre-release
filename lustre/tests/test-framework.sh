@@ -1072,7 +1072,11 @@ load_modules_local() {
 	udevadm control --reload-rules
 	udevadm trigger
 
-	load_lnet
+	if $FORCE_LARGE_NID; then
+		load_lnet config_on_load=1
+	else
+		load_lnet
+	fi
 
 	load_module obdclass/obdclass
 	if ! client_only; then
@@ -3460,8 +3464,8 @@ wait_update_cond() {
 	local verbose
 	local quiet
 
-	[[ "$1" == "--verbose" ]] && verbose="$1" && shift
-	[[ "$1" == "--quiet" || "$1" == "-q" ]] && quiet="$1" && shift
+	[[ "$1" == "--verbose" ]] && verbose="$1" && shift || true
+	[[ "$1" == "--quiet" || "$1" == "-q" ]] && quiet="$1" && shift || true
 
 	local node=$1
 	local check="$2"
@@ -3478,19 +3482,18 @@ wait_update_cond() {
 	while (( $waited <= $max_wait )); do
 		result=$(do_node $quiet $node "$check")
 
-		eval [[ "'$result'" $cond "'$expect'" ]]
-		if [[ $? == 0 ]]; then
-			[[ -n "$quiet" ]] && return 0
+		if eval [[ "'$result'" $cond "'$expect'" ]]; then
+			[[ -z "$quiet" ]] || return 0
 			[[ -z "$result" || $waited -le $sleep ]] ||
 				echo "Updated after ${waited}s: want '$expect' got '$result'"
 			return 0
 		fi
 		if [[ -n "$verbose" && "$result" != "$prev_result" ]]; then
-			[[ -z "$quiet" && -n "$prev_result" ]] &&
+			[[ -n "$quiet" || -z "$prev_result" ]] ||
 				echo "Changed after ${waited}s: from '$prev_result' to '$result'"
 			prev_result="$result"
 		fi
-		(( $waited % $print == 0 )) && {
+		(( $waited % $print != 0 )) || {
 			[[ -z "$quiet" ]] &&
 			echo "Waiting $((max_wait - waited))s for '$expect'"
 		}
@@ -3499,7 +3502,7 @@ wait_update_cond() {
 		waited=$((SECONDS - begin))
 	done
 
-	[[ -z "$quiet" ]] &&
+	[[ -n "$quiet" ]] ||
 	echo "Update not seen after ${max_wait}s: want '$expect' got '$result'"
 
 	return 3
@@ -3510,8 +3513,8 @@ wait_update() {
 	local verbose
 	local quiet
 
-	[[ "$1" == "--verbose" ]] && verbose="$1" && shift
-	[[ "$1" == "--quiet" || "$1" == "-q" ]] && quiet="$1" && shift
+	[[ "$1" == "--verbose" ]] && verbose="$1" && shift || true
+	[[ "$1" == "--quiet" || "$1" == "-q" ]] && quiet="$1" && shift || true
 
 	local node="$1"
 	local check="$2"
@@ -4050,9 +4053,17 @@ client_up() {
 	lfs_df_check $1
 }
 
+# usage: client_evicted client [evictor, mds1 by default]
+# return true if \a client was evicted by \a evictor in current test
 client_evicted() {
-	sleep 1
-	! _lfs_df_check $1
+	local testid=$(echo $TESTNAME | tr '_' ' ')
+	local client=$1
+	local facet=${2:-mds1}
+	local dev=$(facet_svc $facet)
+
+	client_up $client
+	$PDSH $client "dmesg | tac | sed \"/$testid/,$ d\"" |
+		grep -q "client was evicted by ${dev}"
 }
 
 client_reconnect_try() {
@@ -4354,9 +4365,66 @@ host_nids_address() {
 	do_nodes $nodes "$LCTL list_nids | grep -w $net | cut -f 1 -d @"
 }
 
+ip_is_v4() {
+	local ipv4_re='^([0-9]{1,3}\.){3,3}[0-9]{1,3}$'
+
+	if ! [[ $1 =~ $ipv4_re ]]; then
+		return 1
+	fi
+
+	local quads=(${1//\./ })
+
+	(( ${#quads[@]} == 4)) || return 1
+
+	(( quads[0] < 256 && quads[1] < 256 &&
+	   quads[2] < 256 && quads[3] < 256 )) || return 1
+
+	return 0
+}
+
+ip_is_v6() {
+	local ipv6_re='^([0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}$'
+
+	if ! [[ $1 =~ $ipv6_re ]]; then
+		return 1
+	fi
+
+	local segment
+	for segment in ${1//:/ }; do
+		((0x$segment <= 0xFFFF)) || return 1
+	done
+
+	return 0
+}
+
 h2name_or_ip() {
-	if [ "$1" = "'*'" ]; then echo \'*\'; else
-		echo $1"@$2"
+	if [[ "$1" == '*' ]]; then
+		echo \'*\'
+	elif ip_is_v4 "$1" || ip_is_v6 "$1" ; then
+		echo "$1@$2"
+	else
+		local addr nidlist large_nidlist
+		local iplist=$(do_node $1 hostname -I | sed "s/$1://")
+
+		for addr in ${iplist}; do
+			nid="${addr}@$2"
+			ip_is_v4 "$addr" &&
+				nidlist="${nidlist:+$nidlist,}${nid}" ||
+				large_nidlist="${large_nidlist:+$large_nidlist,}${nid}"
+		done
+		if [[ -n $nidlist ]] && [[ -n $large_nidlist ]]; then
+			if ${FORCE_LARGE_NID}; then
+				echo "$large_nidlist"
+			else
+				echo "$nidlist"
+			fi
+		elif [[ -n $nidlist ]]; then
+			echo "$nidlist"
+		elif [[ -n $large_nidlist ]]; then
+			echo "$large_nidlist"
+		else
+			echo "$1@$2"
+		fi
 	fi
 }
 
@@ -8643,7 +8711,7 @@ _wait_osc_import_state() {
 	if [[ $facet == client* ]]; then
 		# During setup time, the osc might not be setup, it need wait
 		# until list_param can return valid value.
-		params=$($LCTL list_param $param 2>/dev/null || true)
+		params=$($LCTL list_param $param 2>/dev/null | head -1)
 		while [ -z "$params" ]; do
 			if [ $i -ge $maxtime ]; then
 				echo "can't get $param in $maxtime secs"
@@ -8651,7 +8719,7 @@ _wait_osc_import_state() {
 			fi
 			sleep 1
 			i=$((i + 1))
-			params=$($LCTL list_param $param 2>/dev/null || true)
+			params=$($LCTL list_param $param 2>/dev/null | head -1)
 		done
 	fi
 
@@ -8825,6 +8893,13 @@ wait_clients_import_state () {
 
 wait_clients_import_ready() {
 	wait_clients_import_state "$1" "$2" "\(FULL\|IDLE\)"
+}
+
+import_param() {
+	local tgt=$1
+	local param=$2
+
+	$LCTL get_param osc.$tgt.import | awk "/$param/ { print \$2 }"
 }
 
 wait_osp_active() {
@@ -9618,8 +9693,18 @@ restore_to_default_flavor()
 set_flavor_all()
 {
 	local flavor=${1:-null}
+	local maxtime=$(( 2 * $(request_timeout client)))
+	local clients=${CLIENTS:-$HOSTNAME}
 
 	echo "setting all flavor to $flavor"
+
+	# make sure all oscs are connected
+	for c in ${clients//,/ }; do
+		do_node $c lfs df -h
+		do_rpc_nodes $c wait_import_state "FULL" \
+			"osc.*.ost_server_uuid" $maxtime ||
+		error "OSCs not in FULL state for client $c"
+	done
 
 	# FIXME need parameter to this fn
 	# and remove global vars
@@ -11239,6 +11324,111 @@ disable_project_quota() {
 
 	mount
 	setupall
+}
+
+change_project() {
+	echo "$LFS project $*"
+	$LFS project $* || error "$LFS project $* failed"
+}
+
+# get quota for a user or a group
+# usage: getquota -u|-g|-p <username>|<groupname>|<projid> global|<obd_uuid> \
+#		  bhardlimit|bsoftlimit|bgrace|ihardlimit|isoftlimit|igrace \
+#		  <pool_name>
+getquota() {
+	local spec
+	local uuid
+	local pool_arg
+
+	sync_all_data > /dev/null 2>&1 || true
+
+	[ "$#" != 4 -a "$#" != 5 ] &&
+		error "getquota: wrong number of arguments: $#"
+	[ "$1" != "-u" -a "$1" != "-g" -a "$1" != "-p" ] &&
+		error "getquota: wrong u/g/p specifier $1 passed"
+
+	uuid="$3"
+
+	case "$4" in
+		curspace)   spec=1;;
+		bsoftlimit) spec=2;;
+		bhardlimit) spec=3;;
+		bgrace)     spec=4;;
+		curinodes)  spec=5;;
+		isoftlimit) spec=6;;
+		ihardlimit) spec=7;;
+		igrace)     spec=8;;
+		*)          error "unknown quota parameter $4";;
+	esac
+
+	[ ! -z "$5" ] && pool_arg="--pool $5 "
+	[ "$uuid" = "global" ] && uuid=$DIR
+
+	$LFS quota -v "$1" "$2" $pool_arg $DIR 1>&2
+	$LFS quota -v "$1" "$2" $pool_arg $DIR |
+		awk 'BEGIN { num='$spec' } { if ($1 ~ "'$uuid'") \
+		{ if (NF == 1) { getline } else { num++ } ; print $num;} }' \
+		| tr -d "*"
+}
+
+# set mdt quota type
+# usage: set_mdt_qtype ugp|u|g|p|none
+set_mdt_qtype() {
+	local qtype=$1
+	local varsvc
+	local mdts=$(get_facets MDS)
+	local cmd
+	[[ "$qtype" =~ "p" ]] && ! is_project_quota_supported &&
+		qtype=$(tr -d 'p' <<<$qtype)
+
+	if [[ $PERM_CMD == *"set_param -P"* ]]; then
+		do_facet mgs $PERM_CMD \
+			osd-*.$FSNAME-MDT*.quota_slave.enabled=$qtype
+	else
+		do_facet mgs $PERM_CMD $FSNAME.quota.mdt=$qtype
+	fi
+	# we have to make sure each MDT received config changes
+	for mdt in ${mdts//,/ }; do
+		varsvc=${mdt}_svc
+		cmd="$LCTL get_param -n "
+		cmd=${cmd}osd-$(facet_fstype $mdt).${!varsvc}
+		cmd=${cmd}.quota_slave.enabled
+
+		if $(facet_up $mdt); then
+			wait_update_facet $mdt "$cmd" "$qtype" || return 1
+		fi
+	done
+	return 0
+}
+
+# set ost quota type
+# usage: set_ost_qtype ugp|u|g|p|none
+set_ost_qtype() {
+	local qtype=$1
+	local varsvc
+	local osts=$(get_facets OST)
+	local cmd
+	[[ "$qtype" =~ "p" ]] && ! is_project_quota_supported &&
+		qtype=$(tr -d 'p' <<<$qtype)
+
+	if [[ $PERM_CMD == *"set_param -P"* ]]; then
+		do_facet mgs $PERM_CMD \
+			osd-*.$FSNAME-OST*.quota_slave.enabled=$qtype
+	else
+		do_facet mgs $PERM_CMD $FSNAME.quota.ost=$qtype
+	fi
+	# we have to make sure each OST received config changes
+	for ost in ${osts//,/ }; do
+		varsvc=${ost}_svc
+		cmd="$LCTL get_param -n "
+		cmd=${cmd}osd-$(facet_fstype $ost).${!varsvc}
+		cmd=${cmd}.quota_slave.enabled
+
+		if $(facet_up $ost); then
+			wait_update_facet $ost "$cmd" "$qtype" || return 1
+		fi
+	done
+	return 0
 }
 
 #

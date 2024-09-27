@@ -448,7 +448,7 @@ int osd_lookup_in_remote_parent(struct osd_thread_info *oti,
 
 		osd_id_gen(id, le32_to_cpu(de->inode), OSD_OII_NOGEN);
 		brelse(bh);
-		inode = osd_iget(oti, osd, id);
+		inode = osd_iget(oti, osd, id, 0);
 		if (IS_ERR(inode)) {
 			rc = PTR_ERR(inode);
 			if (rc == -ESTALE)
@@ -704,7 +704,7 @@ static int osd_obj_update_entry(struct osd_thread_info *info,
 		GOTO(out, rc = 1);
 
 	osd_id_gen(oi_id, le32_to_cpu(de->inode), OSD_OII_NOGEN);
-	inode = osd_iget(info, osd, oi_id);
+	inode = osd_iget(info, osd, oi_id, 0);
 	if (IS_ERR(inode)) {
 		rc = PTR_ERR(inode);
 		if (rc == -ENOENT || rc == -ESTALE)
@@ -1027,8 +1027,7 @@ struct osd_obj_seq *osd_seq_load(struct osd_thread_info *info,
 cleanup:
 	mutex_unlock(&map->om_dir_init_mutex);
 	if (rc != 0) {
-		if (osd_seq != NULL)
-			OBD_FREE_PTR(osd_seq);
+		OBD_FREE_PTR(osd_seq);
 		RETURN(ERR_PTR(rc));
 	}
 
@@ -1086,7 +1085,7 @@ int osd_obj_map_lookup(struct osd_thread_info *info, struct osd_device *dev,
 	osd_id_gen(id, le32_to_cpu(de->inode), OSD_OII_NOGEN);
 	brelse(bh);
 
-	inode = osd_iget(info, dev, id);
+	inode = osd_iget(info, dev, id, 0);
 	if (IS_ERR(inode)) {
 		int rc = PTR_ERR(inode);
 

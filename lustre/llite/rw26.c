@@ -451,8 +451,10 @@ ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 	}
 
 out:
-	cl_2queue_discard(env, io, queue);
-	cl_2queue_disown(env, queue);
+	/* if pages were not submitted successfully above, this takes care of
+	 * taking them off the list and removing the single reference they have
+	 * from when they were created
+	 */
 	cl_2queue_fini(env, queue);
 	RETURN(rc);
 }
@@ -572,6 +574,10 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 	ll_dio_aio = io->ci_dio_aio;
 	LASSERT(ll_dio_aio);
 	LASSERT(ll_dio_aio->cda_iocb == iocb);
+
+	/* unaligned AIO is not supported - see LU-18032 */
+	if (unaligned && ll_dio_aio->cda_is_aio)
+		RETURN(-EINVAL);
 
 	/* We cannot do parallel submission of sub-I/Os - for AIO or regular
 	 * DIO - unless lockless because it causes us to release the lock

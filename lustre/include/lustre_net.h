@@ -1673,7 +1673,7 @@ struct ptlrpc_service {
 	/**
 	 * partition data for ptlrpc service
 	 */
-	struct ptlrpc_service_part	*srv_parts[0];
+	struct ptlrpc_service_part	*srv_parts[];
 };
 
 /**
@@ -1766,6 +1766,8 @@ struct ptlrpc_service_part {
 	struct ptlrpc_nrs		scp_nrs_reg;
 	/** NRS head for HP reqs; valid for services that can handle HP reqs */
 	struct ptlrpc_nrs	       *scp_nrs_hp;
+	/** when the last request was handled on this service */
+	time64_t			scp_last_request;
 
 	/** AT stuff */
 	/** @{ */
@@ -2658,7 +2660,7 @@ void ptlrpcd_decref(void);
  * @{
  */
 const char *ll_opcode2str(__u32 opcode);
-const int ll_str2opcode(const char *ops);
+int ll_str2opcode(const char *ops);
 #ifdef CONFIG_PROC_FS
 void ptlrpc_lprocfs_register_obd(struct obd_device *obd);
 void ptlrpc_lprocfs_unregister_obd(struct obd_device *obd);

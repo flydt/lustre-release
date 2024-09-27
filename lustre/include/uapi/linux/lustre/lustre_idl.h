@@ -116,29 +116,6 @@ extern "C" {
 /* #define DVS_PORTAL			63 */
 /* reserved for Cray DVS - spitzcor@cray.com, roe@cray.com, n8851@cray.com */
 
-#ifndef DECLARE_FLEX_ARRAY
-#ifdef __cplusplus
-/* sizeof(struct{}) is 1 in C++, not 0, can't use C version of the macro. */
-#define DECLARE_FLEX_ARRAY(T, member) T member[0]
-#else
-/**
- * DECLARE_FLEX_ARRAY() - Declare a flexible array usable in a union
- *
- * @TYPE: The type of each flexible array element
- * @NAME: The name of the flexible array member
- *
- * In order to have a flexible array member in a union or alone in a
- * struct, it needs to be wrapped in an anonymous struct with at least 1
- * named member, but that member can be empty.
- */
-#define DECLARE_FLEX_ARRAY(TYPE, NAME)	       \
-	struct {			       \
-		struct { } __empty_ ## NAME;   \
-		TYPE NAME[];		       \
-	}
-#endif
-#endif /* DECLARE_FLEX_ARRAY */
-
 /**
  * Describes a range of sequence, lsr_start is included but lsr_end is
  * not in the range.
@@ -155,7 +132,7 @@ struct lu_seq_range {
 struct lu_seq_range_array {
 	__u32 lsra_count;
 	__u32 lsra_padding;
-	struct lu_seq_range lsra_lsr[0];
+	struct lu_seq_range lsra_lsr[];
 };
 
 #define LU_SEQ_RANGE_MDT	0x0
@@ -511,7 +488,7 @@ struct lu_dirpage {
 	__u64            ldp_hash_end;
 	__u32            ldp_flags;
 	__u32            ldp_pad0;
-	struct lu_dirent ldp_entries[0];
+	struct lu_dirent ldp_entries[];
 };
 
 enum lu_dirpage_flags {
@@ -644,7 +621,7 @@ struct lustre_msg_v2 {
 	 * message buffers are packed after padded lm_buflens[] array,
 	 * padded to a multiple of 8 bytes each to align contents.
 	 */
-	__u32 lm_buflens[0];
+	__u32 lm_buflens[];
 };
 
 /* The returned result of the SUB request in a batch request */
@@ -889,6 +866,7 @@ struct ptlrpc_body_v2 {
  */
 #define OBD_CONNECT2_UNALIGNED_DIO	0x400000000ULL /* unaligned DIO */
 #define OBD_CONNECT2_CONN_POLICY	0x800000000ULL /* server-side connection policy */
+#define OBD_CONNECT2_MIRROR_ID_FIX     0x2000000000ULL /* rr_mirror_id move */
 /* XXX README XXX README XXX README XXX README XXX README XXX README XXX
  * Please DO NOT add OBD_CONNECT flags before first ensuring that this value
  * is not in use by some other branch/patch.  Email adilger@whamcloud.com
@@ -959,7 +937,8 @@ struct ptlrpc_body_v2 {
 				OBD_CONNECT2_ENCRYPT_FID2PATH | \
 				OBD_CONNECT2_DMV_IMP_INHERIT |\
 				OBD_CONNECT2_UNALIGNED_DIO | \
-				OBD_CONNECT2_PCCRO)
+				OBD_CONNECT2_PCCRO | \
+				OBD_CONNECT2_MIRROR_ID_FIX)
 
 #define OST_CONNECT_SUPPORTED  (OBD_CONNECT_SRVLOCK | OBD_CONNECT_GRANT | \
 				OBD_CONNECT_REQPORTAL | OBD_CONNECT_VERSION | \
@@ -1245,7 +1224,7 @@ struct lov_mds_md_v1 {            /* LOV EA mds/wire data (little-endian) */
 	/* lmm_stripe_count used to be __u32 */
 	__u16 lmm_stripe_count;   /* num stripes in use for this object */
 	__u16 lmm_layout_gen;     /* layout generation number */
-	struct lov_ost_data_v1 lmm_objects[0]; /* per-stripe data */
+	struct lov_ost_data_v1 lmm_objects[]; /* per-stripe data */
 };
 
 #define MAX_MD_SIZE_OLD (sizeof(struct lov_mds_md) +			\
@@ -1303,12 +1282,12 @@ struct lov_mds_md_v3 {            /* LOV EA mds/wire data (little-endian) */
 	__u16 lmm_stripe_count;   /* num stripes in use for this object */
 	__u16 lmm_layout_gen;     /* layout generation number */
 	char  lmm_pool_name[LOV_MAXPOOLNAME + 1]; /* must be 32bit aligned */
-	struct lov_ost_data_v1 lmm_objects[0]; /* per-stripe data */
+	struct lov_ost_data_v1 lmm_objects[]; /* per-stripe data */
 };
 
 static inline __u32 lov_mds_md_size(__u16 stripes, __u32 lmm_magic)
 {
-	if (stripes >= LOV_ALL_STRIPES_MIN && stripes <= LOV_ALL_STRIPES_MAX)
+	if (stripes <= LOV_ALL_STRIPES && stripes >= LOV_ALL_STRIPES_WIDE)
 		stripes = 0;
 
 	if (lmm_magic == LOV_MAGIC_V1)
@@ -1790,6 +1769,7 @@ enum mds_cmd {
 	MDS_SWAP_LAYOUTS	= 61,
 	MDS_RMFID		= 62,
 	MDS_BATCH		= 63,
+	MDS_HSM_DATA_VERSION	= 64,
 	MDS_LAST_OPC
 };
 
@@ -2258,8 +2238,16 @@ struct mdt_rec_resync {
 	__u32           rs_padding5;	/* rr_mode */
 	__u32           rs_padding6;	/* rr_flags */
 	__u32           rs_padding7;	/* rr_flags_h */
-	__u32           rs_padding8;	/* rr_umask */
-	__u16           rs_mirror_id;
+	/* The rr_mirror_id_old field used the last reserved field
+	 * in mdt_rec_reint but is not used for any other reint type.
+	 * There are lots of unused fields in this strict that could be
+	 * used instead, so rr_umask was chosen for rs_mirror_id_new
+	 * since it is unlikely that a file resync operation will ever
+	 * need it.  The other unused fields could potentially be needed
+	 * eventually (timestamps or size/blocks) so they were not used.
+	 */
+	__u32           rs_mirror_id_new; /* rr_umask */
+	__u16           rs_mirror_id_old; /* deprecated 2.16.0 */
 	__u16           rs_padding9;	/* rr_padding_4 */
 };
 
@@ -2294,9 +2282,10 @@ struct mdt_rec_reint {
 	__u32           rr_flags;
 	__u32           rr_flags_h;
 	__u32           rr_umask;
-	__u16		rr_mirror_id;
+	__u16		rr_mirror_id_old; /* deprecated 2.16.0 */
 	__u16           rr_padding_4; /* also fix lustre_swab_mdt_rec_reint */
 };
+#define rr_mirror_id_new rr_umask
 
 #define LMV_DESC_QOS_MAXAGE_DEFAULT 60  /* Seconds */
 
@@ -2345,7 +2334,7 @@ struct lmv_mds_md_v1 {
 	__u32 lmv_padding2;
 	__u64 lmv_padding3;
 	char lmv_pool_name[LOV_MAXPOOLNAME + 1];	/* pool name */
-	struct lu_fid lmv_stripe_fids[0];	/* FIDs for each stripe */
+	struct lu_fid lmv_stripe_fids[];	/* FIDs for each stripe */
 };
 
 /* stripe count before directory split */
@@ -2742,8 +2731,8 @@ struct mgs_nidtbl_entry {
 	__u8		mne_nid_size;	/* size of each NID, by bytes */
 	__u8		mne_nid_count;	/* # of NIDs in buffer */
 	union {
-		lnet_nid_t nids[0];	/* variable size buffer for NIDs. */
-		struct lnet_nid nidlist[0];
+		DECLARE_FLEX_ARRAY(lnet_nid_t, nids); /* variable size buffer for NIDs. */
+		DECLARE_FLEX_ARRAY(struct lnet_nid, nidlist);
 	} u;
 };
 
@@ -3100,6 +3089,7 @@ enum llog_flag {
 	LLOG_F_EXT_X_XATTR	= 0x200,
 	LLOG_F_RM_ON_ERR	= 0x400,
 	LLOG_F_MAX_AGE		= 0x800,
+	LLOG_F_EXT_X_NID_BE	= 0x1000,
 
 	/* Note: Flags covered by LLOG_F_EXT_MASK will be inherited from
 	 * catlog to plain log, so do not add LLOG_F_IS_FIXSIZE here,
@@ -3108,7 +3098,8 @@ enum llog_flag {
 	 */
 	LLOG_F_EXT_MASK = LLOG_F_EXT_JOBID | LLOG_F_EXT_EXTRA_FLAGS |
 			  LLOG_F_EXT_X_UIDGID | LLOG_F_EXT_X_NID |
-			  LLOG_F_EXT_X_OMODE | LLOG_F_EXT_X_XATTR,
+			  LLOG_F_EXT_X_OMODE | LLOG_F_EXT_X_XATTR |
+			  LLOG_F_EXT_X_NID_BE,
 };
 
 /* On-disk header structure of each log object, stored in little endian order */
@@ -3436,7 +3427,7 @@ struct link_ea_header {
 struct link_ea_entry {
 	unsigned char      lee_reclen[2]; /* __u16 big-endian, unaligned */
 	unsigned char      lee_parent_fid[sizeof(struct lu_fid)];
-	char               lee_name[0];
+	char               lee_name[];
 } __attribute__((packed));
 
 /** fid2path request/reply structure */
@@ -3456,7 +3447,7 @@ struct getparent {
 	struct lu_fid	gp_fid;         /**< parent FID */
 	__u32		gp_linkno;	/**< hardlink number */
 	__u32		gp_name_size;   /**< size of the name field */
-	char		gp_name[0];     /**< zero-terminated link name */
+	char		gp_name[];      /**< zero-terminated link name */
 } __attribute__((packed));
 
 enum layout_intent_opc {
@@ -3649,7 +3640,7 @@ struct batch_update_request {
 	 * it can locate the next request message via the function
 	 * @batch_update_reqmsg_next() in lustre/include/obj_update.h
 	 */
-	struct lustre_msg	burq_reqmsg[0];
+	struct lustre_msg	burq_reqmsg[];
 };
 
 #define BUT_HEADER_MAGIC	0xBADF0001
@@ -3674,7 +3665,7 @@ struct but_update_header {
 	/* Unused padding field. */
 	__u32	buh_padding;
 	/* Inline buffer used when the RPC request can be packed inline. */
-	__u32	buh_inline_data[0];
+	__u32	buh_inline_data[];
 };
 
 struct but_update_buffer {
@@ -3696,7 +3687,7 @@ struct batch_update_reply {
 	 * It can locate the next reply message buffer via the function
 	 * @batch_update_repmsg_next() in lustre/include/obj_update.h
 	 */
-	struct lustre_msg	burp_repmsg[0];
+	struct lustre_msg	burp_repmsg[];
 };
 
 /**
@@ -3746,11 +3737,11 @@ struct update_op {
 } __attribute__((packed));
 
 struct update_ops {
-	struct update_op	uops_op[0];
+	DECLARE_FLEX_ARRAY(struct update_op, uops_op);
 };
 
 struct update_params {
-	struct object_update_param	up_params[0];
+	DECLARE_FLEX_ARRAY(struct object_update_param, up_params);
 };
 
 enum update_records_flag {
@@ -3855,7 +3846,7 @@ enum nodemap_rbac_roles {
  */
 typedef struct netobj_s {
 	__u32 len;
-	__u8 data[0];
+	__u8 data[];
 } netobj_t;
 
 typedef struct rawobj_s {
@@ -3946,7 +3937,7 @@ struct ladvise_hdr {
 	__u32			lah_value1;	/* unused */
 	__u32			lah_value2;	/* unused */
 	__u64			lah_value3;	/* unused */
-	struct lu_ladvise	lah_advise[0];	/* advices in this header */
+	struct lu_ladvise	lah_advise[];	/* advices in this header */
 };
 
 #if defined(__cplusplus)

@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/lov/lov_ea.c
  *
  * Author: Wang Di <wangdi@clusterfs.com>
  */
@@ -298,7 +278,7 @@ retry_new_ost:
 				lov->desc.ld_uuid.uuid, POSTID(&loi->loi_oi),
 				loi->loi_ost_idx, lov->desc.ld_tgt_count);
 
-			if ((u32)loi->loi_ost_idx >= LOV_V1_INSANE_STRIPE_COUNT)
+			if ((u32)loi->loi_ost_idx >= LOV_V1_INSANE_STRIPE_INDEX)
 				GOTO(out_lsme, rc = -EINVAL);
 
 			if (now > next_print) {
@@ -330,10 +310,22 @@ retry_new_ost:
 					    lov->desc.ld_tgt_count :
 					    lsme->lsme_stripe_count;
 
-		if (min_stripe_maxbytes <= (LLONG_MAX / stripe_count))
-			lov_bytes = min_stripe_maxbytes * stripe_count;
-		else
+		if (min_stripe_maxbytes <= LLONG_MAX / stripe_count) {
+			/*
+			 * If min_stripe_maxbytes is not an even multiple of
+			 * stripe_size, then the last stripe in each object
+			 * cannot be completely filled and would leave a series
+			 * of unwritable holes in the file.
+			 * Trim the maximum file size to the last full stripe
+			 * for each object, plus the maximum object size for
+			 * the 0th stripe.
+			 */
+			lov_bytes = (rounddown(min_stripe_maxbytes,
+					      lsme->lsme_stripe_size) *
+				    (stripe_count - 1)) + min_stripe_maxbytes;
+		} else {
 			lov_bytes = MAX_LFS_FILESIZE;
+		}
 out_dom1:
 		*maxbytes = min_t(loff_t, lov_bytes, MAX_LFS_FILESIZE);
 	}

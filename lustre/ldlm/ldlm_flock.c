@@ -1,24 +1,5 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2003 Hewlett-Packard Development Company LP.
  * Developed under the sponsorship of the US Government under
@@ -29,11 +10,12 @@
  *
  * Copyright (c) 2010, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
 
-/**
+/*
  * This file implements POSIX lock type for Lustre.
  * Its policy properties are start and end of extent and PID.
  *
@@ -575,7 +557,7 @@ reprocess:
 							 lock->l_granted_mode);
 
 		ldlm_flock_add_lock(res, &res->lr_granted, new2);
-		LDLM_LOCK_RELEASE(new2);
+		ldlm_lock_put(new2);
 		break;
 	}
 
@@ -898,7 +880,7 @@ ldlm_export_flock_get(struct cfs_hash *hs, struct hlist_node *hnode)
 	struct ldlm_flock *flock;
 
 	lock = hlist_entry(hnode, struct ldlm_lock, l_exp_flock_hash);
-	LDLM_LOCK_GET(lock);
+	ldlm_lock_get(lock);
 
 	flock = &lock->l_policy_data.l_flock;
 	LASSERT(flock->blocking_export != NULL);
@@ -921,7 +903,7 @@ ldlm_export_flock_put(struct cfs_hash *hs, struct hlist_node *hnode)
 		flock->blocking_owner = 0;
 		flock->blocking_export = NULL;
 	}
-	LDLM_LOCK_RELEASE(lock);
+	ldlm_lock_put(lock);
 }
 
 static struct cfs_hash_ops ldlm_export_flock_ops = {

@@ -1,29 +1,11 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2012, 2017, Intel Corporation.
  * Use is subject to license terms.
- *
+ */
+
+/*
  * Author: Johann Lombardi <johann.lombardi@intel.com>
  * Author: Niu    Yawei    <yawei.niu@intel.com>
  */
@@ -106,7 +88,7 @@ int qmt_intent_policy(const struct lu_env *env, struct lu_device *ld,
 		lock = ldlm_handle2lock(&reqbody->qb_glb_lockh);
 		if (lock == NULL)
 			GOTO(out, rc = -ENOLCK);
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 
 		stype = qmt_uuid2idx(uuid, &idx);
 		if (stype < 0)
@@ -269,7 +251,7 @@ out:
 }
 
 /* clear lge_qunit/edquot_nu flags -
- * slave recieved new qunit and edquot.
+ * slave received new qunit and edquot.
  *
  * \retval	true if revoke is needed - qunit
  *		for this slave reaches least_qunit
@@ -590,7 +572,7 @@ static void qmt_free_lock_array(struct qmt_gl_lock_array *array)
 
 	for (i = 0; i < array->q_cnt; i++) {
 		LASSERT(array->q_locks[i]);
-		LDLM_LOCK_RELEASE(array->q_locks[i]);
+		ldlm_lock_put(array->q_locks[i]);
 		array->q_locks[i] = NULL;
 	}
 	array->q_cnt = 0;
@@ -631,7 +613,7 @@ again:
 
 		count++;
 		if (array->q_max != 0 && array->q_cnt < array->q_max) {
-			array->q_locks[array->q_cnt] = LDLM_LOCK_GET(lock);
+			array->q_locks[array->q_cnt] = ldlm_lock_get(lock);
 			array->q_cnt++;
 		}
 	}
@@ -805,13 +787,12 @@ static int qmt_glimpse_lock(const struct lu_env *env, struct qmt_device *qmt,
 		CERROR("%s: failed to notify %s of new quota settings\n",
 		       qmt->qmt_svname,
 		       obd_uuid2str(&work->gl_lock->l_export->exp_client_uuid));
-		LDLM_LOCK_RELEASE(work->gl_lock);
+		ldlm_lock_put(work->gl_lock);
 		OBD_FREE_PTR(work);
 	}
 out:
-	if (descs)
-		OBD_FREE(descs,
-			 sizeof(struct ldlm_gl_lquota_desc) * locks_count);
+	OBD_FREE(descs,
+		 sizeof(struct ldlm_gl_lquota_desc) * locks_count);
 
 	RETURN(rc);
 }

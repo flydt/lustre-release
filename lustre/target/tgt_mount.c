@@ -49,6 +49,7 @@
 #ifdef HAVE_FSMAP_H
 #include <linux/fsmap.h>
 #endif
+#include <linux/uaccess.h>
 
 #include <llog_swab.h>
 #include <lustre_disk.h>
@@ -376,8 +377,7 @@ int tgt_name2lwp_name(const char *tgt_name, char *lwp_name, int len, u32 idx)
 	GOTO(cleanup, rc = 0);
 
 cleanup:
-	if (fsname != NULL)
-		OBD_FREE(fsname, MTI_NAME_MAXLEN);
+	OBD_FREE(fsname, MTI_NAME_MAXLEN);
 
 	return rc;
 }
@@ -619,10 +619,8 @@ static int lustre_lwp_connect(struct obd_device *lwp, bool is_mdt)
 	GOTO(out, rc);
 
 out:
-	if (data != NULL)
-		OBD_FREE_PTR(data);
-	if (uuid != NULL)
-		OBD_FREE_PTR(uuid);
+	OBD_FREE_PTR(data);
+	OBD_FREE_PTR(uuid);
 
 	lu_env_fini(&env);
 	lu_context_exit(&session_ctx);
@@ -696,10 +694,8 @@ static int lustre_lwp_setup(struct lustre_cfg *lcfg, struct lustre_sb_info *lsi,
 	list_add_tail(&obd->obd_lwp_list, &lsi->lsi_lwp_list);
 	mutex_unlock(&lsi->lsi_lwp_mutex);
 out:
-	if (lwpname)
-		OBD_FREE(lwpname, MTI_NAME_MAXLEN);
-	if (lwpuuid)
-		OBD_FREE(lwpuuid, MTI_NAME_MAXLEN);
+	OBD_FREE(lwpname, MTI_NAME_MAXLEN);
+	OBD_FREE(lwpuuid, MTI_NAME_MAXLEN);
 
 	return rc;
 }
@@ -774,15 +770,12 @@ static int lustre_lwp_add_conn(struct lustre_cfg *cfg,
 	if (rc < 0)
 		CERROR("%s: can't add conn: rc = %d\n", lwpname, rc);
 
-	if (lcfg)
-		OBD_FREE(lcfg, lustre_cfg_len(lcfg->lcfg_bufcount,
-					      lcfg->lcfg_buflens));
+	OBD_FREE(lcfg, lustre_cfg_len(lcfg->lcfg_bufcount,
+				      lcfg->lcfg_buflens));
 out_cfg:
-	if (bufs)
-		OBD_FREE_PTR(bufs);
+	OBD_FREE_PTR(bufs);
 out:
-	if (lwpname)
-		OBD_FREE(lwpname, MTI_NAME_MAXLEN);
+	OBD_FREE(lwpname, MTI_NAME_MAXLEN);
 	RETURN(rc);
 }
 
@@ -1019,12 +1012,9 @@ static int lustre_disconnect_lwp(struct super_block *sb)
 	GOTO(out, rc);
 
 out:
-	if (bufs)
-		OBD_FREE_PTR(bufs);
-	if (cfg)
-		OBD_FREE_PTR(cfg);
-	if (logname)
-		OBD_FREE(logname, MTI_NAME_MAXLEN);
+	OBD_FREE_PTR(bufs);
+	OBD_FREE_PTR(cfg);
+	OBD_FREE(logname, MTI_NAME_MAXLEN);
 
 	return rc1 != 0 ? rc1 : rc;
 }
@@ -1101,8 +1091,7 @@ static int lustre_start_lwp(struct super_block *sb)
 
 out:
 	OBD_FREE(logname, MTI_NAME_MAXLEN);
-	if (cfg)
-		OBD_FREE_PTR(cfg);
+	OBD_FREE_PTR(cfg);
 
 	return rc;
 }
@@ -2020,6 +2009,40 @@ static long server_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	struct file *root_filp;
 	struct inode *root_inode;
 	int err = -ENOTTY;
+
+	if (cmd == LL_IOC_FID2MDTIDX) {
+		union {
+			struct lu_seq_range range;
+			struct lu_fid fid;
+		} u;
+		struct lu_env *env;
+		int len;
+
+		if (copy_from_user(&u.fid, (struct lu_fid __user *)arg,
+				   sizeof(u.fid)))
+			RETURN(-EFAULT);
+
+		OBD_ALLOC_PTR(env);
+		if (env == NULL)
+			return -ENOMEM;
+		err = lu_env_init(env, LCT_DT_THREAD);
+		if (err)
+			GOTO(out, err = -ENOMEM);
+
+		/* XXX: check for size */
+		len = sizeof(struct lu_fid);
+		err = obd_get_info(env, lsi->lsi_osd_exp, sizeof(KEY_FID2IDX),
+				   KEY_FID2IDX, &len, &u.fid);
+		if (err == 0) {
+			err = -EINVAL;
+			if (u.range.lsr_flags & LU_SEQ_RANGE_MDT)
+				err = u.range.lsr_index;
+		}
+		lu_env_fini(env);
+out:
+		OBD_FREE_PTR(env);
+		return err;
+	}
 
 	if (!is_cmd_supported(cmd))
 		return err;

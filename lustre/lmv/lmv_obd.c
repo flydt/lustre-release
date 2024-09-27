@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2004, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -160,7 +142,7 @@ retry:
 		     "%s: MDT index %u more than MDT count %u\n",
 		     obd->obd_name, index, lmv->lmv_mdt_count);
 
-	if (index >= LOV_V1_INSANE_STRIPE_COUNT)
+	if (index >= LOV_V1_INSANE_STRIPE_INDEX)
 		return NULL;
 
 	if (now > next_print) {
@@ -630,6 +612,7 @@ static int lmv_fid2path(struct obd_export *exp, int len, void *karg,
 	int remote_gf_size = 0;
 	int currentisenc = 0;
 	int globalisenc = 0;
+	int excess;
 	int rc;
 
 	gf = karg;
@@ -689,10 +672,11 @@ repeat_fid2path:
 		}
 	}
 
-	CDEBUG(D_INFO, "%s: get path %s "DFID" rec: %llu ln: %u\n",
+	excess = gf->gf_pathlen > 3072 ? gf->gf_pathlen - 3072 : 0;
+	CDEBUG(D_INFO, "%s: get path %.*s "DFID" rec: %llu ln: %u\n",
 	       tgt->ltd_exp->exp_obd->obd_name,
-	       gf->gf_u.gf_path, PFID(&gf->gf_fid), gf->gf_recno,
-	       gf->gf_linkno);
+	       gf->gf_pathlen - excess, gf->gf_u.gf_path + excess,
+	       PFID(&gf->gf_fid), gf->gf_recno, gf->gf_linkno);
 
 	if (rc == 0)
 		GOTO(out_fid2path, rc);
@@ -726,8 +710,7 @@ repeat_fid2path:
 	goto repeat_fid2path;
 
 out_fid2path:
-	if (remote_gf != NULL)
-		OBD_FREE(remote_gf, remote_gf_size);
+	OBD_FREE(remote_gf, remote_gf_size);
 	RETURN(rc);
 }
 
@@ -1038,6 +1021,7 @@ static int lmv_iocontrol(unsigned int cmd, struct obd_export *exp,
 	}
 	case LL_IOC_HSM_STATE_GET:
 	case LL_IOC_HSM_STATE_SET:
+	case LL_IOC_HSM_DATA_VERSION:
 	case LL_IOC_HSM_ACTION: {
 		struct md_op_data *op_data = karg;
 
@@ -2921,7 +2905,7 @@ struct lmv_dir_ctxt {
 	struct md_readdir_info  *ldc_mrinfo;
 	__u64			 ldc_hash;
 	int			 ldc_count;
-	struct stripe_dirent	 ldc_stripes[0];
+	struct stripe_dirent	 ldc_stripes[];
 };
 
 static inline void stripe_dirent_unload(struct stripe_dirent *stripe)

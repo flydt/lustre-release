@@ -491,13 +491,7 @@ test_0c() {
 	# verify components ${ids[6]}, ${ids[8]} and ${ids[10]}
 	for i in 6 8 10; do
 		verify_comp_attr stripe-size $tf ${ids[$i]} 16777216
-		# ffdf which is -33 and matches LOV_ALL_STRIPES_MIN
-		local decimal_lov_lower_limit=-33
-		#C_opt is -c option which can be -1 to -32
-		local C_opt=-1
-		local count_exp=$(($decimal_lov_lower_limit + $C_opt + 1))
-
-		verify_comp_attr stripe-count $tf ${ids[$i]} $count_exp
+		verify_comp_attr stripe-count $tf ${ids[$i]} -1
 		verify_comp_attr pool $tf ${ids[$i]} archive
 		verify_comp_extent $tf ${ids[$i]} 536870912 EOF
 	done
@@ -518,15 +512,16 @@ test_0d() {
 	# create parent directory
 	mkdir $td || error "mkdir $td failed"
 
-	$mirror_cmd $tf &> /dev/null && error "miss -N option"
 	$mirror_cmd -N $tf &> /dev/null && error "$tf does not exist"
 
 	# create a non-mirrored file, convert it to a mirrored file and extend
 	touch $tf || error "touch $tf failed"
 	$mirror_cmd -N $tf || error "convert and extend $tf failed"
 	verify_mirror_count $tf 2
+	$mirror_cmd $tf || error "extend $tf without --mirror-count|-N failed"
+	verify_mirror_count $tf 3
 	ids=($($LFS getstripe $tf | awk '/lcme_id/{print $2}' | tr '\n' ' '))
-	for ((i = 0; i < 2; i++)); do
+	for ((i = 0; i < 3; i++)); do
 		verify_comp_attrs $tf ${ids[$i]}
 		verify_comp_extent $tf ${ids[$i]} 0 EOF
 	done
@@ -707,13 +702,7 @@ test_0f() {
 	# verify components ${ids[9]}, ${ids[11]} and ${ids[13]}
 	for i in 9 11 13; do
 		verify_comp_attr stripe-size $tf ${ids[$i]} 16777216
-		# ffdf which is -33 and matches LOV_ALL_STRIPES_MIN
-		local decimal_lov_lower_limit=-33
-		#C_opt is -c option which can be -1 to -32
-		local C_opt=-1
-		local count_exp=$(($decimal_lov_lower_limit + $C_opt + 1))
-
-		verify_comp_attr stripe-count $tf ${ids[$i]} $count_exp
+		verify_comp_attr stripe-count $tf ${ids[$i]} -1
 		verify_comp_attr pool $tf ${ids[$i]} archive
 		verify_comp_extent $tf ${ids[$i]} 536870912 EOF
 	done
@@ -862,6 +851,8 @@ test_0j() {
 run_test 0j "test lfs mirror read/write commands"
 
 test_0k() {
+	(( $MDS1_VERSION >= $(version_code 2.15.6) )) ||
+		skip "MDS version older than 2.15.6"
 	[[ $OSTCOUNT -lt 3 ]] && skip "need >= 3 OSTs" && return
 
 	mkdir $DIR/$tdir
@@ -2419,8 +2410,8 @@ test_44e() {
 	local size2
 
 	test_mkdir $DIR/$tdir
-	[ $MDS1_VERSION -ge $(version_code 2.14.52) ] ||
-		skip "Need MDS version at least 2.14.52"
+	(( $MDS1_VERSION >= $(version_code v2_15_50-155-ga3f1c4622a) )) ||
+		skip "Need MDS version >= 2.15.50.155 for SOM tunable"
 
 	$LFS mirror create -N2 $tf || error "create mirrored file $tf failed"
 
@@ -2441,7 +2432,7 @@ test_44e() {
 	$LFS getsom $tf
 
 	((size1 == size2)) ||
-		error "mirrored file with strict SOM $size1 != disabled SOM $size2"
+		error "mirrored file with strict SOM $size1 != no SOM $size2"
 
 	# Remount client to clear cached size information
 	remount_client $MOUNT
@@ -2456,8 +2447,8 @@ test_44e() {
 	# 'getsom' here is just for debugging
 	$LFS getsom $tf
 
-	((size2 == size1)) ||
-		error "mirrored file in sync with som disabled, size with som disabled ($size2) and without som disabled ($size1) should agree"
+	(( size2 == size1 )) ||
+		error "mirror file with SOM disabled, SOM size $size2 != $size1"
 }
 run_test 44e "basic FLR SOM tests + disable SOM"
 
@@ -4142,7 +4133,7 @@ test_204f() {
 }
 run_test 204f "FLR write/stale/resync sel w/forced extension"
 
-function test_205() {
+function test_205a() {
 	local tf=$DIR/$tfile
 	local mirrors
 
@@ -4157,22 +4148,39 @@ function test_205() {
 
 	$($LFS getstripe $tf | grep lcme_flags: | tail -1 | grep -q prefer) ||
 		error "prefer flag was not set on the new mirror"
+}
+run_test 205a "lfs mirror extend to set prefer flag"
 
-	$LFS mirror extend -N --flags=nocompr $tf
+function test_205b() {
+	if (( MDS1_VERSION <= $(version_code v2_15_61-245-g37e1316050) )) ; then
+		skip "Need MDS > v2_15_61-245-g37e1316050 to test nocompr flag"
+	fi
+
+	local tf=$DIR/$tfile
+	local mirrors
+
+	$LFS setstripe -c1 $tf ||
+		error "$LFS setstripe -c $tf failed"
+
+	$LFS mirror extend -N --flags=nocompr $tf ||
+		error "$LFS mirror extend -N --flags=nocompr $tf failed"
+
 	mirrors=$($LFS getstripe $tf | grep lcme_mirror_id | wc -l )
-	(( $mirrors == 4 )) || error "no new mirror with nocompr flag was created?"
+	(( $mirrors == 2 )) || error "no new mirror with nocompr flag was created?"
 
 	$($LFS getstripe $tf | grep lcme_flags: | tail -1 | grep -q nocompr) ||
 		error "nocompr flag was not set on the new mirror"
 
-	$LFS mirror extend -N --flags=prefer,nocompr $tf
+	$LFS mirror extend -N --flags=prefer,nocompr $tf ||
+		error "$LFS mirror extend -N --flags=prefer,nocompr $tf failed"
 	mirrors=$($LFS getstripe $tf | grep lcme_mirror_id | wc -l )
-	(( $mirrors == 5 )) || error "no new mirror with prefer,nocompr flags was created?"
+
+	(( $mirrors == 3 )) || error "no new mirror with prefer,nocompr flags was created?"
 
 	$($LFS getstripe $tf | grep lcme_flags: | tail -1 | grep -q "prefer,nocompr") ||
 		error "prefer,nocompr flags were not set on the new mirror"
 }
-run_test 205 "lfs mirror extend to set prefer and nocompr flags"
+run_test 205b "lfs mirror extend to set nocompr flag"
 
 function test_206() {
 	# create a new OST pool

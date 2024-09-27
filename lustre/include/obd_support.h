@@ -63,6 +63,7 @@ extern unsigned int bulk_timeout;
 extern unsigned int at_min;
 extern unsigned int at_max;
 extern unsigned int at_history;
+extern unsigned int at_unhealthy_factor;
 extern int at_early_margin;
 extern int at_extra;
 extern unsigned long obd_max_dirty_pages;
@@ -276,6 +277,7 @@ extern bool obd_enable_health_write;
 #define OBD_FAIL_MDS_HSM_RESTORE_RACE	 0x18b
 #define OBD_FAIL_MDS_CHANGELOG_ENOSPC	 0x18c
 #define OBD_FAIL_MDS_BATCH_NET		 0x18d
+#define OBD_FAIL_MDS_HSM_DATA_VERSION_NET 0x18e
 
 /* OI scrub */
 #define OBD_FAIL_OSD_SCRUB_DELAY			0x190
@@ -365,6 +367,7 @@ extern bool obd_enable_health_write;
 #define OBD_FAIL_OST_RESTART_IO		 0x251
 #define OBD_FAIL_OST_OPCODE		 0x253
 #define OBD_FAIL_OST_DELORPHAN_DELAY	 0x254
+#define OBD_FAIL_OST_ENOSPC_VALID	 0x255
 
 #define OBD_FAIL_LDLM                    0x300
 #define OBD_FAIL_LDLM_NAMESPACE_NEW      0x301
@@ -603,6 +606,7 @@ extern bool obd_enable_health_write;
 #define OBD_FAIL_CATLIST			    0x131b
 #define OBD_FAIL_LLOG_PAUSE_AFTER_PAD               0x131c
 #define OBD_FAIL_LLOG_ADD_GAP			    0x131d
+#define OBD_FAIL_LLOG_BACKUP_ENOSPC		    0x131e
 
 #define OBD_FAIL_LLITE                              0x1400
 #define OBD_FAIL_LLITE_FAULT_TRUNC_RACE             0x1401
@@ -644,6 +648,8 @@ extern bool obd_enable_health_write;
 #define OBD_FAIL_LLITE_READ_PAUSE		    0x1431
 #define OBD_FAIL_LLITE_FAULT_PAUSE		    0x1432
 #define OBD_FAIL_LLITE_STATAHEAD_PAUSE		    0x1433
+#define OBD_FAIL_LLITE_STAT_RACE1		    0x1434
+#define OBD_FAIL_LLITE_STAT_RACE2		    0x1435
 
 #define OBD_FAIL_FID_INDIR	0x1501
 #define OBD_FAIL_FID_INLMA	0x1502
@@ -962,16 +968,6 @@ do {									      \
 
 #define OBD_FREE_PTR_ARRAY_LARGE(ptr, n)			\
 	OBD_FREE_LARGE(ptr, (n) * sizeof(*(ptr)))
-
-/* we memset() the slab object to 0 when allocation succeeds, so DO NOT
- * HAVE A CTOR THAT DOES ANYTHING.  its work will be cleared here.  we'd
- * love to assert on that, but slab.c keeps kmem_cache_s all to itself. */
-#define OBD_SLAB_FREE_RTN0(ptr, slab)                                         \
-({                                                                            \
-	kmem_cache_free((slab), (ptr));                                       \
-	(ptr) = NULL;                                                         \
-	0;                                                                    \
-})
 
 #define __OBD_SLAB_ALLOC_VERBOSE(ptr, slab, cptab, cpt, size, type)	      \
 do {									      \

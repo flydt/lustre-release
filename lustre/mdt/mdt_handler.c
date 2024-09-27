@@ -476,8 +476,7 @@ static int mdt_get_root(struct tgt_session_info *tsi)
 	EXIT;
 out:
 	mdt_thread_info_fini(info);
-	if (buffer)
-		OBD_FREE(buffer, PATH_MAX+1);
+	OBD_FREE(buffer, PATH_MAX+1);
 	return rc;
 }
 
@@ -681,7 +680,7 @@ int mdt_pack_size2body(struct mdt_thread_info *info,
 		lock = ldlm_handle2lock(lh);
 		if (lock != NULL) {
 			dom_lock = ldlm_has_dom(lock);
-			LDLM_LOCK_PUT(lock);
+			ldlm_lock_put(lock);
 		}
 	}
 
@@ -1013,39 +1012,58 @@ int mdt_big_xattr_get(struct mdt_thread_info *info, struct mdt_object *o,
 		      const char *name)
 {
 	const struct lu_env *env = info->mti_env;
-	int rc;
+	void *big_lmm;
+	int big_size, rc;
+	bool using_big_lmv;
 
 	ENTRY;
 
-	LASSERT(info->mti_big_lmm_used == 0);
 	rc = mo_xattr_get(env, mdt_object_child(o), &LU_BUF_NULL, name);
 	if (rc < 0)
 		RETURN(rc);
 
+	if (strcmp(name, XATTR_NAME_LMV) == 0) {
+		LASSERT(info->mti_big_lmv_used == 0);
+		big_size = info->mti_big_lmvsize;
+		big_lmm = info->mti_big_lmv;
+		using_big_lmv = true;
+	} else {
+		LASSERT(info->mti_big_lov_used == 0);
+		big_size = info->mti_big_lovsize;
+		big_lmm = info->mti_big_lov;
+		using_big_lmv = false;
+	}
+
 	/* big_lmm may need to be grown */
-	if (info->mti_big_lmmsize < rc) {
+	if (big_size < rc) {
 		int size = size_roundup_power2(rc);
 
-		if (info->mti_big_lmmsize > 0) {
+		if (big_size > 0) {
 			/* free old buffer */
-			LASSERT(info->mti_big_lmm);
-			OBD_FREE_LARGE(info->mti_big_lmm,
-				       info->mti_big_lmmsize);
-			info->mti_big_lmm = NULL;
-			info->mti_big_lmmsize = 0;
+			LASSERT(big_lmm);
+			OBD_FREE_LARGE(big_lmm, big_size);
+			big_lmm = NULL;
+			big_size = 0;
 		}
 
-		OBD_ALLOC_LARGE(info->mti_big_lmm, size);
-		if (info->mti_big_lmm == NULL)
-			RETURN(-ENOMEM);
-		info->mti_big_lmmsize = size;
+		OBD_ALLOC_LARGE(big_lmm, size);
+		if (big_lmm == NULL)
+			GOTO(out, rc = -ENOMEM);
+		big_size = size;
 	}
-	LASSERT(info->mti_big_lmmsize >= rc);
+	LASSERT(big_size >= rc);
 
-	info->mti_buf.lb_buf = info->mti_big_lmm;
-	info->mti_buf.lb_len = info->mti_big_lmmsize;
+	info->mti_buf.lb_buf = big_lmm;
+	info->mti_buf.lb_len = big_size;
 	rc = mo_xattr_get(env, mdt_object_child(o), &info->mti_buf, name);
-
+out:
+	if (using_big_lmv) {
+		info->mti_big_lmvsize = big_size;
+		info->mti_big_lmv = big_lmm;
+	} else {
+		info->mti_big_lovsize = big_size;
+		info->mti_big_lov = big_lmm;
+	}
 	RETURN(rc);
 }
 
@@ -1053,12 +1071,14 @@ int __mdt_stripe_get(struct mdt_thread_info *info, struct mdt_object *o,
 		     struct md_attr *ma, const char *name)
 {
 	struct md_object *next = mdt_object_child(o);
-	struct lu_buf    *buf = &info->mti_buf;
+	struct lu_buf *buf = &info->mti_buf;
 	int rc;
+	bool is_lov = false;
 
 	if (strcmp(name, XATTR_NAME_LOV) == 0) {
 		buf->lb_buf = ma->ma_lmm;
 		buf->lb_len = ma->ma_lmm_size;
+		is_lov = true;
 		LASSERT(!(ma->ma_valid & MA_LOV));
 	} else if (strcmp(name, XATTR_NAME_LMV) == 0) {
 		buf->lb_buf = ma->ma_lmv;
@@ -1086,9 +1106,6 @@ int __mdt_stripe_get(struct mdt_thread_info *info, struct mdt_object *o,
 
 got:
 		if (strcmp(name, XATTR_NAME_LOV) == 0) {
-			if (info->mti_big_lmm_used)
-				ma->ma_lmm = info->mti_big_lmm;
-
 			/* NOT return LOV EA with hole to old client. */
 			if (unlikely(le32_to_cpu(ma->ma_lmm->lmm_pattern) &
 				     LOV_PATTERN_F_HOLE) &&
@@ -1096,12 +1113,17 @@ got:
 			      OBD_CONNECT_LFSCK)) {
 				return -EIO;
 			}
+			if (info->mti_big_lov_used) {
+				LASSERT(info->mti_big_lovsize >= rc);
+				ma->ma_lmm = info->mti_big_lov;
+			}
 			ma->ma_lmm_size = rc;
 			ma->ma_valid |= MA_LOV;
 		} else if (strcmp(name, XATTR_NAME_LMV) == 0) {
-			if (info->mti_big_lmm_used)
-				ma->ma_lmv = info->mti_big_lmm;
-
+			if (info->mti_big_lmv_used) {
+				LASSERT(info->mti_big_lmvsize >= rc);
+				ma->ma_lmv = info->mti_big_lmv;
+			}
 			ma->ma_lmv_size = rc;
 			ma->ma_valid |= MA_LMV;
 		} else if (strcmp(name, XATTR_NAME_DEFAULT_LMV) == 0) {
@@ -1125,7 +1147,10 @@ got:
 			return rc;
 		rc = mdt_big_xattr_get(info, o, name);
 		if (rc > 0) {
-			info->mti_big_lmm_used = 1;
+			if (is_lov)
+				info->mti_big_lov_used = 1;
+			else
+				info->mti_big_lmv_used = 1;
 			goto got;
 		}
 	}
@@ -1136,33 +1161,40 @@ got:
 int mdt_stripe_get(struct mdt_thread_info *info, struct mdt_object *o,
 		   struct md_attr *ma, const char *name)
 {
-	int rc;
-
-	if (!info->mti_big_lmm) {
-		OBD_ALLOC(info->mti_big_lmm, PAGE_SIZE);
-		if (!info->mti_big_lmm)
-			return -ENOMEM;
-		info->mti_big_lmmsize = PAGE_SIZE;
-	}
+	void *big_lmm;
+	int big_size, rc;
+	bool is_lmv;
 
 	if (strcmp(name, XATTR_NAME_LOV) == 0) {
-		ma->ma_lmm = info->mti_big_lmm;
-		ma->ma_lmm_size = info->mti_big_lmmsize;
-		ma->ma_valid &= ~MA_LOV;
+		big_size = info->mti_big_lovsize;
+		big_lmm = info->mti_big_lov;
+		is_lmv = false;
 	} else if (strcmp(name, XATTR_NAME_LMV) == 0) {
-		ma->ma_lmv = info->mti_big_lmm;
-		ma->ma_lmv_size = info->mti_big_lmmsize;
-		ma->ma_valid &= ~MA_LMV;
+		big_size = info->mti_big_lmvsize;
+		big_lmm = info->mti_big_lmv;
+		is_lmv = true;
 	} else {
 		LBUG();
 	}
 
-	LASSERT(!info->mti_big_lmm_used);
+	if (!big_lmm) {
+		OBD_ALLOC_LARGE(big_lmm, PAGE_SIZE);
+		if (!big_lmm)
+			return -ENOMEM;
+		big_size = PAGE_SIZE;
+	}
+
+	if (is_lmv) {
+		info->mti_big_lmvsize = ma->ma_lmv_size = big_size;
+		info->mti_big_lmv = ma->ma_lmv = big_lmm;
+		ma->ma_valid &= ~MA_LMV;
+	} else {
+		info->mti_big_lovsize = ma->ma_lmm_size = big_size;
+		info->mti_big_lov = ma->ma_lmm = big_lmm;
+		ma->ma_valid &= ~MA_LOV;
+	}
+
 	rc = __mdt_stripe_get(info, o, ma, name);
-	/* since big_lmm is always used here, clear 'used' flag to avoid
-	 * assertion in mdt_big_xattr_get().
-	 */
-	info->mti_big_lmm_used = 0;
 
 	return rc;
 }
@@ -1177,8 +1209,8 @@ int mdt_attr_get_pfid(struct mdt_thread_info *info, struct mdt_object *o,
 
 	ENTRY;
 
-	buf->lb_buf = info->mti_big_lmm;
-	buf->lb_len = info->mti_big_lmmsize;
+	buf->lb_buf = info->mti_xattr_buf;
+	buf->lb_len = sizeof(info->mti_xattr_buf);
 	rc = mo_xattr_get(info->mti_env, mdt_object_child(o),
 			  buf, XATTR_NAME_LINK);
 	/* ignore errors, MA_PFID won't be set and it is
@@ -1186,8 +1218,8 @@ int mdt_attr_get_pfid(struct mdt_thread_info *info, struct mdt_object *o,
 	 */
 	if (rc == -ERANGE || buf->lb_len == 0) {
 		rc = mdt_big_xattr_get(info, o, XATTR_NAME_LINK);
-		buf->lb_buf = info->mti_big_lmm;
-		buf->lb_len = info->mti_big_lmmsize;
+		buf->lb_buf = info->mti_big_lov;
+		buf->lb_len = info->mti_big_lovsize;
 	}
 
 	if (rc < 0)
@@ -1231,8 +1263,8 @@ int mdt_attr_get_pfid_name(struct mdt_thread_info *info, struct mdt_object *o,
 			  XATTR_NAME_LINK);
 	if (rc == -ERANGE) {
 		rc = mdt_big_xattr_get(info, o, XATTR_NAME_LINK);
-		buf->lb_buf = info->mti_big_lmm;
-		buf->lb_len = info->mti_big_lmmsize;
+		buf->lb_buf = info->mti_big_lov;
+		buf->lb_len = info->mti_big_lovsize;
 	}
 	if (rc < 0)
 		return rc;
@@ -2264,7 +2296,7 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 		}
 		fid_extract_from_res_name(child_fid,
 					  &lock->l_resource->lr_name);
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 		child = mdt_object_find(info->mti_env, info->mti_mdt,
 					child_fid);
 		if (IS_ERR(child))
@@ -2485,10 +2517,10 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 				ldlm_inodebits_drop(lock, MDS_INODELOCK_DOM);
 				unlock_res_and_lock(lock);
 			}
-			LDLM_LOCK_PUT(lock);
+			ldlm_lock_put(lock);
 			GOTO(unlock_parent, rc = 0);
 		}
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 	}
 
 	EXIT;
@@ -3811,10 +3843,10 @@ int mdt_check_resent_lock(struct mdt_thread_info *info,
 			      DFID"\n",
 			      info->mti_exp->exp_obd->obd_name,
 			      PFID(mdt_object_fid(mo)));
-			LDLM_LOCK_PUT(lock);
+			ldlm_lock_put(lock);
 			RETURN(-EPROTO);
 		}
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 		return 0;
 	}
 	return 1;
@@ -3960,6 +3992,12 @@ int mdt_object_lock_internal(struct mdt_thread_info *info,
 	struct lustre_handle *handle;
 	int rc;
 
+	/* DoM lock shouln't be combined with other ibits when it is
+	 * taken locally due to potential conflict with GROUP lock.
+	 * Consider trylock either for DoM bit or for others
+	 */
+	LASSERT(!(*ibits & MDS_INODELOCK_DOM && *ibits & ~MDS_INODELOCK_DOM));
+
 	policy->l_inodebits.bits = *ibits;
 	policy->l_inodebits.try_bits = trybits;
 	policy->l_inodebits.li_gid = lh->mlh_gid;
@@ -4012,7 +4050,7 @@ int mdt_object_lock_internal(struct mdt_thread_info *info,
 		lock = ldlm_handle2lock(handle);
 		LASSERT(lock);
 		*ibits = lock->l_policy_data.l_inodebits.bits;
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 	}
 
 	return rc;
@@ -4280,7 +4318,7 @@ static void mdt_save_lock(struct mdt_thread_info *info, struct lustre_handle *h,
 				CDEBUG(D_HA, "sync_lock, do async commit\n");
 				mdt_device_commit_async(info->mti_env, mdt);
 			}
-			LDLM_LOCK_PUT(lock);
+			ldlm_lock_put(lock);
 		}
 		h->cookie = 0ull;
 	}
@@ -4317,7 +4355,7 @@ static void mdt_save_remote_lock(struct mdt_thread_info *info,
 		if (decref || !req || !(mode & (LCK_PW | LCK_EX)) ||
 		    !tgt_ses_info(info->mti_env)->tsi_has_trans) {
 			ldlm_lock_decref_and_cancel(h, mode);
-			LDLM_LOCK_PUT(lock);
+			ldlm_lock_put(lock);
 		} else {
 			tgt_save_slc_lock(&info->mti_mdt->mdt_lut, lock,
 					  req->rq_transno);
@@ -4492,7 +4530,8 @@ void mdt_thread_info_reset(struct mdt_thread_info *info)
 	info->mti_dlm_req = NULL;
 	info->mti_cross_ref = 0;
 	info->mti_opdata = 0;
-	info->mti_big_lmm_used = 0;
+	info->mti_big_lov_used = 0;
+	info->mti_big_lmv_used = 0;
 	info->mti_big_acl_used = 0;
 	info->mti_som_strict = 0;
 	info->mti_intent_lock = 0;
@@ -4656,7 +4695,7 @@ int mdt_intent_lock_replace(struct mdt_thread_info *info,
 		LASSERT(lustre_msg_get_flags(req->rq_reqmsg) &
 			MSG_RESENT);
 
-		LDLM_LOCK_RELEASE(new_lock);
+		ldlm_lock_put(new_lock);
 		lh->mlh_reg_lh.cookie = 0;
 		RETURN(ELDLM_LOCK_REPLACED);
 	}
@@ -4689,7 +4728,7 @@ int mdt_intent_lock_replace(struct mdt_thread_info *info,
 		     &new_lock->l_remote_handle,
 		     &new_lock->l_exp_hash);
 
-	LDLM_LOCK_RELEASE(new_lock);
+	ldlm_lock_put(new_lock);
 	lh->mlh_reg_lh.cookie = 0;
 
 	RETURN(ELDLM_LOCK_REPLACED);
@@ -5460,8 +5499,7 @@ static int mdt_register_seq_exp(struct mdt_device *mdt)
 		GOTO(out_free, rc);
 	}
 out_free:
-	if (lwp_name != NULL)
-		OBD_FREE(lwp_name, MAX_OBD_NAME);
+	OBD_FREE(lwp_name, MAX_OBD_NAME);
 
 	return rc;
 }
@@ -5710,8 +5748,7 @@ static int mdt_connect_to_next(const struct lu_env *env, struct mdt_device *m,
 	}
 
 out:
-	if (data)
-		OBD_FREE_PTR(data);
+	OBD_FREE_PTR(data);
 	RETURN(rc);
 }
 
@@ -5857,10 +5894,8 @@ put_profile:
 free_bufs:
 	OBD_FREE_PTR(bufs);
 cleanup_mem:
-	if (name)
-		OBD_FREE(name, name_size);
-	if (uuid)
-		OBD_FREE(uuid, uuid_size);
+	OBD_FREE(name, name_size);
+	OBD_FREE(uuid, uuid_size);
 	RETURN(rc);
 }
 
@@ -5997,14 +6032,10 @@ lcfg_cleanup:
 put_profile:
 	class_put_profile(lprof);
 cleanup_mem:
-	if (bufs)
-		OBD_FREE_PTR(bufs);
-	if (qmtname)
-		OBD_FREE(qmtname, MAX_OBD_NAME);
-	if (uuid)
-		OBD_FREE(uuid, UUID_MAX);
-	if (data)
-		OBD_FREE_PTR(data);
+	OBD_FREE_PTR(bufs);
+	OBD_FREE(qmtname, MAX_OBD_NAME);
+	OBD_FREE(uuid, UUID_MAX);
+	OBD_FREE_PTR(data);
 	return rc;
 }
 
@@ -6095,6 +6126,8 @@ TGT_MDT_HDL(HAS_BODY | HAS_REPLY, MDS_HSM_REQUEST,
 TGT_MDT_HDL(HAS_KEY | HAS_BODY | HAS_REPLY | IS_MUTABLE,
 	    MDS_SWAP_LAYOUTS,
 	    mdt_swap_layouts),
+TGT_MDT_HDL(HAS_BODY | HAS_REPLY | IS_MUTABLE, MDS_HSM_DATA_VERSION,
+	    mdt_hsm_data_version),
 TGT_MDT_HDL(IS_MUTABLE,		MDS_RMFID,	mdt_rmfid),
 TGT_MDT_HDL(IS_MUTABLE,		MDS_BATCH,	mdt_batch),
 };
@@ -6218,15 +6251,14 @@ static void mdt_fini(const struct lu_env *env, struct mdt_device *m)
 
 	mdt_llog_ctxt_unclone(env, m, LLOG_AGENT_ORIG_CTXT);
 	mdt_llog_ctxt_unclone(env, m, LLOG_CHANGELOG_ORIG_CTXT);
-
+	target_recovery_fini(obd);
 	if (m->mdt_namespace != NULL)
 		ldlm_namespace_free_prior(m->mdt_namespace, NULL,
 					  d->ld_obd->obd_force);
+	mdt_quota_fini(env, m);
 
 	obd_exports_barrier(obd);
 	obd_zombie_barrier();
-
-	mdt_quota_fini(env, m);
 
 	cfs_free_nidlist(&m->mdt_squash.rsi_nosquash_nids);
 
@@ -6234,8 +6266,6 @@ static void mdt_fini(const struct lu_env *env, struct mdt_device *m)
 	 * error path
 	 */
 	mdt_tunables_fini(m);
-
-	target_recovery_fini(obd);
 	upcall_cache_cleanup(m->mdt_identity_cache);
 	m->mdt_identity_cache = NULL;
 
@@ -7363,9 +7393,8 @@ static int mdt_destroy_export(struct obd_export *exp)
 	ENTRY;
 
 	target_destroy_export(exp);
-	if (exp->exp_used_slots)
-		OBD_FREE(exp->exp_used_slots,
-			 BITS_TO_LONGS(OBD_MAX_RIF_MAX) * sizeof(long));
+	OBD_FREE(exp->exp_used_slots,
+		 BITS_TO_LONGS(OBD_MAX_RIF_MAX) * sizeof(long));
 
 	/* destroy can be called from failed obd_setup, so
 	 * checking uuid is safer than obd_self_export
@@ -7671,7 +7700,8 @@ static int mdt_fid2path(struct mdt_thread_info *info,
 {
 	struct mdt_device *mdt = info->mti_mdt;
 	struct mdt_object *obj;
-	int    rc;
+	int excess;
+	int rc;
 
 	ENTRY;
 
@@ -7724,9 +7754,10 @@ static int mdt_fid2path(struct mdt_thread_info *info,
 
 	rc = mdt_path(info, obj, fp, root_fid);
 
-	CDEBUG(D_INFO, "fid "DFID", path %s recno %#llx linkno %u\n",
-	       PFID(&fp->gf_fid), fp->gf_u.gf_path,
-	       fp->gf_recno, fp->gf_linkno);
+	excess = fp->gf_pathlen > 3072 ? fp->gf_pathlen - 3072 : 0;
+	CDEBUG(D_INFO, "fid "DFID", path %.*s recno %#llx linkno %u\n",
+	       PFID(&fp->gf_fid), fp->gf_pathlen - excess,
+	       fp->gf_u.gf_path + excess, fp->gf_recno, fp->gf_linkno);
 
 	mdt_object_put(info->mti_env, obj);
 
@@ -8102,10 +8133,16 @@ static void mdt_key_fini(const struct lu_context *ctx,
 {
 	struct mdt_thread_info *info = data;
 
-	if (info->mti_big_lmm) {
-		OBD_FREE_LARGE(info->mti_big_lmm, info->mti_big_lmmsize);
-		info->mti_big_lmm = NULL;
-		info->mti_big_lmmsize = 0;
+	if (info->mti_big_lov) {
+		OBD_FREE_LARGE(info->mti_big_lov, info->mti_big_lovsize);
+		info->mti_big_lov = NULL;
+		info->mti_big_lovsize = 0;
+	}
+
+	if (info->mti_big_lmv) {
+		OBD_FREE_LARGE(info->mti_big_lmv, info->mti_big_lmvsize);
+		info->mti_big_lmv = NULL;
+		info->mti_big_lmvsize = 0;
 	}
 
 	if (info->mti_big_acl) {

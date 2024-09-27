@@ -114,6 +114,8 @@ static s64 ll_stats_pid_write(const char __user *buf, size_t len)
 	char kernbuf[16];
 	int rc;
 
+	if (len == 0)
+		return -EINVAL;
 	rc = kstrtoull_from_user(buf, len, 0, &value);
 	if (rc < 0 && len < sizeof(kernbuf)) {
 		if (copy_from_user(kernbuf, buf, len))
@@ -461,16 +463,20 @@ static int ll_max_cached_mb_seq_show(struct seq_file *m, void *v)
 	struct ll_ra_info *ra = &sbi->ll_ra_info;
 	long max_cached_mb;
 	long unused_mb;
+	long unevict_mb;
 
 	mutex_lock(&cache->ccc_max_cache_mb_lock);
 	max_cached_mb = PAGES_TO_MiB(cache->ccc_lru_max);
 	unused_mb = PAGES_TO_MiB(atomic_long_read(&cache->ccc_lru_left));
+	unevict_mb = PAGES_TO_MiB(
+			atomic_long_read(&cache->ccc_unevict_lru_used));
 	mutex_unlock(&cache->ccc_max_cache_mb_lock);
 
 	seq_printf(m, "users: %d\n"
 		      "max_cached_mb: %ld\n"
 		      "used_mb: %ld\n"
 		      "unused_mb: %ld\n"
+		      "unevict_mb: %ld\n"
 		      "reclaim_count: %u\n"
 		      "max_read_ahead_mb: %lu\n"
 		      "used_read_ahead_mb: %d\n",
@@ -478,6 +484,7 @@ static int ll_max_cached_mb_seq_show(struct seq_file *m, void *v)
 		   max_cached_mb,
 		   max_cached_mb - unused_mb,
 		   unused_mb,
+		   unevict_mb,
 		   cache->ccc_lru_shrinkers,
 		   PAGES_TO_MiB(ra->ra_max_pages),
 		   PAGES_TO_MiB(atomic_read(&ra->ra_cur_pages)));
@@ -612,6 +619,97 @@ out_unlock:
 }
 LDEBUGFS_SEQ_FOPS(ll_max_cached_mb);
 
+static int ll_unevict_cached_mb_seq_show(struct seq_file *m, void *v)
+{
+	struct super_block *sb = m->private;
+	struct ll_sb_info *sbi = ll_s2sbi(sb);
+	struct cl_client_cache *cache = sbi->ll_cache;
+	long unevict_mb;
+
+	mutex_lock(&cache->ccc_max_cache_mb_lock);
+	unevict_mb = PAGES_TO_MiB(
+			atomic_long_read(&cache->ccc_unevict_lru_used));
+	mutex_unlock(&cache->ccc_max_cache_mb_lock);
+
+	seq_printf(m, "%ld\n", unevict_mb);
+	return 0;
+}
+
+static ssize_t ll_unevict_cached_mb_seq_write(struct file *file,
+					      const char __user *buffer,
+					      size_t count, loff_t *off)
+{
+	struct seq_file *m = file->private_data;
+	struct super_block *sb = m->private;
+	struct ll_sb_info *sbi = ll_s2sbi(sb);
+	struct lu_env *env;
+	__u16 refcheck;
+	char kernbuf[128];
+	int rc;
+
+	ENTRY;
+
+	if (count >= sizeof(kernbuf))
+		RETURN(-EINVAL);
+
+	if (copy_from_user(kernbuf, buffer, count))
+		RETURN(-EFAULT);
+
+	kernbuf[count] = 0;
+	if (count != 5 || strncmp(kernbuf, "clear", 5) != 0)
+		RETURN(-EINVAL);
+
+	env = cl_env_get(&refcheck);
+	if (IS_ERR(env))
+		RETURN(PTR_ERR(env));
+
+	/* being initialized */
+	if (sbi->ll_dt_exp == NULL)
+		GOTO(out, rc = -ENODEV);
+
+	rc = obd_set_info_async(env, sbi->ll_dt_exp,
+				sizeof(KEY_UNEVICT_CACHE_SHRINK),
+				KEY_UNEVICT_CACHE_SHRINK,
+				0, NULL, NULL);
+out:
+	cl_env_put(env, &refcheck);
+	if (rc >= 0)
+		rc = count;
+
+	RETURN(rc);
+}
+LDEBUGFS_SEQ_FOPS(ll_unevict_cached_mb);
+
+static int ll_enable_mlock_pages_seq_show(struct seq_file *m, void *v)
+{
+	struct super_block *sb = m->private;
+	struct ll_sb_info *sbi = ll_s2sbi(sb);
+	struct cl_client_cache *cache = sbi->ll_cache;
+
+	seq_printf(m, "%d\n", cache->ccc_mlock_pages_enable);
+	return 0;
+}
+
+static ssize_t ll_enable_mlock_pages_seq_write(struct file *file,
+					       const char __user *buffer,
+					       size_t count, loff_t *off)
+{
+	struct seq_file *m = file->private_data;
+	struct super_block *sb = m->private;
+	struct ll_sb_info *sbi = ll_s2sbi(sb);
+	struct cl_client_cache *cache = sbi->ll_cache;
+	bool val;
+	int rc;
+
+	rc = kstrtobool_from_user(buffer, count, &val);
+	if (rc)
+		return rc;
+
+	cache->ccc_mlock_pages_enable = val;
+	return count;
+}
+LDEBUGFS_SEQ_FOPS(ll_enable_mlock_pages);
+
 static ssize_t pcc_async_threshold_show(struct kobject *kobj,
 					struct attribute *attr, char *buffer)
 {
@@ -672,6 +770,38 @@ static ssize_t pcc_async_affinity_store(struct kobject *kobj,
 	return count;
 }
 LUSTRE_RW_ATTR(pcc_async_affinity);
+
+static ssize_t pcc_mode_show(struct kobject *kobj, struct attribute *attr,
+			      char *buffer)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+	struct pcc_super *super = &sbi->ll_pcc_super;
+
+	return sprintf(buffer, "0%o\n", super->pccs_mode);
+
+}
+
+static ssize_t pcc_mode_store(struct kobject *kobj, struct attribute *attr,
+			       const char *buffer, size_t count)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+	struct pcc_super *super = &sbi->ll_pcc_super;
+	__u32 mode;
+	int rc;
+
+	rc = kstrtouint(buffer, 8, &mode);
+	if (rc)
+		return rc;
+
+	if (mode & ~S_IRWXUGO)
+		return -EINVAL;
+
+	super->pccs_mode = mode;
+	return count;
+}
+LUSTRE_RW_ATTR(pcc_mode);
 
 static ssize_t checksums_show(struct kobject *kobj, struct attribute *attr,
 			      char *buf)
@@ -1468,6 +1598,34 @@ static ssize_t hybrid_io_store(struct kobject *kobj, struct attribute *attr,
 }
 LUSTRE_RW_ATTR(hybrid_io);
 
+static ssize_t enable_setstripe_gid_show(struct kobject *kobj,
+					 struct attribute *attr, char *buf)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", sbi->ll_enable_setstripe_gid);
+}
+
+static ssize_t enable_setstripe_gid_store(struct kobject *kobj,
+					  struct attribute *attr,
+					  const char *buffer, size_t count)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+	unsigned int val;
+	int rc;
+
+	rc = kstrtoint(buffer, 10, &val);
+	if (rc)
+		return rc;
+
+	sbi->ll_enable_setstripe_gid = val;
+
+	return count;
+}
+LUSTRE_RW_ATTR(enable_setstripe_gid);
+
 static ssize_t max_read_ahead_async_active_show(struct kobject *kobj,
 					       struct attribute *attr,
 					       char *buf)
@@ -2199,6 +2357,10 @@ struct ldebugfs_vars lprocfs_llite_obd_vars[] = {
 	  .fops	=	&ll_site_stats_fops			},
 	{ .name	=	"max_cached_mb",
 	  .fops	=	&ll_max_cached_mb_fops			},
+	{ .name	=	"unevict_cached_mb",
+	  .fops	=	&ll_unevict_cached_mb_fops		},
+	{ .name	=	"enable_mlock_pages",
+	  .fops	=	&ll_enable_mlock_pages_fops		},
 	{ .name	=	"statahead_stats",
 	  .fops	=	&ll_statahead_stats_fops		},
 	{ .name	=	"unstable_stats",
@@ -2261,6 +2423,7 @@ static struct attribute *llite_attrs[] = {
 	&lustre_attr_parallel_dio.attr,
 	&lustre_attr_unaligned_dio.attr,
 	&lustre_attr_hybrid_io.attr,
+	&lustre_attr_enable_setstripe_gid.attr,
 	&lustre_attr_file_heat.attr,
 	&lustre_attr_heat_decay_percentage.attr,
 	&lustre_attr_heat_period_second.attr,
@@ -2277,6 +2440,7 @@ static struct attribute *llite_attrs[] = {
 	&lustre_attr_filename_enc_use_old_base64.attr,
 #endif
 	&lustre_attr_pcc_async_threshold.attr,
+	&lustre_attr_pcc_mode.attr,
 	&lustre_attr_pcc_async_affinity.attr,
 	NULL,
 };
@@ -2764,7 +2928,7 @@ static ssize_t ll_rw_extents_stats_seq_write(struct file *file,
 LDEBUGFS_SEQ_FOPS(ll_rw_extents_stats);
 
 void ll_rw_stats_tally(struct ll_sb_info *sbi, pid_t pid,
-		       struct ll_file_data *file, loff_t pos,
+		       struct ll_file_data *lfd, loff_t pos,
 		       size_t count, int rw)
 {
 	int i, cur = -1;
@@ -2823,13 +2987,13 @@ void ll_rw_stats_tally(struct ll_sb_info *sbi, pid_t pid,
 	/* Offset statistics */
 	for (i = 0; i < LL_PROCESS_HIST_MAX; i++) {
 		if (process[i].rw_pid == pid) {
-			if (process[i].rw_last_file != file) {
+			if (process[i].rw_last_file != lfd) {
 				process[i].rw_range_start = pos;
 				process[i].rw_last_file_pos = pos + count;
 				process[i].rw_smallest_extent = count;
 				process[i].rw_largest_extent = count;
 				process[i].rw_offset = 0;
-				process[i].rw_last_file = file;
+				process[i].rw_last_file = lfd;
 				goto out_unlock;
 			}
 			if (process[i].rw_last_file_pos != pos) {
@@ -2870,7 +3034,7 @@ void ll_rw_stats_tally(struct ll_sb_info *sbi, pid_t pid,
 	process[*process_count].rw_smallest_extent = count;
 	process[*process_count].rw_largest_extent = count;
 	process[*process_count].rw_offset = 0;
-	process[*process_count].rw_last_file = file;
+	process[*process_count].rw_last_file = lfd;
 
 out_unlock:
 	spin_unlock(&sbi->ll_process_lock);

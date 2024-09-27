@@ -1,35 +1,17 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2010, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
 
-/**
+/*
  * This file deals with various client/target related logic including recovery.
  *
  * TODO: This code more logically belongs in the ptlrpc module than in ldlm and
@@ -125,8 +107,7 @@ static int import_set_conn(struct obd_import *imp, struct obd_uuid *uuid,
 	spin_unlock(&imp->imp_lock);
 	RETURN(0);
 out_free:
-	if (imp_conn)
-		OBD_FREE(imp_conn, sizeof(*imp_conn));
+	OBD_FREE(imp_conn, sizeof(*imp_conn));
 out_put:
 	ptlrpc_connection_put(ptlrpc_conn);
 	RETURN(rc);
@@ -368,8 +349,8 @@ int client_obd_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 		RETURN(-EINVAL);
 	}
 
-	if (LUSTRE_CFG_BUFLEN(lcfg, 1) > 37) {
-		CERROR("client UUID must be less than 38 characters\n");
+	if (LUSTRE_CFG_BUFLEN(lcfg, 1) > UUID_MAX) {
+		CERROR("client UUID must be %u characters or less\n", UUID_MAX);
 		RETURN(-EINVAL);
 	}
 
@@ -378,8 +359,8 @@ int client_obd_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 		RETURN(-EINVAL);
 	}
 
-	if (LUSTRE_CFG_BUFLEN(lcfg, 2) > 37) {
-		CERROR("target UUID must be less than 38 characters\n");
+	if (LUSTRE_CFG_BUFLEN(lcfg, 2) > UUID_MAX) {
+		CERROR("target UUID must be %u characters or less\n", UUID_MAX);
 		RETURN(-EINVAL);
 	}
 
@@ -426,7 +407,9 @@ int client_obd_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 	atomic_set(&cli->cl_lru_shrinkers, 0);
 	atomic_long_set(&cli->cl_lru_busy, 0);
 	atomic_long_set(&cli->cl_lru_in_list, 0);
+	atomic_long_set(&cli->cl_unevict_lru_in_list, 0);
 	INIT_LIST_HEAD(&cli->cl_lru_list);
+	INIT_LIST_HEAD(&cli->cl_unevict_lru_list);
 	spin_lock_init(&cli->cl_lru_list_lock);
 	atomic_long_set(&cli->cl_unstable_count, 0);
 	INIT_LIST_HEAD(&cli->cl_shrink_list);
@@ -574,9 +557,8 @@ err_import:
 err_ldlm:
 	ldlm_put_ref();
 err:
-	if (cli->cl_mod_tag_bitmap != NULL)
-		OBD_FREE(cli->cl_mod_tag_bitmap,
-			 BITS_TO_LONGS(OBD_MAX_RIF_MAX) * sizeof(long));
+	OBD_FREE(cli->cl_mod_tag_bitmap,
+		 BITS_TO_LONGS(OBD_MAX_RIF_MAX) * sizeof(long));
 	cli->cl_mod_tag_bitmap = NULL;
 
 	RETURN(rc);
@@ -597,9 +579,8 @@ int client_obd_cleanup(struct obd_device *obd)
 
 	ldlm_put_ref();
 
-	if (cli->cl_mod_tag_bitmap != NULL)
-		OBD_FREE(cli->cl_mod_tag_bitmap,
-			 BITS_TO_LONGS(OBD_MAX_RIF_MAX) * sizeof(long));
+	OBD_FREE(cli->cl_mod_tag_bitmap,
+		 BITS_TO_LONGS(OBD_MAX_RIF_MAX) * sizeof(long));
 	cli->cl_mod_tag_bitmap = NULL;
 
 	RETURN(0);
@@ -937,8 +918,7 @@ static int target_handle_reconnect(struct lustre_handle *conn,
 				      target->obd_name, abs(timeout) / 60,
 				      abs(timeout) % 60, target->obd_name);
 
-		if (buf != NULL)
-			OBD_FREE(buf, size);
+		OBD_FREE(buf, size);
 	}
 
 out_already:

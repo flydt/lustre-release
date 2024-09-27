@@ -230,11 +230,13 @@ static struct ll_sb_info *ll_init_sbi(struct lustre_sb_info *lsi)
 	sbi->ll_hybrid_io_read_threshold_bytes =
 		SBI_DEFAULT_HYBRID_IO_READ_THRESHOLD;
 
+	/* setstripe is allowed for all groups by default */
+	sbi->ll_enable_setstripe_gid = -1;
+
 	INIT_LIST_HEAD(&sbi->ll_all_quota_list);
 	RETURN(sbi);
 out_destroy_ra:
-	if (sbi->ll_foreign_symlink_prefix)
-		OBD_FREE(sbi->ll_foreign_symlink_prefix, sizeof("/mnt/"));
+	OBD_FREE(sbi->ll_foreign_symlink_prefix, sizeof("/mnt/"));
 	if (sbi->ll_cache) {
 		cl_cache_decref(sbi->ll_cache);
 		sbi->ll_cache = NULL;
@@ -379,7 +381,8 @@ static int client_common_fill_super(struct super_block *sb, char *md, char *dt)
 				   OBD_CONNECT2_BATCH_RPC |
 				   OBD_CONNECT2_DMV_IMP_INHERIT |
 				   OBD_CONNECT2_UNALIGNED_DIO |
-				   OBD_CONNECT2_PCCRO;
+				   OBD_CONNECT2_PCCRO |
+				   OBD_CONNECT2_MIRROR_ID_FIX;
 
 #ifdef HAVE_LRU_RESIZE_SUPPORT
 	if (test_bit(LL_SBI_LRU_RESIZE, sbi->ll_flags))
@@ -823,10 +826,8 @@ retry_connect:
 	if (uuid != NULL)
 		sb->s_dev = get_uuid2int(uuid->uuid, strlen(uuid->uuid));
 
-	if (data != NULL)
-		OBD_FREE_PTR(data);
-	if (osfs != NULL)
-		OBD_FREE_PTR(osfs);
+	OBD_FREE_PTR(data);
+	OBD_FREE_PTR(osfs);
 
 	if (sbi->ll_dt_obd) {
 		err = sysfs_create_link(&sbi->ll_kset.kobj,
@@ -866,10 +867,8 @@ out_md:
 	sbi->ll_md_exp = NULL;
 	sbi->ll_md_obd = NULL;
 out:
-	if (data != NULL)
-		OBD_FREE_PTR(data);
-	if (osfs != NULL)
-		OBD_FREE_PTR(osfs);
+	OBD_FREE_PTR(data);
+	OBD_FREE_PTR(osfs);
 	return err;
 }
 
@@ -1231,8 +1230,7 @@ static int ll_options(char *options, struct super_block *sb)
 				OBD_ALLOC_POST(sbi->ll_foreign_symlink_prefix,
 					       sbi->ll_foreign_symlink_prefix_size,
 					       "kmalloced");
-				if (old)
-					OBD_FREE(old, old_len);
+				OBD_FREE(old, old_len);
 
 				/* enable foreign symlink support */
 				set_bit(token, sbi->ll_flags);
@@ -1494,11 +1492,9 @@ int ll_fill_super(struct super_block *sb)
 	sbi->ll_client_common_fill_super_succeeded = 1;
 
 out_free_md:
-	if (md)
-		OBD_FREE(md, md_len);
+	OBD_FREE(md, md_len);
 out_free_dt:
-	if (dt)
-		OBD_FREE(dt, dt_len);
+	OBD_FREE(dt, dt_len);
 out_profile:
 	if (lprof)
 		class_put_profile(lprof);
@@ -1506,8 +1502,7 @@ out_debugfs:
 	if (err < 0)
 		ll_debugfs_unregister_super(sb);
 out_free_cfg:
-	if (cfg)
-		OBD_FREE_PTR(cfg);
+	OBD_FREE_PTR(cfg);
 
 	if (err)
 		ll_put_super(sb);
@@ -2356,9 +2351,9 @@ int ll_setattr_raw(struct dentry *dentry, struct iattr *attr,
 	}
 
 	if (attr->ia_valid & ATTR_FILE) {
-		struct ll_file_data *fd = attr->ia_file->private_data;
+		struct ll_file_data *lfd = attr->ia_file->private_data;
 
-		if (fd->fd_lease_och)
+		if (lfd->fd_lease_och)
 			op_data->op_bias |= MDS_TRUNC_KEEP_LEASE;
 	}
 
@@ -2822,7 +2817,7 @@ int ll_update_inode(struct inode *inode, struct lustre_md *md)
 	}
 
 	if (body->mbo_valid & OBD_MD_FLACL)
-		lli_replace_acl(lli, md);
+		lli_replace_acl(lli, md->posix_acl);
 
 	api32 = test_bit(LL_SBI_32BIT_API, sbi->ll_flags);
 	inode->i_ino = cl_fid_build_ino(&body->mbo_fid1, api32);
@@ -3489,10 +3484,14 @@ int ll_iocontrol(struct inode *inode, struct file *file,
 int ll_flush_ctx(struct inode *inode)
 {
 	struct ll_sb_info  *sbi = ll_i2sbi(inode);
+	struct lustre_sb_info *lsi = sbi->lsi;
 
 	CDEBUG(D_SEC, "flush context for user %d\n",
 	       from_kuid(&init_user_ns, current_uid()));
 
+	obd_set_info_async(NULL, lsi->lsi_mgc->u.cli.cl_mgc_mgsexp,
+			   sizeof(KEY_FLUSH_CTX), KEY_FLUSH_CTX,
+			   0, NULL, NULL);
 	obd_set_info_async(NULL, sbi->ll_md_exp,
 			   sizeof(KEY_FLUSH_CTX), KEY_FLUSH_CTX,
 			   0, NULL, NULL);
@@ -3761,7 +3760,7 @@ int ll_prep_inode(struct inode **inode, struct req_capsule *pill,
 			conf.u.coc_layout = md.layout;
 			(void)ll_layout_conf(*inode, &conf);
 		}
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 	}
 
 	if (default_lmv_deleted)

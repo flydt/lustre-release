@@ -1,33 +1,16 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
+
 #define DEBUG_SUBSYSTEM S_CLASS
 
 #include <linux/vfs.h>
@@ -792,6 +775,7 @@ LUSTRE_RW_ATTR(grant_shrink_interval);
 LUSTRE_OBD_UINT_PARAM_ATTR(at_min);
 LUSTRE_OBD_UINT_PARAM_ATTR(at_max);
 LUSTRE_OBD_UINT_PARAM_ATTR(at_history);
+LUSTRE_OBD_UINT_PARAM_ATTR(at_unhealthy_factor);
 
 static struct attribute *mdc_attrs[] = {
 	&lustre_attr_active.attr,
@@ -809,6 +793,7 @@ static struct attribute *mdc_attrs[] = {
 	&lustre_attr_at_max.attr,
 	&lustre_attr_at_min.attr,
 	&lustre_attr_at_history.attr,
+	&lustre_attr_at_unhealthy_factor.attr,
 	NULL,
 };
 

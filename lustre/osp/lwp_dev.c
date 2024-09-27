@@ -129,13 +129,10 @@ static int lwp_setup(const struct lu_env *env, struct lwp_device *lwp,
 	imp = lwp->lpd_obd->u.cli.cl_import;
 	rc = ptlrpc_init_import(imp);
 out:
-	if (bufs != NULL)
-		OBD_FREE_PTR(bufs);
-	if (server_uuid != NULL)
-		OBD_FREE(server_uuid, len);
-	if (lcfg)
-		OBD_FREE(lcfg, lustre_cfg_len(lcfg->lcfg_bufcount,
-					      lcfg->lcfg_buflens));
+	OBD_FREE_PTR(bufs);
+	OBD_FREE(server_uuid, len);
+	OBD_FREE(lcfg, lustre_cfg_len(lcfg->lcfg_bufcount,
+				      lcfg->lcfg_buflens));
 	if (rc)
 		client_obd_cleanup(lwp->lpd_obd);
 
@@ -395,7 +392,7 @@ static const struct lu_device_type_operations lwp_device_type_ops = {
 };
 
 struct lu_device_type lwp_device_type = {
-	.ldt_tags     = LU_DEVICE_DT,
+	.ldt_tags     = LU_DEVICE_MISC,
 	.ldt_name     = LUSTRE_LWP_NAME,
 	.ldt_ops      = &lwp_device_type_ops,
 	.ldt_ctx_tags = LCT_MD_THREAD

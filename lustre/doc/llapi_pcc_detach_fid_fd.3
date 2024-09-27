@@ -24,19 +24,18 @@ llapi_pcc_detach_file \- detach the given file from PCC
 .BR llapi_pcc_detach_fid_str() ,
 and
 .BR llapi_pcc_detach_file()
-detach a cached file from PCC by an ioctl on the dir or the file itself. The
-file is referenced
-by
+detach a cached file from PCC by an ioctl on the directory or the file itself.
+The file is referenced by
 .IR fid ,
 .IR fidstr ,
 or
 .IR path .
-The dir, which usually a mount point dir that the copytool already has opened,
-is referenced by
+The directory, which is usually a mount point that the copytool
+already has opened, is referenced by
 .IR dirfd ,
 .IR mntpath ,
 .IR path .
-The detach flags is specified by
+The detach flags are specified by
 .IR flags
 argument, which is a
 .B enum lu_pcc_detach_flags
@@ -56,10 +55,10 @@ means that detach the file from PCC yet retain the data copy on PCC backend.
 PCC_DETACH_FL_UNCACHE
 means that remove the PCC copy after detach.
 .TP
-PCC_DETACH_KNOWN_READWRITE
+PCC_DETACH_FL_KNOWN_READWRITE
 means that it is known that the file was once cached as PCC-RW.
 .TP
-PCC_DETACH_KNOWN_READONLY
+PCC_DETACH_FL_KNOWN_READONLY
 means that it is known that the file was once cached as PCC-RO.
 .TP
 PCC_DETACH_FL_CACHE_REMOVED

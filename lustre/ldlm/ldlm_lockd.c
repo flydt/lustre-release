@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2010, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/ldlm/ldlm_lockd.c
  *
  * Author: Peter Braam <braam@clusterfs.com>
  * Author: Phil Schwan <phil@clusterfs.com>
@@ -225,7 +205,7 @@ static int expired_lock_main(void *arg)
 				 * ldlm_add_waiting_lock() or
 				 * ldlm_failed_ast()
 				 */
-				LDLM_LOCK_RELEASE(lock);
+				ldlm_lock_put(lock);
 				continue;
 			}
 
@@ -234,7 +214,7 @@ static int expired_lock_main(void *arg)
 				 * release the lock refcount where
 				 * waiting_locks_callback() founds
 				 */
-				LDLM_LOCK_RELEASE(lock);
+				ldlm_lock_put(lock);
 				continue;
 			}
 			export = class_export_lock_get(lock->l_export, lock);
@@ -269,7 +249,7 @@ static int expired_lock_main(void *arg)
 			 * release extra ref grabbed by ldlm_add_waiting_lock()
 			 * or ldlm_failed_ast()
 			 */
-			LDLM_LOCK_RELEASE(lock);
+			ldlm_lock_put(lock);
 
 			spin_lock_bh(&waiting_locks_spinlock);
 		}
@@ -481,7 +461,7 @@ static int ldlm_add_waiting_lock(struct ldlm_lock *lock, timeout_t timeout)
 		 * grab ref on the lock if it has been added to the
 		 * waiting list
 		 */
-		LDLM_LOCK_GET(lock);
+		ldlm_lock_get(lock);
 	}
 	spin_unlock_bh(&waiting_locks_spinlock);
 
@@ -561,7 +541,7 @@ int ldlm_del_waiting_lock(struct ldlm_lock *lock)
 		 * release lock ref if it has indeed been removed
 		 * from a list
 		 */
-		LDLM_LOCK_RELEASE(lock);
+		ldlm_lock_put(lock);
 	}
 
 	LDLM_DEBUG(lock, "%s", ret == 0 ? "wasn't waiting" : "removed");
@@ -724,7 +704,7 @@ static void ldlm_failed_ast(struct ldlm_lock *lock, int rc,
 		 * the lock was not in any list, grab an extra ref before adding
 		 * the lock to the expired list
 		 */
-		LDLM_LOCK_GET(lock);
+		ldlm_lock_get(lock);
 	/* differentiate it from expired locks */
 	lock->l_callback_timestamp = 0;
 	list_add(&lock->l_pending_chain, &expired_lock_list);
@@ -857,7 +837,7 @@ static int ldlm_cb_interpret(const struct lu_env *env,
 	}
 
 	/* release extra reference taken in ldlm_ast_fini() */
-	LDLM_LOCK_RELEASE(lock);
+	ldlm_lock_put(lock);
 
 	if (rc == -ERESTART)
 		atomic_inc(&arg->restart);
@@ -888,7 +868,7 @@ static inline int ldlm_ast_fini(struct ptlrpc_request *req,
 		if (rc == 0)
 			atomic_inc(&arg->restart);
 	} else {
-		LDLM_LOCK_GET(lock);
+		ldlm_lock_get(lock);
 		ptlrpc_set_add_req(arg->set, req);
 	}
 
@@ -1629,7 +1609,7 @@ retry:
 			ldlm_reprocess_all(lock->l_resource,
 					   lock->l_policy_data.l_inodebits.bits);
 
-		LDLM_LOCK_RELEASE(lock);
+		ldlm_lock_put(lock);
 	}
 
 	LDLM_DEBUG_NOLOCK("server-side enqueue handler END (lock %p, rc %d)",
@@ -1646,7 +1626,7 @@ EXPORT_SYMBOL(ldlm_handle_enqueue);
 void ldlm_clear_blocking_lock(struct ldlm_lock *lock)
 {
 	if (lock->l_blocking_lock) {
-		LDLM_LOCK_RELEASE(lock->l_blocking_lock);
+		ldlm_lock_put(lock->l_blocking_lock);
 		lock->l_blocking_lock = NULL;
 	}
 }
@@ -1745,7 +1725,7 @@ int ldlm_handle_convert0(struct ptlrpc_request *req,
 	EXIT;
 out_put:
 	LDLM_DEBUG(lock, "server-side convert handler END, rc = %d", rc);
-	LDLM_LOCK_PUT(lock);
+	ldlm_lock_put(lock);
 	req->rq_status = rc;
 	return 0;
 }
@@ -1793,8 +1773,14 @@ int ldlm_request_cancel(struct ptlrpc_request *req,
 		lock = ldlm_handle2lock(&dlm_req->lock_handle[i]);
 		if (!lock) {
 			/* below message checked in replay-single.sh test_36 */
-			LDLM_DEBUG_NOLOCK("server-side cancel handler stale lock (cookie %llu)",
+			LDLM_DEBUG_NOLOCK("server-side cancel handler stale lock (cookie %llx)",
 					  dlm_req->lock_handle[i].cookie);
+			continue;
+		}
+		if (lock->l_export != req->rq_export) {
+			LDLM_DEBUG_NOLOCK("server-side cancel mismatched export (cookie %llx)",
+					dlm_req->lock_handle[i].cookie);
+			LDLM_LOCK_PUT(lock);
 			continue;
 		}
 
@@ -1836,7 +1822,7 @@ int ldlm_request_cancel(struct ptlrpc_request *req,
 				       delay);
 		}
 		ldlm_lock_cancel(lock);
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 	}
 	if (pres != NULL) {
 		ldlm_reprocess_all(pres, 0);
@@ -1964,7 +1950,7 @@ void ldlm_handle_bl_callback(struct ldlm_namespace *ns,
 	}
 
 	LDLM_DEBUG(lock, "client blocking callback handler END");
-	LDLM_LOCK_RELEASE(lock);
+	ldlm_lock_put(lock);
 	EXIT;
 }
 
@@ -2049,7 +2035,7 @@ static int ldlm_handle_cp_callback(struct ptlrpc_request *req,
 
 	if (ldlm_is_failed(lock)) {
 		unlock_res_and_lock(lock);
-		LDLM_LOCK_RELEASE(lock);
+		ldlm_lock_put(lock);
 		RETURN(-EINVAL);
 	}
 
@@ -2124,7 +2110,7 @@ out:
 		unlock_res_and_lock(lock);
 		wake_up(&lock->l_waitq);
 	}
-	LDLM_LOCK_RELEASE(lock);
+	ldlm_lock_put(lock);
 
 	return 0;
 }
@@ -2178,7 +2164,7 @@ static void ldlm_handle_gl_callback(struct ptlrpc_request *req,
 		return;
 	}
 	unlock_res_and_lock(lock);
-	LDLM_LOCK_RELEASE(lock);
+	ldlm_lock_put(lock);
 	EXIT;
 }
 
@@ -2498,7 +2484,7 @@ static int ldlm_callback_handler(struct ptlrpc_request *req)
 				   "callback on lock %llx - lock disappeared",
 				   dlm_req->lock_handle[0].cookie);
 			unlock_res_and_lock(lock);
-			LDLM_LOCK_RELEASE(lock);
+			ldlm_lock_put(lock);
 			rc = ldlm_callback_reply(req, -EINVAL);
 			ldlm_callback_errmsg(req, "Operate on stale lock", rc,
 					     &dlm_req->lock_handle[0]);
@@ -2699,7 +2685,7 @@ static int ldlm_cancel_hpreq_check(struct ptlrpc_request *req)
 		rc = ldlm_is_ast_sent(lock) ? 1 : 0;
 		if (rc)
 			LDLM_DEBUG(lock, "hpreq cancel/convert lock");
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 
 		if (rc)
 			break;
@@ -2777,7 +2763,7 @@ static int ldlm_revoke_lock_cb(struct cfs_hash *hs, struct cfs_hash_bd *bd,
 	}
 
 	list_add_tail(&lock->l_rk_ast, rpc_list);
-	LDLM_LOCK_GET(lock);
+	ldlm_lock_get(lock);
 
 	unlock_res_and_lock(lock);
 	return 0;
@@ -3160,7 +3146,7 @@ ldlm_export_lock_get(struct cfs_hash *hs, struct hlist_node *hnode)
 	struct ldlm_lock *lock;
 
 	lock = hlist_entry(hnode, struct ldlm_lock, l_exp_hash);
-	LDLM_LOCK_GET(lock);
+	ldlm_lock_get(lock);
 }
 
 static void
@@ -3169,7 +3155,7 @@ ldlm_export_lock_put(struct cfs_hash *hs, struct hlist_node *hnode)
 	struct ldlm_lock *lock;
 
 	lock = hlist_entry(hnode, struct ldlm_lock, l_exp_hash);
-	LDLM_LOCK_RELEASE(lock);
+	ldlm_lock_put(lock);
 }
 
 static struct cfs_hash_ops ldlm_export_lock_ops = {

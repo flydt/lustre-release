@@ -436,7 +436,7 @@ static int mdt_restripe(struct mdt_thread_info *info,
 	/* lock object */
 	lhc = &info->mti_lh[MDT_LH_CHILD];
 	rc = mdt_object_stripes_lock(info, parent, child, lhc, einfo,
-				     MDS_INODELOCK_FULL, LCK_PW);
+				     MDS_INODELOCK_ELC, LCK_PW);
 	if (rc)
 		GOTO(unlock_child, rc);
 
@@ -985,13 +985,13 @@ static int mdt_reint_setattr(struct mdt_thread_info *info,
 
 			if (!exp_connect_flr(info->mti_exp)) {
 				if (rc > 0 &&
-				    mdt_lmm_is_flr(info->mti_big_lmm))
+				    mdt_lmm_is_flr(info->mti_big_lov))
 					GOTO(out_put, rc = -EOPNOTSUPP);
 			}
 
 			if (!exp_connect_overstriping(info->mti_exp)) {
 				if (rc > 0 &&
-				    mdt_lmm_is_overstriping(info->mti_big_lmm))
+				    mdt_lmm_is_overstriping(info->mti_big_lov))
 					GOTO(out_put, rc = -EOPNOTSUPP);
 			}
 		}
@@ -1223,12 +1223,6 @@ static int mdt_reint_unlink(struct mdt_thread_info *info,
 	if (IS_ERR(mp))
 		RETURN(PTR_ERR(mp));
 
-	if (!mdt_object_remote(mp)) {
-		rc = mdt_version_get_check_save(info, mp, 0);
-		if (rc)
-			GOTO(put_parent, rc);
-	}
-
 	if (!uc->uc_rbac_fscrypt_admin &&
 	    mp->mot_obj.lo_header->loh_attr & LOHA_FSCRYPT_MD)
 		GOTO(put_parent, rc = -EPERM);
@@ -1239,6 +1233,12 @@ static int mdt_reint_unlink(struct mdt_thread_info *info,
 	rc = mdt_parent_lock(info, mp, parent_lh, &rr->rr_name, LCK_PW);
 	if (rc != 0)
 		GOTO(put_parent, rc);
+
+	if (!mdt_object_remote(mp)) {
+		rc = mdt_version_get_check_save(info, mp, 0);
+		if (rc)
+			GOTO(unlock_parent, rc);
+	}
 
 	if (info->mti_spec.sp_rm_entry) {
 		if (!mdt_is_dne_client(req->rq_export))
@@ -1468,14 +1468,6 @@ static int mdt_reint_link(struct mdt_thread_info *info,
 	if (IS_ERR(mp))
 		RETURN(PTR_ERR(mp));
 
-	rc = mdt_version_get_check_save(info, mp, 0);
-	if (rc)
-		GOTO(put_parent, rc);
-
-	rc = mdt_check_enc(info, mp);
-	if (rc)
-		GOTO(put_parent, rc);
-
 	/* step 2: find source */
 	ms = mdt_object_find(info->mti_env, info->mti_mdt, rr->rr_fid1);
 	if (IS_ERR(ms))
@@ -1493,6 +1485,14 @@ static int mdt_reint_link(struct mdt_thread_info *info,
 	rc = mdt_parent_lock(info, mp, lhp, &rr->rr_name, LCK_PW);
 	if (rc != 0)
 		GOTO(put_source, rc);
+
+	rc = mdt_version_get_check_save(info, mp, 0);
+	if (rc)
+		GOTO(unlock_parent, rc);
+
+	rc = mdt_check_enc(info, mp);
+	if (rc)
+		GOTO(unlock_parent, rc);
 
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME3, 5);
 
@@ -1758,7 +1758,7 @@ static int mdt_migrate_link_parent_lock(struct mdt_thread_info *info,
 			lock_res_and_lock(lock);
 			ldlm_set_atomic_cb(lock);
 			unlock_res_and_lock(lock);
-			LDLM_LOCK_PUT(lock);
+			ldlm_lock_put(lock);
 		}
 
 		mdt_object_unlock(info, lnkp, lhl, 1);
@@ -2164,7 +2164,7 @@ static int mdd_migrate_close(struct mdt_thread_info *info,
 	ldlm_lock_cancel(lease);
 	ldlm_reprocess_all(lease->l_resource,
 			   lease->l_policy_data.l_inodebits.bits);
-	LDLM_LOCK_PUT(lease);
+	ldlm_lock_put(lease);
 
 close:
 	rc2 = mdt_close_internal(info, mdt_info_req(info), NULL);
@@ -2883,8 +2883,6 @@ lock_parents:
 	}
 
 	tgt_vbr_obj_set(info->mti_env, mdt_obj2dt(mold));
-	/* save version after locking */
-	mdt_version_get_save(info, mold, 2);
 
 	/* find mnew object:
 	 * mnew target object may not exist now
@@ -2964,6 +2962,9 @@ lock_parents:
 		if (rc < 0)
 			GOTO(out_unlock_new, rc);
 
+		/* save version after locking */
+		mdt_version_get_save(info, mold, 2);
+
 		/* Check if @msrcdir is subdir of @mnew, before locking child
 		 * to avoid reverse locking.
 		 */
@@ -3006,6 +3007,7 @@ lock_parents:
 		if (rc != 0)
 			GOTO(out_put_old, rc);
 
+		mdt_version_get_save(info, mold, 2);
 		mdt_enoent_version_save(info, 3);
 	}
 
@@ -3145,7 +3147,7 @@ static int mdt_reint_resync(struct mdt_thread_info *info,
 out_unlock:
 	up_write(&mo->mot_open_sem);
 out_put_lease:
-	LDLM_LOCK_PUT(lease);
+	ldlm_lock_put(lease);
 out_obj:
 	mdt_object_put(info->mti_env, mo);
 out:

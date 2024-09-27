@@ -73,21 +73,29 @@ do_ns() {
 setup_fakeif() {
 	local netns="$1"
 
-	local netns_arg=""
-	[[ -n $netns ]] &&
-		netns_arg="netns $netns"
-
-	ip link add 'test1pl' type veth peer name $FAKE_IF $netns_arg
-	ip link set 'test1pl' up
+	local netns_arg netns_exec
 	if [[ -n $netns ]]; then
-		do_ns ip addr add "${FAKE_IP}/31" dev $FAKE_IF
-		do_ns ip -6 addr add "${FAKE_IPV6}/64" dev $FAKE_IF
-		do_ns ip link set $FAKE_IF up
-	else
-		ip addr add "${FAKE_IP}/31" dev $FAKE_IF
-		ip -6 addr add "${FAKE_IPV6}/64" dev $FAKE_IF
-		ip link set $FAKE_IF up
+		netns_arg="netns $netns"
+		netns_exec="ip netns exec $netns"
 	fi
+
+	echo "ip link add 'test1pl' type veth peer name $FAKE_IF $netns_arg"
+	ip link add 'test1pl' type veth peer name $FAKE_IF $netns_arg
+	echo "ip link set 'test1pl' up"
+	ip link set 'test1pl' up
+	echo "$netns_exec ip addr add \"${FAKE_IP}/31\" dev $FAKE_IF"
+	$netns_exec ip addr add "${FAKE_IP}/31" dev $FAKE_IF
+	echo "$netns_exec ip -6 addr add \"${FAKE_IPV6}/64\" dev $FAKE_IF"
+	$netns_exec ip -6 addr add "${FAKE_IPV6}/64" dev $FAKE_IF
+	echo "$netns_exec ip link set $FAKE_IF up"
+	$netns_exec ip link set $FAKE_IF up
+
+	local ip4=$($netns_exec ip -o -4 a s $FAKE_IF 2>/dev/null |
+		    grep $FAKE_IP)
+	local ip6=$($netns_exec ip -o -6 a s $FAKE_IF 2>/dev/null |
+		    grep $FAKE_IPV6)
+
+	[[ -n $ip4 && -n $ip6 ]] || error "Failed setup $FAKE_IF"
 }
 
 cleanup_fakeif() {
@@ -246,39 +254,6 @@ validate_gateway_nids() {
 	validate_nids
 }
 
-# TODO: Switch to ipcalc if/when we need more sophisticated validation
-ip_is_v4() {
-	local ipv4_re='^([0-9]{1,3}\.){3,3}[0-9]{1,3}$'
-
-	if ! [[ $1 =~ $ipv4_re ]]; then
-		return 1
-	fi
-
-	local quads=(${1//\./ })
-
-	(( ${#quads[@]} == 4)) || return 1
-
-	(( quads[0] < 256 && quads[1] < 256 &&
-	   quads[2] < 256 && quads[3] < 256 )) || return 1
-
-	return 0
-}
-
-ip_is_v6() {
-	local ipv6_re='^([0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}$'
-
-	if ! [[ $1 =~ $ipv6_re ]]; then
-		return 1
-	fi
-
-	local segment
-	for segment in ${1//:/ }; do
-		((0x$segment <= 0xFFFF)) || return 1
-	done
-
-	return 0
-}
-
 intf_has_ipv6() {
 	local addr=$(ip -o -6 a s "$1" | awk '{print $4}' | head -n 1 |
 		     grep -v '^fe80::' | sed 's,/[0-9]\+$,,')
@@ -294,7 +269,6 @@ intf_has_ipv4() {
 }
 
 cleanupall -f
-setup_netns || error "setup_netns failed with $?"
 
 # Determine the local interface(s) used for LNet
 load_lnet "config_on_load=1" || error "Failed to load modules"
@@ -1110,6 +1084,19 @@ test_27() {
 }
 run_test 27 "Import bad config should fail gracefully"
 
+test_28() {
+	reinit_dlc || return $?
+
+	do_lnetctl peer add --prim_nid 1.1.1.1@tcp --ni 7.7.7.7@tcp ||
+		error "First peer add failed $?"
+	do_lnetctl peer add --prim_nid 1.1.1.2@tcp --nid 7.7.7.8@tcp ||
+		error "Second peer add failed $?"
+
+	count=$(do_lnetctl peer list | awk '/-\s+nid:/{print $NF}' | wc -l)
+	[[ $count -eq 2 ]] || error "wrong number of peers reported"
+}
+run_test 28 "Test peer_list"
+
 test_99a() {
 	reinit_dlc || return $?
 
@@ -1196,12 +1183,6 @@ EOF
 	compare_yaml_files
 }
 run_test 99b "Invalid value for Multi-Rail in yaml import"
-
-have_interface() {
-	local if="$1"
-	local ip=$(ip addr show dev $if | awk '/ inet /{print $2}')
-	[[ -n $ip ]]
-}
 
 add_net() {
 	local net="$1"
@@ -1683,12 +1664,9 @@ run_test 106 "Deleting GW peer should fail"
 test_107() {
 	[[ ${NETTYPE} == tcp* ]] || skip "Need tcp NETTYPE"
 
-	cleanup_netns || error "Failed to cleanup netns before test execution"
 	cleanup_lnet || error "Failed to unload modules before test execution"
 
 	setup_fakeif || error "Failed to add fake IF"
-	have_interface "$FAKE_IF" ||
-		error "Expect $FAKE_IF configured but not found"
 
 	reinit_dlc || return $?
 
@@ -1699,19 +1677,15 @@ test_107() {
 
 	cleanup_fakeif
 	cleanup_lnet
-	setup_netns
 }
 run_test 107 "Deleting extra interface doesn't crash node"
 
 test_108() {
 	[[ ${NETTYPE} == tcp* ]] || skip "Need tcp NETTYPE"
 
-	cleanup_netns || error "Failed to cleanup netns before test execution"
 	cleanup_lnet || error "Failed to unload modules before test execution"
 
 	setup_fakeif || error "Failed to add fake IF"
-	have_interface "$FAKE_IF" ||
-		error "Expect $FAKE_IF configured but not found"
 
 	reinit_dlc || return $?
 
@@ -1730,7 +1704,6 @@ EOF
 
 	cleanup_fakeif
 	cleanup_lnet
-	setup_netns
 
 	return 0
 }
@@ -1739,12 +1712,9 @@ run_test 108 "Check Multi-Rail setup"
 test_109() {
 	[[ ${NETTYPE} == tcp* ]] || skip "Need tcp NETTYPE"
 
-	cleanup_netns || error "Failed to cleanup netns before test execution"
 	cleanup_lnet || error "Failed to unload modules before test execution"
 
 	setup_fakeif || error "Failed to add fake IF"
-	have_interface "$FAKE_IF" ||
-		error "Expect $FAKE_IF configured but not found"
 
 	FAKE_IF_ALIAS="${FAKE_IF}"
 	FAKE_IF_ALIAS+=":0"
@@ -1770,7 +1740,6 @@ test_109() {
 
 	cleanup_fakeif
 	cleanup_lnet
-	setup_netns
 }
 run_test 109 "Add NI using a network interface alias (LU-16859)"
 
@@ -1825,6 +1794,24 @@ test_111() {
 }
 run_test 111 "Test many routes"
 
+test_112() {
+	cleanup_lnet || error "Failed to unload modules before test execution"
+
+	setup_fakeif || error "Failed to add fake IF"
+
+	reinit_dlc || return $?
+
+	$LNETCTL net add --net tcp1 --if ${INTERFACES[0]}
+	$LNETCTL net add --nid ${FAKE_IP}@tcp2
+
+	local count=$($LNETCTL net show -v 3 2>/dev/null | grep -c "lnd tunables:")
+	(( count == 2 )) || error "missing lnd tunables"
+
+	cleanup_lnet
+	cleanup_fakeif
+}
+run_test 112 "multiple net configurations"
+
 test_199() {
 	[[ ${NETTYPE} == tcp* || ${NETTYPE} == o2ib* ]] ||
 		skip "Need tcp or o2ib NETTYPE"
@@ -1850,10 +1837,13 @@ test_200() {
 	[[ ${NETTYPE} == tcp* ]] ||
 		skip "Need tcp NETTYPE"
 	cleanup_lnet || return $?
+	setup_netns || error "setup_netns failed with $?"
 	load_lnet "networks=\"\""
 	do_ns $LNETCTL lnet configure $LNET_CONFIG_INIT_OPT ||
 		error "Failed to configure LNet in non-default namespace rc = $?"
-	$LNETCTL net show --net tcp | grep -q "nid: $FAKE_NID$"
+	$LNETCTL net show --net tcp | grep -q "nid: $FAKE_NID$" ||
+		error "$FAKE_NID is not configured as expected"
+	cleanup_netns
 }
 run_test 200 "load lnet w/o module option, configure in a non-default namespace"
 
@@ -1861,10 +1851,13 @@ test_201() {
 	[[ ${NETTYPE} == tcp* ]] ||
 		skip "Need tcp NETTYPE"
 	cleanup_lnet || return $?
+	setup_netns || error "setup_netns failed with $?"
 	load_lnet "networks=tcp($FAKE_IF)"
 	do_ns $LNETCTL lnet configure $LNET_CONFIG_INIT_OPT ||
 		error "Failed to configure LNet in non-default namespace rc = $?"
-	$LNETCTL net show --net tcp | grep -q "nid: $FAKE_NID$"
+	$LNETCTL net show --net tcp | grep -q "nid: $FAKE_NID$" ||
+		error "$FAKE_NID is not configured as expected"
+	cleanup_netns
 }
 run_test 201 "load lnet using networks module options in a non-default namespace"
 
@@ -1872,10 +1865,13 @@ test_202() {
 	[[ ${NETTYPE} == tcp* ]] ||
 		skip "Need tcp NETTYPE"
 	cleanup_lnet || return $?
+	setup_netns || error "setup_netns failed with $?"
 	load_lnet "networks=\"\" ip2nets=\"tcp0($FAKE_IF) ${FAKE_IP}\""
 	do_ns $LNETCTL lnet configure --all ||
 		error "Failed to configure LNet in non-default namespace rc = $?"
-	$LNETCTL net show | grep -q "nid: ${FAKE_IP}@tcp$"
+	$LNETCTL net show | grep -q "nid: ${FAKE_IP}@tcp$" ||
+		error "$FAKE_IP@tcp is not configured as expected"
+	cleanup_netns
 }
 run_test 202 "load lnet using ip2nets in a non-default namespace"
 
@@ -1885,12 +1881,15 @@ test_203() {
 	[[ ${NETTYPE} == tcp* ]] ||
 		skip "Need tcp NETTYPE"
 	cleanup_lnet || return $?
+	setup_netns || error "setup_netns failed with $?"
 	load_lnet
 	do_lnetctl lnet configure $LNET_CONFIG_OPT ||
 		error "Failed to configure LNet in non-default namespace rc = $?"
 	do_ns $LNETCTL net add --net tcp0 --if $FAKE_IF ||
 		error "Failed to add net in non-default namespace"
-	do_ns $LNETCTL net show | grep -q "nid: $FAKE_NID$"
+	do_ns $LNETCTL net show | grep -q "nid: $FAKE_NID$" ||
+		error "$FAKE_NID is not configured as expected"
+	cleanup_netns
 }
 run_test 203 "add a network using an interface in the non-default namespace"
 
@@ -2306,12 +2305,8 @@ test_208_load_and_check_lnet() {
 test_208() {
 	[[ ${NETTYPE} == tcp* ]] || skip "Need tcp NETTYPE"
 
-	cleanup_netns || error "Failed to cleanup netns before test execution"
 	cleanup_lnet || error "Failed to unload modules before test execution"
 	setup_fakeif || error "Failed to add fake IF"
-
-	have_interface "$FAKE_IF" ||
-		error "Expect $FAKE_IF configured but not found"
 
 	local if0_ip=$(ip --oneline addr show dev ${INTERFACES[0]} |
 		       awk '/inet /{print $4}' |
@@ -2785,12 +2780,9 @@ run_test 212 "Check discovery refcount loss bug (LU-14627)"
 test_213() {
 	[[ ${NETTYPE} == tcp* ]] || skip "Need tcp NETTYPE"
 
-	cleanup_netns || error "Failed to cleanup netns before test execution"
 	cleanup_lnet || error "Failed to unload modules before test execution"
 
 	setup_fakeif || error "Failed to add fake IF"
-	have_interface "$FAKE_IF" ||
-		error "Expect $FAKE_IF configured but not found"
 
 	reinit_dlc || return $?
 
@@ -2829,12 +2821,9 @@ function check_ni_status() {
 test_214() {
 	[[ ${NETTYPE} == tcp* ]] || skip "Need tcp NETTYPE"
 
-	cleanup_netns || error "Failed to cleanup netns before test execution"
 	cleanup_lnet || error "Failed to unload modules before test execution"
 
 	setup_fakeif || error "Failed to add fake IF"
-	have_interface "$FAKE_IF" ||
-		error "Expect $FAKE_IF configured but not found"
 
 	reinit_dlc || return $?
 
@@ -2904,7 +2893,6 @@ ni_stat_changed() {
 }
 
 test_215() {
-	cleanup_netns || error "Failed to cleanup netns before test execution"
 	cleanup_lnet || error "Failed to unload modules before test execution"
 
 	reinit_dlc || return $?
@@ -4014,16 +4002,19 @@ check_sysctl() {
 		   ]]; then
 			value=$(sysctl -n "${BASH_REMATCH[1]}" 2>/dev/null)
 			if [ -z "${value}" ]; then
-				error "Parameter ${BASH_REMATCH[1]} not set"
+				echo "Parameter ${BASH_REMATCH[1]} not set"
+				return 1
 			fi
 			echo "found: ${BASH_REMATCH[1]} ${value}"
 			if [ "${value}" != "${BASH_REMATCH[2]}" ]; then
-				error "Parameter ${BASH_REMATCH[1]} \
-					wrong value: ${value} \
-					expected: ${BASH_REMATCH[2]}"
+				echo "Parameter ${BASH_REMATCH[1]}" \
+					" wrong value: ${value}" \
+					" expected: ${BASH_REMATCH[2]}"
+				return 2
 			fi
 		fi
 	done < "$1"
+	return 0
 }
 
 ### Test that linux route is added for each ni
@@ -4032,6 +4023,8 @@ test_260() {
 	local sysctl_file="/etc/lnet-sysctl.conf"
 	local sysctl_conf_bak="/etc/lnet-sysctl.bak"
 	local sysctl_bak=$TMP/lnet-sysctl.bak
+	local -i max_retries=10
+	local -i retries=0
 
 	echo "Setting default values and create backup for check"
 
@@ -4043,7 +4036,16 @@ test_260() {
 	sysctl -w net.ipv6.neigh.default.gc_thresh3=1024 >> "$sysctl_bak"
 
 	echo "Check default configuration"
-	check_sysctl "${sysctl_bak}"
+	retries=0
+	until check_sysctl "${sysctl_bak}"
+	do
+		if (( retries >= max_retries )); then
+			error "Default sysconfig values not set"
+		fi
+		sleep 3
+		retries+=1
+	done
+
 
 	load_modules || error "Failed to load Modules"
 
@@ -4061,7 +4063,15 @@ test_260() {
 		error "setup-sysctl failed"
 
 	echo "Check new configuration"
-	check_sysctl "${sysctl_file}"
+	retries=0
+	until check_sysctl "${sysctl_file}"
+	do
+		if (( retries >= max_retries )); then
+			error "New sysctl values not set"
+		fi
+		sleep 3
+		retries+=1
+	done
 
 	echo "Reset to original values"
 	echo 0 > /sys/module/lnet/parameters/enable_sysctl_setup 2>&1
@@ -4073,7 +4083,15 @@ test_260() {
 		error "setup-sysctl failed"
 
 	echo "Check original configuration"
-	check_sysctl "${sysctl_bak}"
+	retries=0
+	until check_sysctl "${sysctl_bak}"
+	do
+		if (( retries >= max_retries )); then
+			error "Original sysconfig values not set"
+		fi
+		sleep 3
+		retries+=1
+	done
 
 	rm -f "${sysctl_bak}"
 
@@ -4152,10 +4170,7 @@ test_303() {
 
 	setup_health_test true || return $?
 
-	cleanup_netns || error "Failed to cleanup netns before test execution"
 	setup_fakeif || error "Failed to add fake IF"
-	have_interface "$FAKE_IF" ||
-		error "Expect $FAKE_IF configured but not found"
 
 	add_net "${NETTYPE}99" "$FAKE_IF" || return $?
 
@@ -4192,12 +4207,9 @@ run_test 303 "Check peer NI health after link down"
 test_304() {
 	[[ ${NETTYPE} == tcp* ]] || skip "Need tcp NETTYPE"
 
-	cleanup_netns || error "Failed to cleanup netns before test execution"
 	cleanup_lnet || error "Failed to unload modules before test execution"
 
 	setup_fakeif || error "Failed to add fake IF"
-	have_interface "$FAKE_IF" ||
-		error "Expect $FAKE_IF configured but not found"
 
 	reinit_dlc || return $?
 
@@ -4488,10 +4500,7 @@ run_test 402 "Destination net rule should not panic"
 test_500() {
 	reinit_dlc || return $?
 
-	cleanup_netns || error "Failed to cleanup netns before test execution"
 	setup_fakeif || error "Failed to add fake IF"
-	have_interface "$FAKE_IF" ||
-		error "Expect $FAKE_IF configured but not found"
 
 	add_net "tcp" "${INTERFACES[0]}"
 	add_net "tcp" "${FAKE_IF}"

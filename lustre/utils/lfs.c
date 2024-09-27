@@ -98,6 +98,16 @@ static int lfs_df(int argc, char **argv);
 static int lfs_getname(int argc, char **argv);
 static int lfs_check(int argc, char **argv);
 #ifdef HAVE_SYS_QUOTA_H
+struct quota_param {
+	__u32		 qp_valid;
+	unsigned int	 qp_verbose:1;
+	unsigned int	 qp_quiet:1;
+	unsigned int	 qp_human_readable:1;
+	unsigned int	 qp_show_default:1;
+	unsigned int	 qp_show_pools:1;
+	unsigned int	 qp_show_qid:1;
+};
+
 static int lfs_setquota(int argc, char **argv);
 static int lfs_quota(int argc, char **argv);
 static int lfs_project(int argc, char **argv);
@@ -181,6 +191,24 @@ static inline int lfs_mirror_create(int argc, char **argv)
 
 static inline int lfs_mirror_extend(int argc, char **argv)
 {
+	int i;
+
+	for (i = 0; i < argc; i++)
+		if (strstr(argv[i], "-N") ||
+		    strstr(argv[i], "--mirror-count"))
+			break;
+
+	/* add -N if not specified */
+	if (i == argc) {
+		char *tmp[argc + 1];
+
+		tmp[0] = argv[0]; /* extend */
+		tmp[1] = "-N";
+		memcpy(tmp + 2, argv + 1, (argc - 1) * sizeof(*argv));
+
+		return lfs_setstripe_internal(argc + 1, tmp, SO_MIRROR_EXTEND);
+	}
+
 	return lfs_setstripe_internal(argc, argv, SO_MIRROR_EXTEND);
 }
 
@@ -296,26 +324,29 @@ command_t mirror_cmdlist[] = {
 command_t pcc_cmdlist[] = {
 	{ .pc_name = "attach", .pc_func = lfs_pcc_attach,
 	  .pc_help = "Attach given files to the Persistent Client Cache.\n"
-		"usage: lfs pcc attach [--id|-i ID] [--readonly|-r] [--write|-w] <file> ...\n"
-		"\t-i: archive id for PCC\n"
+		"usage: lfs pcc attach [--id|-i ID] [--readonly|-r] [--write|-w] FILE [...]\n"
+		"\t-i: archive ID for PCC\n"
 		"\t-r: readonly attach\n"
 		"\t-w: writeable attach\n" },
 	{ .pc_name = "attach_fid", .pc_func = lfs_pcc_attach_fid,
 	  .pc_help = "Attach given files into PCC by FID(s).\n"
-		"usage: lfs pcc attach_id [--id|-i ID] {--mnt|-m MOUNTPOINT} [--readonly|-r] [--write|-w] FID ...\n"
-		"\t-i: archive id for PCC\n"
+		"usage: lfs pcc attach_id [--id|-i ID] {--mnt|-m MOUNTPOINT} [--readonly|-r] [--write|-w] FID [...]\n"
+		"\t-i: archive ID for PCC\n"
 		"\t-m: Lustre mount point\n"
 		"\t-r: readonly attach\n"
 		"\t-w: writeable attach\n" },
 	{ .pc_name = "state", .pc_func = lfs_pcc_state,
 	  .pc_help = "Display the PCC state for given files.\n"
-		"usage: lfs pcc state <file> ...\n" },
+		"usage: lfs pcc state FILE [...]\n" },
+	{ .pc_name = "status", .pc_func = lfs_pcc_state,
+	  .pc_help = "Display the PCC state for given files.\n"
+		"usage: lfs pcc status FILE [...]\n" },
 	{ .pc_name = "detach", .pc_func = lfs_pcc_detach,
 	  .pc_help = "Detach given files from the Persistent Client Cache.\n"
-		"usage: lfs pcc detach <file> ...\n" },
+		"usage: lfs pcc detach [-k] FILE [...]\n" },
 	{ .pc_name = "detach_fid", .pc_func = lfs_pcc_detach_fid,
 	  .pc_help = "Detach given files from PCC by FID(s).\n"
-		"usage: lfs pcc detach_fid <mntpath> <fid>...\n" },
+		"usage: lfs pcc detach_fid {--mnt|-m MOUNTPATH} FID...\n" },
 	{ .pc_help = NULL }
 };
 
@@ -428,15 +459,16 @@ command_t cmdlist[] = {
 	 "Usage: getname [--help|-h] [--instance|-i] [--fsname|-n] [path ...]"},
 #ifdef HAVE_SYS_QUOTA_H
 	{"setquota", lfs_setquota, 0, "Set filesystem quotas.\n"
-	 "usage: setquota [-t] {-u|-U|-g|-G|-p|-P ID} {-b|-B|-i|-I LIMIT} [--pool POOL] FILESYSTEM\n"
-	 "       setquota {-u|-g|-p ID} {--default|--delete} FILESYSTEM\n"},
+	 "usage: setquota [-t] {-u|-U|-g|-G|-p|-P ID} {-b|-B|-i|-I LIMIT}\n"
+	 "                [--pool POOL] MOUNT_POINT\n"
+	 "       setquota {-u|-g|-p ID} {--default|--delete} MOUNT_POINT\n"},
 	{"quota", lfs_quota, 0, "Display disk usage and limits.\n"
 	 "usage: quota [-q] [-v] [-h] [-o OBD_UUID|-i MDT_IDX|-I OST_IDX]\n"
-	 "	       [{-u|-g|-p} UNAME|UID|GNAME|GID|PROJID]\n"
-	 "             [--pool OST_POOL_NAME] FILESYSTEM\n"
-	 "       quota -t {-u|-g|-p} [--pool OST_POOL_NAME] FILESYSTEM\n"
-	 "       quota [-hqv] {-U|-G|-P} [--pool OST_POOL_NAME] FILESYSTEM\n"
-	 "	 quota -a {-u|-g|-p} [-s START_QID] [-e END_QID] FILESYSTEM"},
+	 "             [{-u|-g|-p} UNAME|UID|GNAME|GID|PROJID]\n"
+	 "             [--pool OST_POOL_NAME] [MOUNT_POINT ...]\n"
+	 "       quota -t {-u|-g|-p} [--pool OST_POOL_NAME] [MOUNT_POINT ...]\n"
+	 "       quota [-hqv] {-U|-G|-P} [--pool OST_POOL_NAME] [MOUNT_POINT ...]\n"
+	 "       quota -a {-u|-g|-p} [-s START_QID] [-e END_QID] [MOUNT_POINT ...]\n"},
 	{"project", lfs_project, 0,
 	 "Change or list project attribute for specified file or directory.\n"
 	 "usage: project [-d|-r] <file|directory...>\n"
@@ -469,8 +501,9 @@ command_t cmdlist[] = {
 	 "usage: path2fid [--parents] <path> ..."},
 	{"rmfid", lfs_rmfid, 0, "Remove file(s) by FID(s)\n"
 	 "usage: rmfid <fsname|rootpath> <fid> ..."},
-	{"data_version", lfs_data_version, 0, "Display file data version for "
-	 "a given path.\n" "usage: data_version [-n|-r|-w] <path>"},
+	{"data_version", lfs_data_version, 0, "Display file data version or "
+	 "set the data version in the HSM xattr for a given path.\n"
+	"usage: data_version [-n|-r|-w|-s] <path>"},
 	{"hsm_state", lfs_hsm_state, 0, "Display the HSM information (states, "
 	 "undergoing actions) for given files.\n usage: hsm_state <file> ..."},
 	{"hsm_set", lfs_hsm_set, 0, "Set HSM user flag on specified files.\n"
@@ -1844,6 +1877,58 @@ static ssize_t mirror_file_compare(int fd_src, int fd_dst)
 	return bytes_done;
 }
 
+static int
+open_by_fid_str(const char *fid_str, const char *path, int *fdp, int flags)
+{
+	char mntdir[PATH_MAX] = {'\0'};
+	struct lu_fid fid;
+	int fd;
+	int rc;
+
+	rc = llapi_fid_parse(fid_str, &fid, NULL);
+	if (rc != 0)
+		return rc;
+
+	rc = llapi_search_mounts(path, 0, mntdir, NULL);
+	if (rc < 0 || mntdir[0] == '\0') {
+		fprintf(stderr, "Cannot find mounted Lustre filesystem: %s\n",
+			(rc < 0) ? strerror(-rc) : strerror(ENODEV));
+		return rc != 0 ? rc : -ENODEV;
+	}
+
+	fd = llapi_open_by_fid(mntdir, &fid, flags);
+	if (fd < 0)
+		return fd;
+
+	*fdp = fd;
+	return rc;
+}
+
+static struct llapi_layout*
+layout_get_by_name_or_fid(const char *name_or_fid, const char *path,
+			  enum llapi_layout_get_flags layout_flags, int flags)
+{
+	int rc;
+
+	/* Check if name or fid */
+	if (isdigit(*name_or_fid) || *name_or_fid == '[') {
+		int fd;
+
+		rc = open_by_fid_str(name_or_fid, path, &fd, flags);
+		if (rc == 0) {
+			struct llapi_layout *layout;
+
+			layout = llapi_layout_get_by_fd(fd, layout_flags);
+			close(fd);
+			if (layout != NULL)
+				return layout;
+		}
+	}
+
+	/* Then try getting by name */
+	return llapi_layout_get_by_path(name_or_fid, layout_flags);
+}
+
 static int mirror_extend_file(const char *fname, const char *victim_file,
 			      enum mirror_flags mirror_flags)
 {
@@ -2771,7 +2856,7 @@ static int lsa_args_stripe_count_check(struct lfs_setstripe_args *lsa)
 		if (lsa->lsa_stripe_count > 0 &&
 		    lsa->lsa_stripe_count != LLAPI_LAYOUT_DEFAULT &&
 		    !(lsa->lsa_stripe_count >= LLAPI_LAYOUT_WIDE_MIN &&
-		     lsa->lsa_stripe_count <= LLAPI_LAYOUT_WIDE_MAX) &&
+		      lsa->lsa_stripe_count <= LLAPI_LAYOUT_WIDE_MAX) &&
 		    lsa->lsa_nr_tgts != lsa->lsa_stripe_count) {
 			fprintf(stderr, "stripe_count(%lld) != nr_tgts(%d)\n",
 				lsa->lsa_stripe_count,
@@ -3515,6 +3600,7 @@ enum {
 	LFS_INHERIT_RR_OPT,
 	LFS_FIND_PERM,
 	LFS_PRINTF_OPT,
+	LFS_PRINTF_LS,
 	LFS_NO_FOLLOW_OPT,
 	LFS_HEX_IDX_OPT,
 	LFS_STATS_OPT,
@@ -3859,16 +3945,18 @@ static int lfs_setstripe_internal(int argc, char **argv,
 					progname, argv[0]);
 				goto usage_error;
 			}
-			if (migrate_mode)
-				overstriped = true;
-			else
+			overstriped = true;
+			if (!migrate_mode)
 				lsa.lsa_pattern = LLAPI_LAYOUT_OVERSTRIPING;
 			fallthrough;
 		case 'c':
 			errno = 0;
 			lsa.lsa_stripe_count = strtoul(optarg, &end, 0);
+			/* only allow count -2..-32 for overstriped files */
 			if (errno != 0 || *end != '\0'|| optarg == end ||
-			    lsa.lsa_stripe_count < LLAPI_MAX_STRIPE_COUNT ||
+			    lsa.lsa_stripe_count <
+				(overstriped ? LLAPI_OVERSTRIPE_COUNT_MAX :
+					       LLAPI_OVERSTRIPE_COUNT_MIN) ||
 			    lsa.lsa_stripe_count > LOV_MAX_STRIPE_COUNT) {
 				fprintf(stderr,
 					"%s %s: invalid stripe count '%s'\n",
@@ -3876,10 +3964,12 @@ static int lfs_setstripe_internal(int argc, char **argv,
 				goto usage_error;
 			}
 
-			if (lsa.lsa_stripe_count <= LLAPI_MIN_STRIPE_COUNT &&
-			    lsa.lsa_stripe_count >= LLAPI_MAX_STRIPE_COUNT) {
-				lsa.lsa_stripe_count = LLAPI_LAYOUT_WIDE_MIN +
-				    abs(lsa.lsa_stripe_count + 1);
+			if (lsa.lsa_stripe_count <=
+						LLAPI_OVERSTRIPE_COUNT_MIN &&
+			    lsa.lsa_stripe_count >=
+						LLAPI_OVERSTRIPE_COUNT_MAX) {
+				lsa.lsa_stripe_count = LLAPI_LAYOUT_WIDE_MIN -
+					(lsa.lsa_stripe_count + 1);
 			}
 			break;
 		case 'd':
@@ -3957,8 +4047,8 @@ static int lfs_setstripe_internal(int argc, char **argv,
 			errno = 0;
 			lsa.lsa_stripe_off = strtol(optarg, &end, 0);
 			if (errno != 0 || *end != '\0' || optarg == end ||
-			    lsa.lsa_stripe_off < -1 ||
-			    lsa.lsa_stripe_off > LOV_V1_INSANE_STRIPE_COUNT) {
+			    lsa.lsa_stripe_off < (__s16)LOV_ALL_STRIPES ||
+			    lsa.lsa_stripe_off > LOV_V1_INSANE_STRIPE_INDEX) {
 				fprintf(stderr,
 					"%s %s: invalid stripe offset '%s'\n",
 					progname, argv[0], optarg);
@@ -4466,9 +4556,10 @@ static int lfs_setstripe_internal(int argc, char **argv,
 			param->lsp_stripe_size = lsa.lsa_stripe_size;
 		if (lsa.lsa_stripe_count != LLAPI_LAYOUT_DEFAULT) {
 			if (lsa.lsa_stripe_count >= LLAPI_LAYOUT_WIDE_MIN &&
-				lsa.lsa_stripe_count < LLAPI_LAYOUT_WIDE_MAX)
-				param->lsp_stripe_count = LOV_ALL_STRIPES_MIN +
-				(lsa.lsa_stripe_count - LLAPI_LAYOUT_WIDE_MIN);
+			    lsa.lsa_stripe_count <= LLAPI_LAYOUT_WIDE_MAX)
+				param->lsp_stripe_count =
+					LLAPI_LAYOUT_WIDE_MIN -
+					(lsa.lsa_stripe_count + 1);
 			else
 				param->lsp_stripe_count = lsa.lsa_stripe_count;
 		}
@@ -4525,7 +4616,8 @@ static int lfs_setstripe_internal(int argc, char **argv,
 	for (fname = argv[optind]; (optind < argc) && (fname != NULL);
 	     fname = argv[++optind]) {
 		if (from_copy) {
-			layout = llapi_layout_get_by_path(template ?: fname, 0);
+			layout = layout_get_by_name_or_fid(template ?: fname,
+							   fname, 0, O_RDONLY);
 			if (!layout) {
 				fprintf(stderr,
 					"%s: can't create composite layout from file %s: %s\n",
@@ -5426,6 +5518,8 @@ static int lfs_find(int argc, char **argv)
 	{ .val = 'L',	.name = "layout",	.has_arg = required_argument },
 	{ .val = LFS_LINKS_OPT,
 			.name = "links",	.has_arg = required_argument },
+	{ .val = LFS_PRINTF_LS,
+			.name = "ls",		.has_arg = no_argument },
 	{ .val = 'm',	.name = "mdt",		.has_arg = required_argument },
 	{ .val = 'm',	.name = "mdt-index",	.has_arg = required_argument },
 	{ .val = 'm',	.name = "mdt_index",	.has_arg = required_argument },
@@ -6120,6 +6214,10 @@ err_free:
 			break;
 		case LFS_PRINTF_OPT:
 			param.fp_format_printf_str = strdup(optarg);
+			break;
+		case LFS_PRINTF_LS:
+			param.fp_format_printf_str =
+				strdup("%i\t%k\t%M\t%n\t%u\t%g\t%s\t%t\t%p\n");
 			break;
 		case LFS_PROJID_OPT:
 			rc = name2projid(&param.fp_projid, optarg);
@@ -7148,7 +7246,7 @@ static int mntdf(char *mntdir, char *fsname, char *pool, enum mntdf_flags flags,
 		if (!(tp->st_op & ops))
 			continue;
 
-		for (index = 0; index < LOV_ALL_STRIPES_MAX &&
+		for (index = 0; index < LOV_ALL_STRIPES &&
 		     (!lsb || lsb->sb_count < LL_STATFS_MAX); index++) {
 			memset(&stat_buf, 0, sizeof(struct obd_statfs));
 			memset(&uuid_buf, 0, sizeof(struct obd_uuid));
@@ -7327,7 +7425,7 @@ static int lfs_setdirstripe(int argc, char **argv)
 			errno = 0;
 			lsa.lsa_stripe_count = strtoul(optarg, &end, 0);
 			if (errno != 0 || *end != '\0' ||
-			    lsa.lsa_stripe_count < LLAPI_MAX_STRIPE_COUNT ||
+			    lsa.lsa_stripe_count < LLAPI_OVERSTRIPE_COUNT_MAX ||
 			    lsa.lsa_stripe_count > LOV_MAX_STRIPE_COUNT) {
 				fprintf(stderr,
 					"%s: invalid stripe count '%s'\n",
@@ -8878,20 +8976,34 @@ static void diff2str(time_t seconds, char *buf, time_t now)
 }
 
 static void print_quota_title(char *name, struct if_quotactl *qctl,
-			      bool human_readable, bool show_default)
+			      struct quota_param *param)
 {
-	if (show_default) {
+	if (param->qp_quiet ||
+	    qctl->qc_cmd == LUSTRE_Q_GETINFO ||
+	    qctl->qc_cmd == LUSTRE_Q_GETINFOPOOL ||
+	    qctl->qc_cmd == Q_GETOINFO)
+		return;
+
+	if (param->qp_show_qid) {
+		printf("Disk %s quotas\n", qtype_name(qctl->qc_type));
+		printf("%16s %9s %7s %7s %7s %7s %7s %7s %7s %7s\n",
+		       "Filesystem", "quota_id",
+		       param->qp_human_readable ? "used" : "kbytes",
+				"quota", "limit", "grace",
+		       "files", "quota", "limit", "grace");
+	} else if (param->qp_show_default) {
 		printf("Disk default %s quota:\n", qtype_name(qctl->qc_type));
-		printf("%15s %8s%8s%8s %8s%8s%8s\n",
+		printf("%16s %7s %7s %7s %7s %7s %7s\n",
 		       "Filesystem", "bquota", "blimit", "bgrace",
 		       "iquota", "ilimit", "igrace");
 	} else {
 		printf("Disk quotas for %s %s (%cid %u):\n",
 		       qtype_name(qctl->qc_type), name,
 		       *qtype_name(qctl->qc_type), qctl->qc_id);
-		printf("%15s%8s %7s%8s%8s%8s %7s%8s%8s\n",
-		       "Filesystem", human_readable ? "used" : "kbytes",
-		       "quota", "limit", "grace",
+		printf("%16s %7s %7s %7s %7s %7s %7s %7s %7s\n",
+		       "Filesystem",
+		       param->qp_human_readable ? "used" : "kbytes",
+				"quota", "limit", "grace",
 		       "files", "quota", "limit", "grace");
 	}
 }
@@ -8935,7 +9047,7 @@ static void kbytes2str(__u64 num, char *buf, int buflen, bool h)
 static void print_quota(char *mnt, struct if_quotactl *qctl, int type,
 			int rc, bool h, bool show_default, bool show_qid)
 {
-	char *name;
+	char *name, *tmp;
 	time_t now;
 
 	time(&now);
@@ -8973,25 +9085,25 @@ static void print_quota(char *mnt, struct if_quotactl *qctl, int type,
 				iover = 3;
 		}
 
+		tmp = strstr(mnt, "_UUID");
+		if (tmp)
+			*tmp = '\0';
+
+		printf("%16s", mnt); /* Filesystem */
 		if (show_qid) {
 			if (qctl->qc_type == USRQUOTA) {
 				if (uid2name(&name, qctl->qc_id))
-					printf("%10u", qctl->qc_id);
+					printf(" %9u", qctl->qc_id);
 				else
-					printf("%10s", name);
+					printf(" %9s", name);
 			} else if (qctl->qc_type == GRPQUOTA) {
 				if (gid2name(&name, qctl->qc_id))
-					printf("%10u", qctl->qc_id);
+					printf(" %9u", qctl->qc_id);
 				else
-					printf("%10s", name);
+					printf(" %9s", name);
 			} else {
-				printf("%10u", qctl->qc_id);
+				printf(" %9u", qctl->qc_id);
 			}
-		} else {
-			if (strlen(mnt) > 15)
-				printf("%s\n%15s", mnt, "");
-			else
-				printf("%15s", mnt);
 		}
 
 		if (show_default)
@@ -9020,7 +9132,7 @@ static void print_quota(char *mnt, struct if_quotactl *qctl, int type,
 			"%s" : "[%s]", strbuf);
 
 		if (show_default)
-			printf(" %6s %7s %7s", numbuf[1], numbuf[2], timebuf);
+			printf(" %7s %7s %7s", numbuf[1], numbuf[2], timebuf);
 		else
 			printf(" %7s%c %6s %7s %7s",
 			       numbuf[0], bover ? '*' : ' ', numbuf[1],
@@ -9047,7 +9159,7 @@ static void print_quota(char *mnt, struct if_quotactl *qctl, int type,
 			"%ju" : "[%ju]", (uintmax_t)dqb->dqb_ihardlimit);
 
 		if (show_default)
-			printf(" %6s %7s %7s", numbuf[1], numbuf[2], timebuf);
+			printf(" %7s %7s %7s", numbuf[1], numbuf[2], timebuf);
 		else if (type != QC_OSTIDX)
 			printf(" %7s%c %6s %7s %7s",
 			       numbuf[0], iover ? '*' : ' ', numbuf[1],
@@ -9088,7 +9200,7 @@ static int tgt_name2index(const char *tgtname, unsigned int *idx)
 	dash += 4;
 
 	*idx = strtoul(dash, &endp, 16);
-	if (*idx > LOV_V1_INSANE_STRIPE_COUNT) {
+	if (*idx > LOV_V1_INSANE_STRIPE_INDEX) {
 		fprintf(stderr, "wrong index %s\n", tgtname);
 		return -ERANGE;
 	}
@@ -9199,8 +9311,7 @@ out:
 }
 
 static int print_one_quota(char *mnt, char *name, struct if_quotactl *qctl,
-			   int verbose, int quiet, bool human_readable,
-			   bool show_default, bool show_qid, int rc)
+			   struct quota_param *param, int rc)
 {
 	int rc1 = 0, rc2 = 0;
 	char *obd_type = (char *)qctl->obd_type;
@@ -9208,7 +9319,7 @@ static int print_one_quota(char *mnt, char *name, struct if_quotactl *qctl,
 	__u64 total_ialloc = 0, total_balloc = 0;
 	int inacc;
 
-	if (!show_default && qctl->qc_id == 0) {
+	if (!param->qp_show_default && qctl->qc_id == 0) {
 		qctl->qc_dqblk.dqb_bhardlimit = 0;
 		qctl->qc_dqblk.dqb_bsoftlimit = 0;
 		qctl->qc_dqblk.dqb_ihardlimit = 0;
@@ -9226,12 +9337,6 @@ static int print_one_quota(char *mnt, char *name, struct if_quotactl *qctl,
 	    LQUOTA_FLAG(qctl->qc_dqblk.dqb_itime) & LQUOTA_FLAG_DEFAULT)
 		qctl->qc_dqblk.dqb_itime &= LQUOTA_GRACE_MASK;
 
-	if (!show_qid && (qctl->qc_cmd == LUSTRE_Q_GETQUOTA ||
-	     qctl->qc_cmd == LUSTRE_Q_GETQUOTAPOOL ||
-	     qctl->qc_cmd == LUSTRE_Q_GETDEFAULT_POOL ||
-	     qctl->qc_cmd == LUSTRE_Q_GETDEFAULT) && !quiet)
-		print_quota_title(name, qctl, human_readable, show_default);
-
 	if (rc && *obd_type)
 		fprintf(stderr, "%s %s ", obd_type, obd_uuid);
 
@@ -9243,25 +9348,26 @@ static int print_one_quota(char *mnt, char *name, struct if_quotactl *qctl,
 		((qctl->qc_dqblk.dqb_valid & (QIF_LIMITS|QIF_USAGE)) !=
 		 (QIF_LIMITS|QIF_USAGE));
 
-	print_quota(mnt, qctl, QC_GENERAL, rc, human_readable, show_default,
-		    show_qid);
+	print_quota(mnt, qctl, QC_GENERAL, rc, param->qp_human_readable,
+		    param->qp_show_default, param->qp_show_qid);
 
-	if (!show_qid && !show_default && verbose &&
-	    qctl->qc_valid == QC_GENERAL && qctl->qc_cmd != LUSTRE_Q_GETINFO &&
+	if (!param->qp_show_qid && !param->qp_show_default &&
+	    param->qp_verbose && qctl->qc_valid == QC_GENERAL &&
+	    qctl->qc_cmd != LUSTRE_Q_GETINFO &&
 	    qctl->qc_cmd != LUSTRE_Q_GETINFOPOOL) {
 		char strbuf[STRBUF_LEN];
 
-		rc1 = print_obd_quota(mnt, qctl, 1, human_readable,
+		rc1 = print_obd_quota(mnt, qctl, 1, param->qp_human_readable,
 				      &total_ialloc);
-		rc2 = print_obd_quota(mnt, qctl, 0, human_readable,
+		rc2 = print_obd_quota(mnt, qctl, 0, param->qp_human_readable,
 				      &total_balloc);
 		kbytes2str(total_balloc, strbuf, sizeof(strbuf),
-			   human_readable);
+			   param->qp_human_readable);
 		printf("Total allocated inode limit: %ju, total allocated block limit: %s\n",
 		       (uintmax_t)total_ialloc, strbuf);
 	}
 
-	if (!show_qid && (rc || rc1 || rc2 || inacc))
+	if (!param->qp_show_qid && (rc || rc1 || rc2 || inacc))
 		printf("%d Some errors happened when getting quota info. Some devices may be not working or deactivated. The data in \"[]\" is inaccurate.\n", inacc);
 
 	if (rc)
@@ -9276,8 +9382,8 @@ static int print_one_quota(char *mnt, char *name, struct if_quotactl *qctl,
 	return 0;
 }
 
-static int iter_all_quota(char *mnt, struct if_quotactl *qctl, int quiet,
-			  bool human_readable)
+static int iter_all_quota(char *mnt, struct if_quotactl *qctl,
+			  struct quota_param *param)
 {
 	struct if_quotactl qctl_tmp, *qctl_iter;
 	void *buffer = NULL;
@@ -9308,12 +9414,6 @@ static int iter_all_quota(char *mnt, struct if_quotactl *qctl, int quiet,
 	if (rc)
 		goto out;
 
-	printf("Filesystem %s, Disk %s quotas\n", mnt,
-	       qtype_name(qctl->qc_type));
-	printf("%10s%8s %7s%8s%8s%8s %7s%8s%8s\n", "quota_id",
-	       human_readable ? "used" : "kbytes", "quota", "limit", "grace",
-	       "files", "quota", "limit", "grace");
-
 	cur = 0;
 	while (cur < buflen) {
 		if ((buflen - cur) < sizeof(struct if_quotactl)) {
@@ -9329,8 +9429,7 @@ static int iter_all_quota(char *mnt, struct if_quotactl *qctl, int quiet,
 		if ((qctl_iter->qc_dqblk.dqb_valid & QIF_USAGE) != QIF_USAGE)
 			qctl_iter->qc_dqblk.dqb_valid |= QIF_USAGE;
 
-		print_one_quota(mnt, NULL, qctl_iter, 0, quiet,
-				human_readable, false, true, 0);
+		print_one_quota(mnt, NULL, qctl_iter, param, 0);
 	}
 
 out:
@@ -9343,10 +9442,10 @@ out:
 	return rc;
 }
 
-static int get_print_quota(char *mnt, char *name, struct if_quotactl *qctl,
-			   int verbose, int quiet, bool human_readable,
-			   bool show_default)
+static int get_print_quota(char *mnt, struct if_quotactl *qctl,
+			   struct quota_param *param)
 {
+	char *name = NULL;
 	int rc;
 
 	rc = llapi_quotactl(mnt, qctl);
@@ -9370,8 +9469,7 @@ static int get_print_quota(char *mnt, char *name, struct if_quotactl *qctl,
 		return rc;
 	}
 
-	return print_one_quota(mnt, name, qctl, verbose, quiet, human_readable,
-			       show_default, false, rc);
+	return print_one_quota(mnt, name, qctl, param, rc);
 }
 
 static int lfs_project(int argc, char **argv)
@@ -9534,20 +9632,65 @@ static int lfs_project(int argc, char **argv)
 	return ret;
 }
 
+static int do_quota_op(char *mnt, struct if_quotactl *qctl,
+			struct quota_param *param)
+{
+	struct if_quotactl *qctl_tmp;
+	char **poollist = NULL;
+	char *buf = NULL;
+	int poolcount, i, rc = 0;
+
+	/* avoid modifying the original qctl */
+	qctl_tmp = malloc(sizeof(*qctl_tmp) + LOV_MAXPOOLNAME + 1);
+	memcpy(qctl_tmp, qctl, sizeof(*qctl_tmp) + LOV_MAXPOOLNAME + 1);
+
+	if (qctl_tmp->qc_cmd == LUSTRE_Q_ITERQUOTA) {
+		rc = iter_all_quota(mnt, qctl_tmp, param);
+		goto out;
+	}
+
+	if (param->qp_show_pools) {
+		char *p;
+
+		rc = llapi_get_poolbuf(mnt, &buf, &poollist, &poolcount);
+		if (rc)
+			goto out;
+
+		for (i = 0; i < poolcount; i++) {
+			p = memchr(poollist[i], '.', MAXNAMLEN);
+			if (!p) {
+				fprintf(stderr, "bad string format %.*s\n",
+					MAXNAMLEN, poollist[i]);
+				rc = -EINVAL;
+				goto out;
+			}
+			p++;
+			printf("Quotas for pool: %s\n", p);
+			snprintf(qctl_tmp->qc_poolname, LOV_MAXPOOLNAME + 1,
+				 "%s", p);
+			rc = get_print_quota(mnt, qctl_tmp, param);
+			if (rc)
+				goto out;
+		}
+	}
+	rc = get_print_quota(mnt, qctl_tmp, param);
+	goto out;
+out:
+	free(qctl_tmp);
+	free(buf);
+	return rc;
+}
+
 static int lfs_quota(int argc, char **argv)
 {
-	int c;
-	char *mnt, *name = NULL;
+	struct quota_param param = { .qp_valid = QC_GENERAL };
 	struct if_quotactl *qctl;
-	char *obd_uuid, *endp;
-	int rc = 0, rc1 = 0, verbose = 0, quiet = 0;
-	__u32 valid = QC_GENERAL;
-	long idx = 0;
+	char *obd_uuid, *endp, *name = NULL;
 	__u32 start_qid = 0, end_qid = 0;
-	bool human_readable = false;
-	bool show_default = false;
-	int qtype;
-	bool show_pools = false;
+	int c, qtype, rc = 0;
+	long idx = 0;
+	bool all = false;
+
 	struct option long_opts[] = {
 	{ .val = 'a',	.name = "all",		.has_arg = required_argument },
 	{ .val = 'e',	.name = "end-qid",	.has_arg = required_argument },
@@ -9573,9 +9716,6 @@ static int lfs_quota(int argc, char **argv)
 	{ .val = 'U',	.name = "default-usr",	.has_arg = required_argument },
 	{ .val = 'v',	.name = "verbose",	.has_arg = no_argument },
 	{ .name = NULL } };
-	char **poollist = NULL;
-	char *buf = NULL;
-	int poolcount, i;
 
 	qctl = calloc(1, sizeof(*qctl) + LOV_MAXPOOLNAME + 1);
 	if (!qctl)
@@ -9589,12 +9729,13 @@ static int lfs_quota(int argc, char **argv)
 		long_opts, NULL)) != -1) {
 		switch (c) {
 		case 'a':
+			param.qp_show_qid = 1;
 			qctl->qc_cmd = LUSTRE_Q_ITERQUOTA;
 			break;
 		case 'e':
 			if (optarg == NULL || *optarg == '\0') {
 				fprintf(stderr,
-					"%s quota: invalid start quota ID\n",
+					"%s quota: invalid end quota ID\n",
 				progname);
 				rc = CMD_HELP;
 				goto out;
@@ -9602,13 +9743,13 @@ static int lfs_quota(int argc, char **argv)
 			end_qid = strtoul(optarg, NULL, 0);
 			break;
 		case 'G':
-			show_default = true;
+			param.qp_show_default = 1;
 			/* fallthrough */
 		case 'g':
 			qtype = GRPQUOTA;
 			goto quota_type;
 		case 'h':
-			human_readable = true;
+			param.qp_human_readable = 1;
 			break;
 #if LUSTRE_VERSION_CODE < OBD_OCD_VERSION(2, 22, 53, 0)
 		case 'i':
@@ -9619,7 +9760,7 @@ static int lfs_quota(int argc, char **argv)
 		case 'm':
 			errno = 0;
 			idx = strtol(optarg, &endp, 0);
-			if (errno != 0 || idx > LOV_V1_INSANE_STRIPE_COUNT ||
+			if (errno != 0 || idx > LOV_V1_INSANE_STRIPE_INDEX ||
 			    idx < 0 || *endp != '\0') {
 				fprintf(stderr,
 					"%s quota: invalid MDT index '%s'\n",
@@ -9627,7 +9768,7 @@ static int lfs_quota(int argc, char **argv)
 				rc = CMD_HELP;
 				goto out;
 			}
-			valid = qctl->qc_valid = QC_MDTIDX;
+			param.qp_valid = qctl->qc_valid = QC_MDTIDX;
 			qctl->qc_idx = idx;
 			break;
 #if LUSTRE_VERSION_CODE < OBD_OCD_VERSION(2, 22, 53, 0)
@@ -9640,7 +9781,7 @@ static int lfs_quota(int argc, char **argv)
 			idx = strtol(optarg, &endp, 0);
 			/* simple digit, treat it as a numerical OST index */
 			if (*endp == '\0') {
-				if (idx > LOV_V1_INSANE_STRIPE_COUNT ||
+				if (idx > LOV_V1_INSANE_STRIPE_INDEX ||
 				    idx < 0) {
 					fprintf(stderr,
 						"%s quota: invalid OST index '%s'\n",
@@ -9648,17 +9789,17 @@ static int lfs_quota(int argc, char **argv)
 					rc = CMD_HELP;
 					goto out;
 				}
-				valid = qctl->qc_valid = QC_OSTIDX;
+				param.qp_valid = qctl->qc_valid = QC_OSTIDX;
 				qctl->qc_idx = idx;
 				break;
 			}
 
 			/* need to also handle a UUID for compatibility */
-			valid = qctl->qc_valid = QC_UUID;
+			param.qp_valid = qctl->qc_valid = QC_UUID;
 			snprintf(obd_uuid, sizeof(*obd_uuid), "%s", optarg);
 			break;
 		case 'P':
-			show_default = true;
+			param.qp_show_default = 1;
 			/* fallthrough */
 		case 'p':
 			qtype = PRJQUOTA;
@@ -9682,11 +9823,11 @@ static int lfs_quota(int argc, char **argv)
 			}
 
 			/* optarg is NULL */
-			show_pools = true;
+			param.qp_show_pools = 1;
 			qctl->qc_cmd = LUSTRE_Q_GETQUOTAPOOL;
 			break;
 		case 'q':
-			quiet = 1;
+			param.qp_quiet = 1;
 			break;
 		case 's':
 			if (optarg == NULL || *optarg == '\0') {
@@ -9702,11 +9843,15 @@ static int lfs_quota(int argc, char **argv)
 			qctl->qc_cmd = LUSTRE_Q_GETINFO;
 			break;
 		case 'U':
-			show_default = true;
+			param.qp_show_default = 1;
 			/* fallthrough */
 		case 'u':
 			qtype = USRQUOTA;
 quota_type:
+			/*
+			 * since ID is not required for when -a or -t is used
+			 * it is only set after all options have been processed
+			 */
 			if (qctl->qc_type != ALLQUOTA) {
 				fprintf(stderr,
 					"%s quota: only one of -u, -g, or -p may be specified\n",
@@ -9717,7 +9862,7 @@ quota_type:
 			qctl->qc_type = qtype;
 			break;
 		case 'v':
-			verbose = 1;
+			param.qp_verbose = 1;
 			break;
 		default:
 			fprintf(stderr, "%s quota: unrecognized option '%s'\n",
@@ -9727,49 +9872,36 @@ quota_type:
 		}
 	}
 
-	/* current uid/gid info for "lfs quota /path/to/lustre/mount" */
-	if ((qctl->qc_cmd == LUSTRE_Q_GETQUOTA ||
-	     qctl->qc_cmd == LUSTRE_Q_GETQUOTAPOOL) &&
-	     qctl->qc_type == ALLQUOTA &&
-	     optind == argc - 1 && !show_default) {
-		qctl->qc_idx = idx;
-
-		for (qtype = USRQUOTA; qtype <= GRPQUOTA; qtype++) {
-			qctl->qc_type = qtype;
-			qctl->qc_valid = valid;
-			if (qtype == USRQUOTA) {
-				qctl->qc_id = geteuid();
-				rc = uid2name(&name, qctl->qc_id);
-			} else {
-				qctl->qc_id = getegid();
-				rc = gid2name(&name, qctl->qc_id);
-				memset(&qctl->qc_dqblk, 0,
-				       sizeof(qctl->qc_dqblk));
-			}
-			if (rc)
-				name = "<unknown>";
-			mnt = argv[optind];
-			rc1 = get_print_quota(mnt, name, qctl, verbose, quiet,
-					      human_readable, show_default);
-			if (rc1 && !rc)
-				rc = rc1;
-		}
-		goto out;
-	/* lfs quota -u username /path/to/lustre/mount */
-	} else if (qctl->qc_cmd == LUSTRE_Q_GETQUOTA ||
-		   qctl->qc_cmd == LUSTRE_Q_GETQUOTAPOOL) {
-		/* options should be followed by u/g-name and mntpoint */
-		if ((!show_default && optind + 2 != argc) ||
-		    (show_default && optind + 1 != argc) ||
-		    qctl->qc_type == ALLQUOTA) {
-			fprintf(stderr,
-				"%s quota: name and mount point must be specified\n",
+	if (qctl->qc_cmd == LUSTRE_Q_ITERQUOTA) {
+		if (qctl->qc_type == ALLQUOTA) {
+			fprintf(stderr, "%s quota: no quota type to iterate\n",
 				progname);
 			rc = CMD_HELP;
-			goto out;
+			return rc;
 		}
 
-		if (!show_default) {
+		if (end_qid != 0 && start_qid > end_qid) {
+			fprintf(stderr,
+				"%s quota: end qid is smaller than start qid\n",
+				progname);
+			rc = CMD_HELP;
+			return rc;
+		}
+
+		qctl->qc_allquota_qid_start = start_qid;
+		qctl->qc_allquota_qid_end = end_qid;
+	} else if (qctl->qc_type != ALLQUOTA &&
+		   (qctl->qc_cmd == LUSTRE_Q_GETQUOTA ||
+		    qctl->qc_cmd == LUSTRE_Q_GETQUOTAPOOL)) {
+		if (!param.qp_show_default) {
+			if (optind + 1 > argc) {
+				fprintf(stderr,
+					"%s quota: u/g-name is required\n",
+					progname);
+				rc = CMD_HELP;
+				return rc;
+			}
+
 			name = argv[optind++];
 			switch (qctl->qc_type) {
 			case USRQUOTA:
@@ -9801,74 +9933,54 @@ quota_type:
 				goto out;
 			}
 		}
-	} else if (qctl->qc_cmd == LUSTRE_Q_ITERQUOTA) {
-		if (optind + 1 != argc) {
-			fprintf(stderr,
-				"%s quota: mount point must be specified\n",
-				progname);
-			rc = CMD_HELP;
-			goto out;
-		}
-
-		if (qctl->qc_type == ALLQUOTA) {
-			fprintf(stderr, "%s quota: no quota type to iterate\n",
-				progname);
-			rc = CMD_HELP;
-			goto out;
-		}
-
-		if (end_qid != 0 && start_qid > end_qid) {
-			fprintf(stderr,
-				"%s quota: end qid is smaller than start qid\n",
-				progname);
-			rc = CMD_HELP;
-			goto out;
-		}
-
-		qctl->qc_allquota_qid_start = start_qid;
-		qctl->qc_allquota_qid_end = end_qid;
-		rc = iter_all_quota(argv[optind], qctl, quiet, human_readable);
-		goto out;
-	} else if (optind + 1 != argc || qctl->qc_type == ALLQUOTA) {
-		fprintf(stderr, "%s quota: missing quota info argument(s)\n",
-			progname);
-		rc = CMD_HELP;
-		goto out;
+	} else if (qctl->qc_type == ALLQUOTA) {
+		all = true;
+		qctl->qc_type = USRQUOTA;
 	}
 
-	mnt = argv[optind];
-	if (show_pools) {
-		char *p;
-
-		i = 0;
-		rc = llapi_get_poolbuf(mnt, &buf, &poollist, &poolcount);
-		if (rc)
-			goto out;
-
-		for (i = 0; i < poolcount; i++) {
-			p = memchr(poollist[i], '.', MAXNAMLEN);
-			if (!p) {
-				fprintf(stderr, "bad string format %.*s\n",
-					MAXNAMLEN, poollist[i]);
-				rc = -EINVAL;
-				goto out;
+	do {
+		if (all) {
+			qctl->qc_valid = param.qp_valid;
+			if (qctl->qc_type == USRQUOTA) {
+				qctl->qc_id = geteuid();
+				rc = uid2name(&name, qctl->qc_id);
+			} else {
+				qctl->qc_id = getegid();
+				rc = gid2name(&name, qctl->qc_id);
+				memset(&qctl->qc_dqblk, 0,
+				       sizeof(qctl->qc_dqblk));
 			}
-			p++;
-			printf("Quotas for pool: %s\n", p);
-			snprintf(qctl->qc_poolname, LOV_MAXPOOLNAME + 1, "%s",
-				p);
-			rc = get_print_quota(mnt, name, qctl, verbose, quiet,
-					     human_readable, show_default);
 			if (rc)
-				break;
+				name = "<unknown>";
 		}
-		goto out;
-	}
 
-	rc = get_print_quota(mnt, name, qctl, verbose, quiet,
-			     human_readable, show_default);
+		print_quota_title(name, qctl, &param);
+
+		if (optind == argc) {
+			char mnt[PATH_MAX];
+			int i = 0;
+
+			while (!llapi_search_mounts(NULL, i++, mnt, NULL)) {
+				if (mnt[0] == '\0')
+					continue;
+
+				rc = do_quota_op(mnt, qctl, &param);
+				if (rc)
+					break;
+
+				mnt[0] = '\0'; /* avoid matching in next loop */
+			}
+		} else {
+			int i = optind;
+
+			while (i < argc) {
+				rc = do_quota_op(argv[i++], qctl, &param);
+				if (rc)
+					break;
+			}
+		}
+	} while (all && ++qctl->qc_type <= GRPQUOTA);
 out:
-	free(buf);
 	free(qctl);
 	return rc;
 }
@@ -10055,6 +10167,7 @@ static int lfs_changelog(int argc, char **argv)
 	rc = llapi_changelog_start(&changelog_priv,
 				   CHANGELOG_FLAG_BLOCK |
 				   CHANGELOG_FLAG_JOBID |
+				   CHANGELOG_FLAG_NID_BE |
 				   CHANGELOG_FLAG_EXTRA_FLAGS |
 				   (follow ? CHANGELOG_FLAG_FOLLOW : 0),
 				   mdd, startrec);
@@ -10123,11 +10236,17 @@ static int lfs_changelog(int argc, char **argv)
 				       (unsigned long long)uidgid->cr_gid);
 			}
 			if (ef->cr_extra_flags & CLFE_NID) {
-				struct changelog_ext_nid *nid =
-					changelog_rec_nid(rec);
+				if (ef->cr_extra_flags & CLFE_NID_BE) {
+					struct lnet_nid *nid =
+						(void *)changelog_rec_nid(rec);
+					printf(" nid=%s", libcfs_nidstr(nid));
+				} else {
+					struct changelog_ext_nid *nid =
+						changelog_rec_nid(rec);
 
-				printf(" nid=%s",
-				       libcfs_nid2str(nid->cr_nid));
+					printf(" nid=%s",
+					       libcfs_nid2str(nid->cr_nid));
+				}
 			}
 
 			if (ef->cr_extra_flags & CLFE_OPEN) {
@@ -10318,7 +10437,8 @@ static int lfs_fid2path(int argc, char **argv)
 	bool print_link = false;
 	bool print_fid = false;
 	bool print_mnt_dir;
-	char mnt_dir[PATH_MAX] = "";
+	char *mnt_dir = NULL;
+	int mnt_dir_len = PATH_MAX + 1;
 	int mnt_fd = -1;
 	char *path_or_fsname;
 	long long recno = -1;
@@ -10387,6 +10507,13 @@ static int lfs_fid2path(int argc, char **argv)
 	}
 
 	path_or_fsname = argv[optind];
+	if (path_or_fsname && strlen(path_or_fsname))
+		mnt_dir_len = strlen(path_or_fsname) + 1;
+	mnt_dir = malloc(mnt_dir_len + 1);
+	if (!mnt_dir) {
+		rc = -ENOMEM;
+		goto out;
+	}
 
 	if (*path_or_fsname == '/') {
 		print_mnt_dir = true;
@@ -10416,6 +10543,8 @@ static int lfs_fid2path(int argc, char **argv)
 
 	for (i = optind + 1; i < argc; i++) {
 		const char *fid_str = argv[i];
+		int path_len = PATH_MAX;
+		char *path_buf;
 		struct lu_fid fid;
 		char *ptr = NULL;
 		int rc2;
@@ -10433,15 +10562,35 @@ static int lfs_fid2path(int argc, char **argv)
 
 		int linktmp = (linkno >= 0) ? linkno : 0;
 
+		path_buf = malloc(path_len);
+		if (!path_buf) {
+			if (rc == 0)
+				rc = -ENOMEM;
+			continue;
+		}
+
 		while (1) {
 			int oldtmp = linktmp;
 			long long rectmp = recno;
-			char path_buf[PATH_MAX];
 
+fid2path:
 			rc2 = llapi_fid2path_at(mnt_fd, &fid, path_buf,
-						sizeof(path_buf), &rectmp,
+						path_len, &rectmp,
 						&linktmp);
 			if (rc2 < 0) {
+				if (rc2 == -ERANGE) {
+					char *tmpbuf;
+
+					path_len += PATH_MAX;
+					tmpbuf = realloc(path_buf, path_len);
+					if (!tmpbuf) {
+						if (rc == 0)
+							rc = -ENOMEM;
+						break;
+					}
+					path_buf = tmpbuf;
+					goto fid2path;
+				}
 				fprintf(stderr,
 					"%s fid2path: cannot find %s %s: %s\n",
 					progname, path_or_fsname, fid_str,
@@ -10507,10 +10656,12 @@ static int lfs_fid2path(int argc, char **argv)
 				/* no more links */
 				break;
 		}
+		free(path_buf);
 	}
 out:
 	if (!(mnt_fd < 0))
 		close(mnt_fd);
+	free(mnt_dir);
 
 	return rc;
 }
@@ -10714,6 +10865,7 @@ static int lfs_data_version(int argc, char **argv)
 	int data_version_flags = LL_DV_RD_FLUSH; /* Read by default */
 	__u64 data_version;
 	char *path;
+	bool hsm_sync = false;
 	int fd;
 	int rc;
 	int c;
@@ -10724,7 +10876,7 @@ static int lfs_data_version(int argc, char **argv)
 		return CMD_HELP;
 	}
 
-	while ((c = getopt(argc, argv, "hnrw")) != -1) {
+	while ((c = getopt(argc, argv, "hnrws")) != -1) {
 		switch (c) {
 		case 'n':
 			data_version_flags = 0;
@@ -10734,6 +10886,9 @@ static int lfs_data_version(int argc, char **argv)
 			break;
 		case 'w':
 			data_version_flags |= LL_DV_WR_FLUSH;
+			break;
+		case 's':
+			hsm_sync = true;
 			break;
 		default:
 			fprintf(stderr,
@@ -10760,12 +10915,23 @@ static int lfs_data_version(int argc, char **argv)
 	}
 
 	rc = llapi_get_data_version(fd, &data_version, data_version_flags);
-	if (rc < 0)
+	if (rc < 0) {
 		fprintf(stderr,
 			"%s data_version: cannot get version for '%s': %s\n",
 			progname, path, strerror(-rc));
-	else
+	} else {
 		printf("%ju" "\n", (uintmax_t)data_version);
+
+		if (hsm_sync) {
+			rc = llapi_hsm_data_version_set(fd, data_version);
+			if (rc < 0)
+				fprintf(stderr,
+					"%s data_version: cannot set version %llu for"
+					" '%s': %s\n", progname,
+					(unsigned long long)data_version, path,
+					strerror(-rc));
+		}
+	}
 
 	close(fd);
 	return rc;
@@ -13802,6 +13968,11 @@ static int lfs_pcc_detach(int argc, char **argv)
 		}
 	}
 
+	if (argc <= optind) {
+		fprintf(stderr, "%s: must specify one or more FIDs\n", argv[0]);
+		return CMD_HELP;
+	}
+
 	while (optind < argc) {
 		int rc2;
 
@@ -13832,13 +14003,14 @@ static int lfs_pcc_detach_fid(int argc, char **argv)
 	struct option long_opts[] = {
 	{ .val = 'h',	.name = "help",	.has_arg = no_argument },
 	{ .val = 'k',	.name = "keep",	.has_arg = no_argument },
+	{ .val = 'm',	.name = "mnt",	.has_arg = required_argument },
 	{ .name = NULL } };
-	char short_opts[] = "hk";
-	int c;
-	int rc = 0;
+	char short_opts[] = "hkm:";
+	const char *mntpath = NULL;
 	const char *fidstr;
-	const char *mntpath;
 	__u32 detach_flags = PCC_DETACH_FL_UNCACHE;
+	int rc = 0;
+	int c;
 	int dirfd;
 
 	optind = 0;
@@ -13848,6 +14020,11 @@ static int lfs_pcc_detach_fid(int argc, char **argv)
 		case 'k':
 			detach_flags = PCC_DETACH_FL_NONE;
 			break;
+		case 'm':
+			mntpath = optarg;
+			break;
+		case '?':
+			return CMD_HELP;
 		default:
 			fprintf(stderr, "%s: unrecognized option '%s'\n",
 				progname, argv[optind - 1]);
@@ -13857,11 +14034,26 @@ static int lfs_pcc_detach_fid(int argc, char **argv)
 		}
 	}
 
-	mntpath = argv[optind++];
-	dirfd = open(mntpath, O_RDONLY);
+	/* for backward compatibility, allow mntpath without -m */
+	if (!mntpath) {
+		if (argc <= optind) {
+			fprintf(stderr, "%s: must specify Lustre mount point\n",
+				argv[0]);
+			return CMD_HELP;
+		}
+
+		mntpath = argv[optind++];
+	}
+
+	if (argc <= optind) {
+		fprintf(stderr, "%s: must specify one or more FIDs\n", argv[0]);
+		return CMD_HELP;
+	}
+
+	dirfd = open(mntpath, O_RDONLY | O_DIRECTORY);
 	if (dirfd < 0) {
 		rc = -errno;
-		fprintf(stderr, "%s: cannot open '%s': %s",
+		fprintf(stderr, "%s: cannot open directory '%s': %s",
 			argv[0], mntpath, strerror(errno));
 		return rc;
 	}

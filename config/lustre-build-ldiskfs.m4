@@ -70,7 +70,7 @@ AS_IF([test x$RHEL_KERNEL = xyes], [
 			grep -A3 ext4_update_dx_flag $LINUX/fs/ext4/ext4.h \
 			  | grep ext4_test_inode_flag
 			if test $? -eq 0; then
-				LDISKFS_SERIES="5.4.0-66-ubuntu20.series"
+				LDISKFS_SERIES="5.3.18-sles15sp2.series"
 			fi
 			;; # (
 		15sp3 ) LDISKFS_SERIES="5.3.18-sles15sp3.series"
@@ -91,6 +91,7 @@ AS_IF([test x$RHEL_KERNEL = xyes], [
 	    ])
 ], [test x$UBUNTU_KERNEL = xyes], [
         BASEVER=$(echo $LINUXRELEASE | cut -d'-' -f1)
+	AS_VERSION_COMPARE([$BASEVER],[6.10.0],[
 	AS_VERSION_COMPARE([$BASEVER],[6.8.0],[
 	AS_VERSION_COMPARE([$BASEVER],[5.19.0],[
 	AS_VERSION_COMPARE([$BASEVER],[5.15.0],[
@@ -157,7 +158,9 @@ AS_IF([test x$RHEL_KERNEL = xyes], [
 	[LDISKFS_SERIES="5.19.0-35-ubuntu.series"],
 	[LDISKFS_SERIES="5.19.0-35-ubuntu.series"])],
 	[LDISKFS_SERIES="6.7-ml.series"],
-	[LDISKFS_SERIES="6.7-ml.series"])
+	[LDISKFS_SERIES="6.7-ml.series"])],
+	[LDISKFS_SERIES="6.10-ml.series"],
+	[LDISKFS_SERIES="6.10-ml.series"])
 ], [test x$OPENEULER_KERNEL = xyes], [
 	case $OPENEULER_VERSION_NO in
 	2203.0) LDISKFS_SERIES="5.10.0-oe2203.series" ;;
@@ -186,7 +189,11 @@ AS_IF([test -z "$LDISKFS_SERIES"],
 	AS_VERSION_COMPARE([$LINUXRELEASE],[6.7.0], [
 		LDISKFS_SERIES="6.6-ml.series"], [
 		LDISKFS_SERIES="6.7-ml.series"], [
-		LDISKFS_SERIES="6.7-ml.series"]
+	AS_VERSION_COMPARE([$LINUXRELEASE],[6.10.0], [
+		LDISKFS_SERIES="6.7-ml.series"], [
+		LDISKFS_SERIES="6.10-ml.series"], [
+		LDISKFS_SERIES="6.10-ml.series"]
+	)] # 6.10
 	)] # 6.7
 	)] # 6.6
 	)] # 6.1
@@ -348,6 +355,29 @@ AC_DEFUN([LB_LDISKFS_IGET_HAS_FLAGS_ARG], [
 			[if ldiskfs_iget takes a flags argument])
 	])
 ]) # LB_LDISKFS_IGET_HAS_FLAGS_ARG
+
+#
+# LB_LDISKFS_IGET_EA_INODE
+#
+# kernel 6.4 commit b3e6bcb94590dea45396b9481e47b809b1be4afa
+# extra iget flag EXT4_IGET_NO_CHECKS introduced to relax the ea_inode check.
+#
+AC_DEFUN([LB_SRC_LDISKFS_IGET_EA_INODE], [
+	LB2_LINUX_TEST_SRC([ext4_iget_ea_inode], [
+		#include <linux/fs.h>
+		#include "$EXT4_SRC_DIR/ext4.h"
+	],[
+		int f = EXT4_IGET_EA_INODE;
+		(void)f;
+	],[-Werror])
+])
+AC_DEFUN([LB_LDISKFS_IGET_EA_INODE], [
+	LB2_MSG_LINUX_TEST_RESULT([if 'EXT4_IGET_EA_INODE' exists],
+	[ext4_iget_ea_inode], [
+		AC_DEFINE(HAVE_LDISKFS_IGET_EA_INODE, 1,
+			['EXT4_IGET_EA_INODE' exists])
+	])
+]) # LB_LDISKFS_IGET_EA_INODE
 
 #
 # LDISKFS_AC_PATCH_PROGRAM
@@ -641,6 +671,7 @@ AC_DEFUN([LB_KABI_LDISKFS], [AS_IF([test x$enable_ldiskfs != xno],[
 		LB_SRC_EXT4_HAVE_I_CRYPT_INFO
 		LB_SRC_LDISKFS_JOURNAL_ENSURE_CREDITS
 		LB_SRC_LDISKFS_IGET_HAS_FLAGS_ARG
+		LB_SRC_LDISKFS_IGET_EA_INODE
 		LB_SRC_LDISKFS_FIND_ENTRY_LOCKED_EXISTS
 		LB_SRC_LDISKFSFS_DIRHASH_WANTS_DIR
 		LB_SRC_JBD2_H_TOTAL_CREDITS
@@ -653,6 +684,7 @@ AC_DEFUN([LB_KABI_LDISKFS], [AS_IF([test x$enable_ldiskfs != xno],[
 		LB_EXT4_HAVE_I_CRYPT_INFO
 		LB_LDISKFS_JOURNAL_ENSURE_CREDITS
 		LB_LDISKFS_IGET_HAS_FLAGS_ARG
+		LB_LDISKFS_IGET_EA_INODE
 		LB_LDISKFS_FIND_ENTRY_LOCKED_EXISTS
 		LB_LDISKFSFS_DIRHASH_WANTS_DIR
 		LB_JBD2_H_TOTAL_CREDITS

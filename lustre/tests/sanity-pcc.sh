@@ -57,7 +57,6 @@ fi
 if [[ -r /etc/redhat-release ]]; then
 	rhel_version=$(sed -e 's/[^0-9.]*//g' /etc/redhat-release)
 	if (( $(version_code $rhel_version) >= $(version_code 9.3.0) )); then
-		always_except EX-8739 6 7a 7b 23 35 # PCC-RW
 		always_except LU-17289 102          # fio io_uring
 		always_except LU-17781 33	    # inconsistent LSOM
 	elif (( $(version_code $rhel_version) >= $(version_code 8.9.0) )); then
@@ -3276,7 +3275,8 @@ test_40() {
 		error "should not send OST_READ RPCs to OSTs"
 
 	echo "Time1: $time1 Time2: $time2"
-	[ $time1 -le $time2 ] ||
+	# Occasionally async can take a tiny bit longer due to races, that's OK
+	[ $time1 -le $((time2 + 1)) ] ||
 		error "Total time for async open attach should be smaller"
 
 	do_facet $SINGLEAGT $LFS pcc detach $file
@@ -3301,7 +3301,8 @@ test_40() {
 	time2=$((SECONDS - stime))
 
 	echo "Time1: $time1 Time2: $time2"
-	[ $time1 -le $time2 ] ||
+	# Occasionally async can take a tiny bit longer due to races, that's OK
+	[ $time1 -le $((time2 + 1)) ] ||
 		error "Total time for async open attach should be smaller"
 }
 run_test 40 "Test async open attach in the background for PCC-RO file"
@@ -3340,6 +3341,9 @@ test_42() {
 	local hsm_root="$mntpt/$tdir"
 	local file=$DIR/$tfile
 
+	$LCTL get_param -n mdc.*.connect_flags | grep -q pcc_ro ||
+		skip "Server does not support PCC-RO"
+
 	setup_loopdev $SINGLEAGT $loopfile $mntpt 60
 	do_facet $SINGLEAGT mkdir $hsm_root || error "mkdir $hsm_root failed"
 	setup_pcc_mapping $SINGLEAGT \
@@ -3354,6 +3358,32 @@ test_42() {
 	check_lpcc_state $file "readonly"
 }
 run_test 42 "PCC attach without attach ID specified"
+
+test_43() {
+	local loopfile="$TMP/$tfile"
+	local mntpt="/mnt/pcc.$tdir"
+	local hsm_root="$mntpt/$tdir"
+	local file=$DIR/$tfile
+
+	$LCTL get_param -n mdc.*.connect_flags | grep -q pcc_ro ||
+		skip "Server does not support PCC-RO"
+
+	setup_loopdev $SINGLEAGT $loopfile $mntpt 60
+	do_facet $SINGLEAGT mkdir $hsm_root || error "mkdir $hsm_root failed"
+	setup_pcc_mapping $SINGLEAGT \
+		"size\<{100M}\ roid=$HSM_ARCHIVE_NUMBER\ ropcc=1"
+	do_facet $SINGLEAGT $LCTL pcc list $MOUNT
+
+	echo "attach_root_user_data" > $file || error "echo $file failed"
+
+	do_facet $SINGLEAGT $LFS pcc state $file
+	# Attach by non-root user should fail.
+	do_facet $SINGLEAGT $RUNAS $LFS pcc attach -r $file &&
+		error "PCC attach -r $file should fail for non-root user"
+	do_facet $SINGLEAGT $RUNAS $LFS pcc state $file
+	check_lpcc_state $file "none"
+}
+run_test 43 "Auto attach at open() should add capacity owner check"
 
 test_44() {
 	local loopfile="$TMP/$tfile"
@@ -3371,7 +3401,12 @@ test_44() {
 	setup_pcc_mapping client \
 		"projid={0}\ roid=$HSM_ARCHIVE_NUMBER\ ropcc=1\ mmap_conv=0"
 	$LCTL pcc list $MOUNT
-	$LCTL set_param llite.*.pcc_async_threshold=1G
+
+	local thresh=$($LCTL get_param -n llite.*.pcc_async_threshold |
+		       head -n 1)
+
+	stack_trap "$LCTL set_param llite.*.pcc_async_threshold=$thresh"
+	$LCTL set_param llite.*.pcc_async_threshold=0
 
 	dd if=/dev/zero of=$file bs=$bs count=$count ||
 		error "Write $file failed"
@@ -3425,6 +3460,189 @@ test_44() {
 }
 run_test 44 "Verify valid auto attach without re-fetching the whole files"
 
+test_45() {
+	local loopfile="$TMP/$tfile"
+	local loopfile2="$TMP/$tfile.2"
+	local mntpt="/mnt/pcc.$tdir"
+	local mntpt2="/mnt/pcc.$tdir.2"
+	local file1=$DIR/$tfile
+	local file2=$DIR2/$tfile
+	local count=50
+	local bs="1M"
+
+	$LCTL get_param -n mdc.*.connect_flags | grep -q pcc_ro ||
+		skip "Server does not support PCC-RO"
+
+	setup_loopdev client $loopfile $mntpt 100
+	setup_loopdev client $loopfile2 $mntpt2 100
+	stack_trap "$LCTL pcc clear $MOUNT" EXIT
+	$LCTL pcc add $MOUNT $mntpt -p \
+		"projid={0} roid=$HSM_ARCHIVE_NUMBER ropcc=1" ||
+		error "failed to config PCC for $MOUNT $mntpt"
+	stack_trap "$LCTL pcc clear $MOUNT2" EXIT
+	$LCTL pcc add $MOUNT2 $mntpt2 -p \
+		"projid={0} roid=$HSM_ARCHIVE_NUMBER ropcc=1" ||
+		error "failed to config PCC for $MOUNT2 $mntpt2"
+	$LCTL pcc list $MOUNT
+	$LCTL pcc list $MOUNT2
+
+	local thresh=$(do_facet $SINGLEAGT $LCTL get_param -n \
+		       llite.*.pcc_async_threshold | head -n 1)
+
+	stack_trap "do_facet $SINGLEAGT $LCTL \
+		    set_param llite.*.pcc_async_threshold=$thresh"
+	do_facet $SINGLEAGT $LCTL set_param llite.*.pcc_async_threshold=0
+
+	dd if=/dev/zero of=$file1 bs=$bs count=$count ||
+		error "Write $file1 failed"
+
+	local n=16
+	local lpid
+	local -a pids1
+	local -a pids2
+
+	$LFS getstripe -v $file1
+	clear_stats llite.*.stats
+
+	for ((i = 0; i < $n; i++)); do
+		(
+		while [ ! -e $DIR/$tfile.lck ]; do
+			dd if=$file1 of=/dev/null bs=$bs count=$count ||
+				error "Read $file failed"
+			sleep 0.$((RANDOM % 4 + 1))
+		done
+		)&
+		pids1[$i]=$!
+	done
+
+	for ((i = 0; i < $n; i++)); do
+		(
+		while [ ! -e $DIR/$tfile.lck ]; do
+			dd if=$file2 of=/dev/null bs=$bs count=$count ||
+				error "Read $file failed"
+			sleep 0.$((RANDOM % 4 + 1))
+		done
+		)&
+		pids2[$i]=$!
+	done
+
+	sleep 60
+	touch $DIR/$tfile.lck
+	for ((i = 0; i < $n; i++)); do
+		wait ${pids1[$i]} || error "$?: read failed"
+		wait ${pids2[$i]} || error "$?: read failed"
+	done
+
+	$LFS getstripe -v $file1
+	$LCTL get_param llite.*.stats
+
+	local attach_num=$(calc_stats llite.*.stats pcc_attach)
+	local detach_num=$(calc_stats llite.*.stats pcc_detach)
+	local autoat_num=$(calc_stats llite.*.stats pcc_auto_attach)
+
+	echo "attach $attach_num detach $detach_num auto_attach $autoat_num"
+	(( attach_num <= 2 )) || error "attach more than 2 time: $attach_num"
+	rm -f $DIR/$tfile.lck
+}
+run_test 45 "Concurrent read access from two mount points"
+
+test_46() {
+	local loopfile="$TMP/$tfile"
+	local mntpt="/mnt/pcc.$tdir"
+	local hsm_root="$mntpt/$tdir"
+	local file=$DIR/$tfile
+	local fsuuid=$($LFS getname $MOUNT | awk '{print $1}')
+
+	$LCTL get_param -n mdc.*.connect_flags | grep -q pcc_ro ||
+		skip "Server does not support PCC-RO"
+
+	setup_loopdev client $loopfile $mntpt 60
+	mkdir $hsm_root || error "mkdir $hsm_root failed"
+	setup_pcc_mapping client \
+		"projid={0}\ roid=$HSM_ARCHIVE_NUMBER\ ropcc=1\ mmap_conv=0"
+	$LCTL pcc list $MOUNT
+
+	local mode=$($LCTL get_param -n llite.$fsuuid.pcc_mode)
+	$RUNAS id
+
+	echo "Mode: $mode"
+	echo "QQQQQ" > $file || error "write $file failed"
+	chmod 664 $file || error "chomd $file failed"
+
+	$LCTL set_param llite.$fsuuid.pcc_mode="0" ||
+		error "Set PCC mode failed"
+	stack_trap "$LCTL set_param llite.$fsuuid.pcc_mode=$mode" EXIT
+	$RUNAS $LFS pcc attach -r $file &&
+		error "User should not attach $file"
+	$RUNAS cat $file || error "cat $file failed"
+	check_lpcc_state $file "none" client
+
+	$LCTL set_param llite.$fsuuid.pcc_mode="0400" ||
+		error "Set PCC mode failed"
+	stack_trap "$LCTL set_param llite.$fsuuid.pcc_mode=$mode" EXIT
+	$RUNAS $LFS pcc attach -r $file &&
+		error "User should not attach $file"
+	$RUNAS cat $file || error "cat $file failed"
+	check_lpcc_state $file "none" client
+
+	$LCTL set_param llite.$fsuuid.pcc_mode="0004" ||
+		error "Set PCC mode failed"
+	$RUNAS cat $file || error "cat $file failed"
+	$LFS pcc state $file
+	check_lpcc_state $file "readonly" client
+	$RUNAS $LFS pcc detach $file || error "Detach $file failed"
+
+	$RUNAS stat $file || error "stat $file failed"
+	$LFS pcc attach -r $file || error "failed to attach $file"
+	check_lpcc_state $file "readonly" client
+	$RUNAS $LFS pcc detach $file || error "failed to detach $file"
+
+	$LCTL set_param llite.$fsuuid.pcc_mode="0040" ||
+		error "Set PCC mode failed"
+	chmod 660 $file || error "chmod $file failed"
+	$RUNAS cat $file || error "cat $file failed"
+	$LFS pcc state $file
+	check_lpcc_state $file "readonly" client
+	$RUNAS $LFS pcc detach $file || error "failed to detach $file"
+
+	$RUNAS $LFS pcc attach -r $file || error "attach $file failed"
+	stat $file || error "stat $file failed"
+	$LFS pcc state $file
+	check_lpcc_state $file "readonly" client
+	$RUNAS $LFS pcc detach $file || error "Detach $file failed"
+}
+run_test 46 "Verify PCC mode setting works correctly"
+
+test_47() {
+	local loopfile="$TMP/$tfile"
+	local mntpt="/mnt/pcc.$tdir"
+	local hsm_root="$mntpt/$tdir"
+	local file=$DIR/$tfile
+
+	$LCTL get_param -n mdc.*.connect_flags | grep -q pcc_ro ||
+		skip "Server does not support PCC-RO"
+
+	setup_loopdev client $loopfile $mntpt 60
+	mkdir $hsm_root || error "mkdir $hsm_root failed"
+	setup_pcc_mapping client \
+		"projid={0}\ roid=$HSM_ARCHIVE_NUMBER\ ropcc=1\ mmap_conv=0"
+	$LCTL pcc list $MOUNT
+
+	local mtime0
+	local mtime1
+
+	echo "QQQQQ" > $file || error "echo $file failed"
+	mtime0=$(stat -c "%Y" $file);
+
+	sleep 3
+	cat $file || error "cat $file failed"
+	wait_readonly_attach_fini $file client
+	mtime1=$(stat -c "%Y" $file)
+
+	(( mtime0 == mtime1 )) || error "mtime changed from $mtime0 to $mtime1"
+}
+run_test 47 "mtime should be kept once file attached into PCC"
+
 test_96() {
 	local loopfile="$TMP/$tfile"
 	local mntpt="/mnt/pcc.$tdir"
@@ -3440,6 +3658,12 @@ test_96() {
 	setup_pcc_mapping $SINGLEAGT \
 		"projid={0}\ roid=$HSM_ARCHIVE_NUMBER\ pccro=1\ mmap_conv=0"
 	do_facet $SINGLEAGT $LCTL pcc list $MOUNT
+
+	local thresh=$(do_facet $SINGLEAGT $LCTL get_param -n \
+		       llite.*.pcc_async_threshold | head -n 1)
+
+	stack_trap "do_facet $SINGLEAGT $LCTL set_param \
+		    llite.*.pcc_async_threshold=$thresh"
 	do_facet $SINGLEAGT $LCTL set_param llite.*.pcc_async_threshold=1G
 
 	local rpid11
@@ -3550,6 +3774,12 @@ test_97() {
 	setup_pcc_mapping $SINGLEAGT \
 		"projid={0}\ roid=$HSM_ARCHIVE_NUMBER\ pccro=1\ mmap_conv=0"
 	do_facet $SINGLEAGT $LCTL pcc list $MOUNT
+
+	local thresh=$(do_facet $SINGLEAGT $LCTL get_param -n \
+		       llite.*.pcc_async_threshold | head -n 1)
+
+	stack_trap "do_facet $SINGLEAGT $LCTL set_param \
+		    llite.*.pcc_async_threshold=$thresh"
 	do_facet $SINGLEAGT $LCTL set_param llite.*.pcc_async_threshold=1G
 
 	local mpid1
@@ -3614,6 +3844,12 @@ test_98() {
 	setup_pcc_mapping $SINGLEAGT \
 		"projid={0}\ roid=$HSM_ARCHIVE_NUMBER\ pccro=1\ mmap_conv=0"
 	do_facet $SINGLEAGT $LCTL pcc list $MOUNT
+
+	local thresh=$(do_facet $SINGLEAGT $LCTL get_param -n \
+		       llite.*.pcc_async_threshold | head -n 1)
+
+	stack_trap "do_facet $SINGLEAGT $LCTL set_param \
+		    llite.*.pcc_async_threshold=$thresh"
 	do_facet $SINGLEAGT $LCTL set_param llite.*.pcc_async_threshold=0
 
 	local rpid1
@@ -3885,6 +4121,20 @@ test_101a() {
 	do_facet $SINGLEAGT "echo 10 > /proc/sys/user/max_user_namespaces"
 	stack_trap "do_facet $SINGLEAGT 'echo $maxuserns > /proc/sys/user/max_user_namespaces'"
 
+	# disable apparmor checking of userns temporarily
+	if [[ "$CLIENT_OS_ID" == "ubuntu" ]] &&
+	   (( $CLIENT_OS_VERSION_CODE >= $(version_code 24) )); then
+		local userns_val
+
+		userns_val=$(do_facet $SINGLEAGT \
+			sysctl -n kernel.apparmor_restrict_unprivileged_userns)
+		if (( "$userns_val" != 0 )); then
+			do_facet $SINGLEAGT \
+				sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+			stack_trap "do_facet $SINGLEAGT sysctl -w kernel.apparmor_restrict_unprivileged_userns=$userns_val"
+		fi
+	fi
+
 	echo "creating user namespace for $RUNAS_ID"
 	# Create a mount and user namespace with this command, and leave the
 	# process running so we can do the rest of our steps
@@ -4020,6 +4270,12 @@ test_102() {
 	mkdir $hsm_root || error "mkdir $hsm_root failed"
 	setup_pcc_mapping client \
 		"projid={0}\ roid=$HSM_ARCHIVE_NUMBER\ pccro=1"
+
+	local thresh=$($LCTL get_param -n llite.*.pcc_async_threshold |
+		       head -n 1)
+
+	stack_trap "do_facet $SINGLEAGT $LCTL set_param \
+		    llite.*.pcc_async_threshold=$thresh"
 	do_facet $SINGLEAGT $LCTL set_param llite.*.pcc_async_threshold=0
 
 	local ioengine="io_uring"

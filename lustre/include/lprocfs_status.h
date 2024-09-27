@@ -174,7 +174,7 @@ struct lprocfs_counter {
 };
 
 struct lprocfs_percpu {
-	struct lprocfs_counter lp_cntr[0];
+	DECLARE_FLEX_ARRAY(struct lprocfs_counter, lp_cntr);
 };
 
 enum lprocfs_stats_lock_ops {
@@ -211,7 +211,7 @@ struct lprocfs_stats {
 
 	/* has ls_num of counter headers */
 	struct lprocfs_counter_header	*ls_cnt_header;
-	struct lprocfs_percpu		*ls_percpu[0];
+	struct lprocfs_percpu		*ls_percpu[];
 };
 
 #define OPC_RANGE(seg) (seg ## _LAST_OPC - seg ## _FIRST_OPC)
@@ -640,7 +640,6 @@ lprocfs_pinger_recov_seq_write(struct file *file, const char __user *buffer,
 int string_to_size(u64 *size, const char *buffer, size_t count);
 int sysfs_memparse(const char *buffer, size_t count, u64 *val,
 		    const char *defunit);
-char *lprocfs_strnstr(const char *s1, const char *s2, size_t len);
 char *lprocfs_find_named_value(const char *buffer, const char *name,
 				size_t *count);
 void lprocfs_oh_tally(struct obd_histogram *oh, unsigned int value);

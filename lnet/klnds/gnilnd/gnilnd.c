@@ -1,27 +1,16 @@
-/*
- * Copyright (C) 2012 Cray, Inc.
+// SPDX-License-Identifier: GPL-2.0
+
+/* Copyright (C) 2012 Cray, Inc.
  *
  * Copyright (c) 2013, 2017, Intel Corporation.
- *
- *   Author: Nic Henke <nic@cray.com>
- *   Author: James Shimek <jshimek@cray.com>
- *
- *   This file is part of Lustre, http://www.lustre.org.
- *
- *   Lustre is free software; you can redistribute it and/or
- *   modify it under the terms of version 2 of the GNU General Public
- *   License as published by the Free Software Foundation.
- *
- *   Lustre is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with Lustre; if not, write to the Free Software
- *   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
+
+/* This file is part of Lustre, http://www.lustre.org.
+ *
+ * Author: Nic Henke <nic@cray.com>
+ * Author: James Shimek <jshimek@cray.com>
+ */
+
 #include "gnilnd.h"
 
 static int
@@ -2655,7 +2644,7 @@ kgnilnd_startup(struct lnet_ni *ni)
 
 	kgnilnd_tunables_setup(ni);
 
-	if (!ni->ni_interface) {
+	if (!ni->ni_interface || !strlen(ni->ni_interface)) {
 		rc = lnet_ni_add_interface(ni, "ipogif0");
 		if (rc < 0)
 			CWARN("gnilnd failed to allocate ni_interface\n");

@@ -143,8 +143,7 @@ static int ofd_connect_to_next(const struct lu_env *env, struct ofd_device *m,
 	m->ofd_dt_dev.dd_lu_dev.ld_site->ls_top_dev = &m->ofd_dt_dev.dd_lu_dev;
 
 out:
-	if (data)
-		OBD_FREE_PTR(data);
+	OBD_FREE_PTR(data);
 	RETURN(rc);
 }
 
@@ -1588,15 +1587,7 @@ static int ofd_create_hdl(struct tgt_session_info *tsi)
 			if (sync_trans < 0)
 				GOTO(out, rc = sync_trans);
 
-			if (diff <= -OST_MAX_PRECREATE) {
-				/* LU-5648 */
-				CERROR("%s: invalid precreate request for "
-				       DOSTID", last_id %llu. "
-				       "Likely MDS last_id corruption\n",
-				       ofd_name(ofd), POSTID(&oa->o_oi),
-				       ofd_seq_last_oid(oseq));
-				GOTO(out, rc = -EINVAL);
-			} else if (diff < 0) {
+			if (diff < 0) {
 				LCONSOLE(D_INFO,
 					 "%s: MDS LAST_ID "DFID" (%llu) is %lld behind OST LAST_ID "DFID" (%llu), trust the OST\n",
 					 ofd_name(ofd), PFID(&oa->o_oi.oi_fid),
@@ -2486,14 +2477,14 @@ static void ofd_prolong_extent_locks(struct tgt_session_info *tsi,
 				/* bingo */
 				LASSERT(lock->l_export == data->lpa_export);
 				ldlm_lock_prolong_one(lock, data);
-				LDLM_LOCK_PUT(lock);
+				ldlm_lock_put(lock);
 				if (data->lpa_locks_cnt > 0)
 					RETURN_EXIT;
 				/* The lock was destroyed probably lets try
 				 * resource tree. */
 			} else {
 				lock->l_last_used = ktime_get();
-				LDLM_LOCK_PUT(lock);
+				ldlm_lock_put(lock);
 			}
 		}
 	}

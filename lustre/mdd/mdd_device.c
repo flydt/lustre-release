@@ -130,8 +130,7 @@ static int mdd_connect_to_next(const struct lu_env *env, struct mdd_device *m,
 	lu_dev_add_linkage(lud->ld_site, lud);
 
 out:
-	if (data)
-		OBD_FREE(data, sizeof(*data));
+	OBD_FREE(data, sizeof(*data));
 	RETURN(rc);
 }
 
@@ -864,7 +863,9 @@ static int obf_lookup(const struct lu_env *env, struct md_object *p,
 	while (*name == '[')
 		name++;
 
-	sscanf(name, SFID, RFID(f));
+        if (sscanf(name, SFID, RFID(f)) != 3)
+		GOTO(out, rc = -ENOENT);
+
 	if (!fid_is_sane(f))
 		GOTO(out, rc = -ENOENT);
 

@@ -42,6 +42,7 @@ always_except LU-6493  42b
 always_except LU-16515 118c 118d
 always_except LU-8411  407
 always_except LU-17525 56x 56xa 56xb
+always_except LU-18032 119i
 
 if $SHARED_KEY; then
 	always_except LU-14181 64e 64f
@@ -534,7 +535,7 @@ test_17e() {
 	local foo=$DIR/$tdir/$tfile
 	ln -s $foo $foo || error "create symlink failed"
 	ls -l $foo || error "ls -l failed"
-	ls $foo && error "ls not failed" || true
+	ls $foo && error_ignore LU-18093 "ls not failed" || true
 }
 run_test 17e "symlinks: create recursive symlink (should return error)"
 
@@ -1667,6 +1668,8 @@ test_27ce() {
 			osts=$osts","
 		fi
 	done
+
+	echo "$LFS setstripe -o $osts $DIR/$tdir/$tfile"
 	$LFS setstripe -o $osts $DIR/$tdir/$tfile || error "setstripe failed"
 	local getstripe=$($LFS getstripe $DIR/$tdir/$tfile)
 	echo "$getstripe"
@@ -1675,7 +1678,7 @@ test_27ce() {
 	local getstripe_osts=$(echo "$getstripe" | sed -e '1,/obdidx/d' |\
 		awk '{print $1}' | tr '\n' ' ' | sed -e 's/[[:space:]]*$//')
 	[ "$getstripe_osts" = "${osts//,/ }" ] ||
-		error "stripes not on specified OSTs"
+		error "stripes '$getstripe_osts' not on given OSTs ${osts//,/ }"
 
 	dd if=/dev/zero of=$DIR/$tdir/$tfile bs=1M count=4 || error "dd failed"
 }
@@ -1840,8 +1843,13 @@ test_27m() {
 	stack_trap simple_cleanup_common
 	test_mkdir $DIR/$tdir
 	$LFS setstripe -i 0 -c 1 $DIR/$tdir/$tfile.1
-	dd if=/dev/zero of=$DIR/$tdir/$tfile.1 bs=1024 count=$MAXFREE &&
-		error "dd should fill OST0"
+	if check_fallocate_supported $ost1; then
+		fallocate -l ${MAXFREE}k $DIR/$tdir/$tfile.1 &&
+			error "fallocate should fill OST0"
+	else
+		dd if=/dev/zero of=$DIR/$tdir/$tfile.1 bs=1024 count=$MAXFREE &&
+			error "dd should fill OST0"
+	fi
 	i=2
 	while $LFS setstripe -i 0 -c 1 $DIR/$tdir/$tfile.$i; do
 		i=$((i + 1))
@@ -2591,6 +2599,8 @@ test_27Cg() {
 run_test 27Cg "test setstripe with wrong OST idx"
 
 test_27Ci() {
+	[[ $($LCTL get_param mdc.*.import) =~ connect_flags.*overstriping ]] ||
+		skip "server does not support overstriping"
 	local tf=$DIR/$tfile
 
 	stack_trap "rm -f $DIR/$tfile"
@@ -2627,15 +2637,18 @@ test_27Cj() {
 		skip "need MDS >= 2.15.61.76"
 
 	stack_trap "rm -f $DIR/$tfile"
+
+	#check that beyond -32 it fails
+	echo "setstripe -C -33 should fail"
+	$LFS setstripe -C -33 $DIR/$tfile && error "setstripe should fail"
+
 	# start_full_debug_logging
 	# number of stripes created will be 32*ost count
 	$LFS setstripe  -C -32 $DIR/$tfile || error "create $tfile failed"
 	local count=$($LFS getstripe -c $DIR/$tfile)
 	local stripe_cnt=$(($OSTCOUNT * 32))
 	(( $count == $stripe_cnt )) ||
-		error "$DIR/$tfile stripe count $count != $OSTCOUNT"
-	#check that beyond -32 it fails
-	!($LFS setstripe  -C -34 $DIR/$tfile) || error "setstripe should fail"
+		error "$DIR/$tfile stripe count $count != $stripe_cnt"
 }
 run_test 27Cj "overstriping with -C for max values in multiple of targets"
 
@@ -2865,11 +2878,6 @@ test_27J() {
 	(( $MDS1_VERSION > $(version_code 2.12.51) )) ||
 		skip "Need MDS version newer than 2.12.51"
 
-	# skip basic ops on file with foreign LOV tests on 5.12-6.2 kernels
-	# until the filemap_read() issue is fixed by v6.2-rc4-61-g5956592ce337
-	(( $LINUX_VERSION_CODE < $(version_code 5.12.0) ||
-	   $LINUX_VERSION_CODE >= $(version_code 6.2.0) )) ||
-		skip "Need kernel < 5.12.0 or >= 6.2.0 for filemap_read() fix"
 
 	test_mkdir $DIR/$tdir
 	local uuid1=$(cat /proc/sys/kernel/random/uuid)
@@ -2938,14 +2946,19 @@ test_27J() {
 	$LFS setstripe -c 2 $DIR/$tdir/${tfile}2 &&
 		error "$DIR/$tdir/${tfile}2: setstripe should fail"
 
-	# R/W should fail
-	cat $DIR/$tdir/$tfile && error "$DIR/$tdir/$tfile: read should fail"
-	cat $DIR/$tdir/${tfile}2 &&
-		error "$DIR/$tdir/${tfile}2: read should fail"
-	cat /etc/passwd > $DIR/$tdir/$tfile &&
-		error "$DIR/$tdir/$tfile: write should fail"
-	cat /etc/passwd > $DIR/$tdir/${tfile}2 &&
-		error "$DIR/$tdir/${tfile}2: write should fail"
+	# skip basic ops on file with foreign LOV tests on >5.12 kernels
+	(( $LINUX_VERSION_CODE < $(version_code 5.12.0) )) && {
+		# kernel >= 5.12.0 would skip filemap_read() with 0 sized file
+		# R/W should fail
+		cat $DIR/$tdir/$tfile &&
+			error "$DIR/$tdir/$tfile: read should fail"
+		cat $DIR/$tdir/${tfile}2 &&
+			error "$DIR/$tdir/${tfile}2: read should fail"
+		cat /etc/passwd > $DIR/$tdir/$tfile &&
+			error "$DIR/$tdir/$tfile: write should fail"
+		cat /etc/passwd > $DIR/$tdir/${tfile}2 &&
+			error "$DIR/$tdir/${tfile}2: write should fail"
+	}
 
 	# chmod should work
 	chmod 222 $DIR/$tdir/$tfile ||
@@ -3517,13 +3530,18 @@ test_27R() {
 run_test 27R "test max_stripecount limitation when stripe count is set to -1"
 
 test_27T() {
+	(( $OST1_VERSION >= $(version_code 2.14.57.71) )) ||
+		skip "need ost1 >= v2_14_57-71-g73d5ee7033 for ENOSPC fix"
 	[ $(facet_host client) == $(facet_host ost1) ] &&
 		skip "need ost1 and client on different nodes"
 
-#define OBD_FAIL_OSC_NO_GRANT            0x411
-	$LCTL set_param fail_loc=0x20000411 fail_val=1
-#define OBD_FAIL_OST_ENOSPC              0x215
-	do_facet ost1 "$LCTL set_param fail_loc=0x80000215"
+	# CFS_FAIL_ONCE is needed to get cfs_fail_count reset
+	#define OBD_FAIL_OSC_NO_GRANT            0x411
+	#define CFS_FAIL_SKIP                    0x20000000
+	#define CFS_FAIL_ONCE                    0x80000000
+	$LCTL set_param fail_loc=0xa0000411 fail_val=1
+	#define OBD_FAIL_OST_ENOSPC_VALID        0x255
+	do_facet ost1 "$LCTL set_param fail_loc=0x80000255"
 	$LFS setstripe -i 0 -c 1 $DIR/$tfile
 	# DIO does not support partial writes to a single stripe - a write to
 	# each stripe will fail or succeed entirely.  So we disable hybrid IO
@@ -3531,8 +3549,17 @@ test_27T() {
 	local hybrid=$($LCTL get_param -n llite.*.hybrid_io)
 	$LCTL set_param llite.*.hybrid_io=0
 	stack_trap "$LCTL set_param -n llite.*.hybrid_io=$hybrid" EXIT
-	$MULTIOP $DIR/$tfile oO_WRONLY:P$((4 * 1024 * 1024 + 10 * 4096))c ||
+
+	local pagesz=$(getconf PAGESIZE)
+	local pagenr=$($LCTL get_param -n osc.*-OST0000-*.max_pages_per_rpc)
+
+	$MULTIOP $DIR/$tfile oO_WRONLY:P$(((pagenr + 10) * pagesz))c ||
 		error "multiop failed"
+	(( $(stat -c '%s' $DIR/$tfile) == pagenr * pagesz )) ||
+		error "wrong size"
+
+	# this is to reset cfs_fail_count and to clear ar_force_sync flags
+	$MULTIOP $DIR/$tfile oO_WRONLY:w${pagesz}c
 }
 run_test 27T "no eio on close on partial write due to enosp"
 
@@ -3633,6 +3660,56 @@ test_27V() {
 	return 0
 }
 run_test 27V "creating widely striped file races with deactivating OST"
+
+test_27W() {
+	[[ $($LCTL get_param mdc.*.import) =~ connect_flags.*overstriping ]] ||
+		skip "server does not support overstriping"
+	[ $PARALLEL == "yes" ] && skip "skip parallel run"
+	local stripe_count
+	local defcount=4
+
+	# Set back to unrestricted
+	stack_trap "$LCTL set_param llite.$FSNAME-*.enable_setstripe_gid=-1"
+
+	mkdir $DIR/$tdir
+	# Set a default layout
+	$LFS setstripe -C $defcount $DIR/$tdir || error "(0) root failed to set default layout"
+
+	chmod a+rw $DIR
+	chmod a+rw $DIR/$tdir
+	# Verify this works normally
+	$RUNAS $LFS setstripe -c 1 $DIR/$tdir/$tfile || error "(1) failed to setstripe"
+	rm -f $DIR/$tdir/$tfile
+
+	# Limit to CAP_SYS_RESOURCE
+	$LCTL set_param llite.$FSNAME-*.enable_setstripe_gid=0
+	# Prints a messsage, but will use the default layout for the directory
+	# This is so scripts which use setstripe and don't check error will not fail
+	$RUNAS $LFS setstripe -c 1 $DIR/$tdir/$tfile || error "(2) setstripe failed"
+	# Verify default layout was used on file:
+	stripe_count=$($LFS getstripe -c $DIR/$tdir/$tfile)
+	((stripe_count == defcount)) ||
+		error "(3) got stripe_count '$stripe_count', expected $defcount"
+	rm -f $DIR/$tdir/$tfile
+
+	# Allow for RUNAS group
+	$LCTL set_param llite.$FSNAME-*.enable_setstripe_gid=$RUNAS_GID
+	$RUNAS $LFS setstripe -c 1 $DIR/$tdir/$tfile || error "(4) failed to setstripe"
+	# Confirm we did not use the default layout
+	stripe_count=$($LFS getstripe -c $DIR/$tdir/$tfile)
+	((stripe_count == 1)) || error "(5) got stripe_count '$stripe_count', expected 1"
+	rm -f $DIR/$tdir/$tfile
+
+	# Set to some other GID
+	$LCTL set_param llite.$FSNAME-*.enable_setstripe_gid=1
+	# Should give warning and succeed
+	$RUNAS $LFS setstripe -c 1 $DIR/$tdir/$tfile || error "(6) setstripe failed"
+	# Confirm we used default layout
+	stripe_count=$($LFS getstripe -c $DIR/$tdir/$tfile)
+	((stripe_count == defcount)) ||
+		error "(7) got stripe_count '$stripe_count', expected $defcount"
+}
+run_test 27W "test enable_setstripe_gid"
 
 # createtest also checks that device nodes are created and
 # then visible correctly (#2091)
@@ -5486,6 +5563,23 @@ test_39s() {
 }
 run_test 39s "relatime is supported"
 
+test_39u() {
+	touch $DIR/$tfile
+	sleep 2
+	dd if=/dev/zero of=$DIR/$tfile bs=1M count=1 conv=notrunc ||
+		error "dd failed"
+
+	#define OBD_FAIL_LLITE_STAT_RACE1			0x1434
+	$LCTL set_param fail_loc=0x80001434
+
+	local mtimes=($(stat -c "%Y" $DIR/$tfile &
+			sleep 1; stat -c "%Y" $DIR/$tfile; wait))
+
+	(( ${mtimes[0]} == ${mtimes[1]} )) ||
+		error "mtime mismatch ${mtimes[0]} != ${mtimes[1]}"
+}
+run_test 39u "stat race"
+
 test_40() {
 	dd if=/dev/zero of=$DIR/$tfile bs=4096 count=1
 	$RUNAS $OPENFILE -f O_WRONLY:O_TRUNC $DIR/$tfile &&
@@ -5831,6 +5925,138 @@ test_44a() {
 	done
 }
 run_test 44a "test sparse pwrite ==============================="
+
+test_44b() {
+	(( $OST1_VERSION >= $(version_code 2.15.61.137) )) ||
+		skip "Need OST >= 2.15.61.137 for large object handling"
+
+	$LFS setstripe -c 1 $DIR/$tfile || error "setstripe failed"
+	local off=$((2**32*4096-8192))
+	dd if=/dev/zero of=$DIR/$tfile bs=1 count=1 seek=$off conv=notrunc ||
+		error "dd failed"
+	cancel_lru_locks osc
+	$CHECKSTAT -s $((2**32*4096-8192+1)) $DIR/$tfile || error "wrong size"
+}
+run_test 44b "write one byte at offset 0xfffffffe000"
+
+test_44c() {
+	(( $OST1_VERSION >= $(version_code 2.15.61.137) )) ||
+		skip "Need OST >= 2.15.61.137 for large object handling"
+
+	local osc_tgt="$FSNAME-OST0000-osc-$($LFS getname -i $DIR)"
+	local max_object_bytes=$(import_param $osc_tgt max_object_bytes)
+
+	$LFS setstripe -c 1 $DIR/$tfile || error "setstripe failed"
+
+	dd if=/dev/zero of=$DIR/$tfile conv=notrunc bs=1 count=1 \
+		seek=$((max_object_bytes - 1)) || error "dd failed"
+	cancel_lru_locks osc
+	$CHECKSTAT -s $max_object_bytes $DIR/$tfile || error "wrong size"
+}
+run_test 44c "write 1 byte at max_object_bytes - 1 offset"
+
+test_44d() {
+	(( $OST1_VERSION >= $(version_code 2.15.61.137) )) ||
+		skip "Need OST >= 2.15.61.137 for large object handling"
+
+	local osc_tgt="$FSNAME-OST0000-osc-$($LFS getname -i $DIR)"
+	local max_object_bytes=$(import_param $osc_tgt max_object_bytes)
+
+	$LFS setstripe -c 2 $DIR/$tfile || error "setstripe failed"
+
+	local stripe_size=$($LFS getstripe -S $DIR/$tfile)
+	local off=$((max_object_bytes & ~(stripe_size - 1)))
+
+	$TRUNCATE $DIR/$tfile $off
+	dd if=/dev/zero of=$DIR/$tfile bs=1 count=1 seek=$off
+	local rc1=$?
+	dd if=/dev/zero of=$DIR/$tfile oflag=append conv=notrunc bs=1 count=1 \
+		seek=$off
+	local rc2=$?
+	[[ $rc1 -eq 0 && $rc2 -eq 0 ]] || error "one of dd commands failed"
+}
+run_test 44d "if write at position fails (EFBIG), so should do append"
+
+# write file until maximal size is reached
+max_file_size() {
+	local file=$1
+
+	off=1
+	minoff=1
+	while true; do
+		echo a | dd of=$1 bs=1 count=1 conv=notrunc seek=$off status=progress \
+			2>/dev/null
+		[[ $? -ne 0 ]] && break
+		minoff=$off
+		off=$(echo "$off * 2" | bc)
+	done
+	maxoff=$off
+	minoff_1=$(echo $off + 1 | bc)
+	while [[ maxoff -ne minoff_1 ]]; do
+		off=$(echo "($maxoff + $minoff) / 2" | bc)
+		echo a | dd of=$1 bs=1 count=1 conv=notrunc seek=$off status=progress \
+			2>/dev/null
+		[[ $? -eq 0 ]] && minoff=$off || maxoff=$off
+		minoff_1=$(echo $off + 1 | bc)
+	done
+	stat -c %s $file
+}
+
+test_44e_write_read()
+{
+	local ifile=$1
+	local ofile=$2
+	local stripe_count=$3
+	local stripe_size=$($LFS getstripe -S $ofile)
+	local file_size=$(max_file_size $ofile)
+	local write_count=$((stripe_count * stripe_size))
+	local offset=$((file_size - write_count))
+
+	dd if=/dev/urandom of=$ifile bs=$write_count count=1 ||
+		error "failed to write random data"
+
+	dd if=$ifile of=$ofile bs=$write_count count=1 oflag=seek_bytes \
+		seek=$offset conv=notrunc || error "dd failed"
+	cancel_lru_locks osc
+	cmp $ifile $ofile -i 0:$offset -n $write_count || error "cmp failed"
+}
+
+test_44e() {
+	(( $OST1_VERSION >= $(version_code 2.15.61.137) )) ||
+		    skip "Need OST >= 2.15.61.137 for large object handling"
+
+	local TF="$(mktemp --tmpdir -u $tfile.XXXXXX)"
+
+	$LFS setstripe -S 1M -c $OSTCOUNT $DIR/$tfile ||
+		error "lfs setstripe -S 1M -c $OSTCOUNT failed"
+	test_44e_write_read $TF $DIR/$tfile $OSTCOUNT
+	rm -f $DIR/$tfile
+	rm -f $TF
+
+	$LFS setstripe -S 1M -c $OSTCOUNT -C $((OSTCOUNT * 2)) $DIR/$tfile ||
+		error "lfs setstripe -S 1M -c $OSTCOUNT -C [* 2] failed"
+	test_44e_write_read $TF $DIR/$tfile $((OSTCOUNT * 2))
+
+	rm -f $DIR/$tfile
+	rm -f $TF
+}
+run_test 44e "write and read maximal stripes"
+
+test_44f() {
+	[ "$FSTYPE" != "zfs" ] ||
+		skip "ORI-366/LU-1941: FIEMAP unimplemented on ZFS"
+
+	local i
+	# required space: NUMFILES_44f * 20Mb
+	local NUMFILES_44f=${NUMFILES_44f:-50}
+
+	for (( i=0; i<NUMFILES_44f; i++ )); do
+		multiop $DIR/$tfile-$i \
+			Ow10485760Z10485760w10485760Ic ||
+			error "multiop failed"
+	done
+}
+run_test 44f "Check fiemap for sparse files"
 
 dirty_osc_total() {
 	tot=0
@@ -7476,14 +7702,14 @@ test_56rd() {
 
 	mkfifo $dir/fifo || error "failed to create fifo file"
 	$LFS find $dir -t p --printf "%p %y %LP\n" ||
-		error "should not fail even cannot get projid from pipe file"
+		error "should not fail when getting projid from pipe file"
 	found=$($LFS find $dir -t p --printf "%y")
 	[[ "p" == $found ]] || error "found $found, expect p"
 
 	mknod $dir/chardev c 1 5 ||
 		error "failed to create character device file"
 	$LFS find $dir -t c --printf "%p %y %LP\n" ||
-		error "should not fail even cannot get projid from chardev file"
+		error "should not fail when getting projid from chardev file"
 	found=$($LFS find $dir -t c --printf "%y")
 	[[ "c" == $found ]] || error "found $found, expect c"
 
@@ -9115,6 +9341,35 @@ test_56ea() { #LU-10378
 }
 run_test 56ea "test lfs find -printf option"
 
+test_56eaa() {
+	local lfs_find=($($LFS find $DIR -printf "%i %u %g %M %p\n" | sort -n))
+	local normal_find=($(find $DIR -printf "%i %u %g %M %p\n" | sort -n))
+
+	echo "comparing ${#normal_find[@]} elements starting with:"
+	echo "lfs: ${lfs_find[0]} ${lfs_find[1]} ${lfs_find[2]} ${lfs_find[3]} ${lfs_find[4]}"
+	echo "find: ${normal_find[0]} ${normal_find[1]} ${normal_find[2]} ${normal_find[3]} ${normal_find[4]}"
+
+	for ((i = 0; i < ${#normal_find[@]}; i++)); do
+		if [[ "${lfs_find[i]}" != "${normal_find[i]}" ]]; then
+			error "expected '${normal_find[i]}' but got '${lfs_find[i]}' from file ${lfs_find[$((i - (i % 5) + 4))]}"
+		fi
+	done
+}
+run_test 56eaa "test lfs find -printf added functions"
+
+test_56eab() {
+	touch $DIR/$tfile
+	local lfs_ls=($($LFS find $DIR -name $tfile -ls))
+	local find_ls=($(find $DIR -name $tfile -ls))
+
+# "-1" is last field, since dates are not printed exactly the same.
+	for ((i = -1; i < 7; i++)); do
+		[[ "${lfs_ls[i]}" == "${find_ls[i]}" ]] ||
+			error "expected '${lfs_ls[i]}' but got '${find_ls[i]}'"
+	done
+}
+run_test 56eab "test lfs find -ls function"
+
 test_56eb() {
 	local dir=$DIR/$tdir
 	local subdir_1=$dir/subdir_1
@@ -9140,6 +9395,14 @@ test_56eb() {
 		error "symlink should not have stripe info"
 }
 run_test 56eb "check lfs getstripe on symlink"
+
+test_56ebb() {
+
+	mkdir $DIR/$tdir
+	mkfifo $DIR/$tdir/$tfile-fifo
+	$LFS getdirstripe -r $DIR/$tdir || error "$LFS getdirstripe -r: $DIR"
+}
+run_test 56ebb "check $LFS getdirstripe for FIFO file"
 
 test_56ec() {
 	[[ $OSTCOUNT -lt 2 ]] && skip_env "needs >= 2 OSTs"
@@ -9469,6 +9732,55 @@ test_56eh() {
 	done
 }
 run_test 56eh "check lfs find --skip"
+
+test_56ei() {
+	(( $MDS1_VERSION >= $(version_code 2.15.64.110) )) ||
+		skip "need MDS >= v2_15_64-110-g501e5b2c8a for special projid"
+	local path=$DIR/$tdir
+	local projid=1234
+	local expected_count=3
+
+	# Create test dir containing:
+	# - regular file, with default projid
+	# - regular file, with unique projid
+	# - symbolic link, with unique projid
+	# - special char dev file, with unique projid
+	test_mkdir $path || error "mkdir $path failed"
+	touch $path/file0 $path/file$projid || error "touch failed"
+	ln -s $path/file$projid $path/link$projid
+	mknod $path/char$projid c 1 3
+	$LFS project -p $projid -s $path/file$projid
+	$LFS project -p $projid -s $path/link$projid
+	$LFS project -p $projid -s $path/char$projid
+	stack_trap "rm -rf $path" EXIT
+
+	$LFS project -r $path/
+	echo -e "Actual output:\n$($LFS find $path --printf '%LP %p\n')"
+
+	# Find all files and print their projids along with their path; count
+	found_count=$($LFS find $path --printf "%LP %p\n" |
+		grep -E "$projid $path/(link|char|file)$projid" | wc -l)
+	echo -e "found_count: $found_count"
+	[[ $found_count == $expected_count ]] ||
+		error "Did not find any entries with expected projid $projid"
+}
+run_test 56ei "test lfs find --printf prints correct projid for special files"
+
+test_56ej() {
+	test_mkdir $DIR/$tdir.src ||
+		error "mkdir failed on $DIR/$tdir.src"
+	test_mkdir $DIR/$tdir.dest ||
+		error "mkdir failed on $DIR/$tdir.dest"
+	local f_mgrt=$DIR/$tdir.dest/$tfile.mgrt
+
+	$LFS setstripe -o 1 $DIR/$tdir.src
+	$LFS setstripe -o 0 $DIR/$tdir.dest
+	dd if=/dev/random of=$f_mgrt bs=1M count=1
+
+	$LFS migrate  --non-block --copy $DIR/$tdir.src $f_mgrt ||
+		error "migrate remote dir error $DIR/$tdir.src $f_mgrt"
+}
+run_test 56ej "lfs migration --non-block copy"
 
 test_57a() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
@@ -10007,13 +10319,6 @@ test_64c() {
 	$LCTL set_param osc.*OST0000-osc-[^mM]*.cur_grant_bytes=0
 }
 run_test 64c "verify grant shrink"
-
-import_param() {
-	local tgt=$1
-	local param=$2
-
-	$LCTL get_param osc.$tgt.import | awk "/$param/ { print \$2 }"
-}
 
 # this does exactly what osc_request.c:osc_announce_cached() does in
 # order to calculate max amount of grants to ask from server
@@ -11518,6 +11823,8 @@ check_filefrag_77n() {
 }
 
 test_77n() {
+	local filefrag_op=$(filefrag -l 2>&1 | grep "invalid option")
+	[[ -z "$filefrag_op" ]] || skip_env "filefrag missing logical ordering"
 	[[ "$CKSUM_TYPES" =~ t10 ]] || skip "no T10 checksum support on osc"
 
 	touch $DIR/$tfile
@@ -13430,8 +13737,7 @@ test_105f() {
 run_test 105f "Enqueue same range flocks"
 
 test_105g() {
-
-	(( $CLIENT_VERSION >= $(version_code 2.15.63.127) )) ||
+	(( $CLIENT_VERSION >= $(version_code 2.15.64.117) )) ||
 		skip "Need Client >= 2.15.63.127 for ldlm dump stack"
 
 	flock_is_enabled || skip_env "mount w/o flock enabled"
@@ -14461,6 +14767,8 @@ test_119h()
 }
 run_test 119h "basic tests of memory unaligned dio"
 
+# Unaligned AIO is disabled and may not be reenabled
+# See LU-18032
 # aiocp with the '-a' option makes testing memory unaligned aio trivial
 test_119i()
 {
@@ -16177,20 +16485,14 @@ test_129() {
 run_test 129 "test directory size limit ========================"
 
 OLDIFS="$IFS"
-cleanup_130() {
-	trap 0
-	IFS="$OLDIFS"
-	rm -f $DIR/$tfile
-}
-
 test_130a() {
-	local filefrag_op=$(filefrag -e 2>&1 | grep "invalid option")
-	[[ -z "$filefrag_op" ]] || skip_env "filefrag does not support FIEMAP"
-
-	trap cleanup_130 EXIT RETURN
+	local filefrag_op=$(filefrag -l 2>&1 | grep "invalid option")
+	[[ -z "$filefrag_op" ]] || skip_env "filefrag missing logical ordering"
 
 	local fm_file=$DIR/$tfile
+
 	$LFS setstripe -S 65536 -c 1 $fm_file || error "setstripe on $fm_file"
+	stack_trap "rm -f $fm_file"
 	dd if=/dev/zero of=$fm_file bs=65536 count=1 ||
 		error "dd failed for $fm_file"
 
@@ -16204,25 +16506,22 @@ test_130a() {
 	filefrag_op=$(filefrag -ve -k $fm_file |
 		      sed -n '/ext:/,/found/{/ext:/d; /found/d; p}')
 	local lun=$($LFS getstripe -i $fm_file)
-
 	local start_blk=$(echo $filefrag_op | cut -d: -f2 | cut -d. -f1)
-	IFS=$'\n'
 	local tot_len=0
-	for line in $filefrag_op; do
+
+	while read line; do
 		local frag_lun=$(echo $line | cut -d: -f5)
 		local ext_len=$(echo $line | cut -d: -f4)
 
-		if (( $frag_lun != $lun )); then
-			error "FIEMAP on 1-stripe file($fm_file) failed"
-			return
-		fi
+		(( $frag_lun == $lun )) ||
+			error "OST$lun was reported on OST$frag_lun"
 		(( tot_len += ext_len ))
-	done
+	done <<< "$filefrag_op"
 
-	if (( lun != frag_lun || start_blk != 0 || tot_len != 64 )); then
-		error "FIEMAP on 1-stripe file($fm_file) failed"
-		return
-	fi
+	(( start_blk == 0 )) ||
+		error "OST$last_lun start_blk $start_blk != 0"
+	(( tot_len == 64 )) ||
+		error "OST$last_lun $tot_len != 64"
 
 	echo "FIEMAP on single striped file succeeded"
 }
@@ -16236,13 +16535,13 @@ test_130b() {
 	[[ "$ost1_FSTYPE" != "zfs" ]] ||
 		skip "LU-1941: FIEMAP unimplemented on ZFS"
 
-	trap cleanup_130 EXIT RETURN
-
 	local fm_file=$DIR/$tfile
 	$LFS setstripe -S 65536 -c $OSTCOUNT $fm_file ||
 		error "setstripe on $fm_file"
+	stack_trap "rm -f $fm_file"
 
-	dd if=/dev/zero of=$fm_file bs=1M count=$OSTCOUNT ||
+	local actual_stripe_count=$($LFS getstripe -c $fm_file)
+	dd if=/dev/zero of=$fm_file bs=1M count=$actual_stripe_count ||
 		error "dd failed on $fm_file"
 
 	filefrag -ves $fm_file || error "filefrag $fm_file failed"
@@ -16251,31 +16550,27 @@ test_130b() {
 
 	local last_lun=$(echo $filefrag_op | cut -d: -f5 |
 			 sed -e 's/^[ \t]*/0x/' | sed -e 's/0x0x/0x/')
-
-	IFS=$'\n'
 	local tot_len=0
 	local num_luns=1
 
-	for line in $filefrag_op; do
+	while read line; do
 		local frag_lun=$(echo $line | cut -d: -f5 |
 				 sed -e 's/^[ \t]*/0x/' | sed -e 's/0x0x/0x/')
 		local ext_len=$(echo $line | cut -d: -f4)
 		if (( $frag_lun != $last_lun )); then
-			if (( tot_len != 1024 )); then
-				error "FIEMAP on $fm_file failed; returned len $tot_len for OST $last_lun instead of 1024"
-				return
-			else
-				(( num_luns += 1 ))
-				tot_len=0
-			fi
+			(( tot_len == 1024 )) ||
+				error "OST$last_lun $tot_len != 1024"
+			(( num_luns += 1 ))
+			tot_len=0
 		fi
 		(( tot_len += ext_len ))
 		last_lun=$frag_lun
-	done
-	if (( num_luns != $OSTCOUNT || tot_len != 1024 )); then
-		error "FIEMAP on $fm_file failed; returned wrong number of luns or wrong len for OST $last_lun"
-		return
-	fi
+	done <<< "$filefrag_op"
+
+	(( num_luns == $actual_stripe_count )) ||
+		error "OST$last_lun $num_luns != $actual_stripe_count"
+	(( tot_len == 1024 )) ||
+		error "OST$last_lun $tot_len != 1024"
 
 	echo "FIEMAP on $OSTCOUNT-stripe file succeeded"
 }
@@ -16289,10 +16584,9 @@ test_130c() {
 	[[ "$ost1_FSTYPE" != "zfs" ]] ||
 		skip "LU-1941: FIEMAP unimplemented on ZFS"
 
-	trap cleanup_130 EXIT RETURN
-
 	local fm_file=$DIR/$tfile
 	$LFS setstripe -S 65536 -c 2 $fm_file || error "setstripe on $fm_file"
+	stack_trap "rm -f $fm_file"
 
 	dd if=/dev/zero of=$fm_file seek=1 bs=1M count=1 ||
 		error "dd failed on $fm_file"
@@ -16303,35 +16597,29 @@ test_130c() {
 
 	local last_lun=$(echo $filefrag_op | cut -d: -f5 |
 			 sed -e 's/^[ \t]*/0x/' | sed -e 's/0x0x/0x/')
-
-	IFS=$'\n'
 	local tot_len=0
 	local num_luns=1
-	for line in $filefrag_op; do
+
+	while read line; do
 		local frag_lun=$(echo $line | cut -d: -f5 |
 				 sed -e 's/^[ \t]*/0x/' | sed -e 's/0x0x/0x/')
 		local ext_len=$(echo $line | cut -d: -f4)
 		if (( $frag_lun != $last_lun )); then
 			local logical=$(echo $line | cut -d: -f2 | cut -d. -f1)
-			if (( logical != 512 )); then
-				error "FIEMAP on $fm_file failed; returned logical start for lun $logical instead of 512"
-				return
-			fi
-			if (( tot_len != 512 )); then
-				error "FIEMAP on $fm_file failed; returned len $tot_len for OST $last_lun instead of 1024"
-				return
-			else
-				(( num_luns += 1 ))
-				tot_len=0
-			fi
+			(( logical == 512 )) ||
+				error "OST$last_lun logical start $logical != 512"
+			(( tot_len == 512 )) ||
+				error "OST$last_lun $tot_len != 512"
+			(( num_luns += 1 ))
+			tot_len=0
 		fi
 		(( tot_len += ext_len ))
 		last_lun=$frag_lun
-	done
-	if (( num_luns != 2 || tot_len != 512 )); then
-		error "FIEMAP on $fm_file failed; returned wrong number of luns or wrong len for OST $last_lun"
-		return
-	fi
+	done <<< "$filefrag_op"
+	(( num_luns == 2 )) ||
+		error "OST$last_lun $num_luns != 2"
+	(( tot_len == 512 )) ||
+		error "OST$last_lun $tot_len != 512"
 
 	echo "FIEMAP on 2-stripe file with hole succeeded"
 }
@@ -16345,11 +16633,10 @@ test_130d() {
 	[[ "$ost1_FSTYPE" != "zfs" ]] ||
 		skip "LU-1941: FIEMAP unimplemented on ZFS"
 
-	trap cleanup_130 EXIT RETURN
-
 	local fm_file=$DIR/$tfile
 	$LFS setstripe -S 65536 -c $OSTCOUNT $fm_file ||
 			error "setstripe on $fm_file"
+	stack_trap "rm -f $fm_file"
 
 	local actual_stripe_count=$($LFS getstripe -c $fm_file)
 	dd if=/dev/zero of=$fm_file bs=1M count=$actual_stripe_count ||
@@ -16361,30 +16648,27 @@ test_130d() {
 
 	local last_lun=$(echo $filefrag_op | cut -d: -f5 |
 			 sed -e 's/^[ \t]*/0x/' | sed -e 's/0x0x/0x/')
-
-	IFS=$'\n'
 	local tot_len=0
 	local num_luns=1
-	for line in $filefrag_op; do
+
+	while read line; do
 		local frag_lun=$(echo $line | cut -d: -f5 |
 				 sed -e 's/^[ \t]*/0x/' | sed -e 's/0x0x/0x/')
 		local ext_len=$(echo $line | cut -d: -f4)
 		if (( $frag_lun != $last_lun )); then
-			if (( tot_len != 1024 )); then
-				error "FIEMAP on $fm_file failed; returned len $tot_len for OST $last_lun instead of 1024"
-				return
-			else
-				(( num_luns += 1 ))
-				local tot_len=0
-			fi
+			(( tot_len == 1024 )) ||
+				error "OST$last_lun $tot_len != 1024"
+			(( num_luns += 1 ))
+			tot_len=0
 		fi
 		(( tot_len += ext_len ))
 		last_lun=$frag_lun
-	done
-	if (( num_luns != actual_stripe_count || tot_len != 1024 )); then
-		error "FIEMAP on $fm_file failed; returned wrong number of luns or wrong len for OST $last_lun"
-		return
-	fi
+	done <<< "$filefrag_op"
+
+	(( num_luns == actual_stripe_count )) ||
+		error "OST$last_lun $num_luns != $actual_stripe_count"
+	(( tot_len == 1024 )) ||
+		error "OST$last_lun $tot_len != 1024"
 
 	echo "FIEMAP on N-stripe file succeeded"
 }
@@ -16397,8 +16681,6 @@ test_130e() {
 	[[ -z "$filefrag_op" ]] || skip_env "filefrag missing logical ordering"
 	[[ "$ost1_FSTYPE" != "zfs" ]] ||
 		skip "LU-1941: FIEMAP unimplemented on ZFS"
-
-	trap cleanup_130 EXIT RETURN
 
 	local fm_file=$DIR/$tfile
 	$LFS setstripe -S 131072 -c 2 $fm_file || error "setstripe on $fm_file"
@@ -16416,27 +16698,25 @@ test_130e() {
 		      sed -n '/ext:/,/found/{/ext:/d; /found/d; p}')
 
 	local last_lun=$(echo $filefrag_op | cut -d: -f5)
-
-	IFS=$'\n'
 	local tot_len=0
 	local num_luns=1
-	for line in $filefrag_op; do
+
+	while read line; do
 		local frag_lun=$(echo $line | cut -d: -f5)
 		local ext_len=$(echo $line | cut -d: -f4)
 		if (( $frag_lun != $last_lun )); then
-			if (( tot_len != $expected_len )); then
+			(( tot_len == $expected_len )) ||
 				error "OST$last_lun $tot_len != $expected_len"
-			else
-				(( num_luns += 1 ))
-				tot_len=0
-			fi
+			(( num_luns += 1 ))
+			tot_len=0
 		fi
 		(( tot_len += ext_len ))
 		last_lun=$frag_lun
-	done
-	if (( num_luns != 2 || tot_len != $expected_len )); then
-		error "OST$last_lun $num_luns != 2, $tot_len != $expected_len"
-	fi
+	done <<< "$filefrag_op"
+	(( num_luns == 2 )) ||
+		error "OST$last_lun $num_luns != 2"
+	(( tot_len == $expected_len )) ||
+		error "OST$last_lun $tot_len != $expected_len"
 
 	echo "FIEMAP with continuation calls succeeded"
 }
@@ -18018,6 +18298,40 @@ test_154e()
 }
 run_test 154e ".lustre is not returned by readdir"
 
+test_154ea()
+{
+	stack_trap "rm -rf $MOUNT/[abcdeg]*" EXIT
+
+	# long specially selected names are to displace .lustre out of
+	# first directory block
+	touch $MOUNT/$(printf "a%0100x" 6)
+	for i in 11 15
+	do
+	    touch $MOUNT/$(printf "a%0254x" $i)
+	done
+	touch $MOUNT/$(printf "b%0254x" $i)
+	for i in 16 6 7
+	do
+	    touch $MOUNT/$(printf "c%0254x" $i)
+	done
+	for i in 4 10 8
+	do
+	    touch $MOUNT/$(printf "d%0254x" $i)
+	done
+	for i in 1 14
+	do
+	    touch /mnt/lustre/$(printf "e%0254x" $i)
+	done
+	for i in 13 14
+	do
+	    touch /mnt/lustre/$(printf "g%0254x" $i)
+	done
+	if ls -a $MOUNT | grep -q '^\.lustre$'; then
+	    error ".lustre returned by readdir"
+	fi
+}
+run_test 154ea ".lustre is not returned by readdir (2)"
+
 test_154f() {
 	[ -n "$FILESET" ] && skip "SKIP due to FILESET set"
 
@@ -18127,6 +18441,33 @@ test_154h()
 	$LFS rmfid $DIR "$fid" || error "rmfid failed for $fid"
 }
 run_test 154h "Verify interactive path2fid"
+
+test_154i()
+{
+	local long=thislongpathnameisforaverydeepsubdirthatwewanttotestagainst
+	local depth
+	local path
+	local max
+	local fid
+
+	mkdir -p $DIR/$tdir
+	cd $DIR/$tdir
+
+	# create a directory tree with full path longer than PATH_MAX=4096
+	max=$((4096 / $(wc -c <<< $long) + 5))
+	for (( depth = 0; depth <= max; depth++)); do
+		mkdir -v $long$depth || error "mkdir $long$depth failed"
+		cd $long$depth
+	done
+
+	fid=$($LFS path2fid .) || error "path2fid failed"
+	path=$($LFS fid2path $MOUNT $fid) || error "fid2path failed (1)"
+	echo -e "Path for fid $fid is:\n$path"
+
+	path=$($LFS fid2path $(cd ..; pwd) $fid) || error "fid2path failed (2)"
+	echo -e "Path for fid $fid is:\n$path"
+}
+run_test 154i "fid2path for path longer than PATH_MAX"
 
 test_155_small_load() {
     local temp=$TMP/$tfile
@@ -25900,7 +26241,9 @@ test_270h() {
 
 	# DOM component in the middle and has other enries in the same mirror,
 	# should succeed but lost DoM component
-	$LFS setstripe --copy=${dom}_1 $dom ||
+	local fid1=$($LFS path2fid ${dom}_1)
+
+	$LFS setstripe --copy=$fid1 $dom ||
 		error "Can't create file from OST|DOM mirror layout"
 	# check new file has no DoM layout after all
 	[[ $($LFS getstripe -L $dom) != "mdt" ]] ||
@@ -27184,6 +27527,8 @@ test_300l() {
 	$LFS setdirstripe -i 1 -D $DIR/$tdir/striped_dir ||
 		error "set default striped dir failed"
 
+	do_facet mds2 $LCTL set_param mdt.*MDT0001.enable_remote_dir_gid=-1
+	stack_trap "do_facet mds2 $LCTL set_param mdt.*MDT0001.enable_remote_dir_gid=0"
 	#define OBD_FAIL_MDS_STALE_DIR_LAYOUT	 0x158
 	$LCTL set_param fail_loc=0x80000158
 	$RUNAS mkdir $DIR/$tdir/striped_dir/test_dir || error "create dir fails"
@@ -28483,9 +28828,10 @@ test_398d() { #  LU-13846
 	diff $DIR/$tfile $aio_file || error "file diff after aiocp"
 
 	# test memory unaligned aio
-	aiocp -a 512 -b 64M -s 64M -f O_DIRECT $DIR/$tfile $aio_file ||
-		error "unaligned aio failed"
-	diff $DIR/$tfile $aio_file || error "file diff after aiocp"
+	# LU-18032 - unaligned AIO is disabled
+	#aiocp -a 512 -b 64M -s 64M -f O_DIRECT $DIR/$tfile $aio_file ||
+	#	error "unaligned aio failed"
+	#diff $DIR/$tfile $aio_file || error "file diff after aiocp"
 
 	rm -f $DIR/$tfile $aio_file
 }
@@ -29100,21 +29446,21 @@ test_401b() {
 	# jobid_var may not allow arbitrary values, so use jobid_name
 	# if available
 	if $LCTL list_param jobid_name > /dev/null 2>&1; then
-		local testname=jobid_name tmp='testing%p'
+		local jobvarname=jobid_name tmp='testing%p'
 	else
-		local testname=jobid_var tmp=testing
+		local jobvarname=jobid_var tmp=testing
 	fi
 
-	local save=$($LCTL get_param -n $testname)
+	local save=$($LCTL get_param -n $jobvarname)
 
-	$LCTL set_param foo=bar $testname=$tmp bar=baz &&
+	$LCTL set_param foo=bar $jobvarname=$tmp bar=baz &&
 		error "no error returned when setting bad parameters"
 
-	local jobid_new=$($LCTL get_param -n foe $testname baz)
+	local jobid_new=$($LCTL get_param -n foe $jobvarname baz)
 	[[ "$jobid_new" == "$tmp" ]] || error "jobid tmp $jobid_new != $tmp"
 
-	$LCTL set_param -n fog=bam $testname=$save bat=fog
-	local jobid_old=$($LCTL get_param -n foe $testname bag)
+	$LCTL set_param -n fog=bam $jobvarname=$save bat=fog
+	local jobid_old=$($LCTL get_param -n foe $jobvarname bag)
 	[[ "$jobid_old" == "$save" ]] || error "jobid new $jobid_old != $save"
 }
 run_test 401b "Verify 'lctl {get,set}_param' continue after error"
@@ -29123,27 +29469,27 @@ test_401c() {
 	# jobid_var may not allow arbitrary values, so use jobid_name
 	# if available
 	if $LCTL list_param jobid_name > /dev/null 2>&1; then
-		local testname=jobid_name
+		local jobvarname=jobid_name
 	else
-		local testname=jobid_var
+		local jobvarname=jobid_var
 	fi
 
-	local jobid_var_old=$($LCTL get_param -n $testname)
+	local jobid_var_old=$($LCTL get_param -n $jobvarname)
 	local jobid_var_new
 
-	$LCTL set_param $testname= &&
+	$LCTL set_param $jobvarname= &&
 		error "no error returned for 'set_param a='"
 
-	jobid_var_new=$($LCTL get_param -n $testname)
+	jobid_var_new=$($LCTL get_param -n $jobvarname)
 	[[ "$jobid_var_old" == "$jobid_var_new" ]] ||
-		error "$testname was changed by setting without value"
+		error "$jobvarname was changed by setting without value"
 
-	$LCTL set_param $testname &&
+	$LCTL set_param $jobvarname &&
 		error "no error returned for 'set_param a'"
 
-	jobid_var_new=$($LCTL get_param -n $testname)
+	jobid_var_new=$($LCTL get_param -n $jobvarname)
 	[[ "$jobid_var_old" == "$jobid_var_new" ]] ||
-		error "$testname was changed by setting without value"
+		error "$jobvarname was changed by setting without value"
 }
 run_test 401c "Verify 'lctl set_param' without value fails in either format."
 
@@ -29151,40 +29497,81 @@ test_401d() {
 	# jobid_var may not allow arbitrary values, so use jobid_name
 	# if available
 	if $LCTL list_param jobid_name > /dev/null 2>&1; then
-		local testname=jobid_name new_value='foo=bar%p'
+		local jobvarname=jobid_name new_value='foo=bar%p'
 	else
-		local testname=jobid_var new_value=foo=bar
+		local jobvarname=jobid_var new_value=foo=bar
 	fi
 
-	local jobid_var_old=$($LCTL get_param -n $testname)
+	local jobid_var_old=$($LCTL get_param -n $jobvarname)
 	local jobid_var_new
 
-	$LCTL set_param $testname=$new_value ||
+	$LCTL set_param $jobvarname=$new_value ||
 		error "'set_param a=b' did not accept a value containing '='"
 
-	jobid_var_new=$($LCTL get_param -n $testname)
+	jobid_var_new=$($LCTL get_param -n $jobvarname)
 	[[ "$jobid_var_new" == "$new_value" ]] ||
 		error "'set_param a=b' failed on a value containing '='"
 
-	# Reset the $testname to test the other format
-	$LCTL set_param $testname=$jobid_var_old
-	jobid_var_new=$($LCTL get_param -n $testname)
+	# Reset the $jobvarname to test the other format
+	$LCTL set_param $jobvarname=$jobid_var_old
+	jobid_var_new=$($LCTL get_param -n $jobvarname)
 	[[ "$jobid_var_new" == "$jobid_var_old" ]] ||
-		error "failed to reset $testname"
+		error "failed to reset $jobvarname"
 
-	$LCTL set_param $testname $new_value ||
+	$LCTL set_param $jobvarname $new_value ||
 		error "'set_param a b' did not accept a value containing '='"
 
-	jobid_var_new=$($LCTL get_param -n $testname)
+	jobid_var_new=$($LCTL get_param -n $jobvarname)
 	[[ "$jobid_var_new" == "$new_value" ]] ||
 		error "'set_param a b' failed on a value containing '='"
 
-	$LCTL set_param $testname $jobid_var_old
-	jobid_var_new=$($LCTL get_param -n $testname)
+	$LCTL set_param $jobvarname $jobid_var_old
+	jobid_var_new=$($LCTL get_param -n $jobvarname)
 	[[ "$jobid_var_new" == "$jobid_var_old" ]] ||
-		error "failed to reset $testname"
+		error "failed to reset $jobvarname"
 }
 run_test 401d "Verify 'lctl set_param' accepts values containing '='"
+
+cleanup_401db() {
+	local saved_val=$1
+
+	echo "start cleanup... "
+	do_facet mgs $LCTL set_param -P at_min="$saved_val"
+	wait_update $HOSTNAME "$LCTL get_param -n at_min" "$saved_val"
+	echo "done"
+}
+
+test_401db() { #LU-9544
+	local new_val=6
+
+	local saved_val=$($LCTL get_param -n at_min)
+
+	stack_trap "cleanup_401db $saved_val"
+
+	do_facet mgs $LCTL set_param -P at_min=$new_val ||
+		error "failed to set at_min=$new_val"
+
+	wait_update $HOSTNAME "$LCTL get_param -n at_min" $new_val
+	local expected=$($LCTL get_param -n at_min)
+
+	do_facet mgs $LCTL set_param -P -d at_min=$new_val ||
+		error "failed to delete at_min"
+
+	echo "Wait for erroneous changes"
+	wait_update_cond $HOSTNAME "$LCTL get_param -n at_min" != $new_val
+	local result=$($LCTL get_param -n at_min)
+
+	! [[ "$result" =~ "=" ]] || {
+		echo "result:$result"
+		error "'lctl set_param -P -d a=b' added trailing '='"
+	}
+
+	[[ $result == $expected ]] || {
+		echo -e "result:$result\nexpected:$expected"
+		error "'lctl set_param -P -d a=b' changed value of a"
+	}
+}
+run_test 401db "Verify 'lctl set_param' does not add trailing '='"
 
 test_401e() { # LU-14779
 	$LCTL list_param -R "ldlm.namespaces.MGC*" ||
@@ -29498,15 +29885,23 @@ test_411b() {
 	# LU-9966
 	[ -e "$cg_basedir/memory.kmem.limit_in_bytes" ] ||
 		skip "no setup for cgroup"
-	$LFS setstripe -c 2 $DIR/$tfile || error "unable to setstripe"
-	# (x86) testing suggests we can't reliably avoid OOM with a 64M-256M
-	# limit, so we have 384M in cgroup
-	# (arm) this seems to hit OOM more often than x86, so 1024M
-	if [[ $(uname -m) = aarch64 ]]; then
-		local memlimit_mb=1024
-	else
-		local memlimit_mb=384
-	fi
+
+	local count=2
+
+	(( OSTCOUNT < 2 )) && count=$OSTCOUNT
+	$LFS setstripe -c $count $DIR/$tfile || error "unable to setstripe"
+
+	# To avoid testing failures on x86 and arm, we set the memcg limit
+	# with 1024M on both systems.
+	local memlimit_mb=1024
+	local min_size_ost=$($LFS df | awk "/$FSNAME-OST/ { print \$4 }" |
+			     sort -un | head -1)
+
+	(( memlimit_mb * 4 * 1024 < min_size_ost * count - 100 )) ||
+		skip "OST space are too small: ${min_size_ost}K"
+
+	echo "count=$count/$OSTCOUNT min_size_ost=${min_size_ost}K"
+	$LFS df
 
 	# Create a cgroup and set memory limit
 	# (tfile is used as an easy way to get a recognizable cgroup name)
@@ -29524,7 +29919,7 @@ test_411b() {
 	cancel_lru_locks osc
 
 	rm -f $DIR/$tfile
-	$LFS setstripe -c 2 $DIR/$tfile || error "unable to setstripe"
+	$LFS setstripe -c $count $DIR/$tfile || error "unable to setstripe"
 
 	# Try writing at a larger block size
 	# NB: if block size is >= 1/2 cgroup size, we sometimes get OOM killed
@@ -29537,9 +29932,13 @@ test_411b() {
 	sync
 	cancel_lru_locks osc
 	rm -f $DIR/$tfile
-	$LFS setstripe -c 2 $DIR/$tfile.{1..4} || error "unable to setstripe"
+
+	$LFS setstripe -c $count $DIR/$tfile.{1..4} || error "unable to setstripe"
 
 	# Try writing multiple files at once
+	(( memlimit_mb * 4 * 1024 * 2 < min_size_ost * count - 100 )) ||
+		skip "OST space are too small: ${min_size_ost}K"
+
 	echo "writing multiple files"
 	bash -c "echo \$$ > $cgdir/tasks && dd if=/dev/zero of=$DIR/$tfile.1 bs=32M count=$((memlimit_mb * 4 / 64))" &
 	local pid1=$!
@@ -31626,6 +32025,262 @@ test_460d() {
 }
 run_test 460d "Check encrypt pools output"
 
+resident_pages() {
+	local file=$1
+
+	vmtouch $file | awk '/Resident Pages:/ {print $3}' |
+		awk -F/ '{ print $1 }'
+}
+
+# The command "echo 2 > /proc/sys/vm/drop_caches" may revoke the DLM locks
+# due to slab cache reclaim. Thus we should avoid to reclaim slab cache for
+# DLM locks during testing since it may evict mlock()ed pages due to the
+# release of the DLM extent lock.
+# After the page cache shrinker is disabled, "echo 3 > /proc/sys/vm/drop_caches"
+# and "echo 2 > /proc/sys/vm/drop_caches" will not scan and clear unused pages
+# from the LRU list.
+disable_page_cache_shrink() {
+	local enabled=$($LCTL get_param -n osc.*.enable_page_cache_shrink |
+			head -n 1)
+
+	stack_trap "$LCTL set_param osc.*.enable_page_cache_shrink=$enabled"
+	$LCTL set_param osc.*.enable_page_cache_shrink=0
+}
+
+enable_mlock_pages_check() {
+	local enabled=$($LCTL get_param -n llite.*.enable_mlock_pages)
+
+	stack_trap "$LCTL set_param llite.*.enable_mlock_pages=$enabled"
+	$LCTL set_param llite.*.enable_mlock_pages=1
+}
+
+test_600a() {
+	local file=$DIR/$tfile
+	local size_mb=100
+	local pcnt=$((size_mb * 1024 * 1024 / PAGE_SIZE))
+
+	which vmtouch || skip_env "This test needs vmtouch utility"
+	check_set_fallocate_or_skip
+	disable_page_cache_shrink
+	enable_mlock_pages_check
+
+	fallocate -l ${size_mb}M $file || error "failed to fallocate $file"
+	stack_trap "pkill -9 vmtouch || true"
+	vmtouch -vltdw -m 1g $file || error "failed to vmtouch $file"
+
+	local rcnt=$(resident_pages $file)
+
+	echo "before drop_caches (0):"
+	grep Mlocked: /proc/meminfo
+	$LCTL get_param llite.*.max_cached_mb
+	echo "drop page caches (1):"
+	echo 1 > /proc/sys/vm/drop_caches
+	grep Mlocked: /proc/meminfo
+	$LCTL get_param llite.*.max_cached_mb
+	vmtouch $file
+	(( $pcnt == $rcnt )) || error "resident pages are $rcnt, expected $pcnt"
+
+	local unevict_mb
+
+	$LCTL set_param llite.*.unevict_cached_mb=clear
+	$LCTL get_param llite.*.unevict_cached_mb
+	unevict_mb=$($LCTL get_param -n llite.*.unevict_cached_mb)
+	(( $unevict_mb == $size_mb )) ||
+		error "unevict_cached_mb is $unevict_mb, expected $size_mb"
+
+	$LCTL set_param $OSC.*$OSC*.osc_unevict_cached_mb=clear
+	$LCTL get_param $OSC.*$OSC*.osc_unevict_cached_mb
+	unevict_mb=$($LCTL get_param -n $OSC.*$OSC*.osc_unevict_cached_mb |
+		     awk '{sum += $1 } END { print sum }')
+	(( $unevict_mb == $size_mb )) ||
+		error "osc_unevict_cached_mb is $unevict_mb, expected $size_mb"
+
+	# The lock revocation will evict the cached pages protected by it.
+	# This is desired behavior for conflict access from the remote client.
+	# But how to deal with the lock revocation triggered by LRU lock
+	# shrinking on client side, should this kind of locks that protected
+	# the mlocked pages be canceled in this case? Or the lock protecting
+	# mlock()ed pages should not put into lock LRU list?
+	cancel_lru_locks $OSC
+	echo "drop lru DLM lock:"
+	grep Mlocked: /proc/meminfo
+	$LCTL get_param llite.*.max_cached_mb
+	$LCTL get_param osc.*.osc_cached_mb
+	rcnt=$(resident_pages $file)
+	(( $rcnt == 0 )) || error "resident pages are $rcnt, expected zero"
+	unevict_mb=$($LCTL get_param -n llite.*.unevict_cached_mb)
+	(( $unevict_mb == 0 )) ||
+		error "unevict_cached_mb is $unevict_mb, expected 0"
+	unevict_mb=$($LCTL get_param -n $OSC.*$OSC*.osc_unevict_cached_mb |
+		     awk '{sum += $1 } END { print sum }')
+	(( $unevict_mb == 0 )) ||
+		error "osc_unevict_cached_mb is $unevict_mb, expected $size_mb"
+
+}
+run_test 600a "basic test for mlock()ed file"
+
+test_600b() {
+	local file=$DIR/$tfile
+	local size_mb=100
+	local cache_limit=64
+	local max_cached_mb=$($LCTL get_param llite.*.max_cached_mb |
+			      awk '/^max_cached_mb/ { print $2 }')
+
+	which vmtouch || skip_env "This test needs vmtouch utility"
+	check_set_fallocate_or_skip
+	disable_page_cache_shrink
+	enable_mlock_pages_check
+
+	fallocate -l ${size_mb}M $file || error "failed to fallocate $file"
+	stack_trap "pkill -9 vmtouch || true"
+
+	cancel_lru_locks $OSC
+	$LCTL get_param llite.*.max_cached_mb
+	stack_trap "$LCTL set_param llite.*.max_cached_mb=$max_cached_mb"
+	$LCTL set_param llite.*.max_cached_mb=$cache_limit
+
+	# The required mlock()ed pages (100M) are larger than @max_cached_mb.
+	vmtouch -vltdw -m 1g $file || error "failed to mlock $file"
+	vmtouch $file
+	grep Mlocked: /proc/meminfo
+
+	local used_mb
+	local unevict_mb
+
+	echo 1 > /proc/sys/vm/drop_caches
+	$LCTL get_param llite.*.max_cached_mb
+	$LCTL set_param llite.*.unevict_cached_mb=clear
+	used_mb=$($LCTL get_param llite.*.max_cached_mb |
+		  awk '/^used_mb/ { print $2 }')
+	unevict_mb=$($LCTL get_param -n llite.*.unevict_cached_mb)
+	(( $used_mb == 0 )) || error "used_mb is $used_mb, expected 0"
+	(( $unevict_mb == $size_mb )) ||
+		error "unevict_mb is $unevict_mb, expected $size_mb"
+}
+run_test 600b "mlock a file (via vmtouch) larger than max_cached_mb"
+
+test_600c() {
+	local dir=$DIR/$tdir
+	local cache_limit=64
+	local max_cached_mb=$($LCTL get_param llite.*.max_cached_mb |
+			      awk '/^max_cached_mb/ { print $2 }')
+
+	which vmtouch || skip_env "This test needs vmtouch utility"
+	check_set_fallocate_or_skip
+	disable_page_cache_shrink
+	enable_mlock_pages_check
+
+	stack_trap "rm -rf $dir"
+	stack_trap "$LCTL set_param llite.*.max_cached_mb=$max_cached_mb"
+	$LCTL set_param llite.*.max_cached_mb=$cache_limit
+	stack_trap "pkill -9 vmtouch || true"
+
+	local size=$((64 * 1048576))
+	local file1=$dir/$tfile.1
+	local file2=$dir/$tfile.2
+
+	mkdir $dir || error "failed to mkdir $dir"
+	fallocate -l $size $file1 || error "failed to fallocate $file1"
+	fallocate -l $size $file2 || error "failed to fallocate $file2"
+	cancel_lru_locks $OSC
+
+	vmtouch -vltdw -m 1g $file1 || error "failed to vmtouch $file1"
+	$LCTL get_param llite.*.max_cached_mb
+	$LCTL set_param llite.*.unevict_cached_mb=clear
+	$LCTL get_param llite.*.max_cached_mb
+
+	local cached_mb=$($LCTL get_param llite.*.max_cached_mb |
+			  awk '/^used_mb/ { print $2 }')
+
+	[ $cached_mb -eq 0 ] || error "expected used_mb 0 got $cached_mb"
+	cached_mb=$($LCTL get_param llite.*.max_cached_mb |
+		    awk '/^unevict_mb/ { print $2 }')
+	[ $cached_mb -eq 64 ] || error "expected unevict_mb 64 got $cached_mb"
+
+	vmtouch -vt $file2 || error "failed to vmtouch $file2"
+	echo 3 > /proc/sys/vm/drop_caches
+	dd if=$file2 of=/dev/null bs=1M count=64 ||
+		error "failed to reading $file2 into cache"
+
+	pkill -9 vmtouch || error "failed to kill vmtouch"
+	vmtouch -vt $file2 || error "failed to load $files into cache"
+	$LCTL get_param llite.*.max_cached_mb
+	echo 1 > /proc/sys/vm/drop_caches
+	$LCTL set_param llite.*.unevict_cached_mb=clear
+	cached_mb=$($LCTL get_param llite.*.max_cached_mb |
+		    awk '/^used_mb/ { print $2 }')
+	[ $cached_mb -eq 0 ] || error "expected used_mb 0 got $cached_mb"
+	cached_mb=$($LCTL get_param llite.*.max_cached_mb |
+		    awk '/^unevict_mb/ { print $2 }')
+	[ $cached_mb -eq 0 ] || error "expected unevict_mb 0 got $cached_mb"
+}
+run_test 600c "Test I/O when mlocked page count > @max_cached_mb"
+
+test_600d_base() {
+	local mlcksz=$1
+	local fsz=$2
+	local n=$3
+	local dir=$DIR/$tdir
+	local mlckf=$dir/mlockfile
+
+	echo "mlock size: $mlcksz file size: $fsz, n: $n"
+	mkdir -p $dir || error "mkdir $dir failed"
+
+	fallocate -l $mlcksz $mlckf || error "failed to fallocate $mlckf"
+	for ((i = 0; i < $n; i++)); do
+		fallocate -l $fsz $dir/$tfile.$i ||
+			error "failed to fallocate $dir/$tfile.$i"
+	done
+
+	cancel_lru_locks $OSC
+
+	declare -a pids
+
+	vmtouch -vltdw -m 1G $mlckf || error "failed to mlock $mlckf"
+	for ((i = 0; i < $n; i++)); do
+		vmtouch -t -m 1g $dir/$tfile.$i &
+		pids[i]=$!
+	done
+
+	cat /proc/meminfo | grep 'Mlocked'
+	$LCTL get_param llite.*.max_cached_mb
+	echo "drop caches:"
+	echo 1 > /proc/sys/vm/drop_caches
+	$LCTL set_param llite.*.unevict_cached_mb=clear
+	$LCTL get_param llite.*.max_cached_mb
+
+	for ((i = 0; i < $n; i++)); do
+		wait ${pids[i]} || error "touch $dir/$tfile.$i failed: rc = $?"
+	done
+
+	cat /proc/meminfo | grep 'Mlocked:'
+	pkill -9 vmtouch || true
+	rm -rvf $dir || error "failed to rm $dir"
+}
+
+test_600d() {
+	local dir=$DIR/$tdir
+	local cache_limit=64
+	local max_cached_mb=$($LCTL get_param llite.*.max_cached_mb |
+			      awk '/^max_cached_mb/ { print $2 }')
+
+	which vmtouch || skip_env "This test needs vmtouch utility"
+	check_set_fallocate_or_skip
+	disable_page_cache_shrink
+	enable_mlock_pages_check
+
+	stack_trap "rm -rf $dir"
+	stack_trap "$LCTL set_param llite.*.max_cached_mb=$max_cached_mb"
+	$LCTL set_param llite.*.max_cached_mb=$cache_limit
+	stack_trap "pkill -9 vmtouch || true"
+
+	local size=$((cache_limit * 1048576))
+
+	test_600d_base $((size - PAGE_SIZE)) 4096 16
+	test_600d_base $((size - 2 * PAGE_SIZE)) 16384 16
+}
+run_test 600d "Test I/O with limited LRU page slots (some was mlocked)"
+
 prep_801() {
 	[[ $MDS1_VERSION -lt $(version_code 2.9.55) ]] ||
 	[[ $OST1_VERSION -lt $(version_code 2.9.55) ]] &&
@@ -32695,6 +33350,11 @@ test_818() {
 	# restore osp-syn threads
 	stack_trap "fail $SINGLEMDS"
 
+	# disable console ratelimit
+	local rl=$(do_facet mds1 $LCTL get_param -n console_ratelimit)
+	do_facet mds1 $LCTL set_param console_ratelimit=0
+	stack_trap "do_facet mds1 $LCTL set_param console_ratelimit=$rl"
+
 	#define OBD_FAIL_OSP_CANT_PROCESS_LLOG		0x2105
 	do_facet $SINGLEMDS lctl set_param fail_loc=0x80002105
 	start $SINGLEMDS $(mdsdevname ${SINGLEMDS//mds/}) $MDS_MOUNT_OPTS ||
@@ -32960,7 +33620,7 @@ test_851() {
 
 	test_mkdir $dir || error "failed to create dir $dir"
 
-	$fanotify_prog $DIR > $report &
+	stdbuf -o0 $fanotify_prog $DIR > $report &
 	pid=$!
 
 	sleep 1
@@ -32972,8 +33632,8 @@ test_851() {
 	stack_trap "rm -f $report"
 
 	echo "1234567890" > $file
-	wait_update_cond localhost "stat -c %s $report" "-gt" "0" 30 ||
-		error "fanotify did not report anything after 30 seconds"
+	wait_update_cond localhost "stat -c %s $report" "-gt" "0" 60 ||
+		error "fanotify did not report anything after 60 seconds"
 	grep -a -E "open.*:$file:" $report ||
 		error "no open event for writing $file"
 	grep -a -E "write.*:$file:" $report ||
@@ -32983,8 +33643,8 @@ test_851() {
 
 	> $report
 	cat $file
-	wait_update_cond localhost "stat -c %s $report" "-gt" "0" 30 ||
-		error "fanotify did not report anything after 30 seconds"
+	wait_update_cond localhost "stat -c %s $report" "-gt" "0" 60 ||
+		error "fanotify did not report anything after 60 seconds"
 	grep -a -E "open.*:$file:" $report ||
 		error "no open event for reading $file"
 	grep -a -E "read.*:$file:" $report ||

@@ -352,7 +352,7 @@ static void osc_extent_free(struct kref *kref)
 	LASSERT(RB_EMPTY_NODE(&ext->oe_node));
 
 	if (ext->oe_dlmlock) {
-		LDLM_LOCK_RELEASE(ext->oe_dlmlock);
+		ldlm_lock_put(ext->oe_dlmlock);
 		ext->oe_dlmlock = NULL;
 	}
 #if 0
@@ -700,7 +700,7 @@ static struct osc_extent *osc_extent_find(const struct lu_env *env,
 	cur->oe_mppr    = max_pages;
 	if (olck->ols_dlmlock != NULL) {
 		LASSERT(olck->ols_hold);
-		cur->oe_dlmlock = LDLM_LOCK_GET(olck->ols_dlmlock);
+		cur->oe_dlmlock = ldlm_lock_get(olck->ols_dlmlock);
 	}
 
 	/* grants has been allocated by caller */
@@ -2598,7 +2598,7 @@ int osc_queue_sync_pages(const struct lu_env *env, struct cl_io *io,
 	}
 	oscl = oio->oi_write_osclock ? : oio->oi_read_osclock;
 	if (oscl && oscl->ols_dlmlock != NULL) {
-		ext->oe_dlmlock = LDLM_LOCK_GET(oscl->ols_dlmlock);
+		ext->oe_dlmlock = ldlm_lock_get(oscl->ols_dlmlock);
 	}
 	if (ext->oe_dio && !ext->oe_rw) { /* direct io write */
 		int grants;
@@ -2611,7 +2611,9 @@ int osc_queue_sync_pages(const struct lu_env *env, struct cl_io *io,
 
 		CDEBUG(D_CACHE, "requesting %d bytes grant\n", grants);
 		spin_lock(&cli->cl_loi_list_lock);
-		if (osc_reserve_grant(cli, grants) == 0) {
+		if (osc_reserve_grant(cli, grants) == 0 &&
+		    cli->cl_dirty_pages + page_count <
+						    cli->cl_dirty_max_pages) {
 			list_for_each_entry(oap, list, oap_pending_item) {
 				osc_consume_write_grant(cli,
 							&oap->oap_brw_page);
@@ -2622,12 +2624,12 @@ int osc_queue_sync_pages(const struct lu_env *env, struct cl_io *io,
 		} else {
 			/* We cannot report ENOSPC correctly if we do parallel
 			 * DIO (async RPC submission), so turn off parallel dio
-			 * if there is not sufficient grant available.  This
-			 * makes individual RPCs synchronous.
+			 * if there is not sufficient grant or dirty pages
+			 * available. This makes individual RPCs synchronous.
 			 */
 			io->ci_parallel_dio = false;
 			CDEBUG(D_CACHE,
-			"not enough grant available, switching to sync for this i/o\n");
+			"not enough grant or dirty pages available, switching to sync for this i/o\n");
 		}
 		spin_unlock(&cli->cl_loi_list_lock);
 		osc_update_next_shrink(cli);
@@ -3173,7 +3175,7 @@ static bool check_and_discard_cb(const struct lu_env *env, struct cl_io *io,
 						info->oti_fn_index =
 							CL_PAGE_EOF;
 				}
-				LDLM_LOCK_PUT(tmp);
+				ldlm_lock_put(tmp);
 			} else {
 				info->oti_ng_index = CL_PAGE_EOF;
 				discard = true;

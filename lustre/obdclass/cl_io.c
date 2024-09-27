@@ -944,8 +944,7 @@ void cl_page_list_disown(const struct lu_env *env, struct cl_page_list *plist)
 		/*
 		 * XXX __cl_page_disown() will fail if page is not locked.
 		 */
-		if (page->cp_type == CPT_CACHEABLE)
-			__cl_page_disown(env, page);
+		__cl_page_disown(env, page);
 		cl_page_put(env, page);
 	}
 	EXIT;
@@ -1208,7 +1207,6 @@ static void cl_sub_dio_end(const struct lu_env *env, struct cl_sync_io *anchor)
 	while (sdio->csd_pages.pl_nr > 0) {
 		struct cl_page *page = cl_page_list_first(&sdio->csd_pages);
 
-		cl_page_delete(env, page);
 		cl_page_list_del(env, &sdio->csd_pages, page, false);
 		cl_page_put(env, page);
 	}
@@ -1253,6 +1251,7 @@ struct cl_dio_aio *cl_dio_aio_alloc(struct kiocb *iocb, struct cl_object *obj,
 		 */
 		cl_sync_io_init_notify(&aio->cda_sync, 1, aio, cl_dio_aio_end);
 		aio->cda_iocb = iocb;
+		aio->cda_is_aio = is_aio;
 		aio->cda_no_aio_complete = !is_aio;
 		/* if this is true AIO, the memory is freed by the last call
 		 * to cl_sync_io_note (when all the I/O is complete), because

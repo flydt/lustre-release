@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -127,7 +109,7 @@ int mdc_set_lock_data(struct obd_export *exp, const struct lustre_handle *lockh,
 		*bits = lock->l_policy_data.l_inodebits.bits;
 
 	unlock_res_and_lock(lock);
-	LDLM_LOCK_PUT(lock);
+	ldlm_lock_put(lock);
 
 	RETURN(0);
 }
@@ -806,7 +788,7 @@ int mdc_finish_enqueue(struct obd_export *exp,
 			ldlm_lock_decref(lockh, einfo->ei_mode);
 			einfo->ei_mode = lock->l_req_mode;
 		}
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 	}
 
 	lockrep = req_capsule_server_get(pill, &RMF_DLM_REP);
@@ -981,7 +963,7 @@ int mdc_finish_enqueue(struct obd_export *exp,
 		unlock_res_and_lock(lock);
 	}
 out_lock:
-	LDLM_LOCK_PUT(lock);
+	ldlm_lock_put(lock);
 
 	RETURN(rc);
 }
@@ -1292,7 +1274,7 @@ static int mdc_finish_intent_lock(struct obd_export *exp,
 				 PLDLMRES(lock->l_resource),
 				 PFID(&body->mbo_fid1));
 		}
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 
 		memcpy(&old_lock, lockh, sizeof(*lockh));
 		if (ldlm_lock_match(NULL, LDLM_FL_BLOCK_GRANTED, NULL,

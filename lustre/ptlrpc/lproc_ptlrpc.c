@@ -98,6 +98,7 @@ static struct ll_rpc_opcode {
 	{ MDS_SWAP_LAYOUTS,	"mds_swap_layouts" },
 	{ MDS_RMFID,        "mds_rmfid" },
 	{ MDS_BATCH,        "mds_batch" },
+	{ MDS_HSM_DATA_VERSION, "mds_hsm_data_version" },
 	{ LDLM_ENQUEUE,     "ldlm_enqueue" },
 	{ LDLM_CONVERT,     "ldlm_convert" },
 	{ LDLM_CANCEL,      "ldlm_cancel" },
@@ -182,7 +183,7 @@ const char *ll_opcode2str(__u32 opcode)
 	return ll_rpc_opcode_table[offset].opname;
 }
 
-const int ll_str2opcode(const char *ops)
+int ll_str2opcode(const char *ops)
 {
 	int i;
 
@@ -800,8 +801,7 @@ default_queue:
 
 	mutex_unlock(&nrs_core.nrs_mutex);
 out:
-	if (cmd_copy)
-		OBD_FREE(cmd_copy, LPROCFS_NRS_WR_MAX_CMD);
+	OBD_FREE(cmd_copy, LPROCFS_NRS_WR_MAX_CMD);
 
 	RETURN(rc < 0 ? rc : count);
 }
@@ -948,8 +948,7 @@ ptlrpc_lprocfs_svc_req_history_stop(struct seq_file *s, void *iter)
 {
 	struct ptlrpc_srh_iterator *srhi = iter;
 
-	if (srhi != NULL)
-		OBD_FREE(srhi, sizeof(*srhi));
+	OBD_FREE(srhi, sizeof(*srhi));
 }
 
 static void *

@@ -1,29 +1,11 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2012, 2017, Intel Corporation.
  * Use is subject to license terms.
- *
+ */
+
+/*
  * Author: Johann Lombardi <johann.lombardi@intel.com>
  * Author: Niu    Yawei    <yawei.niu@intel.com>
  */
@@ -1262,7 +1244,7 @@ static int qmt_dqacq(const struct lu_env *env, struct lu_device *ld,
 	lock = ldlm_handle2lock(&qbody->qb_glb_lockh);
 	if (lock == NULL)
 		RETURN(-ENOLCK);
-	LDLM_LOCK_PUT(lock);
+	ldlm_lock_put(lock);
 
 	uuid = &req->rq_export->exp_client_uuid;
 	stype = qmt_uuid2idx(uuid, &idx);
@@ -1293,7 +1275,7 @@ static int qmt_dqacq(const struct lu_env *env, struct lu_device *ld,
 
 		if (!obd_uuid_equals(&lock->l_export->exp_client_uuid, uuid)) {
 			/* sorry, no way to cheat ... */
-			LDLM_LOCK_PUT(lock);
+			ldlm_lock_put(lock);
 			RETURN(-ENOLCK);
 		}
 
@@ -1310,7 +1292,7 @@ static int qmt_dqacq(const struct lu_env *env, struct lu_device *ld,
 			/* lock is being cancelled, prolong timeout */
 			ldlm_refresh_waiting_lock(lock, timeout);
 		}
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 	}
 
 	/* extract quota information from global index FID packed in the

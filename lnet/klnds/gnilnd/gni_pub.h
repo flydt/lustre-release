@@ -1,24 +1,11 @@
-/* -*- c-basic-offset: 8; indent-tabs-mode: nil -*- */
-/*
-	Contains the user interface to the GNI. Kernel and User level.
+/* SPDX-License-Identifier: GPL-2.0 */
 
-	Copyright 2007 Cray Inc. All Rights Reserved.
-	Written by Igor Gorodetsky <igorodet@cray.com>
+/* Copyright 2007 Cray Inc. All Rights Reserved. */
 
-	This program is free software; you can redistribute it and/or modify it
-	under the terms of the GNU General Public License as published by the
-	Free Software Foundation; either version 2 of the License,
-	or (at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-	See the GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to the Free Software Foundation, Inc.,
-	51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
-*/
+/* Contains the user interface to the GNI. Kernel and User level.
+ *
+ * Author: Igor Gorodetsky <igorodet@cray.com>
+ */
 
 #ifndef _GNI_PUB_H_
 #define _GNI_PUB_H_
@@ -475,7 +462,7 @@ typedef enum gni_fma_cmd_type {
 	GNI_FMA_ATOMIC_FAX_C   = 0x01C,    /* cached atomic FETCH AND exclusive OR */
 	GNI_FMA_ATOMIC_CSWAP   = 0x00D,    /* atomic COMPARE and SWAP */
 	GNI_FMA_ATOMIC_CSWAP_C = 0x01D,    /* cached atomic COMPARE and SWAP */
-	/* Second generation commands ( GET sematics ) */
+	/* Second generation commands ( GET semantics ) */
 	GNI_FMA_ATOMIC2_FAND_S    = 0x240,    /* atomic fetching logical AND (32-bit operands) */
 	GNI_FMA_ATOMIC2_FAND      = 0x041,    /* atomic FETCH and AND */
 	GNI_FMA_ATOMIC2_FAND_SC   = 0x260,    /* cached atomic fetching logical AND (32-bit operands) */
@@ -535,7 +522,7 @@ typedef enum gni_fma_cmd_type {
 	GNI_FMA_ATOMIC_XOR_C   = 0x11B,    /* cached atomic exclusive OR */
 	GNI_FMA_ATOMIC_AX      = 0x10C,    /* atomic AND exclusive OR */
 	GNI_FMA_ATOMIC_AX_C    = 0x11C,    /* cached atomic AND exclusive OR */
-	/* Second generation commands ( PUT sematics ) */
+	/* Second generation commands ( PUT semantics ) */
 	GNI_FMA_ATOMIC2_AND_S    = 0x340,    /* atomic AND (32-bit operands) */
 	GNI_FMA_ATOMIC2_AND      = 0x141,    /* atomic AND */
 	GNI_FMA_ATOMIC2_AND_SC   = 0x360,    /* cached atomic AND (32-bit operands) */

@@ -82,32 +82,34 @@ case $with_o2ib in
 		# Use ofed_info to find external driver
 		AS_IF([which ofed_info 2>/dev/null], [
 			AS_IF([test x$uses_dpkg = xyes], [
-				LIST_ALL_PKG="dpkg -l | awk '{print \[$]2}'"
 				LSPKG="dpkg --listfiles"
 			], [
-				LIST_ALL_PKG="rpm -qa"
 				LSPKG="rpm -ql"
 			])
 
 			O2IBPKG="mlnx-ofed-kernel-dkms"
-			O2IBPKG+="|mlnx-ofed-kernel-modules"
-			O2IBPKG+="|mlnx-ofa_kernel-devel"
-			O2IBPKG+="|compat-rdma-devel"
-			O2IBPKG+="|kernel-ib-devel"
-			O2IBPKG+="|ofa_kernel-devel"
+			O2IBPKG+=" mlnx-ofed-kernel-modules"
+			O2IBPKG+=" mlnx-ofa_kernel-devel"
+			O2IBPKG+=" compat-rdma-devel"
+			O2IBPKG+=" kernel-ib-devel"
+			O2IBPKG+=" ofa_kernel-devel"
 
 			O2IBDIR="/ofa_kernel"
 			O2IBDIR+="|/ofa_kernel/default"
 			O2IBDIR+="|/openib"
 
-			O2IBDIR_PATH=$(eval $LIST_ALL_PKG |
-				       egrep -w "$O2IBPKG" | xargs $LSPKG |
+			O2IBDIR_PATH=$(eval $LSPKG $O2IBPKG 2>/dev/null |
 				       egrep "${O2IBDIR}$" |
 				       grep -v /ofed_scripts/ | head -n1)
 
+			# Nowadays, path should always be
+			# /usr/src/ofa_kernel/$ARCH/${LINUXRELEASE}
+			# and we could clean all that complexity
+			# but I don't know how far we should be retro-compatible.
+
 			if test -n "$O2IBDIR_PATH"; then
-				if test -d $O2IBDIR_PATH/${LINUXRELEASE}; then
-					O2IBDIR_PATH=$O2IBDIR_PATH/${LINUXRELEASE}
+				if test -d $O2IBDIR_PATH/${target_cpu}/${LINUXRELEASE}; then
+					O2IBDIR_PATH=$O2IBDIR_PATH/${target_cpu}/${LINUXRELEASE}
 				fi
 				EXT_O2IBPATHS=$(find $O2IBDIR_PATH -name rdma_cm.h |
 					sed -e 's/\/include\/rdma\/rdma_cm.h//')
@@ -1025,6 +1027,28 @@ AC_DEFUN([LN_CONFIG_SOCK_CREATE_KERN], [
 ]) # LN_CONFIG_SOCK_CREATE_KERN
 
 #
+# LN_CONFIG_SOCK_NOT_OWNED_BY_ME
+#
+# Linux upstream v6.11-rc3-g151c9c724d05d5b0d changes TCP socket orphan
+# cleanup, requiring a change in ksocklnd if present. This has been back-ported
+# to 4.* and 5.* Linux distributions.
+#
+AC_DEFUN([LN_SRC_CONFIG_SOCK_NOT_OWNED_BY_ME], [
+	LB2_LINUX_TEST_SRC([sock_not_owned_by_me], [
+		#include <net/sock.h>
+	],[
+		sock_not_owned_by_me((const struct sock *)0);
+	],[-Werror])
+])
+AC_DEFUN([LN_CONFIG_SOCK_NOT_OWNED_BY_ME], [
+	LB2_MSG_LINUX_TEST_RESULT([if Linux kernel has 'sock_not_owned_by_me'],
+	[sock_not_owned_by_me], [
+		AC_DEFINE(HAVE_SOCK_NOT_OWNED_BY_ME, 1,
+			[sock_not_owned_by_me is defined in sock.h])
+	])
+]) # LN_CONFIG_SOCK_NOT_OWNED_BY_ME
+
+#
 # LN_CONFIG_SK_DATA_READY
 #
 # 3.15 for struct sock the *sk_data_ready() field only takes one argument now
@@ -1203,6 +1227,7 @@ AC_DEFUN([LN_PROG_LINUX_SRC], [
 	LN_SRC_CONFIG_SK_DATA_READY
 	# 4.x
 	LN_SRC_CONFIG_SOCK_CREATE_KERN
+	LN_SRC_CONFIG_SOCK_NOT_OWNED_BY_ME
 	# 4.6
 	LN_SRC_ETHTOOL_LINK_SETTINGS
 	# 4.14
@@ -1222,6 +1247,7 @@ AC_DEFUN([LN_PROG_LINUX_RESULTS], [
 	LN_CONFIG_SK_DATA_READY
 	# 4.x
 	LN_CONFIG_SOCK_CREATE_KERN
+	LN_CONFIG_SOCK_NOT_OWNED_BY_ME
 	# 4.6
 	LN_ETHTOOL_LINK_SETTINGS
 	# 4.14

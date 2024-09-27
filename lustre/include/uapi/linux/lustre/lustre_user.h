@@ -111,6 +111,29 @@ typedef struct stat     lstat_t;
 #define fstatat_f       fstatat
 #endif
 
+#ifndef DECLARE_FLEX_ARRAY
+#ifdef __cplusplus
+/* sizeof(struct{}) is 1 in C++, not 0, can't use C version of the macro. */
+#define DECLARE_FLEX_ARRAY(T, member) T member[0]
+#else
+/**
+ * DECLARE_FLEX_ARRAY() - Declare a flexible array usable in a union
+ *
+ * @TYPE: The type of each flexible array element
+ * @NAME: The name of the flexible array member
+ *
+ * In order to have a flexible array member in a union or alone in a
+ * struct, it needs to be wrapped in an anonymous struct with at least 1
+ * named member, but that member can be empty.
+ */
+#define DECLARE_FLEX_ARRAY(TYPE, NAME)	       \
+	struct {			       \
+		struct { } __empty_ ## NAME;   \
+		TYPE NAME[];		       \
+	}
+#endif
+#endif /* DECLARE_FLEX_ARRAY */
+
 #ifndef STATX_BASIC_STATS
 /*
  * Timestamp structure for the timestamps in struct statx.
@@ -571,7 +594,7 @@ struct ll_ioc_lease {
 	__u32		lil_mode;
 	__u32		lil_flags;
 	__u32		lil_count;
-	__u32		lil_ids[0];
+	__u32		lil_ids[];
 };
 
 struct ll_ioc_lease_id {
@@ -581,7 +604,7 @@ struct ll_ioc_lease_id {
 	__u16		lil_mirror_id;
 	__u16		lil_padding1;
 	__u64		lil_padding2;
-	__u32		lil_ids[0];
+	__u32		lil_ids[];
 };
 
 /*
@@ -655,6 +678,7 @@ struct ll_ioc_lease_id {
 						struct lu_pcc_detach_fid)
 #define LL_IOC_PCC_STATE		_IOR('f', 252, struct lu_pcc_state)
 #define LL_IOC_PROJECT			_IOW('f', 253, struct lu_project)
+#define LL_IOC_HSM_DATA_VERSION		_IOW('f', 254, struct ioc_data_version)
 
 #ifndef	FS_IOC_FSGETXATTR
 /*
@@ -813,12 +837,11 @@ static inline bool lov_pool_is_reserved(const char *pool)
  */
 #define LOV_MAX_STRIPE_COUNT 2000  /* ~((12 * 4096 - 256) / 24) */
 
-/* Below given max and min values are used to check range of stripe count */
-/* LOV_ALL_STRIPES_MAX  LLAPI_MIN_STRIPE_COUNT */
-/* LOV_ALL_STRIPES_MIN  LLAPI_MIN_STRIPE_COUNT+ LLAPI_MAX_STRIPE_COUNT */
-#define LOV_ALL_STRIPES_MAX 0xffff
-#define LOV_ALL_STRIPES_MIN 0xffdf
-#define LOV_V1_INSANE_STRIPE_COUNT 65532 /* maximum stripe count bz13933 */
+/* max and min values are used to check range of overstripe count */
+#define LOV_ALL_STRIPES       0xffff /* only valid for directories */
+#define LOV_ALL_STRIPES_WIDE  0xffe0 /* LLAPI_OVERSTRIPE_COUNT_MAX */
+#define LOV_V1_INSANE_STRIPE_INDEX (LOV_ALL_STRIPES_WIDE - 1) /* max index */
+#define LOV_V1_INSANE_STRIPE_COUNT LOV_V1_INSANE_STRIPE_INDEX /* deprecated */
 
 #define XATTR_LUSTRE_PREFIX	"lustre."
 #define XATTR_LUSTRE_LOV	XATTR_LUSTRE_PREFIX"lov"
@@ -851,7 +874,7 @@ struct lov_user_md_v1 {           /* LOV EA user data (host-endian) */
 					   * used when reading
 					   */
 	};
-	struct lov_user_ost_data_v1 lmm_objects[0]; /* per-stripe data */
+	struct lov_user_ost_data_v1 lmm_objects[]; /* per-stripe data */
 } __attribute__((packed, __may_alias__));
 
 struct lov_user_md_v3 {           /* LOV EA user data (host-endian) */
@@ -869,7 +892,7 @@ struct lov_user_md_v3 {           /* LOV EA user data (host-endian) */
 					   */
 	};
 	char  lmm_pool_name[LOV_MAXPOOLNAME + 1]; /* pool name */
-	struct lov_user_ost_data_v1 lmm_objects[0]; /* per-stripe data */
+	struct lov_user_ost_data_v1 lmm_objects[]; /* per-stripe data */
 } __attribute__((packed, __may_alias__));
 
 struct lov_foreign_md {
@@ -1059,7 +1082,7 @@ struct lov_comp_md_v1 {
 
 static inline __u32 lov_user_md_size(__u16 stripes, __u32 lmm_magic)
 {
-	if (stripes >= LOV_ALL_STRIPES_MIN && stripes <= LOV_ALL_STRIPES_MAX)
+	if (stripes <= LOV_ALL_STRIPES && stripes >= LOV_ALL_STRIPES_WIDE)
 		stripes = 0;
 
 	if (lmm_magic == LOV_USER_MAGIC_V1)
@@ -1508,7 +1531,7 @@ struct identity_downcall_data {
 	__u32                            idd_nperms;
 	__u32                            idd_ngroups;
 	struct perm_downcall_data idd_perms[N_PERMS_MAX];
-	__u32                            idd_groups[0];
+	__u32                            idd_groups[];
 };
 
 #if LUSTRE_VERSION_CODE < OBD_OCD_VERSION(2, 16, 53, 0)
@@ -1518,7 +1541,7 @@ struct sepol_downcall_data_old {
 	__u32		sdd_magic;
 	__s64		sdd_sepol_mtime;
 	__u16		sdd_sepol_len;
-	char		sdd_sepol[0];
+	char		sdd_sepol[];
 };
 #endif
 
@@ -1528,7 +1551,7 @@ struct sepol_downcall_data {
 	__u16		sdd_sepol_len;
 	__u16		sdd_padding1;
 	__s64		sdd_sepol_mtime;
-	char		sdd_sepol[0];
+	char		sdd_sepol[];
 };
 
 #ifdef NEED_QUOTA_DEFS
@@ -1872,31 +1895,26 @@ enum changelog_rec_extra_flags {
 	CLFE_NID	= 0x0002,
 	CLFE_OPEN	= 0x0004,
 	CLFE_XATTR	= 0x0008,
-	CLFE_SUPPORTED	= CLFE_UIDGID | CLFE_NID | CLFE_OPEN | CLFE_XATTR
+	/* NID is in network-byte-order and may be large. */
+	CLFE_NID_BE	= 0x0010,
+
+	CLFE_SUPPORTED	= CLFE_UIDGID | CLFE_NID | CLFE_OPEN | CLFE_XATTR |
+			  CLFE_NID_BE,
 };
 
 enum changelog_send_flag {
 	/* Use changelog follow mode: llapi_changelog_recv() will not stop at
 	 * the end of records and wait for new records to be generated.
 	 */
-	CHANGELOG_FLAG_FOLLOW      = 0x01,
+	CHANGELOG_FLAG_FOLLOW		= 0x01,
 	/* Deprecated since Lustre 2.10 */
-	CHANGELOG_FLAG_BLOCK       = 0x02,
+	CHANGELOG_FLAG_BLOCK		= 0x02,
 	/* Pack jobid into the changelog records if available. */
-	CHANGELOG_FLAG_JOBID       = 0x04,
+	CHANGELOG_FLAG_JOBID		= 0x04,
 	/* Pack additional flag bits into the changelog record */
-	CHANGELOG_FLAG_EXTRA_FLAGS = 0x08,
-};
-
-enum changelog_send_extra_flag {
-	/* Pack uid/gid into the changelog record */
-	CHANGELOG_EXTRA_FLAG_UIDGID = 0x01,
-	/* Pack nid into the changelog record */
-	CHANGELOG_EXTRA_FLAG_NID    = 0x02,
-	/* Pack open mode into the changelog record */
-	CHANGELOG_EXTRA_FLAG_OMODE  = 0x04,
-	/* Pack xattr name into the changelog record */
-	CHANGELOG_EXTRA_FLAG_XATTR  = 0x08,
+	CHANGELOG_FLAG_EXTRA_FLAGS	= 0x08,
+	/* Request NIDs to be packed in large big-endian format */
+	CHANGELOG_FLAG_NID_BE		= 0x10,
 };
 
 #define CR_MAXSIZE __ALIGN_KERNEL(2 * NAME_MAX + 2 + \
@@ -1951,9 +1969,10 @@ struct changelog_ext_uidgid {
 
 /* Changelog extra extension to include NID. */
 struct changelog_ext_nid {
-	/* have __u64 instead of lnet_nid_t type for use by client api */
+	/* If CLFE_NID_BE is not set cr_nid is of the lnet_nid_t type.
+	 * With CLFE_NID_BE set then all this data is struct lnet_nid
+	 */
 	__u64 cr_nid;
-	/* for use when IPv6 support is added */
 	__u64 extra;
 	__u32 padding;
 };
@@ -2153,173 +2172,6 @@ inline __kernel_size_t changelog_rec_snamelen(const struct changelog_rec *rec)
 {
 	return rec->cr_namelen -
 	       (changelog_rec_sname(rec) - changelog_rec_name(rec));
-}
-
-/**
- * Remap a record to the desired format as specified by the crf flags.
- * The record must be big enough to contain the final remapped version.
- * Superfluous extension fields are removed and missing ones are added
- * and zeroed. The flags of the record are updated accordingly.
- *
- * The jobid and rename extensions can be added to a record, to match the
- * format an application expects, typically. In this case, the newly added
- * fields will be zeroed.
- * The Jobid field can be removed, to guarantee compatibility with older
- * clients that don't expect this field in the records they process.
- *
- * The following assumptions are being made:
- *   - CLF_RENAME will not be removed
- *   - CLF_JOBID will not be added without CLF_RENAME being added too
- *   - CLF_EXTRA_FLAGS will not be added without CLF_JOBID being added too
- *
- * @param[in,out]  rec         The record to remap.
- * @param[in]      crf_wanted  Flags describing the desired extensions.
- * @param[in]      cref_want   Flags describing the desired extra extensions.
- */
-static inline void changelog_remap_rec(struct changelog_rec *rec,
-				       enum changelog_rec_flags crf_wanted,
-				       enum changelog_rec_extra_flags cref_want)
-{
-	char *xattr_mov = NULL;
-	char *omd_mov = NULL;
-	char *nid_mov = NULL;
-	char *uidgid_mov = NULL;
-	char *ef_mov;
-	char *jid_mov;
-	char *rnm_mov;
-	enum changelog_rec_extra_flags cref = CLFE_INVALID;
-
-	crf_wanted = (enum changelog_rec_flags)
-	    (crf_wanted & CLF_SUPPORTED);
-	cref_want = (enum changelog_rec_extra_flags)
-	    (cref_want & CLFE_SUPPORTED);
-
-	if ((rec->cr_flags & CLF_SUPPORTED) == crf_wanted) {
-		if (!(rec->cr_flags & CLF_EXTRA_FLAGS) ||
-		    (rec->cr_flags & CLF_EXTRA_FLAGS &&
-		    (changelog_rec_extra_flags(rec)->cr_extra_flags &
-							CLFE_SUPPORTED) ==
-								     cref_want))
-			return;
-	}
-
-	/* First move the variable-length name field */
-	memmove((char *)rec + changelog_rec_offset(crf_wanted, cref_want),
-		changelog_rec_name(rec), rec->cr_namelen);
-
-	/* Locations of extensions in the remapped record */
-	if (rec->cr_flags & CLF_EXTRA_FLAGS) {
-		xattr_mov = (char *)rec +
-			changelog_rec_offset(
-			    (enum changelog_rec_flags)
-				    (crf_wanted & CLF_SUPPORTED),
-			    (enum changelog_rec_extra_flags)
-				    (cref_want & ~CLFE_XATTR));
-		omd_mov = (char *)rec +
-			changelog_rec_offset(
-			    (enum changelog_rec_flags)
-				    (crf_wanted & CLF_SUPPORTED),
-			    (enum changelog_rec_extra_flags)
-				    (cref_want & ~(CLFE_OPEN | CLFE_XATTR)));
-		nid_mov = (char *)rec +
-			changelog_rec_offset(
-			    (enum changelog_rec_flags)
-				(crf_wanted & CLF_SUPPORTED),
-			    (enum changelog_rec_extra_flags)
-				(cref_want &
-				 ~(CLFE_NID | CLFE_OPEN | CLFE_XATTR)));
-		uidgid_mov = (char *)rec +
-			changelog_rec_offset(
-				(enum changelog_rec_flags)
-				    (crf_wanted & CLF_SUPPORTED),
-				(enum changelog_rec_extra_flags)
-				    (cref_want & ~(CLFE_UIDGID |
-							   CLFE_NID |
-							   CLFE_OPEN |
-							   CLFE_XATTR)));
-		cref = (enum changelog_rec_extra_flags)
-			changelog_rec_extra_flags(rec)->cr_extra_flags;
-	}
-
-	ef_mov  = (char *)rec +
-		  changelog_rec_offset(
-				(enum changelog_rec_flags)
-				 (crf_wanted & ~CLF_EXTRA_FLAGS), CLFE_INVALID);
-	jid_mov = (char *)rec +
-		  changelog_rec_offset((enum changelog_rec_flags)(crf_wanted &
-				       ~(CLF_EXTRA_FLAGS | CLF_JOBID)),
-				       CLFE_INVALID);
-	rnm_mov = (char *)rec +
-		  changelog_rec_offset((enum changelog_rec_flags)(crf_wanted &
-				       ~(CLF_EXTRA_FLAGS |
-					 CLF_JOBID |
-					 CLF_RENAME)),
-				       CLFE_INVALID);
-
-	/* Move the extension fields to the desired positions */
-	if ((crf_wanted & CLF_EXTRA_FLAGS) &&
-	    (rec->cr_flags & CLF_EXTRA_FLAGS)) {
-		if ((cref_want & CLFE_XATTR) && (cref & CLFE_XATTR))
-			memmove(xattr_mov, changelog_rec_xattr(rec),
-				sizeof(struct changelog_ext_xattr));
-
-		if ((cref_want & CLFE_OPEN) && (cref & CLFE_OPEN))
-			memmove(omd_mov, changelog_rec_openmode(rec),
-				sizeof(struct changelog_ext_openmode));
-
-		if ((cref_want & CLFE_NID) && (cref & CLFE_NID))
-			memmove(nid_mov, changelog_rec_nid(rec),
-				sizeof(struct changelog_ext_nid));
-
-		if ((cref_want & CLFE_UIDGID) && (cref & CLFE_UIDGID))
-			memmove(uidgid_mov, changelog_rec_uidgid(rec),
-				sizeof(struct changelog_ext_uidgid));
-
-		memmove(ef_mov, changelog_rec_extra_flags(rec),
-			sizeof(struct changelog_ext_extra_flags));
-	}
-
-	if ((crf_wanted & CLF_JOBID) && (rec->cr_flags & CLF_JOBID))
-		memmove(jid_mov, changelog_rec_jobid(rec),
-			sizeof(struct changelog_ext_jobid));
-
-	if ((crf_wanted & CLF_RENAME) && (rec->cr_flags & CLF_RENAME))
-		memmove(rnm_mov, changelog_rec_rename(rec),
-			sizeof(struct changelog_ext_rename));
-
-	/* Clear newly added fields */
-	if (xattr_mov && (cref_want & CLFE_XATTR) &&
-	    !(cref & CLFE_XATTR))
-		memset(xattr_mov, 0, sizeof(struct changelog_ext_xattr));
-
-	if (omd_mov && (cref_want & CLFE_OPEN) &&
-	    !(cref & CLFE_OPEN))
-		memset(omd_mov, 0, sizeof(struct changelog_ext_openmode));
-
-	if (nid_mov && (cref_want & CLFE_NID) &&
-	    !(cref & CLFE_NID))
-		memset(nid_mov, 0, sizeof(struct changelog_ext_nid));
-
-	if (uidgid_mov && (cref_want & CLFE_UIDGID) &&
-	    !(cref & CLFE_UIDGID))
-		memset(uidgid_mov, 0, sizeof(struct changelog_ext_uidgid));
-
-	if ((crf_wanted & CLF_EXTRA_FLAGS) &&
-	    !(rec->cr_flags & CLF_EXTRA_FLAGS))
-		memset(ef_mov, 0, sizeof(struct changelog_ext_extra_flags));
-
-	if ((crf_wanted & CLF_JOBID) && !(rec->cr_flags & CLF_JOBID))
-		memset(jid_mov, 0, sizeof(struct changelog_ext_jobid));
-
-	if ((crf_wanted & CLF_RENAME) && !(rec->cr_flags & CLF_RENAME))
-		memset(rnm_mov, 0, sizeof(struct changelog_ext_rename));
-
-	/* Update the record's flags accordingly */
-	rec->cr_flags = (rec->cr_flags & CLF_FLAGMASK) | crf_wanted;
-	if (rec->cr_flags & CLF_EXTRA_FLAGS)
-		changelog_rec_extra_flags(rec)->cr_extra_flags =
-			changelog_rec_extra_flags(rec)->cr_extra_flags |
-			cref_want;
 }
 
 enum changelog_message_type {
@@ -2539,7 +2391,7 @@ struct hsm_user_item {
 
 struct hsm_user_request {
 	struct hsm_request	hur_request;
-	struct hsm_user_item	hur_user_item[0];
+	struct hsm_user_item	hur_user_item[];
 	/* extra data blob at end of struct (after all
 	 * hur_user_items), only use helpers to access it
 	 */
@@ -2609,7 +2461,7 @@ struct hsm_action_item {
 	struct hsm_extent hai_extent;  /* byte range to operate on */
 	__u64      hai_cookie;  /* action cookie from coordinator */
 	__u64      hai_gid;     /* grouplock id */
-	char       hai_data[0]; /* variable length */
+	char       hai_data[];  /* variable length */
 } __attribute__((packed));
 
 /**
@@ -2838,7 +2690,7 @@ struct llapi_ladvise_hdr {
 	__u32			lah_value1;	/* unused */
 	__u32			lah_value2;	/* unused */
 	__u64			lah_value3;	/* unused */
-	struct llapi_lu_ladvise	lah_advise[0];	/* advices in this header */
+	struct llapi_lu_ladvise	lah_advise[];	/* advices in this header */
 };
 
 #define LAH_COUNT_MAX	(1024)
@@ -2919,7 +2771,7 @@ enum obd_heat_type {
 struct lu_heat {
 	__u32 lh_count;
 	__u32 lh_flags;
-	__u64 lh_heat[0];
+	__u64 lh_heat[];
 };
 
 enum lu_pcc_type {
@@ -3062,7 +2914,7 @@ struct fid_array {
 	/* make header's size equal lu_fid */
 	__u32 fa_padding0;
 	__u64 fa_padding1;
-	struct lu_fid fa_fids[0];
+	struct lu_fid fa_fids[];
 };
 #define OBD_MAX_FIDS_IN_ARRAY	4096
 
@@ -3093,7 +2945,7 @@ struct ll_foreign_symlink_upcall_item {
 				/* internal storage of constant string */
 				char *string;
 				/* upcall stores constant string in a raw */
-				char bytestring[0];
+				DECLARE_FLEX_ARRAY(char, bytestring);
 			};
 		};
 	};

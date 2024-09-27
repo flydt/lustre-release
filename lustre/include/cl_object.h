@@ -2284,6 +2284,10 @@ struct cl_client_cache {
 	 */
 	atomic_long_t		ccc_lru_left;
 	/**
+	 * # of unevictable LRU entries
+	 */
+	atomic_long_t		ccc_unevict_lru_used;
+	/**
 	 * List of entities(OSCs) for this LRU cache
 	 */
 	struct list_head	ccc_lru;
@@ -2298,7 +2302,11 @@ struct cl_client_cache {
 	/**
 	 * Set if unstable check is enabled
 	 */
-	unsigned int		ccc_unstable_check:1;
+	unsigned int		ccc_unstable_check:1,
+	/**
+	 * Whether unevictable (mlock pages) checking is enabled
+	 */
+				ccc_mlock_pages_enable:1;
 	/**
 	 * # of unstable pages for this mount point
 	 */
@@ -2533,7 +2541,8 @@ struct cl_dio_aio {
 	ssize_t			cda_bytes;
 	struct mm_struct	*cda_mm;
 	unsigned		cda_no_aio_complete:1,
-				cda_creator_free:1;
+				cda_creator_free:1,
+				cda_is_aio:1;
 };
 
 struct cl_iter_dup {

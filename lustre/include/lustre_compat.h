@@ -561,9 +561,8 @@ static inline int ll_vfs_getxattr(struct dentry *dentry, struct inode *inode,
 				  const char *name,
 				  void *value, size_t size)
 {
-#if defined(HAVE_MNT_IDMAP_ARG) || defined(HAVE_USER_NAMESPACE_ARG)
-	return vfs_getxattr(&nop_mnt_idmap, dentry, name, value, size);
-#elif defined(HAVE_VFS_SETXATTR)
+#if defined(HAVE_MNT_IDMAP_ARG) || defined(HAVE_USER_NAMESPACE_ARG) || \
+	defined(HAVE_VFS_SETXATTR)
 	return __vfs_getxattr(dentry, inode, name, value, size);
 #else
 	if (unlikely(!inode->i_op->getxattr))
@@ -773,8 +772,8 @@ ll_shrinker_create(struct ll_shrinker_ops *ops, unsigned int flags,
 #define ll_access_ok(ptr, len) access_ok(ptr, len)
 #endif
 
-#ifdef HAVE_WB_STAT_MOD
-#define __add_wb_stat(wb, item, amount)		wb_stat_mod(wb, item, amount)
+#ifndef HAVE_WB_STAT_MOD
+#define wb_stat_mod(wb, item, amount)	__add_wb_stat(wb, item, amount)
 #endif
 
 #ifdef HAVE_SEC_RELEASE_SECCTX_1ARG

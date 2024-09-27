@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 
 /* Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
@@ -57,7 +57,7 @@ struct libcfs_ioctl_data {
 	__u32 ioc_plen2; /* buffers in userspace */
 	void __user *ioc_pbuf2;
 
-	char ioc_bulk[0];
+	char ioc_bulk[];
 };
 
 #define IOCTL_LIBCFS_TYPE		  long

@@ -1,37 +1,19 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  *
  * Implementation of cl_io for LOV layer.
  *
- *   Author: Nikita Danilov <nikita.danilov@sun.com>
- *   Author: Jinshan Xiong <jinshan.xiong@whamcloud.com>
+ * Author: Nikita Danilov <nikita.danilov@sun.com>
+ * Author: Jinshan Xiong <jinshan.xiong@whamcloud.com>
  */
 
 #define DEBUG_SUBSYSTEM S_LOV
@@ -1027,7 +1009,7 @@ static int lov_io_rw_iter_init(const struct lu_env *env,
 		 "pos %lld, [%lld, %lld)\n", io->u.ci_rw.crw_pos,
 		 lse->lsme_extent.e_start, lse->lsme_extent.e_end);
 	next = min_t(__u64, next, lse->lsme_extent.e_end);
-	next = min_t(loff_t, next, lio->lis_io_endpos);
+	next = min_t(__u64, next, lio->lis_io_endpos);
 
 	io->ci_continue = next < lio->lis_io_endpos;
 	io->u.ci_rw.crw_bytes = next - io->u.ci_rw.crw_pos;
@@ -1381,7 +1363,7 @@ static int lov_io_submit(const struct lu_env *env,
 			 * the pages will be transient. We don't care about
 			 * the return code of cl_page_prep() at all.
 			 */
-			(void) cl_page_prep(env, ios->cis_io, page, crt);
+			LASSERT(page->cp_type == CPT_TRANSIENT);
 			cl_page_completion(env, page, crt, 0);
 			continue;
 		}

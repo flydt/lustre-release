@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -585,12 +567,15 @@ int mdc_file_resync(struct obd_export *exp, struct md_op_data *op_data)
 	rec->rs_cap	= ll_capability_u32(op_data->op_cap);
 	rec->rs_fid	= op_data->op_fid1;
 	rec->rs_bias	= op_data->op_bias;
-	rec->rs_mirror_id = op_data->op_mirror_id;
+	if (exp_connect_mirror_id_fix(exp))
+		rec->rs_mirror_id_new = op_data->op_mirror_id;
+	else
+		rec->rs_mirror_id_old = op_data->op_mirror_id;
 
 	lock = ldlm_handle2lock(&op_data->op_lease_handle);
 	if (lock != NULL) {
 		rec->rs_lease_handle = lock->l_remote_handle;
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 	}
 
 	ptlrpc_request_set_replen(req);

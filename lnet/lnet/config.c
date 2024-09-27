@@ -128,8 +128,7 @@ lnet_net_append_cpts(__u32 *cpts, __u32 ncpts, struct lnet_net *net)
 
 	if (cpts == NULL) {
 		/* there is an NI which will exist on all CPTs */
-		if (net->net_cpts != NULL)
-			CFS_FREE_PTR_ARRAY(net->net_cpts, net->net_ncpts);
+		CFS_FREE_PTR_ARRAY(net->net_cpts, net->net_ncpts);
 		net->net_cpts = NULL;
 		net->net_ncpts = LNET_CPT_NUMBER;
 		return 0;
@@ -365,7 +364,10 @@ int lnet_ni_add_interface(struct lnet_ni *ni, char *iface)
 	if (ni == NULL)
 		return -ENOMEM;
 
-	if (ni->ni_interface != NULL) {
+	if (!iface || !strlen(iface))
+		return -EINVAL;
+
+	if (ni->ni_interface && strlen(ni->ni_interface)) {
 		LCONSOLE_ERROR("%s: interface %s already set for net %s: rc = %d\n",
 			       iface, ni->ni_interface,
 			       libcfs_net2str(LNET_NID_NET(&ni->ni_nid)),
@@ -452,7 +454,7 @@ lnet_ni_alloc_common(struct lnet_net *net, struct lnet_nid *nid, char *iface)
 	 * if an interface name is provided then make sure to add in that
 	 * interface name in NI
 	 */
-	if (iface)
+	if (iface && strlen(iface))
 		if (lnet_ni_add_interface(ni, iface) != 0)
 			goto failed;
 

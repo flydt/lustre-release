@@ -60,7 +60,7 @@ extern struct kset *ldlm_svc_kset;
 #define OBD_LDLM_DEVICENAME  "ldlm"
 
 #define LDLM_DEFAULT_LRU_SIZE (100 * num_online_cpus())
-#define LDLM_DEFAULT_MAX_ALIVE		3900	/* 3900 seconds ~65 min */
+#define LDLM_DEFAULT_LRU_MAX_AGE	600	/* 600 seconds = 10 min */
 #define LDLM_CTIME_AGE_LIMIT (10)
 /* if client lock is unused for that time it can be cancelled if any other
  * client shows interest in that lock, e.g. glimpse is occured.
@@ -1089,7 +1089,7 @@ struct lustre_handle_array {
 	unsigned int		ha_count;
 	/* ha_map is used as bit flag to indicate handle is remote or local */
 	DECLARE_BITMAP(ha_map, LMV_MAX_STRIPE_COUNT);
-	struct lustre_handle	ha_handles[0];
+	struct lustre_handle	ha_handles[];
 };
 
 /**
@@ -1323,12 +1323,13 @@ extern const char *ldlm_it2str(enum ldlm_intent_flags it);
  */
 #ifdef LIBCFS_DEBUG
 #define ldlm_lock_debug(msgdata, mask, cdls, lock, fmt, a...) do {      \
-	if (((mask) & D_CANTMASK) != 0 ||                \
+	if (((mask) & D_CANTMASK) != 0 ||                               \
 	    ((libcfs_debug & (mask)) != 0 &&                            \
 	     (libcfs_subsystem_debug & DEBUG_SUBSYSTEM) != 0)) {        \
 		_ldlm_lock_debug(lock, msgdata, fmt, ##a);              \
-		if (ldlm_lock_to_ns(lock)->ns_dump_stack_on_error &&    \
-					(mask) & D_ERROR)             \
+		if (unlikely(ldlm_lock_to_ns(lock)->                    \
+				ns_dump_stack_on_error) &&              \
+						(mask) & D_ERROR)       \
 			dump_stack();				        \
 	}								\
 } while (0)

@@ -944,6 +944,7 @@ static int mdd_changelog_data_store_by_fid(const struct lu_env *env,
 			clf_flags |= CLF_JOBID;
 		xflags |= CLFE_UIDGID;
 		xflags |= CLFE_NID;
+		xflags |= CLFE_NID_BE;
 	}
 	if (type == CL_OPEN || type == CL_DN_OPEN)
 		xflags |= CLFE_OPEN;
@@ -975,7 +976,7 @@ static int mdd_changelog_data_store_by_fid(const struct lu_env *env,
 			mdd_changelog_rec_extra_uidgid(&rec->cr,
 						       uc->uc_uid, uc->uc_gid);
 		if (xflags & CLFE_NID)
-			mdd_changelog_rec_extra_nid(&rec->cr, uc->uc_nid);
+			mdd_changelog_rec_extra_nid(&rec->cr, &uc->uc_nid);
 		if (xflags & CLFE_OPEN)
 			mdd_changelog_rec_extra_omode(&rec->cr, clf_flags);
 		if (xflags & CLFE_XATTR) {
@@ -4092,14 +4093,20 @@ out:
 		last->lde_reclen = 0; /* end mark */
 	}
 out_err:
-	if (result > 0)
+	if (result > 0) {
 		/* end of directory */
 		dp->ldp_hash_end = cpu_to_le64(MDS_DIR_END_OFF);
-	else if (result < 0)
+		if (last == NULL && fid_is_dot_lustre(&fid))
+			/*
+			 * .lustre is last in directory and alone in
+			 * last directory block
+			 */
+			dp->ldp_flags = cpu_to_le32(LDF_EMPTY);
+	} else if (result < 0) {
 		CWARN("%s: build page failed for "DFID": rc = %d\n",
 		      lu_dev_name(obj->do_lu.lo_dev),
 		      PFID(lu_object_fid(&obj->do_lu)), result);
-
+	}
 	return result;
 }
 

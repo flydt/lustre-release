@@ -2113,8 +2113,7 @@ lmv_out_free:
 		/* in v1 and v3 cases lumv1 points to data */
 		rc = ll_dir_setstripe(inode, lumv1_ptr, set_default);
 out:
-		if (lumv3)
-			OBD_FREE(lumv3, lum_size);
+		OBD_FREE(lumv3, lum_size);
 		RETURN(rc);
 	}
 	case LL_IOC_LMV_GETSTRIPE: {
@@ -2867,7 +2866,7 @@ out_state_free:
 		if (!S_ISREG(inode2->i_mode))
 			GOTO(out_iput, rc = -EINVAL);
 
-		if (!inode_owner_or_capable(&nop_mnt_idmap, inode2))
+		if (!pcc_inode_permission(inode2))
 			GOTO(out_iput, rc = -EPERM);
 
 		rc = pcc_ioctl_detach(inode2, &detach->pccd_flags);
@@ -2893,7 +2892,7 @@ out_detach:
 static loff_t ll_dir_seek(struct file *file, loff_t offset, int origin)
 {
 	struct inode *inode = file->f_mapping->host;
-	struct ll_file_data *fd = file->private_data;
+	struct ll_file_data *lfd = file->private_data;
 	struct ll_sb_info *sbi = ll_i2sbi(inode);
 	int api32 = ll_need_32bit_api(sbi);
 	loff_t ret = -EINVAL;
@@ -2927,11 +2926,11 @@ static loff_t ll_dir_seek(struct file *file, loff_t offset, int origin)
 			hash64 = test_bit(LL_SBI_64BIT_HASH, sbi->ll_flags);
 			if ((api32 && offset == LL_DIR_END_OFF_32BIT) ||
 			    (!api32 && offset == LL_DIR_END_OFF))
-				fd->lfd_pos = MDS_DIR_END_OFF;
+				lfd->lfd_pos = MDS_DIR_END_OFF;
 			else if (api32 && hash64)
-				fd->lfd_pos = offset << 32;
+				lfd->lfd_pos = offset << 32;
 			else
-				fd->lfd_pos = offset;
+				lfd->lfd_pos = offset;
 			file->f_pos = offset;
 			file->f_version = 0;
 		}

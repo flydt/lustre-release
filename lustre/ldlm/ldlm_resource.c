@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2010, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/ldlm/ldlm_resource.c
  *
  * Author: Phil Schwan <phil@clusterfs.com>
  * Author: Peter Braam <braam@clusterfs.com>
@@ -555,10 +535,7 @@ static ssize_t dump_stack_on_error_store(struct kobject *kobj,
 	if (err != 0)
 		return -EINVAL;
 
-	if (tmp != 0)
-		ns->ns_dump_stack_on_error = 1;
-	else
-		ns->ns_dump_stack_on_error = 0;
+	ns->ns_dump_stack_on_error = tmp;
 
 	return count;
 }
@@ -1003,26 +980,26 @@ struct ldlm_namespace *ldlm_namespace_new(struct obd_device *obd, char *name,
 	atomic_set(&ns->ns_bref, 0);
 	init_waitqueue_head(&ns->ns_waitq);
 
-	ns->ns_max_nolock_size		= NS_DEFAULT_MAX_NOLOCK_BYTES;
-	ns->ns_contention_time		= NS_DEFAULT_CONTENTION_SECONDS;
-	ns->ns_contended_locks		= NS_DEFAULT_CONTENDED_LOCKS;
-
-	ns->ns_max_parallel_ast		= LDLM_DEFAULT_PARALLEL_AST_LIMIT;
-	ns->ns_nr_unused		= 0;
-	ns->ns_max_unused		= LDLM_DEFAULT_LRU_SIZE;
-	ns->ns_cancel_batch		= LDLM_DEFAULT_LRU_SHRINK_BATCH;
-	ns->ns_recalc_pct		= LDLM_DEFAULT_SLV_RECALC_PCT;
-	ns->ns_max_age			= ktime_set(LDLM_DEFAULT_MAX_ALIVE, 0);
-	ns->ns_ctime_age_limit		= LDLM_CTIME_AGE_LIMIT;
-	ns->ns_dirty_age_limit		= ktime_set(LDLM_DIRTY_AGE_LIMIT, 0);
-	ns->ns_timeouts			= 0;
-	ns->ns_orig_connect_flags	= 0;
-	ns->ns_connect_flags		= 0;
-	ns->ns_stopping			= 0;
-	ns->ns_dump_stack_on_error	= 0;
-	ns->ns_reclaim_start		= 0;
-	ns->ns_last_pos			= &ns->ns_unused_list;
-	ns->ns_flags			= 0;
+	ns->ns_connect_flags	    = 0;
+	ns->ns_orig_connect_flags   = 0;
+	ns->ns_nr_unused	    = 0;
+	ns->ns_last_pos		    = &ns->ns_unused_list;
+	ns->ns_max_unused	    = LDLM_DEFAULT_LRU_SIZE;
+	ns->ns_cancel_batch	    = LDLM_DEFAULT_LRU_SHRINK_BATCH;
+	ns->ns_recalc_pct	    = LDLM_DEFAULT_SLV_RECALC_PCT;
+	ns->ns_max_age		    = ktime_set(LDLM_DEFAULT_LRU_MAX_AGE, 0);
+	ns->ns_timeouts		    = 0;
+	ns->ns_ctime_age_limit	    = LDLM_CTIME_AGE_LIMIT;
+	ns->ns_dirty_age_limit	    = ktime_set(LDLM_DIRTY_AGE_LIMIT, 0);
+	ns->ns_contended_locks	    = NS_DEFAULT_CONTENDED_LOCKS;
+	ns->ns_contention_time	    = NS_DEFAULT_CONTENTION_SECONDS;
+	ns->ns_max_nolock_size	    = NS_DEFAULT_MAX_NOLOCK_BYTES;
+	ns->ns_max_parallel_ast	    = LDLM_DEFAULT_PARALLEL_AST_LIMIT;
+	ns->ns_stopping		    = 0;
+	ns->ns_rpc_recalc	    = 0;
+	ns->ns_dump_stack_on_error  = 0;
+	ns->ns_reclaim_start	    = 0;
+	ns->ns_flags		    = 0;
 
 	rc = ldlm_namespace_sysfs_register(ns);
 	if (rc) {
@@ -1088,7 +1065,7 @@ static void cleanup_resource(struct ldlm_resource *res, struct list_head *q,
 				continue;
 
 			lock = tmp;
-			LDLM_LOCK_GET(lock);
+			ldlm_lock_get(lock);
 			ldlm_set_cleaned(lock);
 			break;
 		}
@@ -1126,7 +1103,7 @@ static void cleanup_resource(struct ldlm_resource *res, struct list_head *q,
 			if (lock->l_completion_ast)
 				lock->l_completion_ast(lock,
 						       LDLM_FL_FAILED, NULL);
-			LDLM_LOCK_RELEASE(lock);
+			ldlm_lock_put(lock);
 			continue;
 		}
 
@@ -1144,7 +1121,7 @@ static void cleanup_resource(struct ldlm_resource *res, struct list_head *q,
 				   "Freeing a lock still held by a client node");
 			ldlm_lock_cancel(lock);
 		}
-		LDLM_LOCK_RELEASE(lock);
+		ldlm_lock_put(lock);
 	} while (1);
 }
 
@@ -1528,8 +1505,7 @@ static void ldlm_resource_free(struct ldlm_resource *res)
 			OBD_SLAB_FREE(res->lr_itree, ldlm_interval_tree_slab,
 				      sizeof(*res->lr_itree) * LCK_MODE_NUM);
 	} else if (res->lr_type == LDLM_IBITS) {
-		if (res->lr_ibits_queues != NULL)
-			OBD_FREE_PTR(res->lr_ibits_queues);
+		OBD_FREE_PTR(res->lr_ibits_queues);
 	}
 
 	call_rcu(&res->lr_rcu, __ldlm_resource_free);

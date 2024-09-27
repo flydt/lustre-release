@@ -41,6 +41,12 @@ to the new OST(s). In contrast,
 .B lfs setstripe
 is used for creating new (empty) files with the specified layout.
 For OST object migration, there additional options available:
+.PP
+If setstripe is restricted to specified users, this also applies to
+.B lfs migrate.
+See
+.BR lfs-setstripe (1)
+for details.
 .TP
 .BR -b , --block
 Block access to the file by other applications during data migration
@@ -113,7 +119,7 @@ and future metadata workload. If
 is -1, the MDT index will be balanced by free space and inodes among
 available MDTs.  If multiple
 .I MDT_INDEX
-values are specified in a comma-seperated list, then all
+values are specified in a comma-separated list, then all
 subdirectories will be
 .B striped
 across all of the specified MDT indices as if an equivalent

@@ -1,29 +1,13 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2017, Commissariat a l'Energie Atomique et aux Energies
  *                     Alternatives.
- *
  * Copyright (c) 2017, Intel Corporation.
+ */
+
+/*
+ * This file is part of Lustre, http://www.lustre.org/
  *
  * Author: Henri Doreau <henri.doreau@cea.fr>
  */
@@ -293,12 +277,12 @@ static int chlg_load(void *args)
 	struct obd_device *obd = NULL;
 	struct llog_ctxt *ctx = NULL;
 	struct llog_handle *llh = NULL;
+	enum llog_flag nid_be_flag = 0;
 	int rc;
-	ENTRY;
 
+	ENTRY;
 	crs->crs_last_catidx = 0;
 	crs->crs_last_idx = 0;
-
 again:
 	obd = chlg_obd_get(ced);
 	if (obd == NULL)
@@ -318,13 +302,15 @@ again:
 		GOTO(err_out, rc);
 	}
 
+	if (crs->crs_flags & CLFE_NID_BE)
+		nid_be_flag = LLOG_F_EXT_X_NID_BE;
 
 	rc = llog_init_handle(NULL, llh,
 			      LLOG_F_IS_CAT |
 			      LLOG_F_EXT_JOBID |
 			      LLOG_F_EXT_EXTRA_FLAGS |
 			      LLOG_F_EXT_X_UIDGID |
-			      LLOG_F_EXT_X_NID |
+			      LLOG_F_EXT_X_NID | nid_be_flag |
 			      LLOG_F_EXT_X_OMODE |
 			      LLOG_F_EXT_X_XATTR,
 			      NULL);
@@ -866,8 +852,7 @@ out_listrm:
 
 out_unlock:
 	mutex_unlock(&chlg_registered_dev_lock);
-	if (entry)
-		OBD_FREE_PTR(entry);
+	OBD_FREE_PTR(entry);
 	RETURN(rc);
 }
 

@@ -1,27 +1,9 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  *
@@ -128,7 +110,7 @@ static int mdc_dom_lock_match(const struct lu_env *env, struct obd_export *exp,
 			ldlm_lock_decref(lockh, rc);
 			rc = 0;
 		}
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 	}
 	RETURN(rc);
 }
@@ -209,7 +191,7 @@ static bool mdc_check_and_discard_cb(const struct lu_env *env, struct cl_io *io,
 					OSC_DAP_FL_TEST_LOCK | OSC_DAP_FL_AST);
 			if (tmp != NULL) {
 				info->oti_fn_index = CL_PAGE_EOF;
-				LDLM_LOCK_PUT(tmp);
+				ldlm_lock_put(tmp);
 			} else if (cl_page_own(env, io, page) == 0) {
 				/* discard the page */
 				cl_page_discard(env, io, page);
@@ -630,7 +612,7 @@ static int mdc_enqueue_fini(struct obd_export *exp, struct ptlrpc_request *req,
 		memcpy(&lock->l_ost_lvb, &ols->ols_lvb,
 		       sizeof(lock->l_ost_lvb));
 		unlock_res_and_lock(lock);
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 		*flags |= LDLM_FL_LVB_READY;
 	}
 
@@ -694,7 +676,7 @@ static int mdc_enqueue_interpret(const struct lu_env *env,
 	CFS_FAIL_TIMEOUT(OBD_FAIL_OSC_CP_CANCEL_RACE, 10);
 
 	ldlm_lock_decref(lockh, mode);
-	LDLM_LOCK_PUT(lock);
+	ldlm_lock_put(lock);
 	RETURN(rc);
 }
 
@@ -756,11 +738,11 @@ static int mdc_enqueue_send(const struct lu_env *env, struct obd_export *exp,
 			(*upcall)(cookie, &lockh, ELDLM_LOCK_MATCHED);
 
 			ldlm_lock_decref(&lockh, mode);
-			LDLM_LOCK_PUT(matched);
+			ldlm_lock_put(matched);
 			RETURN(ELDLM_OK);
 		}
 		ldlm_lock_decref(&lockh, mode);
-		LDLM_LOCK_PUT(matched);
+		ldlm_lock_put(matched);
 	}
 
 	if (*flags & (LDLM_FL_TEST_LOCK | LDLM_FL_MATCH_LOCK))
@@ -1045,7 +1027,7 @@ static int mdc_get_lock_handle(const struct lu_env *env, struct osc_object *osc,
 		return -ENOENT;
 	} else {
 		*lh = lock->l_remote_handle;
-		LDLM_LOCK_PUT(lock);
+		ldlm_lock_put(lock);
 	}
 	return 0;
 }

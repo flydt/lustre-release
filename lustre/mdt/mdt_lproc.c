@@ -400,8 +400,7 @@ again:
 				   param->idd_uid, param);
 
 out:
-	if (param != NULL)
-		OBD_FREE(param, size);
+	OBD_FREE(param, size);
 
 	return rc ? rc : count;
 }
@@ -416,7 +415,7 @@ static int mdt_site_stats_seq_show(struct seq_file *m, void *data)
 }
 LPROC_SEQ_FOPS_RO(mdt_site_stats);
 
-#define BUFLEN (UUID_MAX + 4)
+#define BUFLEN LNET_NIDSTR_SIZE
 
 static ssize_t
 lprocfs_mds_evict_client_seq_write(struct file *file, const char __user *buf,
@@ -436,7 +435,7 @@ lprocfs_mds_evict_client_seq_write(struct file *file, const char __user *buf,
 	/*
 	 * OBD_ALLOC() will zero kbuf, but we only copy BUFLEN - 1
 	 * bytes into kbuf, to ensure that the string is NUL-terminated.
-	 * UUID_MAX should include a trailing NUL already.
+	 * LNET_NIDSTR_SIZE includes space for a trailing NUL already.
 	 */
 	if (copy_from_user(kbuf, buf, min_t(unsigned long, BUFLEN - 1, count)))
 		GOTO(out, rc = -EFAULT);
@@ -1345,8 +1344,13 @@ LUSTRE_RO_ATTR(eviction_count);
 LUSTRE_OBD_UINT_PARAM_ATTR(at_min);
 LUSTRE_OBD_UINT_PARAM_ATTR(at_max);
 LUSTRE_OBD_UINT_PARAM_ATTR(at_history);
+LUSTRE_OBD_UINT_PARAM_ATTR(at_unhealthy_factor);
 
 static struct attribute *mdt_attrs[] = {
+	&lustre_attr_at_min.attr,
+	&lustre_attr_at_max.attr,
+	&lustre_attr_at_history.attr,
+	&lustre_attr_at_unhealthy_factor.attr,
 	&lustre_attr_tot_dirty.attr,
 	&lustre_attr_tot_granted.attr,
 	&lustre_attr_tot_pending.attr,
@@ -1368,12 +1372,16 @@ static struct attribute *mdt_attrs[] = {
 	&lustre_attr_enable_dir_migration.attr,
 	&lustre_attr_enable_dir_restripe.attr,
 	&lustre_attr_enable_dir_auto_split.attr,
+	&lustre_attr_enable_dmv_implicit_inherit.attr,
+	&lustre_attr_enable_dmv_xattr.attr,
 	&lustre_attr_enable_parallel_rename_dir.attr,
 	&lustre_attr_enable_parallel_rename_file.attr,
 	&lustre_attr_enable_parallel_rename_crossdir.attr,
 	&lustre_attr_enable_remote_dir.attr,
 	&lustre_attr_enable_remote_dir_gid.attr,
 	&lustre_attr_enable_remote_rename.attr,
+	&lustre_attr_enable_remote_subdir_mount.attr,
+	&lustre_attr_enable_strict_som.attr,
 	&lustre_attr_enable_striped_dir.attr,
 	&lustre_attr_commit_on_sharing.attr,
 	&lustre_attr_local_recovery.attr,
@@ -1382,7 +1390,6 @@ static struct attribute *mdt_attrs[] = {
 	&lustre_attr_sync_count.attr,
 	&lustre_attr_dom_lock.attr,
 	&lustre_attr_dom_read_open.attr,
-	&lustre_attr_enable_strict_som.attr,
 	&lustre_attr_migrate_hsm_allowed.attr,
 	&lustre_attr_hsm_control.attr,
 	&lustre_attr_job_cleanup_interval.attr,
@@ -1392,13 +1399,7 @@ static struct attribute *mdt_attrs[] = {
 	&lustre_attr_dir_split_delta.attr,
 	&lustre_attr_dir_restripe_nsonly.attr,
 	&lustre_attr_checksum_t10pi_enforce.attr,
-	&lustre_attr_enable_remote_subdir_mount.attr,
 	&lustre_attr_max_mod_rpcs_in_flight.attr,
-	&lustre_attr_enable_dmv_implicit_inherit.attr,
-	&lustre_attr_at_min.attr,
-	&lustre_attr_at_max.attr,
-	&lustre_attr_at_history.attr,
-	&lustre_attr_enable_dmv_xattr.attr,
 	NULL,
 };
 
