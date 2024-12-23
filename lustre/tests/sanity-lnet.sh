@@ -2148,10 +2148,15 @@ cleanup_health_test() {
 add_health_test_drop_rules() {
 	local args="-m GET -r 1 -e ${1}"
 	local src dst
+	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+		net_drop_add="net_drop add"
+	else
+		net_drop_add="net_drop_add"
+	fi
 
 	for src in "${LNIDS[@]}"; do
 		for dst in "${RNIDS[@]}" "${LNIDS[@]}"; do
-			$LCTL net_drop_add -s $src -d $dst ${args} ||
+			$LCTL $net_drop_add -s $src -d $dst ${args} ||
 				error "Failed to add drop rule $src $dst $args"
 		done
 	done
@@ -2159,6 +2164,11 @@ add_health_test_drop_rules() {
 
 do_lnet_health_ping_test() {
 	local hstatus="$1"
+	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+		net_drop_del="net_drop del"
+	else
+		net_drop_del="net_drop_del"
+	fi
 
 	echo "Simulate $hstatus"
 
@@ -2170,7 +2180,7 @@ do_lnet_health_ping_test() {
 
 	lnet_health_post
 
-	$LCTL net_drop_del -a
+	$LCTL $net_drop_del -a
 
 	return 0
 }
@@ -3440,6 +3450,10 @@ test_225() {
 run_test 225 "Check avoid_asym_router_failure=0 w/DD disabled"
 
 test_226() {
+
+	(( $MDS1_VERSION >= $(version_code v2_15_62-31-g2b210f3905) )) ||
+		skip "need MDS >= 2.15.62.31 for refcnt fix LU-17440"
+
 	setup_router_test -r 2 || return $?
 
 	do_basic_rtr_test || return $?
@@ -3743,9 +3757,17 @@ do_expired_message_drop_test() {
 
 	delay=$((tto + 1))
 
+	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+		net_delay_add="net_delay add"
+		net_delay_del="net_delay del"
+	else
+		net_delay_add="net_delay_add"
+		net_delay_del="net_delay_del"
+	fi
+
 	for lnid in "${LNIDS[@]}"; do
 		for rnid in "${RNIDS[@]}"; do
-			$LCTL net_delay_add -s "${lnid}" -d "${rnid}" \
+			$LCTL $net_delay_add -s "${lnid}" -d "${rnid}" \
 				-l "${delay}" -r 1 -m GET ||
 				error "Failed to add delay rule"
 		done
@@ -3786,7 +3808,7 @@ do_expired_message_drop_test() {
 
 	sleep ${delay}
 
-	$LCTL net_delay_del -a
+	$LCTL $net_delay_del -a
 
 	wait
 
@@ -4023,7 +4045,7 @@ test_260() {
 	local sysctl_file="/etc/lnet-sysctl.conf"
 	local sysctl_conf_bak="/etc/lnet-sysctl.bak"
 	local sysctl_bak=$TMP/lnet-sysctl.bak
-	local -i max_retries=10
+	local -i max_wait=60
 	local -i retries=0
 
 	echo "Setting default values and create backup for check"
@@ -4039,10 +4061,10 @@ test_260() {
 	retries=0
 	until check_sysctl "${sysctl_bak}"
 	do
-		if (( retries >= max_retries )); then
+		if (( retries >= max_wait )); then
 			error "Default sysconfig values not set"
 		fi
-		sleep 3
+		sleep 1
 		retries+=1
 	done
 
@@ -4064,12 +4086,11 @@ test_260() {
 
 	echo "Check new configuration"
 	retries=0
-	until check_sysctl "${sysctl_file}"
-	do
-		if (( retries >= max_retries )); then
+	until check_sysctl "${sysctl_file}"; do
+		if (( retries >= max_wait )); then
 			error "New sysctl values not set"
 		fi
-		sleep 3
+		sleep 1
 		retries+=1
 	done
 
@@ -4084,12 +4105,12 @@ test_260() {
 
 	echo "Check original configuration"
 	retries=0
-	until check_sysctl "${sysctl_bak}"
-	do
-		if (( retries >= max_retries )); then
-			error "Original sysconfig values not set"
+	until check_sysctl "${sysctl_bak}"; do
+		if (( retries >= max_wait )); then
+			echo "Original sysconfig values not set"
+			break
 		fi
-		sleep 3
+		sleep 1
 		retries+=1
 	done
 

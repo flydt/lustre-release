@@ -1,33 +1,13 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
- * lustre/target/tgt_grant.c
- *
  * This file provides code related to grant space management on Lustre Targets
  * (OSTs and MDTs). Grant is a mechanism used by client nodes to reserve disk
  * space on a target for the data writeback cache. The Lustre client is thus
@@ -731,7 +711,7 @@ static void tgt_grant_check(const struct lu_env *env, struct obd_export *exp,
 
 	assert_spin_locked(&tgd->tgd_grant_lock);
 
-	if (obd->obd_recovering) {
+	if (test_bit(OBDF_RECOVERING, obd->obd_flags)) {
 		/* Replaying write. Grant info have been processed already so no
 		 * need to do any enforcement here. It is worth noting that only
 		 * bulk writes with all rnbs having OBD_BRW_FROM_GRANT can be
@@ -805,7 +785,7 @@ static void tgt_grant_check(const struct lu_env *env, struct obd_export *exp,
 			       ted->ted_grant, i);
 		}
 
-		if (obd->obd_recovering)
+		if (test_bit(OBDF_RECOVERING, obd->obd_flags))
 			CERROR("%s: cli %s is replaying OST_WRITE while one rnb"
 			       " hasn't OBD_BRW_FROM_GRANT set (0x%x)\n",
 			       obd->obd_name, exp->exp_client_uuid.uuid,
@@ -856,7 +836,8 @@ static void tgt_grant_check(const struct lu_env *env, struct obd_export *exp,
 	       "\n", obd->obd_name, exp->exp_client_uuid.uuid, exp,
 	       granted, ungranted, ted->ted_grant, ted->ted_dirty);
 
-	if (obd->obd_recovering || (oa->o_valid & OBD_MD_FLGRANT) == 0)
+	if (test_bit(OBDF_RECOVERING, obd->obd_flags) ||
+	    (oa->o_valid & OBD_MD_FLGRANT) == 0)
 		/* don't update dirty accounting during recovery or
 		 * if grant information got discarded (e.g. during resend) */
 		RETURN_EXIT;
@@ -942,7 +923,7 @@ static long tgt_grant_alloc(struct obd_export *exp, u64 curgrant,
 	if (curgrant >= want || curgrant >= ted->ted_grant + chunk)
 		RETURN(0);
 
-	if (obd->obd_recovering)
+	if (test_bit(OBDF_RECOVERING, obd->obd_flags))
 		conservative = false;
 
 	if (conservative)
@@ -1276,7 +1257,7 @@ refresh:
 	/* When close to free space exhaustion, trigger a sync to force
 	 * writeback cache to consume required space immediately and release as
 	 * much space as possible. */
-	if (!obd->obd_recovering && force != 2 && left < chunk) {
+	if (!test_bit(OBDF_RECOVERING, obd->obd_flags) && force != 2 && left < chunk) {
 		bool from_grant = true;
 		int  i;
 
@@ -1355,7 +1336,7 @@ long tgt_grant_create(const struct lu_env *env, struct obd_export *exp, s64 *nr)
 	unsigned long		 granted;
 	ENTRY;
 
-	if (exp->exp_obd->obd_recovering ||
+	if (test_bit(OBDF_RECOVERING, exp->exp_obd->obd_flags) ||
 	    lut->lut_dt_conf.ddp_inodespace == 0)
 		/* don't enforce grant during recovery */
 		RETURN(0);

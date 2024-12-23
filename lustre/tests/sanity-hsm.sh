@@ -394,6 +394,14 @@ get_request_count() {
 		"awk -vn=0 '/'$fid'.*action='$request'/ {n++}; END {print n}'"
 }
 
+get_request_cookie() {
+	local fid=$1
+	local request=$2
+
+	do_facet $SINGLEMDS "$LCTL get_param -n $HSM_PARAM.actions |"\
+		"awk '/'$fid'.*action='$request'/ {print \\\$6}' | cut -f3 -d/"
+}
+
 # Ensure the number of HSM request for a given FID is correct
 # assert_request_count FID REQUEST_TYPE COUNT [ERROR_MSG]
 assert_request_count() {
@@ -2372,6 +2380,53 @@ test_26d() {
 }
 run_test 26d "RAoLU when Client eviction"
 
+test_26e() {
+	# test needs a running copytool
+	copytool setup
+	mkdir_on_mdt0 $DIR/$tdir
+
+	local f=$DIR/$tdir/$tfile
+	local fid=$(create_small_file $f)
+	local f2=$DIR/$tdir/$tfile-2
+	local fid2=$(create_small_file $f2)
+
+	$LFS hsm_archive $f || error "could not archive file"
+	wait_request_state $fid ARCHIVE SUCCEED
+
+	kill_copytools
+	wait_copytools || error "copytool failed to stop"
+
+	$LFS hsm_archive $f2 || error "could not archive file"
+	wait_request_state $fid2 ARCHIVE WAITING
+
+	local last_cookie=$(( $(get_request_cookie $fid2 ARCHIVE) ))
+
+	stack_trap "cdt_set_mount_state enabled"
+	cdt_set_mount_state shutdown
+
+	fail mds1
+	cdt_check_state stopped
+
+	stack_trap "set_hsm_param remove_archive_on_last_unlink 0"
+	set_hsm_param remove_archive_on_last_unlink 1
+
+	rm -f $f
+
+	wait_request_state $fid REMOVE WAITING
+
+	local new_cookie=$(( $(get_request_cookie $fid REMOVE) ))
+	echo "Check cookie from RAoLU request (last: $last_cookie, remove: $new_cookie)"
+	(( new_cookie == last_cookie + 1 )) ||
+		error "RAoLU fail to setup a valid cookie ($new_cookie != $last_cookie + 1)"
+
+	cdt_enable
+	copytool setup
+
+	wait_request_state $fid2 ARCHIVE SUCCEED
+	wait_request_state $fid REMOVE SUCCEED
+}
+run_test 26e "RAoLU with a non-started coordinator"
+
 test_27a() {
 	# test needs a running copytool
 	copytool setup
@@ -2831,7 +2886,7 @@ test_35() {
 	wait_request_state $fid RESTORE STARTED
 
 	# mv must not block during restore
-	timeout --signal=KILL 1 mv "$f1" "$f" || error "mv $f1 $f failed"
+	timeout --signal=KILL 2 mv "$f1" "$f" || error "mv $f1 $f failed"
 
 	copytool_continue
 	wait_request_state $fid RESTORE SUCCEED
@@ -5091,6 +5146,9 @@ test_261() {
 run_test 261 "Report 0 bytes size after HSM release"
 
 test_262() {
+	(( MDS1_VERSION >= $(version_code v2_15_61-204-g5ee13823a4) )) ||
+		skip "Need MDS version at least 2.15.61"
+
 	local file=$DIR/$tdir/$tfile
 	local blocks
 	local fid
@@ -5625,11 +5683,8 @@ run_test 409b "getattr released file with CDT stopped after remount"
 
 test_410()
 {
-	[ "$MDS1_VERSION" -lt $(version_code 2.15.3.2) ] &&
-		skip "need MDS version at least 2.15.3.2"
-
-	[ "$CLIENT_VERSION" -lt $(version_code 2.15.3.2) ] &&
-		skip "need client version at least 2.15.3.2"
+	(( MDS1_VERSION >= $(version_code 2.15.90.10) )) ||
+		skip "need MDS >= v2_15_90-10-g80a961261a23 for HSM fix"
 
 	mkdir_on_mdt0 $DIR/$tdir
 

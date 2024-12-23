@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (c) 2004, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -194,6 +176,7 @@ int llapi_file_get_stripe(const char *path, struct lov_user_md *lum);
 int llapi_file_lookup(int dirfd, const char *name);
 void llapi_set_command_name(const char *cmd);
 void llapi_clear_command_name(void);
+int llapi_get_lmm_from_path(const char *path, struct lov_user_md_v1 **lmmbuf);
 
 enum llapi_layout_verbose  {
 	VERBOSE_STRIPE_COUNT	=      0x1,
@@ -563,6 +546,7 @@ int llapi_get_version(char *buffer, int buffer_size, char **version)
 	__attribute__((deprecated));
 int llapi_get_data_version(int fd, __u64 *data_version, __u64 flags);
 int llapi_file_flush(int fd);
+int llapi_fsync(int fd);
 extern int llapi_get_ost_layout_version(int fd, __u32 *layout_version);
 int llapi_hsm_data_version_set(int fd, __u64 data_version);
 int llapi_hsm_state_get_fd(int fd, struct hsm_user_state *hus);

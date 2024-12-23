@@ -4019,16 +4019,52 @@ int jt_nodemap_activate(int argc, char **argv)
  */
 int jt_nodemap_add(int argc, char **argv)
 {
-	int rc;
+	bool dynamic = false;
+	char *nm_name = NULL;
+	int c, rc;
 
-	rc = llapi_nodemap_exists(argv[1]);
+	static struct option long_opts[] = {
+		{ .val = 'd', .name = "dynamic", .has_arg = no_argument },
+		{ .val = 'h', .name = "help",	 .has_arg = no_argument },
+		{ .name = NULL } };
+
+	while ((c = getopt_long(argc, argv, "dh",
+				long_opts, NULL)) != -1) {
+		switch (c) {
+		case 'd':
+			dynamic = true;
+			break;
+		case 'h':
+		default:
+			goto add_usage;
+		}
+	}
+
+	if (optind < argc)
+		nm_name = argv[optind];
+
+	if (!nm_name) {
+		fprintf(stderr, "nodemap_add: missing nodemap name\n");
+add_usage:
+		fprintf(stderr,
+			"usage: nodemap_add [-d|--dynamic] NODEMAP_NAME\n");
+		return -EINVAL;
+	}
+
+	if (!dynamic && !is_mgs()) {
+		fprintf(stderr,
+			"nodemap_add: non-dynamic nodemap only allowed on MGS node\n");
+		goto add_usage;
+	}
+
+	rc = llapi_nodemap_exists(nm_name);
 	if (rc == 0) {
-		fprintf(stderr, "error: %s existing nodemap name\n", argv[1]);
+		fprintf(stderr, "error: %s existing nodemap name\n", nm_name);
 		return 1;
 	}
 
-	rc = nodemap_cmd(LCFG_NODEMAP_ADD, false, NULL, 0, argv[0],
-			 argv[1], NULL);
+	rc = nodemap_cmd(LCFG_NODEMAP_ADD, dynamic, NULL, 0, argv[0],
+			 nm_name, NULL);
 
 	if (rc != 0)
 		perror(argv[0]);
@@ -4048,16 +4084,41 @@ int jt_nodemap_add(int argc, char **argv)
  */
 int jt_nodemap_del(int argc, char **argv)
 {
-	int rc;
+	char *nm_name = NULL;
+	int c, rc;
 
-	rc = llapi_nodemap_exists(argv[1]);
+	static struct option long_opts[] = {
+		{ .val = 'h', .name = "help",	 .has_arg = no_argument },
+		{ .name = NULL } };
+
+	while ((c = getopt_long(argc, argv, "h",
+				long_opts, NULL)) != -1) {
+		switch (c) {
+		case 'h':
+		default:
+			goto del_usage;
+		}
+	}
+
+	if (optind < argc)
+		nm_name = argv[optind];
+
+	if (!nm_name) {
+		fprintf(stderr, "nodemap_del: missing nodemap name\n");
+del_usage:
+		fprintf(stderr,
+			"usage: nodemap_del NODEMAP_NAME\n");
+		return -EINVAL;
+	}
+
+	rc = llapi_nodemap_exists(nm_name);
 	if (rc != 0) {
 		fprintf(stderr, "error: %s not existing nodemap name\n",
-			argv[1]);
+			nm_name);
 		return rc;
 	}
 	rc = nodemap_cmd(LCFG_NODEMAP_DEL, false, NULL, 0, argv[0],
-			 argv[1], NULL);
+			 nm_name, NULL);
 
 	if (rc != 0)
 		perror(argv[0]);
@@ -4181,8 +4242,8 @@ static int parse_nid_range(char *nodemap_range, char *nid_range, int range_len)
 
 	INIT_LIST_HEAD(&nidlist);
 
-	if (cfs_parse_nidlist(nodemap_range, strlen(nodemap_range),
-			      &nidlist) <= 0) {
+	if (!cfs_parse_nidlist(nodemap_range, strlen(nodemap_range),
+			       &nidlist)) {
 		fprintf(stderr,
 			"error: nodemap_xxx_range: can't parse nid range: %s\n",
 			nodemap_range);
@@ -4220,18 +4281,18 @@ static int parse_nid_range(char *nodemap_range, char *nid_range, int range_len)
  */
 int jt_nodemap_add_range(int argc, char **argv)
 {
-	char			*nodemap_name = NULL;
-	char			*nodemap_range = NULL;
-	char			nid_range[2 * LNET_NIDSTR_SIZE + 2];
-	int			rc = 0;
-	int			c;
+	char nid_range[2 * LNET_NIDSTR_SIZE + 2];
+	char *nodemap_range = NULL;
+	char *nodemap_name = NULL;
+	int c, rc = 0;
 
 	static struct option long_opts[] = {
+	{ .val = 'h',	.name = "help",		.has_arg = no_argument },
 	{ .val = 'n',	.name = "name",		.has_arg = required_argument },
 	{ .val = 'r',	.name = "range",	.has_arg = required_argument },
 	{ .name = NULL } };
 
-	while ((c = getopt_long(argc, argv, "n:r:",
+	while ((c = getopt_long(argc, argv, "hn:r:",
 				long_opts, NULL)) != -1) {
 		switch (c) {
 		case 'n':
@@ -4240,13 +4301,22 @@ int jt_nodemap_add_range(int argc, char **argv)
 		case 'r':
 			nodemap_range = optarg;
 			break;
+		case 'h':
+		default:
+			goto add_range_usage;
 		}
 	}
 
-	if (!nodemap_name || !nodemap_range) {
+	if (!nodemap_name) {
+		fprintf(stderr, "nodemap_add_range: missing nodemap name\n");
+add_range_usage:
 		fprintf(stderr,
-			"usage: nodemap_add_range --name <name> --range <range>\n");
+			"usage: nodemap_add_range --name NODEMAP_NAME --range NID_RANGE\n");
 		return -EINVAL;
+	}
+	if (!nodemap_range) {
+		fprintf(stderr, "nodemap_add_range: missing NID range\n");
+		goto add_range_usage;
 	}
 
 	rc = parse_nid_range(nodemap_range, nid_range, sizeof(nid_range));
@@ -4278,18 +4348,18 @@ int jt_nodemap_add_range(int argc, char **argv)
  */
 int jt_nodemap_del_range(int argc, char **argv)
 {
-	char			*nodemap_name = NULL;
-	char			*nodemap_range = NULL;
-	char			nid_range[2 * LNET_NIDSTR_SIZE + 2];
-	int			rc = 0;
-	int			c;
+	char nid_range[2 * LNET_NIDSTR_SIZE + 2];
+	char *nodemap_range = NULL;
+	char *nodemap_name = NULL;
+	int c, rc = 0;
 
 	static struct option long_opts[] = {
-	{ .val = 'n',	.name = "name",		.has_arg = required_argument },
-	{ .val = 'r',	.name = "range",	.has_arg = required_argument },
-	{ .name = NULL } };
+		{ .val = 'h', .name = "help",	 .has_arg = no_argument },
+		{ .val = 'n', .name = "name",    .has_arg = required_argument },
+		{ .val = 'r', .name = "range",   .has_arg = required_argument },
+		{ .name = NULL } };
 
-	while ((c = getopt_long(argc, argv, "n:r:",
+	while ((c = getopt_long(argc, argv, "hn:r:",
 				long_opts, NULL)) != -1) {
 		switch (c) {
 		case 'n':
@@ -4298,13 +4368,22 @@ int jt_nodemap_del_range(int argc, char **argv)
 		case 'r':
 			nodemap_range = optarg;
 			break;
+		case 'h':
+		default:
+			goto del_range_usage;
 		}
 	}
 
-	if (!nodemap_name || !nodemap_range) {
+	if (!nodemap_name) {
+		fprintf(stderr, "nodemap_del_range: missing nodemap name\n");
+del_range_usage:
 		fprintf(stderr,
-			"usage: nodemap_del_range --name <name> --range <range>\n");
-		return -1;
+			"usage: nodemap_del_range --name NODEMAP_NAME --range NID_RANGE\n");
+		return -EINVAL;
+	}
+	if (!nodemap_range) {
+		fprintf(stderr, "nodemap_del_range: missing NID range\n");
+		goto del_range_usage;
 	}
 
 	rc = parse_nid_range(nodemap_range, nid_range, sizeof(nid_range));
@@ -5090,8 +5169,7 @@ int parse_pool_cmd_args(int argc, char **argv, bool *wait,
 		return -ENAMETOOLONG;
 	}
 
-	strncpy(fsname, param, fsname_len);
-	fsname[fsname_len] = '\0';
+	snprintf(fsname, fsname_len + 1, "%s", param);
 	if (!ptr)
 		return 0;
 

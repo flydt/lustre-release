@@ -64,6 +64,13 @@ if [[ -r /etc/redhat-release ]]; then
 	fi
 fi
 
+if [[ "$CLIENT_OS_ID_LIKE" =~ "suse" ]]; then
+	if (( CLIENT_OS_VERSION_CODE >= $(version_code 15.3) &&
+	      CLIENT_OS_VERSION_CODE <= $(version_code 15.5) )); then
+		always_except LU-18298	1c 1d	   # passed on SLES15 SP6
+	fi
+fi
+
 build_test_filter
 
 # if there is no CLIENT1 defined, some tests can be ran on localhost
@@ -203,8 +210,18 @@ umount_loopdev() {
 	local facet=$1
 	local mntpt=$2
 	local rc
+	local i
 
-	do_facet $facet lsof $mntpt || true
+	for ((i = 0; i < 10; i++)); do
+		if do_facet $facet lsof $mntpt; then
+			echo "$mntpt is busy, wait 1 second..."
+			sleep 1
+		else
+			echo "$mntpt is idle now"
+			break
+		fi
+	done
+
 	do_facet $facet $UMOUNT $mntpt
 	rc=$?
 	return $rc
@@ -223,8 +240,11 @@ setup_loopdev() {
 	do_facet $facet mount
 	do_facet $facet $UMOUNT $mntpt
 	do_facet $facet mount
-	do_facet $facet mkfs.ext4 $file ||
-		error "mkfs.ext4 $file failed"
+	do_facet $facet mkfs.ext4 $file || error "mkfs.ext4 $file failed"
+	local mcs=$(do_facet $facet tune2fs -l $file |& grep metadata_csum_seed)
+	[[ -z "$mcs" ]] ||
+		do_facet $facet "tune2fs -O ^metadata_csum_seed $file" ||
+		error "failed to turn off metadata_csum_seed feature"
 	do_facet $facet file $file
 	do_facet $facet mount -t ext4 -o loop,usrquota,grpquota $file $mntpt ||
 		error "mount -o loop,usrquota,grpquota $file $mntpt failed"
@@ -244,6 +264,10 @@ setup_loopdev_project() {
 	do_facet $facet $UMOUNT $mntpt
 	do_facet $facet mkfs.ext4 -O project,quota $file ||
 		error "mkfs.ext4 -O project,quota $file failed"
+	local mcs=$(do_facet $facet tune2fs -l $file |& grep metadata_csum_seed)
+	[[ -z "$mcs" ]] ||
+		do_facet $facet "tune2fs -O ^metadata_csum_seed $file" ||
+		error "failed to turn off metadata_csum_seed feature"
 	do_facet $facet file $file
 	do_facet $facet mount -t ext4 -o loop,prjquota $file $mntpt ||
 		error "mount -o loop,prjquota $file $mntpt failed"
@@ -2800,11 +2824,13 @@ test_32() {
 	sleep 3
 	do_facet $SINGLEAGT rm $lpcc_path || error "rm $lpcc_path failed"
 	rmultiop_stop $agt_host || error "multiop $file read failed"
+
+	# file will be detached in @pcc_ioctl_state()
 	check_lpcc_state $file "readonly"
 
 	local content=$(do_facet $SINGLEAGT cat $file)
 	[[ $content == "roattach_removed" ]] || error "data mismatch: $content"
-	check_lpcc_state $file "readonly"
+	check_lpcc_state $file "none"
 	do_facet $SINGLEAGT $LFS pcc detach -k $file ||
 		error "RO-PCC detach $file failed"
 	check_lpcc_state $file "none"
@@ -2812,10 +2838,11 @@ test_32() {
 	do_facet $SINGLEAGT $LFS pcc attach -r -i $HSM_ARCHIVE_NUMBER $file ||
 		error "RO-PCC attach $file failed"
 	do_facet $SINGLEAGT rm $lpcc_path || error "rm $lpcc_path failed"
+	# file will be detached in @pcc_ioctl_state()
 	check_lpcc_state $file "readonly"
 	content=$(do_facet $SINGLEAGT cat $file)
 	[[ $content == "roattach_removed" ]] || error "data mismatch: $content"
-	check_lpcc_state $file "readonly"
+	check_lpcc_state $file "none"
 	do_facet $SINGLEAGT $LFS pcc detach -k $file ||
 		error "RO-PCC detach $file failed"
 	check_lpcc_state $file "none"
@@ -2979,6 +3006,9 @@ test_35() {
 	local file=$DIR/$tfile
 	local -a lpcc_path
 
+	$LCTL get_param -n mdc.*.connect_flags | grep -q pcc_ro ||
+		skip "Server does not support PCC-RO"
+
 	setup_loopdev $SINGLEAGT $loopfile $mntpt 50
 	copytool setup -m "$MOUNT" -a "$HSM_ARCHIVE_NUMBER"
 	setup_pcc_mapping
@@ -3014,6 +3044,9 @@ test_36_base() {
 	local state="readonly"
 	local rw="$1"
 
+	$LCTL get_param -n mdc.*.connect_flags | grep -q pcc_ro ||
+                skip "Server does not support PCC-RO"
+
 	[[ -z $rw ]] || state="readwrite"
 	setup_loopdev $SINGLEAGT $loopfile $mntpt 50
 	copytool setup -m "$MOUNT" -a "$HSM_ARCHIVE_NUMBER"
@@ -3041,9 +3074,6 @@ test_36a() {
 run_test 36a "Stale RW-PCC copy should be deleted after remove the PCC backend"
 
 test_36b() {
-	$LCTL get_param -n mdc.*.connect_flags | grep -q pcc_ro ||
-		skip "Server does not support PCC-RO"
-
 	test_36_base
 }
 run_test 36b "Stale RO-PCC copy should be deleted after remove the PCC backend"
@@ -3552,6 +3582,7 @@ test_46() {
 	local hsm_root="$mntpt/$tdir"
 	local file=$DIR/$tfile
 	local fsuuid=$($LFS getname $MOUNT | awk '{print $1}')
+	local runascmd="$RUNAS -G0"
 
 	$LCTL get_param -n mdc.*.connect_flags | grep -q pcc_ro ||
 		skip "Server does not support PCC-RO"
@@ -3563,7 +3594,7 @@ test_46() {
 	$LCTL pcc list $MOUNT
 
 	local mode=$($LCTL get_param -n llite.$fsuuid.pcc_mode)
-	$RUNAS id
+	$runascmd id
 
 	echo "Mode: $mode"
 	echo "QQQQQ" > $file || error "write $file failed"
@@ -3572,44 +3603,44 @@ test_46() {
 	$LCTL set_param llite.$fsuuid.pcc_mode="0" ||
 		error "Set PCC mode failed"
 	stack_trap "$LCTL set_param llite.$fsuuid.pcc_mode=$mode" EXIT
-	$RUNAS $LFS pcc attach -r $file &&
+	$runascmd $LFS pcc attach -r $file &&
 		error "User should not attach $file"
-	$RUNAS cat $file || error "cat $file failed"
+	$runascmd cat $file || error "cat $file failed"
 	check_lpcc_state $file "none" client
 
 	$LCTL set_param llite.$fsuuid.pcc_mode="0400" ||
 		error "Set PCC mode failed"
 	stack_trap "$LCTL set_param llite.$fsuuid.pcc_mode=$mode" EXIT
-	$RUNAS $LFS pcc attach -r $file &&
+	$runascmd $LFS pcc attach -r $file &&
 		error "User should not attach $file"
-	$RUNAS cat $file || error "cat $file failed"
+	$runascmd cat $file || error "cat $file failed"
 	check_lpcc_state $file "none" client
 
 	$LCTL set_param llite.$fsuuid.pcc_mode="0004" ||
 		error "Set PCC mode failed"
-	$RUNAS cat $file || error "cat $file failed"
+	$runascmd cat $file || error "cat $file failed"
 	$LFS pcc state $file
 	check_lpcc_state $file "readonly" client
-	$RUNAS $LFS pcc detach $file || error "Detach $file failed"
+	$runascmd $LFS pcc detach $file || error "Detach $file failed"
 
-	$RUNAS stat $file || error "stat $file failed"
+	$runascmd stat $file || error "stat $file failed"
 	$LFS pcc attach -r $file || error "failed to attach $file"
 	check_lpcc_state $file "readonly" client
-	$RUNAS $LFS pcc detach $file || error "failed to detach $file"
+	$runascmd $LFS pcc detach $file || error "failed to detach $file"
 
 	$LCTL set_param llite.$fsuuid.pcc_mode="0040" ||
 		error "Set PCC mode failed"
 	chmod 660 $file || error "chmod $file failed"
-	$RUNAS cat $file || error "cat $file failed"
+	$runascmd cat $file || error "cat $file failed"
 	$LFS pcc state $file
 	check_lpcc_state $file "readonly" client
-	$RUNAS $LFS pcc detach $file || error "failed to detach $file"
+	$runascmd $LFS pcc detach $file || error "failed to detach $file"
 
-	$RUNAS $LFS pcc attach -r $file || error "attach $file failed"
+	$runascmd $LFS pcc attach -r $file || error "attach $file failed"
 	stat $file || error "stat $file failed"
 	$LFS pcc state $file
 	check_lpcc_state $file "readonly" client
-	$RUNAS $LFS pcc detach $file || error "Detach $file failed"
+	$runascmd $LFS pcc detach $file || error "Detach $file failed"
 }
 run_test 46 "Verify PCC mode setting works correctly"
 
@@ -3642,6 +3673,31 @@ test_47() {
 	(( mtime0 == mtime1 )) || error "mtime changed from $mtime0 to $mtime1"
 }
 run_test 47 "mtime should be kept once file attached into PCC"
+
+test_48() {
+	local loopfile="$TMP/$tfile"
+	local mntpt="/mnt/pcc.$tdir"
+	local hsm_root="$mntpt/$tdir"
+	local file=$DIR/$tfile
+	local -a lpcc_path
+
+	setup_loopdev client $loopfile $mntpt 60
+	mkdir $hsm_root || error "mkdir $hsm_root failed"
+	setup_pcc_mapping client \
+		"projid={0}\ roid=$HSM_ARCHIVE_NUMBER\ ropcc=1"
+
+	echo "QQQQQ" > $file || error "echo $file failed"
+	lpcc_path=$(lpcc_fid2path $hsm_root $file)
+	cat $file || error "cat $file failed"
+	check_lpcc_state $file "readonly" client
+
+	rm $lpcc_path || error "rm $lpcc_path failed"
+	$LFS pcc state $file | grep "(unlinked)" || error "$file not unlinked"
+	[[ "$(cat $file)" =~ "QQQQQ" ]] || error "read $file content failed"
+	check_lpcc_state $file "readonly" client
+	$LFS pcc detach $file || error "detach '$file' failed"
+}
+run_test 48 "PCC state should check whether the file in local PCC cache"
 
 test_96() {
 	local loopfile="$TMP/$tfile"
@@ -4295,6 +4351,42 @@ test_102() {
 		error "fio seqread $file failed"
 }
 run_test 102 "PCC-RO should not hange for io_uring I/O engine"
+
+test_203() {
+	local loopfile="$TMP/$tfile"
+	local mntpt="/mnt/pcc.$tdir"
+	local hsm_root="$mntpt/$tdir"
+	local file=$DIR/$tfile
+	local bs="1024"
+
+	setup_loopdev client $loopfile $mntpt 10
+	mkdir $hsm_root || error "mkdir $hsm_root failed"
+	setup_pcc_mapping client \
+		"projid={0}\ roid=$HSM_ARCHIVE_NUMBER\ pccro=1"
+	$LCTL pcc list $MOUNT
+	clear_stats llite.*.stats
+
+	dd if=/dev/zero of=$file bs=$bs count=1 ||
+		error "Write $file failed"
+
+	cat $file > /dev/null
+	cat $file > /dev/null
+
+	echo "==== stats ===="
+	$LCTL get_param llite.*.stats
+
+	local attach_num=$(calc_stats llite.*.stats pcc_attach_bytes)
+	local attach_bytes=$(calc_stats_sum llite.*.stats pcc_attach_bytes)
+	local hit_num=$(calc_stats llite.*.stats pcc_hit_bytes)
+	local hit_bytes=$(calc_stats_sum llite.*.stats pcc_hit_bytes)
+	echo "attach_num: $attach_num, attach_bytes: $attach_bytes, hit_num: $hit_num, hit_bytes: $hit_bytes"
+
+	(( $attach_num == 1 )) || error "wrong attach number: $attach_num"
+	(( $attach_bytes == $bs )) || error "wrong attach bytes: $attach_bytes"
+	(( $hit_num == 2 )) || error "wrong hit number: $hit_num"
+	(( $hit_bytes == $((2 * bs)) )) || error "wrong hit bytes: $hit_bytes"
+}
+run_test 203 "Verify attach/hit bytes statistics data"
 
 complete_test $SECONDS
 check_and_cleanup_lustre

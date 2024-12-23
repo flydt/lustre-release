@@ -1,32 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/include/lustre/libiam.h
  *
  * iam user level library
  *
@@ -61,17 +41,13 @@ struct dx_countlimit {
 } __attribute__((packed));
 
 struct iam_lfix_root {
-	u_int64_t  ilr_magic;
-	u_int16_t  ilr_keysize;
-	u_int16_t  ilr_recsize;
-	u_int16_t  ilr_ptrsize;
-	u_int8_t   ilr_indirect_levels;
-	u_int8_t   ilr_padding;
-	struct dx_countlimit limit;
-	u_int32_t idle_blocks;
-	u_int8_t  ilr_paddingdd2[12];
-	unsigned char entries[];
-} __attribute__((packed));
+	__le64	ilr_magic;
+	__le16	ilr_keysize;
+	__le16	ilr_recsize;
+	__le16	ilr_ptrsize;
+	__u8	ilr_indirect_levels;
+	__u8	ilr_padding;
+};
 
 struct iam_leaf_head {
 	u_int16_t ill_magic;
@@ -98,6 +74,8 @@ struct iam_index_head {
 	u_int8_t  paddingdd[16];
 	unsigned char entries[];
 } __attribute__((packed));
+
+typedef __u32 lvar_hash_t;
 
 struct lvar_root {
 	u_int32_t vr_magic;

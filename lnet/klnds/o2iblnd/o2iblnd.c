@@ -1040,10 +1040,10 @@ kiblnd_destroy_conn(struct kib_conn *conn)
 	if (conn->ibc_state != IBLND_CONN_INIT) {
 		struct kib_net *net = peer_ni->ibp_ni->ni_data;
 
-		kiblnd_peer_decref(peer_ni);
-		rdma_destroy_id(cmid);
 		atomic_dec(&peer_ni->ibp_nconns);
 		atomic_dec(&net->ibn_nconns);
+		kiblnd_peer_decref(peer_ni);
+		rdma_destroy_id(cmid);
 	}
 }
 
@@ -3579,7 +3579,6 @@ kiblnd_base_startup(struct net *ns)
 
 	spin_lock_init(&kiblnd_data.kib_connd_lock);
 	INIT_LIST_HEAD(&kiblnd_data.kib_connd_conns);
-	INIT_LIST_HEAD(&kiblnd_data.kib_connd_waits);
 	INIT_LIST_HEAD(&kiblnd_data.kib_connd_zombies);
 	INIT_LIST_HEAD(&kiblnd_data.kib_reconn_list);
 	INIT_LIST_HEAD(&kiblnd_data.kib_reconn_wait);

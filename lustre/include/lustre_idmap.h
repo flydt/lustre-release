@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/lustre/include/lustre_idmap.h
  *
  * MDS data structures.
  * See also lustre_idl.h for wire formats of requests.
@@ -63,6 +43,7 @@
 struct lu_ucred;
 
 extern void lustre_groups_from_list(struct group_info *ginfo, gid_t *glist);
+extern void lustre_list_from_groups(gid_t *glist, struct group_info *ginfo);
 extern void lustre_groups_sort(struct group_info *group_info);
 extern int lustre_groups_search(struct group_info *group_info, gid_t grp);
 extern int lustre_in_group_p(struct lu_ucred *mu, gid_t grp);

@@ -2363,8 +2363,11 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 	if (rc < 0) {
 		GOTO(out_child, rc);
 	} else if (rc > 0) {
-		if (!(child_bits & MDS_INODELOCK_UPDATE) &&
-		    !mdt_object_remote(child)) {
+		bool hardlink_check = lhp && info->mti_batch_env &&
+				      S_ISREG(lu_object_attr(&child->mot_obj));
+
+		if ((!(child_bits & MDS_INODELOCK_UPDATE) &&
+		     !mdt_object_remote(child)) || hardlink_check) {
 			struct md_attr *ma = &info->mti_attr;
 
 			ma->ma_valid = 0;
@@ -2372,6 +2375,35 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 			rc = mdt_attr_get_complex(info, child, ma);
 			if (unlikely(rc != 0))
 				GOTO(out_child, rc);
+
+			/*
+			 * There is a possible deadlock between link() and batch
+			 * stat-ahead on hardlinks.
+			 * link()
+			 * - Take parent DLM lock: mdt_parent_lock PW
+			 * - Take object DLM lock: mdt_object_lock EX
+			 * batch stat-ahead
+			 * - Already hold the DLM lock on one link of the
+			 *   object which will return to the client in previous
+			 *   stat operation on MDT.
+			 * - Take parent DLM lock: mdt_parent_lock PR
+			 *
+			 * Deadlock:
+			 * The link operation, which is holding the parent PW
+			 * lock, is waiting for the batch stat-ahead to release
+			 * the DLM lock on one link of the file.
+			 * The batch statahead, which is holding the DLM lock on
+			 * the file in the previous sub stat operation in the
+			 * batch RPC, currently is trying to acquire the PR DLM
+			 * lock on the parent.
+			 * To avoid this deadlock, we simply cancel the
+			 * statahead on the hardlink in a batch RPC.
+			 * Without this fix, it failed lustre-rsync-test/test_6.
+			 */
+			if (hardlink_check && (ma->ma_valid & MA_INODE) &&
+			    (ma->ma_attr.la_valid & LA_NLINK) &&
+			    ma->ma_attr.la_nlink > 1)
+				GOTO(out_child, rc = -ECANCELED);
 
 			/* If the file has not been changed for some time, we
 			 * return not only a LOOKUP lock, but also an UPDATE
@@ -3612,6 +3644,12 @@ struct mdt_object *mdt_object_find(const struct lu_env *env,
 	struct mdt_object *m;
 
 	ENTRY;
+	/* mdt_orphan_open() gets local ROOT */
+	if (!fid_is_namespace_visible(f) && !fid_is_local_file(f)) {
+		CERROR("%s: MDT object FID "DFID" is corrupt: rc = %d\n",
+		       mdt_obd_name(d), PFID(f), -EINVAL);
+		RETURN(ERR_PTR(-EINVAL));
+	}
 
 	CDEBUG(D_INFO, "Find object for "DFID"\n", PFID(f));
 	o = lu_object_find(env, &d->mdt_lu_dev, f, NULL);
@@ -6268,6 +6306,8 @@ static void mdt_fini(const struct lu_env *env, struct mdt_device *m)
 	mdt_tunables_fini(m);
 	upcall_cache_cleanup(m->mdt_identity_cache);
 	m->mdt_identity_cache = NULL;
+	upcall_cache_cleanup(m->mdt_identity_cache_int);
+	m->mdt_identity_cache_int = NULL;
 
 	tgt_fini(env, &m->mdt_lut);
 
@@ -6320,6 +6360,7 @@ static int mdt_init0(const struct lu_env *env, struct mdt_device *m,
 	struct lu_site *s;
 	struct seq_server_site *ss_site;
 	const char *identity_upcall = "NONE";
+	char cache_internal[NAME_MAX + 1] = { 0 };
 	struct md_device *next;
 	struct lu_fid fid;
 	int rc;
@@ -6530,7 +6571,6 @@ static int mdt_init0(const struct lu_env *env, struct mdt_device *m,
 	 */
 	if (m->mdt_opts.mo_acl)
 		identity_upcall = MDT_IDENTITY_UPCALL_PATH;
-
 	m->mdt_identity_cache = upcall_cache_init(mdt_obd_name(m),
 						identity_upcall,
 						UC_IDCACHE_HASH_SIZE,
@@ -6542,6 +6582,21 @@ static int mdt_init0(const struct lu_env *env, struct mdt_device *m,
 		rc = PTR_ERR(m->mdt_identity_cache);
 		m->mdt_identity_cache = NULL;
 		GOTO(err_free_hsm, rc);
+	}
+
+	snprintf(cache_internal, sizeof(cache_internal), "%s_int",
+		 mdt_obd_name(m));
+	m->mdt_identity_cache_int = upcall_cache_init(cache_internal,
+						IDENTITY_UPCALL_INTERNAL,
+						UC_IDCACHE_HASH_SIZE,
+						1200, /* entry expire: 20 mn */
+						30, /* acquire expire: 30 s */
+						true, /* acquire can replay */
+						&mdt_identity_upcall_cache_ops);
+	if (IS_ERR(m->mdt_identity_cache_int)) {
+		rc = PTR_ERR(m->mdt_identity_cache_int);
+		m->mdt_identity_cache_int = NULL;
+		GOTO(err_cache, rc);
 	}
 
 	rc = mdt_tunables_init(m, dev);
@@ -6585,6 +6640,9 @@ err_ping_evictor:
 err_procfs:
 	mdt_tunables_fini(m);
 err_recovery:
+	upcall_cache_cleanup(m->mdt_identity_cache_int);
+	m->mdt_identity_cache_int = NULL;
+err_cache:
 	upcall_cache_cleanup(m->mdt_identity_cache);
 	m->mdt_identity_cache = NULL;
 err_free_hsm:
@@ -6853,7 +6911,7 @@ static int mdt_prepare(const struct lu_env *env,
 	obd->obd_no_conn = 0;
 	spin_unlock(&obd->obd_dev_lock);
 
-	if (obd->obd_recovering == 0)
+	if (!test_bit(OBDF_RECOVERING, obd->obd_flags))
 		mdt_postrecov(env, mdt);
 
 	RETURN(rc);
@@ -7105,6 +7163,7 @@ static int mdt_ctxt_add_dirty_flag(struct lu_env *env,
 	mdt_ucred(info)->uc_rbac_byfid_ops = 1;
 	mdt_ucred(info)->uc_rbac_chlg_ops = 1;
 	mdt_ucred(info)->uc_rbac_fscrypt_admin = 1;
+	mdt_ucred(info)->uc_rbac_server_upcall = 1;
 	rc = mdt_add_dirty_flag(info, mfd->mfd_object, &info->mti_attr);
 
 	lu_context_exit(&ses);
@@ -7798,49 +7857,55 @@ static int mdt_rpc_fid2path(struct mdt_thread_info *info, void *key, int keylen,
 
 int mdt_get_info(struct tgt_session_info *tsi)
 {
-	char	*key;
-	int	 keylen;
-	__u32	*vallen;
-	void	*valout;
-	int	 rc;
+	char *key;
+	int keylen;
+	int rc;
 
 	ENTRY;
 
 	key = req_capsule_client_get(tsi->tsi_pill, &RMF_GETINFO_KEY);
-	if (key == NULL) {
-		CDEBUG(D_IOCTL, "No GETINFO key\n");
-		RETURN(err_serious(-EFAULT));
+	if (!key) {
+		DEBUG_REQ(D_IOCTL, tgt_ses_req(tsi), "no GETINFO key");
+		RETURN(err_serious(-EPROTO));
 	}
 	keylen = req_capsule_get_size(tsi->tsi_pill, &RMF_GETINFO_KEY,
 				      RCL_CLIENT);
-
-	vallen = req_capsule_client_get(tsi->tsi_pill, &RMF_GETINFO_VALLEN);
-	if (vallen == NULL) {
-		CDEBUG(D_IOCTL, "%s: cannot get RMF_GETINFO_VALLEN buffer\n",
-				tgt_name(tsi->tsi_tgt));
-		RETURN(err_serious(-EFAULT));
-	}
-
-	req_capsule_set_size(tsi->tsi_pill, &RMF_GETINFO_VAL, RCL_SERVER,
-			     *vallen);
-	rc = req_capsule_server_pack(tsi->tsi_pill);
-	if (rc)
-		RETURN(err_serious(rc));
-
-	valout = req_capsule_server_get(tsi->tsi_pill, &RMF_GETINFO_VAL);
-	if (valout == NULL) {
-		CDEBUG(D_IOCTL, "%s: cannot get get-info RPC out buffer\n",
-				tgt_name(tsi->tsi_tgt));
-		RETURN(err_serious(-EFAULT));
-	}
-
 	if (KEY_IS(KEY_FID2PATH)) {
-		struct mdt_thread_info	*info = tsi2mdt_info(tsi);
+		struct mdt_thread_info *info;
+		__u32 *vallen;
+		void *valout;
 
+		req_capsule_extend(tsi->tsi_pill, &RQF_MDS_FID2PATH);
+		vallen = req_capsule_client_get(tsi->tsi_pill,
+						&RMF_GETINFO_VALLEN);
+		if (!vallen) {
+			CDEBUG(D_IOCTL,
+			       "%s: cannot get RMF_GETINFO_VALLEN buffer\n",
+			       tgt_name(tsi->tsi_tgt));
+			RETURN(err_serious(-EPROTO));
+		}
+
+		req_capsule_set_size(tsi->tsi_pill, &RMF_GETINFO_VAL,
+				     RCL_SERVER, *vallen);
+		rc = req_capsule_server_pack(tsi->tsi_pill);
+		if (rc)
+			RETURN(err_serious(rc));
+
+		valout = req_capsule_server_get(tsi->tsi_pill,
+						&RMF_GETINFO_VAL);
+		if (!valout) {
+			CDEBUG(D_IOCTL,
+			       "%s: cannot get get-info RPC out buffer\n",
+			       tgt_name(tsi->tsi_tgt));
+			RETURN(-ENOMEM);
+		}
+		info = tsi2mdt_info(tsi);
 		rc = mdt_rpc_fid2path(info, key, keylen, valout, *vallen);
 		mdt_thread_info_fini(info);
+	} else if (KEY_IS(KEY_FIEMAP)) {
+		rc = mdt_fiemap_get(tsi);
 	} else {
-		rc = -EINVAL;
+		rc = err_serious(-EOPNOTSUPP);
 	}
 	RETURN(rc);
 }
@@ -7933,13 +7998,13 @@ static int mdt_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 		if (data->ioc_type & OBD_FLG_ABORT_RECOV_MDT) {
 			LCONSOLE_WARN("%s: Aborting MDT recovery\n",
 				      obd->obd_name);
-			obd->obd_abort_mdt_recovery = 1;
+			set_bit(OBDF_ABORT_MDT_RECOVERY, obd->obd_flags);
 			wake_up(&obd->obd_next_transno_waitq);
 		} else { /* if (data->ioc_type & OBD_FLG_ABORT_RECOV_OST) */
 			/* lctl didn't set OBD_FLG_ABORT_RECOV_OST < 2.13.57 */
 			LCONSOLE_WARN("%s: Aborting client recovery\n",
 				      obd->obd_name);
-			obd->obd_abort_recovery = 1;
+			set_bit(OBDF_ABORT_RECOVERY, obd->obd_flags);
 			target_stop_recovery_thread(obd);
 		}
 		rc = 0;

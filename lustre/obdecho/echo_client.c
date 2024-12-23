@@ -1839,6 +1839,7 @@ static void echo_ucred_init(struct lu_env *env)
 	ucred->uc_rbac_byfid_ops = 1;
 	ucred->uc_rbac_chlg_ops = 1;
 	ucred->uc_rbac_fscrypt_admin = 1;
+	ucred->uc_rbac_server_upcall = 1;
 }
 
 static void echo_ucred_fini(struct lu_env *env)
@@ -2445,7 +2446,8 @@ static int echo_client_setup(const struct lu_env *env,
 	}
 
 	tgt = class_name2obd(lustre_cfg_string(lcfg, 1));
-	if (!tgt || !tgt->obd_attached || !tgt->obd_set_up) {
+	if (!tgt || !test_bit(OBDF_ATTACHED, tgt->obd_flags) ||
+	    !test_bit(OBDF_SET_UP, tgt->obd_flags)) {
 		CERROR("device not attached or not set up (%s)\n",
 		       lustre_cfg_string(lcfg, 1));
 		RETURN(-EINVAL);

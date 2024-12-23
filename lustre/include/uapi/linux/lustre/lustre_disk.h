@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2016, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  *
@@ -289,7 +271,7 @@ struct nodemap_cluster_rec {
 	char			ncr_name[LUSTRE_NODEMAP_NAME_LENGTH + 1];
 	enum nm_flag_bits	ncr_flags:8;
 	enum nm_flag2_bits	ncr_flags2:8;
-	__u8			ncr_padding1;
+	__u8			ncr_padding1;	/* zeroed since 2.16 */
 	__u32			ncr_squash_projid;
 	__u32			ncr_squash_uid;
 	__u32			ncr_squash_gid;
@@ -299,42 +281,42 @@ struct nodemap_cluster_rec {
 struct nodemap_range_rec {
 	lnet_nid_t	nrr_start_nid;
 	lnet_nid_t	nrr_end_nid;
-	__u64		nrr_padding1;
-	__u64		nrr_padding2;
+	__u64		nrr_padding1;	/* zeroed since 2.16 */
+	__u64		nrr_padding2;	/* zeroed since 2.16 */
 };
 
 struct nodemap_range2_rec {
 	struct lnet_nid	nrr_nid_prefix;
-	__u32		nrr_padding1; /* these fields may be used if */
-	__u32		nrr_padding2; /* nrr_nid_prefix.nid_size > 12 */
-	__u16		nrr_padding3;
-	__u8		nrr_padding4;
+	__u32		nrr_padding1;	/* padding may be used for nid_prefix */
+	__u32		nrr_padding2;	/* if nrr_nid_prefix.nid_size > 12 */
+	__u16		nrr_padding3;	/* zeroed since 2.16 */
+	__u8		nrr_padding4;	/* zeroed since 2.16 */
 	__u8		nrr_netmask;
 };
 
 struct nodemap_id_rec {
 	__u32	nir_id_fs;
-	__u32	nir_padding1;
-	__u64	nir_padding2;
-	__u64	nir_padding3;
-	__u64	nir_padding4;
+	__u32	nir_padding1;		/* zeroed since 2.16 */
+	__u64	nir_padding2;		/* zeroed since 2.16 */
+	__u64	nir_padding3;		/* zeroed since 2.16 */
+	__u64	nir_padding4;		/* zeroed since 2.16 */
 };
 
 struct nodemap_global_rec {
 	__u8	ngr_is_active;
-	__u8	ngr_padding1;
-	__u16	ngr_padding2;
-	__u32	ngr_padding3;
-	__u64	ngr_padding4;
-	__u64	ngr_padding5;
-	__u64	ngr_padding6;
+	__u8	ngr_padding1;		/* zeroed since 2.16 */
+	__u16	ngr_padding2;		/* zeroed since 2.16 */
+	__u32	ngr_padding3;		/* zeroed since 2.16 */
+	__u64	ngr_padding4;		/* zeroed since 2.16 */
+	__u64	ngr_padding5;		/* zeroed since 2.16 */
+	__u64	ngr_padding6;		/* zeroed since 2.16 */
 };
 
 struct nodemap_cluster_roles_rec {
-	__u64 ncrr_roles;	/* enum nodemap_rbac_roles */
-	__u64 ncrr_unused1;
-	__u64 ncrr_unused2;
-	__u64 ncrr_unused3;
+	__u64 ncrr_roles;		/* enum nodemap_rbac_roles */
+	__u64 ncrr_padding1;		/* zeroed since 2.16 (always) */
+	__u64 ncrr_padding2;		/* zeroed since 2.16 (always) */
+	__u64 ncrr_padding3;		/* zeroed since 2.16 (always) */
 };
 
 union nodemap_rec {

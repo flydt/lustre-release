@@ -1,29 +1,11 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
+/* SPDX-License-Identifier: GPL-2.0 */
 
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License version 2 for more details.  A copy is
- * included in the COPYING file that accompanied this code.
-
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * GPL HEADER END
- */
 /*
  * Copyright (c) 2014, 2016, Intel Corporation.
  */
+
 /*
- * lustre/include/lustre_lmv.h
+ * This file is part of Lustre, http://www.lustre.org/
  *
  * Lustre LMV structures and functions.
  *
@@ -164,7 +146,7 @@ lmv_stripe_object_dump(int mask, const struct lmv_stripe_object *lsmo)
 	int i;
 
 	CDEBUG(mask,
-	       "dump LMV: refs %u magic=%#x count=%u index=%u hash=%s:%#x max_inherit=%hhu max_inherit_rr=%hhu version=%u migrate_offset=%u migrate_hash=%s:%x pool=%.*s\n",
+	       "dump LMV: magic=%#x refs=%u count=%u index=%u hash=%s:%#x max_inherit=%hhu max_inherit_rr=%hhu version=%u migrate_offset=%u migrate_hash=%s:%x pool=%.*s\n",
 	       lsm->lsm_md_magic, atomic_read(&lsmo->lso_refs),
 	       lsm->lsm_md_stripe_count, lsm->lsm_md_master_mdt_index,
 	       lmv_is_known_hash_type(lsm->lsm_md_hash_type) ?

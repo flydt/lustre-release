@@ -376,9 +376,9 @@ static int mdc_xattr_common(struct obd_export *exp,const struct req_format *fmt,
 			req_capsule_set_size(&req->rq_pill, &RMF_EADATA,
 					     RCL_CLIENT, 0);
 
-		count = mdc_resource_get_unused(exp, fid,
-						&cancels, LCK_EX,
-						MDS_INODELOCK_XATTR);
+		count = mdc_resource_cancel_unused(exp, fid,
+						   &cancels, LCK_EX,
+						   MDS_INODELOCK_XATTR);
 
 		rc = mdc_prep_elc_req(exp, req, MDS_REINT, &cancels, count);
 		if (rc)
@@ -1507,8 +1507,6 @@ static int mdc_read_page(struct obd_export *exp, struct md_op_data *op_data,
 		       rp_param.rp_off, -5);
 		goto fail;
 	}
-	if (!PageChecked(page))
-		SetPageChecked(page);
 	if (PageError(page)) {
 		CERROR("%s: page error: "DFID" at %llu: rc %d\n",
 		       exp->exp_obd->obd_name, PFID(&op_data->op_fid1),
@@ -1978,8 +1976,8 @@ static inline int mdc_hsm_request_lock_to_cancel(struct obd_export *exp,
 	for (i = 0; i < req_hr->hr_itemcount; i++, hui++) {
 		if (!fid_is_sane(&hui->hui_fid))
 			continue;
-		count += mdc_resource_get_unused(exp, &hui->hui_fid, cancels,
-						 LCK_EX, MDS_INODELOCK_LAYOUT);
+		count += mdc_resource_cancel_unused(exp, &hui->hui_fid, cancels,
+						    LCK_EX, MDS_INODELOCK_LAYOUT);
 	}
 
 	return count;
@@ -2204,12 +2202,12 @@ static int mdc_ioc_swap_layouts(struct obd_export *exp,
 	 * So the client must cancel its layout locks on the 2 fids
 	 * with the request RPC to avoid extra RPC round trips.
 	 */
-	count = mdc_resource_get_unused(exp, &op_data->op_fid1, &cancels,
-					LCK_EX, MDS_INODELOCK_LAYOUT |
-					MDS_INODELOCK_XATTR);
-	count += mdc_resource_get_unused(exp, &op_data->op_fid2, &cancels,
-					 LCK_EX, MDS_INODELOCK_LAYOUT |
-					 MDS_INODELOCK_XATTR);
+	count = mdc_resource_cancel_unused(exp, &op_data->op_fid1, &cancels,
+					   LCK_EX, MDS_INODELOCK_LAYOUT |
+					   MDS_INODELOCK_XATTR);
+	count += mdc_resource_cancel_unused(exp, &op_data->op_fid2, &cancels,
+					    LCK_EX, MDS_INODELOCK_LAYOUT |
+					    MDS_INODELOCK_XATTR);
 
 	req = ptlrpc_request_alloc(class_exp2cliimp(exp),
 				   &RQF_MDS_SWAP_LAYOUTS);
@@ -2380,35 +2378,36 @@ static int mdc_get_info_rpc(struct obd_export *exp,
 			    u32 keylen, void *key,
 			    u32 vallen, void *val)
 {
-        struct obd_import      *imp = class_exp2cliimp(exp);
-        struct ptlrpc_request  *req;
-        char                   *tmp;
-        int                     rc = -EINVAL;
-        ENTRY;
+	struct obd_import *imp = class_exp2cliimp(exp);
+	struct ptlrpc_request *req;
+	char *tmp;
+	int rc = -EINVAL;
 
-        req = ptlrpc_request_alloc(imp, &RQF_MDS_GET_INFO);
-        if (req == NULL)
-                RETURN(-ENOMEM);
+	ENTRY;
 
-        req_capsule_set_size(&req->rq_pill, &RMF_GETINFO_KEY,
-                             RCL_CLIENT, keylen);
-        req_capsule_set_size(&req->rq_pill, &RMF_GETINFO_VALLEN,
+	req = ptlrpc_request_alloc(imp, &RQF_MDS_FID2PATH);
+	if (req == NULL)
+		RETURN(-ENOMEM);
+
+	req_capsule_set_size(&req->rq_pill, &RMF_GETINFO_KEY,
+			     RCL_CLIENT, keylen);
+	req_capsule_set_size(&req->rq_pill, &RMF_GETINFO_VALLEN,
 			     RCL_CLIENT, sizeof(vallen));
 
-        rc = ptlrpc_request_pack(req, LUSTRE_MDS_VERSION, MDS_GET_INFO);
-        if (rc) {
-                ptlrpc_request_free(req);
-                RETURN(rc);
-        }
+	rc = ptlrpc_request_pack(req, LUSTRE_MDS_VERSION, MDS_GET_INFO);
+	if (rc) {
+		ptlrpc_request_free(req);
+		RETURN(rc);
+	}
 
-        tmp = req_capsule_client_get(&req->rq_pill, &RMF_GETINFO_KEY);
-        memcpy(tmp, key, keylen);
-        tmp = req_capsule_client_get(&req->rq_pill, &RMF_GETINFO_VALLEN);
+	tmp = req_capsule_client_get(&req->rq_pill, &RMF_GETINFO_KEY);
+	memcpy(tmp, key, keylen);
+	tmp = req_capsule_client_get(&req->rq_pill, &RMF_GETINFO_VALLEN);
 	memcpy(tmp, &vallen, sizeof(vallen));
 
-        req_capsule_set_size(&req->rq_pill, &RMF_GETINFO_VAL,
-                             RCL_SERVER, vallen);
-        ptlrpc_request_set_replen(req);
+	req_capsule_set_size(&req->rq_pill, &RMF_GETINFO_VAL,
+			     RCL_SERVER, vallen);
+	ptlrpc_request_set_replen(req);
 
 	/* if server failed to resolve FID, and OI scrub not able to fix it, it
 	 * will return -EINPROGRESS, ptlrpc_queue_wait() will keep retrying,
@@ -3102,6 +3101,7 @@ static const struct md_ops mdc_md_ops = {
 	.m_close            = mdc_close,
 	.m_create           = mdc_create,
 	.m_enqueue          = mdc_enqueue,
+	.m_enqueue_async    = mdc_enqueue_async,
 	.m_getattr          = mdc_getattr,
 	.m_getattr_name     = mdc_getattr_name,
 	.m_intent_lock      = mdc_intent_lock,

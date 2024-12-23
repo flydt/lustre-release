@@ -303,25 +303,16 @@ BuildRequires: pkgconfig(libselinux)
 BuildRequires: pkgconfig(libselinux) openssl-devel
 %endif
 %if %{with lustre_modules}
-%if %{with mofed}
-%if 0%{?mofed_source} > 0
-BuildRequires: mlnx-ofa_kernel-devel
-%endif
-%if %{with multiple_lnds}
-%if "%{_vendor}" == "redhat" || 0%{?openEuler}
-Requires: kmod-mlnx-ofa_kernel
+%if %{defined kernel_module_package_buildreqs}
+BuildRequires: %kernel_module_package_buildreqs
 %else
-Requires: mlnx-ofa_kernel-kmp
-%endif
-%endif
-%endif
 %if 0%{?rhel} >= 8 || 0%{?openEuler}
 BuildRequires: kernel-rpm-macros
 %endif
-%if 0%{?suse_version} >= 1530
+%if 0%{?sle_version} >= 150300
 BuildRequires: rpm-build >= 4.14.3
 %endif
-BuildRequires: %kernel_module_package_buildreqs
+%endif
 # need to provide a /usr/lib/${uname -r)/build dir
 BuildRequires: kernel >= 3.10
 %if "%{_vendor}" == "redhat"

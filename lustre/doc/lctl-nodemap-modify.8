@@ -100,6 +100,11 @@ it is still possible to lock or unlock encrypted directories,
 as these operations only need read access to fscrypt metadata.
 .br
 - quota_ops, to allow quota modifications.
+.br
+- server_upcall, to define which identity upcall to use. If set, identity upcall
+is defined by server side tunable. If not set, identity upcall is forced to
+INTERNAL, so that servers trust supplementary groups as provided by clients.
+.br
 Apart from all, any role not explicitly specified is forbidden.
 And to forbid all roles, use 'none' value.
 .RE
@@ -110,7 +115,7 @@ The value to set for the property. Should be 0 or 1 for admin and trusted.
 .EX
 .B # lctl nodemap_modify --name remotesite --property trusted --value 1
 .B # lctl nodemap_modify --name remotesite --property admin --value 1
-.B # lctl nodemap_modify --name remotesite --property map_mode --value uid_only
+.B # lctl nodemap_modify --name remotesite --property map_mode --value uid
 .B # lctl nodemap_modify --name othersite --property squash_uid --value 101
 .EE
 .SH AVAILABILITY

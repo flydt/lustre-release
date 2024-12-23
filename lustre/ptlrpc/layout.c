@@ -404,6 +404,11 @@ static const struct req_msg_field *ost_grant_shrink_client[] = {
 static const struct req_msg_field *mds_getinfo_client[] = {
 	&RMF_PTLRPC_BODY,
 	&RMF_GETINFO_KEY,
+};
+
+static const struct req_msg_field *mds_fid2path_client[] = {
+	&RMF_PTLRPC_BODY,
+	&RMF_GETINFO_KEY,
 	&RMF_GETINFO_VALLEN
 };
 
@@ -823,6 +828,7 @@ static struct req_format *req_formats[] = {
 	&RQF_MDS_CONNECT,
 	&RQF_MDS_DISCONNECT,
 	&RQF_MDS_GET_INFO,
+	&RQF_MDS_FID2PATH,
 	&RQF_MDS_GET_ROOT,
 	&RQF_MDS_STATFS,
 	&RQF_MDS_STATFS_NEW,
@@ -1588,6 +1594,11 @@ struct req_format RQF_MDS_GET_INFO =
 			mds_getinfo_server);
 EXPORT_SYMBOL(RQF_MDS_GET_INFO);
 
+struct req_format RQF_MDS_FID2PATH =
+	DEFINE_REQ_FMT0("MDS_FID2PATH", mds_fid2path_client,
+			mds_getinfo_server);
+EXPORT_SYMBOL(RQF_MDS_FID2PATH);
+
 struct req_format RQF_MDS_BATCH =
 	DEFINE_REQ_FMT0("MDS_BATCH", mds_batch_client,
 			mds_batch_server);
@@ -2052,6 +2063,7 @@ int req_capsule_server_pack(struct req_capsule *pill)
 		if (used_len + msg_len > req->rq_replen) {
 			__u32 len;
 			__u32 max;
+			__u32 add;
 
 			if (!req_capsule_has_field(&req->rq_pill,
 						   &RMF_BUT_REPLY, RCL_SERVER))
@@ -2068,17 +2080,20 @@ int req_capsule_server_pack(struct req_capsule *pill)
 			len = req_capsule_get_size(&req->rq_pill,
 						   &RMF_BUT_REPLY, RCL_SERVER);
 			/*
-			 * Currently just increase the batch reply buffer
-			 * by 2.
+			 * Currently just increase the batch RPC reply buffer
+			 * (including @RMF_PTLRPC_BODY + @RMF_BUT_REPLY) by 2.
+			 * We must set the new length carefully as it will be
+			 * rounded up with 8.
 			 */
 			max = BUT_MAXREPSIZE - req->rq_replen;
+			add = len;
 			if (used_len + msg_len > len)
-				len = used_len + msg_len;
+				add = used_len + msg_len;
 
-			if (len > max)
+			if (add > max)
 				len += max;
 			else
-				len += len;
+				len += add;
 
 			rc = req_capsule_server_grow(&req->rq_pill,
 						     &RMF_BUT_REPLY, len);
@@ -2512,17 +2527,14 @@ void req_capsule_set_size(struct req_capsule *pill,
 	    (size > 0)) {
 		__u32 rmf_size = (__u32)field->rmf_size;
 
-		if ((field->rmf_flags & RMF_F_STRUCT_ARRAY) &&
-		    (size % rmf_size != 0)) {
-			CERROR("%s: array field size mismatch %u %% %u != 0 (%d)\n",
-				field->rmf_name, size, rmf_size, loc);
-			LBUG();
-		} else if (!(field->rmf_flags & RMF_F_STRUCT_ARRAY) &&
-			   size < rmf_size) {
-			CERROR("%s: field size mismatch %u != %u (%d)\n",
-				field->rmf_name, size, rmf_size, loc);
-			LBUG();
-		}
+		LASSERTF(!((field->rmf_flags & RMF_F_STRUCT_ARRAY) &&
+			   (size % rmf_size != 0)),
+			 "%s: array field size mismatch %u %% %u != 0 (%d)\n",
+			 field->rmf_name, size, rmf_size, loc);
+		LASSERTF(!(!(field->rmf_flags & RMF_F_STRUCT_ARRAY) &&
+			   size < rmf_size),
+			 "%s: field size mismatch %u != %u (%d)\n",
+			 field->rmf_name, size, rmf_size, loc);
 	}
 
 	pill->rc_area[loc][__req_capsule_offset(pill, field, loc)] = size;

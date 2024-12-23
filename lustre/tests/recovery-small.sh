@@ -139,6 +139,12 @@ run_test 9 "pause bulk on OST (bug 1420)"
 test_10a() {
 	local before=$(date +%s)
 	local evict
+	local lru_param="ldlm.namespaces.*mdc*.lru_max_age"
+	local old_max_age=($($LCTL get_param -n $lru_param))
+	local old_ratelimit=$($LCTL get_param console_ratelimit)
+
+	$LCTL set_param $lru_param=3900s console_ratelimit=0
+	stack_trap "$LCTL set_param $lru_param=$old_max_age $old_ratelimit"
 
 	do_facet client "stat $DIR > /dev/null"  ||
 		error "failed to stat $DIR: $?"
@@ -149,12 +155,15 @@ test_10a() {
 	client_reconnect
 	evict=$(do_facet client $LCTL get_param mdc.$FSNAME-MDT*.state |
 	  awk -F"[ [,]" '/EVICTED ]$/ { if (mx<$5) {mx=$5;} } END { print mx }')
-	[ ! -z "$evict" ] && [[ $evict -gt $before ]] ||
+	[[ -n "$evict" ]] && (( $evict > $before )) ||
 		(do_facet client $LCTL get_param mdc.$FSNAME-MDT*.state;
 		    error "no eviction: $evict before:$before")
 
 	do_facet client checkstat -v -p 0777 $DIR ||
 		error "client checkstat failed: $?"
+
+	# console messages may be ratelimited on later iterations
+	(( ONLY_REPEAT_ITER == 1 )) || return 0
 
 	# check that the thread watchdog is working properly
 	do_facet mds1 dmesg | tac | sed "/${TESTNAME/_/ }/,$ d" |
@@ -1022,16 +1031,6 @@ test_24a() { # bug 11710 details correct fsync() behavior
 }
 run_test 24a "fsync error (should return error)"
 
-wait_client_evicted () {
-	local facet=$1
-	local exports=$2
-	local varsvc=${facet}_svc
-
-	wait_update $(facet_active_host $facet) \
-		"lctl get_param -n *.${!varsvc}.num_exports | cut -d' ' -f2" \
-		$((exports - 1)) $3
-}
-
 test_24b() {
 	remote_ost_nodsh && skip "remote OST with nodsh" && return 0
 
@@ -1100,26 +1099,39 @@ test_26a() {      # was test_26 bug 5921 - evict dead exports by pinger
 }
 run_test 26a "evict dead exports"
 
+wait_client_evicted () {
+	local facet=$1
+	local exports=$2
+	local timeout=$3
+	local varsvc=${facet}_svc
+
+	wait_update_cond $(facet_active_host $facet) \
+		"lctl get_param -n *.${!varsvc}.num_exports | cut -d' ' -f2" \
+		"-le" $((exports - 1)) $timeout
+}
+
 test_26b() {      # bug 10140 - evict dead exports by pinger
 	remote_ost_nodsh && skip "remote OST with nodsh" && return 0
 
-	if [ $(facet_host mgs) = $(facet_host ost1) ]; then
+	[[ $(facet_host mgs) != $(facet_host ost1) ]] ||
 		skip "msg and ost1 are at the same node"
-		return 0
-	fi
 
 	check_timeout || return 1
 	clients_up
-	zconf_mount `hostname` $MOUNT2 ||
+	zconf_mount $HOSTNAME $MOUNT2 ||
                 { error "Failed to mount $MOUNT2"; return 2; }
-	sleep 1 # wait connections being established
+	# make sure all imports are connected and not IDLE
+	do_facet client $LFS df > /dev/null
+	$LFS setstripe -c -1 $MOUNT/$tfile
 
-	local MDS_NEXP=$(do_facet $SINGLEMDS lctl get_param -n mdt.${mds1_svc}.num_exports | cut -d' ' -f2)
-	local OST_NEXP=$(do_facet ost1 lctl get_param -n obdfilter.${ost1_svc}.num_exports | cut -d' ' -f2)
+	local mds_nexp=$(do_facet mds1 \
+		lctl get_param -n mdt.${mds1_svc}.num_exports)
+	local ost_nexp=$(do_facet ost1 \
+		lctl get_param -n obdfilter.${ost1_svc}.num_exports)
 
-	echo starting with $OST_NEXP OST and $MDS_NEXP MDS exports
+	echo "starting with '$ost_nexp' OST and '$mds_nexp' MDS exports"
 
-	zconf_umount `hostname` $MOUNT2 -f
+	zconf_umount $HOSTNAME $MOUNT2 -f
 
 	# PING_INTERVAL max(obd_timeout / 4, 1U)
 	# PING_EVICT_TIMEOUT (PING_INTERVAL * 6)
@@ -1130,10 +1142,10 @@ test_26b() {      # bug 10140 - evict dead exports by pinger
 	# = 6 * PING_INTERVAL + PING_INTERVAL
 	# = 7 PING_INTERVAL = 7 obd_timeout / 4 =  (1+3/4)obd_timeout
 	# let's wait $((TIMEOUT * 2)) # bug 19887
-	wait_client_evicted ost1 $OST_NEXP $((TIMEOUT * 2)) ||
-		error "Client was not evicted by ost"
-	wait_client_evicted $SINGLEMDS $MDS_NEXP $((TIMEOUT * 2)) ||
-		error "Client was not evicted by mds"
+	wait_client_evicted ost1 $ost_nexp $((TIMEOUT * 2)) ||
+		error "Client was not evicted by OSS"
+	wait_client_evicted mds1 $mds_nexp $((TIMEOUT * 2)) ||
+		error "Client was not evicted by MDS"
 }
 run_test 26b "evict dead exports"
 
@@ -3031,7 +3043,7 @@ test_140b() {
 run_test 140b "local mount is excluded from recovery"
 
 test_141() {
-	local oldc
+	local oldc=0
 	local newc
 	local oldgen
 
@@ -3044,18 +3056,28 @@ test_141() {
 	oldgen=$(do_facet ost1 $LCTL get_param -n mgc.*.import |
 		 awk '/generation:/{print $NF}')
 	do_rpc_nodes $(facet_active_host ost1) cancel_lru_locks MGC
-	oldc=$(do_facet ost1 $LCTL get_param -n \
-		'ldlm.namespaces.MGC*.lock_count')
+	local end=$((SECONDS + 30))
+	local tmpc=1
+
+	while (( oldc == 0 || tmpc != oldc )) && (( SECONDS < end )); do
+		tmpc=$oldc
+		sleep 1
+		oldc=$(do_facet ost1 \
+		       $LCTL "get_param -n 'ldlm.namespaces.MGC*.lock_count'")
+	done
+
 	fail $SINGLEMDS
 	wait_mgc_import_state ost1 FULL
 	wait_update_facet_cond ost1 "$LCTL get_param -n mgc.*.import |
-		awk '/generation:/{print}' | cut -d':' -f2" != " $oldgen"
+		awk '/generation:/{print}' | cut -d':' -f2" "!=" " $oldgen"
 	do_rpc_nodes $(facet_active_host ost1) cancel_lru_locks MGC
-	newc=$(do_facet ost1 $LCTL get_param -n \
-		'ldlm.namespaces.MGC*.lock_count')
-
-	[ $oldc -eq $newc ] || error "mgc lost locks ($oldc != $newc)"
-	return 0
+	wait_update_facet ost1 \
+		"$LCTL get_param -n 'ldlm.namespaces.MGC*.lock_count'" $oldc ||
+	{
+		newc=$(do_facet ost1 \
+		       $LCTL get_param -n 'ldlm.namespaces.MGC*.lock_count')
+		error "mgc lost locks ($oldc != $newc)"
+	}
 }
 run_test 141 "do not lose locks on MGS restart"
 
@@ -3490,6 +3512,9 @@ test_152() {
 run_test 152 "QoS object allocation could be awakened in case of OST failover"
 
 test_153() {
+	(( MDS1_VERSION >= $(version_code 2.15.54.113) )) ||
+		skip "need MDS >= v2_15_54-113-g654d5f3fa4df for reconnect fix"
+
 #define OBD_FAIL_MDS_CONNECT_VS_EVICT   0x174
 	do_facet mds1 "$LCTL set_param fail_loc=0x174"
 	# first drop ping reply from MDS and then
@@ -3505,6 +3530,8 @@ test_153() {
 run_test 153 "evict vs reconnect race"
 
 test_154a() {
+	(( MDS1_VERSION >= $(version_code 2.15.60.2) )) ||
+		skip "need MDS >= v2_15_60-2-ge81805244476 for llog fix"
 	[ $MDSCOUNT -lt 2 ] && skip "needs >= 2 MDTs"
 
 	stop mds2
@@ -3537,6 +3564,8 @@ test_154a() {
 run_test 154a "corruption update llog can be skipped"
 
 test_154b() {
+	(( MDS1_VERSION >= $(version_code 2.15.60.2) )) ||
+		skip "need MDS >= v2_15_60-2-ge81805244476 for llog fix"
 	[ $MDSCOUNT -lt 2 ] && skip "needs >= 2 MDTs"
 
 	stop mds1
@@ -3560,6 +3589,9 @@ test_154b() {
 run_test 154b "restore update llog after failed recovery"
 
 test_155() {
+	(( MDS1_VERSION >= $(version_code 2.15.58.110) )) ||
+		skip "need MDS >= v2_15_58-110-g71f8e5d6506f for ptlrpc fix"
+
 	local lsoutput1
 	local lsoutput2
 
@@ -3629,6 +3661,9 @@ run_test 156 "tot_granted miscount after client eviction"
 
 test_157()
 {
+	(( MDS1_VERSION >= $(version_code 2.15.58.110) )) ||
+		skip "need MDS >= v2_15_58-110-g71f8e5d6506f to avoid eviction"
+
 	$LFS setstripe -i 0 -c 1 $DIR/$tfile || error "setstripe failed"
 	dd if=/dev/zero of=$DIR/$tfile bs=4096 count=1
 	cancel_lru_locks osc
@@ -3640,7 +3675,9 @@ test_157()
 	sleep 1
 	ost_evict_client
 	wait $MULTIPID
-	[[ $? == 135 ]] || error "multiop failed with not SIGBUS"
+	local rc=$?
+	(( rc == 0 || rc == 135 )) ||
+		error "multiop failed with $rc, not SIGBUS (135)"
 }
 run_test 157 "eviction during mmaped i/o"
 
@@ -3699,8 +3736,8 @@ test_160() {
 
 	for ((i = 1; i <= threads; i++)); do
 		local file=$DIR/$tdir/file_$i
-		#open/group lock/write/unlink/pause 20s/group unlock/close
-		$MULTIOP $file OG1234w10240u_20g1234c &
+		#open/group lock/write/unlink/pause/group unlock/close
+		$MULTIOP $file OG1234w10240u_g1234c &
 		pids[$i]=$!
 	done
 	sleep 2
@@ -3718,10 +3755,19 @@ test_160() {
 	do_facet mds1 $LCTL get_param osp.$FSNAME-OST0000-osc-MDT0000.error_list
 	echo inflight $rc
 	for ((i = 1; i <= threads; i++)); do
-		wait ${pids[$i]}
+		kill -USR1 ${pids[$i]} && wait ${pids[$i]}
 	done
 
 	(( $rc <= 2 )) || error "destroying OST objects are blocked $rc"
+
+	#without group lock, wait and check if all objects are destroyed
+	sleep $((timeout * 3))
+	do_facet mds1 $LCTL get_param osp.$FSNAME-OST0000-osc-MDT0000.error_list
+	local errs=$(do_facet mds1 $LCTL get_param -n osp.$FSNAME-OST0000-osc-MDT0000.error_list | wc -l)
+	rc=$(do_facet mds1 $LCTL get_param -n osp.$FSNAME-OST0000-osc-MDT0000.destroys_in_flight)
+
+	(( $errs == 0 )) || error "error_list not empty"
+	(( $rc == 0 )) || error "$rc destroys in flight"
 }
 run_test 160 "MDT destroys are blocked by grouplocks"
 

@@ -35,8 +35,10 @@
 
 #define DEBUG_SUBSYSTEM S_CLASS
 
+#include <linux/glob.h>
 #include <obd_class.h>
 #include <lprocfs_status.h>
+#include <lustre_kernelcomm.h>
 
 #ifdef CONFIG_PROC_FS
 
@@ -656,6 +658,7 @@ static const char *const obd_connect_names[] = {
 	"conn_policy",			/* 0x800000000 */
 	"sparse_read",		       /* 0x1000000000 */
 	"mirror_id_fix",	       /* 0x2000000000 */
+	"update_layout",	       /* 0x4000000000 */
 	NULL
 };
 
@@ -789,6 +792,19 @@ obd_connect_data_seqprint(struct seq_file *m, struct obd_connect_data *ocd)
 			   ocd->ocd_maxmodrpcs);
 }
 
+static inline const char *conn_uptodate2str(int status)
+{
+	if (status > 0)
+		return "uptodate";
+	if (status == -EHOSTUNREACH)
+		return "unreachable";
+	if (status == -EALREADY)
+		return "discovering";
+	if (status == -EAGAIN)
+		return "rediscover";
+	return "unknown";
+}
+
 static void lprocfs_import_seq_show_locked(struct seq_file *m,
 					   struct obd_device *obd,
 					   struct obd_import *imp)
@@ -847,7 +863,7 @@ static void lprocfs_import_seq_show_locked(struct seq_file *m,
 		seq_printf(m, "\n          \"%s\": { connects: %u, replied: %u,"
 			   " uptodate: %s, sec_ago: ",
 			   nidstr, conn->oic_attempts, conn->oic_replied,
-			   conn->oic_uptodate ? "true" : "false");
+			   conn_uptodate2str(conn->oic_uptodate));
 		if (conn->oic_last_attempt)
 			seq_printf(m, "%lld }", ktime_get_seconds() -
 				   conn->oic_last_attempt);
@@ -1248,6 +1264,9 @@ struct lprocfs_stats *lprocfs_stats_alloc(unsigned int num,
 	stats->ls_flags = flags;
 	stats->ls_init = ktime_get_real();
 	spin_lock_init(&stats->ls_lock);
+	kref_init(&stats->ls_refcount);
+	stats->ls_source = NULL;
+	stats->ls_index = -1;
 
 	/* alloc num of counter headers */
 	CFS_ALLOC_PTR_ARRAY(stats->ls_cnt_header, stats->ls_num);
@@ -1271,16 +1290,63 @@ fail:
 }
 EXPORT_SYMBOL(lprocfs_stats_alloc);
 
-void lprocfs_stats_free(struct lprocfs_stats **statsh)
+/* stats_list is a mirror of those parts of debugfs which contain lustre
+ * statistics. It is used to provide netlink access to those statistics.
+ * Any lustre module and register or deregister a set of statistics.
+ */
+static atomic_t lstats_count = ATOMIC_INIT(0);
+static DEFINE_XARRAY_ALLOC(lstats_list);
+
+struct lprocfs_stats *ldebugfs_stats_alloc(int num, char *name,
+					   struct dentry *debugfs_entry,
+					   struct kobject *kobj,
+					   enum lprocfs_stats_flags flags)
 {
-	struct lprocfs_stats *stats = *statsh;
+	struct lprocfs_stats *stats = lprocfs_stats_alloc(num, flags);
+	char *param;
+	int rc;
+
+	if (!stats)
+		return NULL;
+
+	xa_lock(&lstats_list);
+	stats->ls_index = atomic_read(&lstats_count);
+	rc = __xa_alloc(&lstats_list, &stats->ls_index, stats, xa_limit_31b,
+			GFP_KERNEL);
+	if (rc < 0) {
+		xa_unlock(&lstats_list);
+		lprocfs_stats_free(&stats);
+		return NULL;
+	}
+	atomic_inc(&lstats_count);
+	xa_unlock(&lstats_list);
+
+	stats->ls_source = kobject_get_path(kobj, GFP_KERNEL);
+	if (!stats->ls_source) {
+		lprocfs_stats_free(&stats);
+		return NULL;
+	}
+
+	param = stats->ls_source;
+	while ((param = strchr(param, '/')) != NULL)
+		*param = '.';
+
+	debugfs_create_file(name, 0644, debugfs_entry, stats,
+			    &ldebugfs_stats_seq_fops);
+	return stats;
+}
+EXPORT_SYMBOL(ldebugfs_stats_alloc);
+
+static void stats_free(struct kref *kref)
+{
+	struct lprocfs_stats *stats = container_of(kref, struct lprocfs_stats,
+						   ls_refcount);
 	unsigned int num_entry;
 	unsigned int percpusize;
 	unsigned int i;
 
 	if (!stats || stats->ls_num == 0)
 		return;
-	*statsh = NULL;
 
 	if (stats->ls_flags & LPROCFS_STATS_FLAG_NOPERCPU)
 		num_entry = 1;
@@ -1299,9 +1365,110 @@ void lprocfs_stats_free(struct lprocfs_stats **statsh)
 		CFS_FREE_PTR_ARRAY(stats->ls_cnt_header, stats->ls_num);
 	}
 
+	if (stats->ls_index != -1) {
+		xa_lock(&lstats_list);
+		__xa_erase(&lstats_list, stats->ls_index);
+		atomic_dec(&lstats_count);
+		xa_unlock(&lstats_list);
+	}
+
+	kfree(stats->ls_source); /* allocated by kobject_get_path */
+
 	LIBCFS_FREE(stats, offsetof(typeof(*stats), ls_percpu[num_entry]));
 }
+
+void lprocfs_stats_free(struct lprocfs_stats **statsh)
+{
+	struct lprocfs_stats *stats = *statsh;
+
+	if (!stats)
+		return;
+
+	if (kref_put(&stats->ls_refcount, stats_free))
+		*statsh = NULL;
+}
 EXPORT_SYMBOL(lprocfs_stats_free);
+
+unsigned int lustre_stats_scan(struct lustre_stats_list *slist, const char *source)
+{
+	struct lprocfs_stats *item, **stats;
+	unsigned int cnt = 0, snum;
+	const char *tmp = source;
+	unsigned long idx = 0;
+
+	if (source)
+		for (snum = 0; tmp[snum]; tmp[snum] == '.' ? snum++ : *tmp++);
+
+	xa_for_each(&lstats_list, idx, item) {
+		if (!kref_get_unless_zero(&item->ls_refcount))
+			continue;
+
+		if (strlen(item->ls_source) == 0) {
+			lprocfs_stats_free(&item);
+			continue;
+		}
+
+		if (source) {
+			char filter[PATH_MAX / 8], *src = item->ls_source;
+			unsigned int num;
+
+			if (strstarts(src, ".fs.lustre."))
+				src += strlen(".fs.lustre.");
+
+			/* glob_match() has a hard time telling *.* from *.*.*
+			 * from *.*.* so we need to compare the number of '.'
+			 * and filter on that as well. This actually avoids
+			 * the overhead of calling glob_match() every time.
+			 */
+			tmp = src;
+			for (num = 0; tmp[num]; tmp[num] == '.' ? num++ : *tmp++);
+			if (snum != num) {
+				lprocfs_stats_free(&item);
+				continue;
+			}
+
+			/* glob_match() does not like *.--- patterns so
+			 * we have to do special handling in this case.
+			 * Replace '*.' with obd_type names.
+			 */
+			if (strstarts(source, "*.")) {
+				char *start = strchr(src, '.');
+				int len;
+
+				/* If start is NULL this means its a top
+				 * level stats. We are looking for "*."
+				 * which is one level down. Let's skip it.
+				 */
+				if (!start) {
+					lprocfs_stats_free(&item);
+					continue;
+				}
+
+				/* We know src -> start is the obd_type */
+				len = start - src;
+				snprintf(filter, sizeof(filter), "%.*s%s",
+					 len, src, source + 1);
+				filter[strlen(filter) - 1] = '\0';
+			} else {
+				strscpy(filter, source, strlen(source) + 1);
+			}
+			if (!glob_match(filter, src)) {
+				lprocfs_stats_free(&item);
+				continue;
+			}
+		}
+		stats = genradix_ptr_alloc(&slist->gfl_list, slist->gfl_count++,
+					   GFP_ATOMIC);
+		if (!stats) {
+			lprocfs_stats_free(&item);
+			return -ENOMEM;
+		}
+		*stats = item;
+		cnt += item->ls_num;
+	}
+
+	return slist->gfl_count ? cnt : -ENOENT;
+}
 
 u64 lprocfs_stats_collector(struct lprocfs_stats *stats, int idx,
 			    enum lprocfs_fields_flags field)
@@ -1600,6 +1767,7 @@ static const char * const mps_stats[] = {
 	[LPROC_MD_CLOSE]		= "close",
 	[LPROC_MD_CREATE]		= "create",
 	[LPROC_MD_ENQUEUE]		= "enqueue",
+	[LPROC_MD_ENQUEUE_ASYNC]	= "enqueue_async",
 	[LPROC_MD_GETATTR]		= "getattr",
 	[LPROC_MD_INTENT_LOCK]		= "intent_lock",
 	[LPROC_MD_LINK]			= "link",
@@ -1726,6 +1894,227 @@ __s64 lprocfs_read_helper(struct lprocfs_counter *lc,
 }
 EXPORT_SYMBOL(lprocfs_read_helper);
 
+/*
+ * Parse a decimal string and decompose it into integer and fractional values.
+ * The fractionnal part is returned with @frac_d and @frac_div the 10^x
+ * denominator. The maximum number of digits for the fractional part is 9.
+ *
+ * examples of valid inputs:
+ * - ".01"	-> int_d: 0, frac_d: 1,		frac_div: 100
+ * - "5"	-> int_d: 5, frac_d: 0,		frac_div: 1
+ * - "2.1255"	-> int_d: 2, frac_d: 1255,	frac_div: 10000
+ * - "2.0295"	-> int_d: 2, frac_d: 295,	frac_div: 10000
+ * - "2.99999"	-> int_d: 3, frac_d: 99999,	frac_div: 100000
+ */
+static int string_to_decimal(u64 *int_d, u64 *frac_d, u32 *frac_div,
+			     const char *buffer, size_t count)
+{
+	const char *str = buffer;
+	int len = 0, frac_len = 0;
+	int i;
+	int rc;
+
+	*int_d = 0;
+	*frac_d = 0;
+	*frac_div = 1;
+
+	if (!count)
+		return -EINVAL;
+
+	/* parse integer */
+	if (*str != '.') {
+		rc = sscanf(str, "%llu%n", int_d, &len);
+		if (rc < 0)
+			return rc;
+		if (rc < 1 || !len || len > count)
+			return -EINVAL;
+		str += len;
+	}
+
+	/* parse fractional  */
+	if (*str != '.')
+		return len ? len : -EINVAL;
+
+	str++;
+	len++;
+	rc = sscanf(str, "%llu%n", frac_d, &frac_len);
+	if (rc < 0)
+		return rc;
+	if (rc < 1 || !frac_len)
+		return (len == 1) ? -EINVAL : len;
+
+	len += frac_len;
+	if (len > count)
+		return -EINVAL;
+
+	/* if frac_len >= 10, the frac_div will overflow */
+	if (frac_len >= 10)
+		return -EOVERFLOW;
+
+	for (i = 0; i < frac_len; i++)
+		*frac_div *= 10;
+
+	return len;
+}
+
+static int string_to_blksize(u64 *blk_size, const char *buffer, size_t count)
+{
+	/* For string_get_size() it can support values above exabytes,
+	 * (ZiB, YiB) due to breaking the return value into a size and
+	 * bulk size to avoid 64 bit overflow. We don't break the size
+	 * up into block size units so we don't support ZiB or YiB.
+	 */
+	enum string_size_units {
+		STRING_UNITS_2 = 0,
+		STRING_UNITS_10,
+	} unit = STRING_UNITS_2;
+	static const char *const units_2[] = {
+		"K",  "M",  "G",  "T",  "P",  "E",
+	};
+	static const char *const units_10[] = {
+		"kB", "MB", "GB", "TB", "PB", "EB",
+	};
+	static const char *const *const units_str[] = {
+		[STRING_UNITS_2] = units_2,
+		[STRING_UNITS_10] = units_10,
+	};
+	static const unsigned int coeff[] = {
+		[STRING_UNITS_2] = 1024,
+		[STRING_UNITS_10] = 1000,
+	};
+	size_t len = 0;
+	int i;
+
+	*blk_size = 1;
+	if (!count || !*buffer)
+		return -EINVAL;
+
+	if (*buffer == 'B') {
+		len = 1;
+		goto check_end;
+	}
+
+	if (count >= 2 && buffer[1] == 'B')
+		unit = STRING_UNITS_10;
+
+	i = unit == STRING_UNITS_2 ? ARRAY_SIZE(units_2) - 1 :
+				     ARRAY_SIZE(units_10) - 1;
+	do {
+		size_t unit_len = min(count, strlen(units_str[unit][i]));
+
+		if (strncmp(buffer, units_str[unit][i], unit_len) == 0) {
+			len += unit_len;
+			for (; i >= 0; i--)
+				*blk_size *= coeff[unit];
+			break;
+		}
+	} while (i--);
+
+	if (*blk_size == 1) {
+		CDEBUG(D_INFO, "unknown suffix '%s'\n", buffer);
+		return -EINVAL;
+	}
+
+	/* handle the optional "iB" suffix */
+	if (unit == STRING_UNITS_2 && (count - len) >= 2 &&
+	    buffer[len] == 'i' && buffer[len + 1] == 'B')
+		len += 2;
+
+check_end:
+	if (count > len && isalnum(buffer[len]))
+		return -EINVAL;
+
+	return len;
+}
+
+/*
+ * This comes from scale64_check_overflow() (time/timekeeping.c).
+ * This is used to prevent u64 overflow for:
+ * *base = mutl * *base / div
+ */
+static int scale64_rem(u64 mult, u32 div, u64 *base, u32 *remp)
+{
+	u64 tmp = *base;
+	u64 quot;
+	u32 rem, rem2;
+
+	if (!tmp)
+		return 0;
+	if (mult > tmp)
+		swap(mult, tmp);
+
+	quot = div_u64_rem(tmp, div, &rem);
+
+	if (mult > div &&
+	    (fls64(mult) + fls64(quot) >= 8 * sizeof(u64) ||
+	    fls64(mult) + fls(rem) >= 8 * sizeof(u64)))
+		return -EOVERFLOW;
+	quot *= mult;
+
+	tmp = div_u64_rem(rem * mult, div, &rem2);
+	*base = quot + tmp;
+	if (remp)
+		*remp = rem2;
+
+	return 0;
+}
+
+static int __string_to_size(u64 *size, const char *buffer, size_t count,
+			    const char *defunit)
+{
+	u64 whole, frac, blk_size;
+	u32 frac_div;
+	const char *ptr;
+	size_t len, unit_len;
+	int rc;
+
+	*size = 0;
+
+	rc = string_to_decimal(&whole, &frac, &frac_div, buffer, count);
+	if (rc < 0)
+		return rc;
+
+	len = rc;
+	ptr = buffer + len;
+	if (len >= count || !*ptr || isspace(*ptr)) {
+		*size = whole;
+		if (!defunit)
+			return len;
+
+		ptr = defunit;
+		unit_len = strlen(defunit);
+	} else {
+		unit_len = count - len;
+	}
+
+	rc = string_to_blksize(&blk_size, ptr, unit_len);
+	if (rc < 0)
+		return rc;
+
+	if (ptr != defunit)
+		len += rc;
+
+	if (blk_size == 1 && frac)
+		return -EINVAL;
+
+	if (blk_size == 1) {
+		*size = whole;
+		return len;
+	}
+
+	if (fls64(whole) + fls64(blk_size) >= sizeof(u64) * 8)
+		return -EOVERFLOW;
+
+	whole *= blk_size;
+	rc = scale64_rem(blk_size, frac_div, &frac, NULL);
+	if (rc)
+		return rc;
+
+	*size = whole + frac;
+
+	return len;
+}
+
 /**
  * string_to_size - convert ASCII string representing a numerical
  *		    value with optional units to 64-bit binary value
@@ -1740,7 +2129,7 @@ EXPORT_SYMBOL(lprocfs_read_helper);
  * the end which can be base 2 or base 10 in value. If no units are given
  * the string is assumed to just a numerical value.
  *
- * Returns:	@count if the string is successfully parsed,
+ * Returns:	length of characters parsed,
  *		-errno on invalid input strings. Error values:
  *
  *  - ``-EINVAL``: @buffer is not a proper numerical string
@@ -1749,113 +2138,7 @@ EXPORT_SYMBOL(lprocfs_read_helper);
  */
 int string_to_size(u64 *size, const char *buffer, size_t count)
 {
-	/* For string_get_size() it can support values above exabytes,
-	 * (ZiB, YiB) due to breaking the return value into a size and
-	 * bulk size to avoid 64 bit overflow. We don't break the size
-	 * up into block size units so we don't support ZiB or YiB.
-	 */
-	static const char *const units_10[] = {
-		"kB", "MB", "GB", "TB", "PB", "EB",
-	};
-	static const char *const units_2[] = {
-		"K",  "M",  "G",  "T",  "P",  "E",
-	};
-	static const char *const *const units_str[] = {
-		[STRING_UNITS_2] = units_2,
-		[STRING_UNITS_10] = units_10,
-	};
-	static const unsigned int coeff[] = {
-		[STRING_UNITS_10] = 1000,
-		[STRING_UNITS_2] = 1024,
-	};
-	enum string_size_units unit = STRING_UNITS_2;
-	u64 whole, blk_size = 1;
-	char kernbuf[22], *end;
-	size_t len = count;
-	int rc;
-	int i;
-
-	if (count >= sizeof(kernbuf)) {
-		CERROR("count %zd > buffer %zd\n", count, sizeof(kernbuf));
-		return -E2BIG;
-	}
-
-	*size = 0;
-	/* The "iB" suffix is optionally allowed for indicating base-2 numbers.
-	 * If suffix is only "B" and not "iB" then we treat it as base-10.
-	 */
-	end = strstr(buffer, "B");
-	if (end && *(end - 1) != 'i')
-		unit = STRING_UNITS_10;
-
-	i = unit == STRING_UNITS_2 ? ARRAY_SIZE(units_2) - 1 :
-				     ARRAY_SIZE(units_10) - 1;
-	do {
-		end = strnstr(buffer, units_str[unit][i], count);
-		if (end) {
-			for (; i >= 0; i--)
-				blk_size *= coeff[unit];
-			len = end - buffer;
-			break;
-		}
-	} while (i--);
-
-	/* as 'B' is a substring of all units, we need to handle it
-	 * separately.
-	 */
-	if (!end) {
-		/* 'B' is only acceptable letter at this point */
-		end = strnchr(buffer, count, 'B');
-		if (end) {
-			len = end - buffer;
-
-			if (count - len > 2 ||
-			    (count - len == 2 && strcmp(end, "B\n") != 0)) {
-				CDEBUG(D_INFO, "unknown suffix '%s'\n", buffer);
-				return -EINVAL;
-			}
-		}
-		/* kstrtoull will error out if it has non digits */
-		goto numbers_only;
-	}
-
-	end = strnchr(buffer, count, '.');
-	if (end) {
-		/* need to limit 3 decimal places */
-		char rem[4] = "000";
-		u64 frac = 0;
-		size_t off;
-
-		len = end - buffer;
-		end++;
-
-		/* limit to 3 decimal points */
-		off = min_t(size_t, 3, strspn(end, "0123456789"));
-		/* need to limit frac_d to a u32 */
-		memcpy(rem, end, off);
-		rc = kstrtoull(rem, 10, &frac);
-		if (rc)
-			return rc;
-
-		if (fls64(frac) + fls64(blk_size) - 1 > 64)
-			return -EOVERFLOW;
-
-		frac *= blk_size;
-		do_div(frac, 1000);
-		*size += frac;
-	}
-numbers_only:
-	snprintf(kernbuf, sizeof(kernbuf), "%.*s", (int)len, buffer);
-	rc = kstrtoull(kernbuf, 10, &whole);
-	if (rc)
-		return rc;
-
-	if (whole != 0 && fls64(whole) + fls64(blk_size) - 1 > 64)
-		return -EOVERFLOW;
-
-	*size += whole * blk_size;
-
-	return count;
+	return __string_to_size(size, buffer, count, NULL);
 }
 EXPORT_SYMBOL(string_to_size);
 
@@ -1870,11 +2153,11 @@ EXPORT_SYMBOL(string_to_size);
  *
  * Parses a string into a number. The number stored at @buffer is
  * potentially suffixed with K, M, G, T, P, E. Besides these other
- * valid suffix units are shown in the string_to_size() function.
+ * valid suffix units are shown in the __string_to_size() function.
  * If the string lacks a suffix then the defunit is used. The defunit
  * should be given as a binary unit (e.g. MiB) as that is the standard
- * for tunables in Lustre. If no unit suffix is given (e.g. 'G'), then
- * it is assumed to be in binary units.
+ * for tunables in Lustre.  If no unit suffix is given (e.g. only "G"
+ * instead of "GB"), then it is assumed to be in binary units ("GiB").
  *
  * Returns:	0 on success or -errno on failure.
  */
@@ -1882,34 +2165,13 @@ int sysfs_memparse(const char *buffer, size_t count, u64 *val,
 		   const char *defunit)
 {
 	const char *param = buffer;
-	char tmp_buf[23];
 	int rc;
 
-	if (count > strlen(buffer))
-		count = strlen(buffer);
-
-	while (count > 0 && isspace(buffer[count - 1]))
-		count--;
-
+	count = strnlen(buffer, count);
 	if (!count)
 		RETURN(-EINVAL);
 
-	/* If there isn't already a unit on this value, append @defunit.
-	 * Units of 'B' don't affect the value, so don't bother adding.
-	 */
-	if (!isalpha(buffer[count - 1]) && defunit[0] != 'B') {
-		if (count + 3 >= sizeof(tmp_buf)) {
-			CERROR("count %zd > size %zd\n", count, sizeof(param));
-			RETURN(-E2BIG);
-		}
-
-		scnprintf(tmp_buf, sizeof(tmp_buf), "%.*s%s", (int)count,
-			  buffer, defunit);
-		param = tmp_buf;
-		count = strlen(param);
-	}
-
-	rc = string_to_size(val, param, count);
+	rc = __string_to_size(val, param, count, defunit);
 
 	return rc < 0 ? rc : 0;
 }
@@ -2343,7 +2605,7 @@ int lprocfs_wr_nosquash_nids(const char __user *buffer, unsigned long count,
 		RETURN(count);
 	}
 
-	if (cfs_parse_nidlist(kernbuf, &tmp) < 0) {
+	if (cfs_parse_nidlist(kernbuf, strlen(kernbuf), &tmp)) {
 		errmsg = "can't parse";
 		GOTO(failed, rc = -EINVAL);
 	}

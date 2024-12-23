@@ -3201,7 +3201,7 @@ t32_test() {
 					return 1
 		fi
 
-		[[ $(do_facet mds1 pgrep orph_.*-MDD | wc -l) == 0 ]] ||
+		wait_update_facet mds1 "pgrep orph_.*-MDD | wc -l" "0" ||
 			error "MDD orphan cleanup thread not quit"
 
 		umount $tmp/mnt/lustre || {
@@ -3766,7 +3766,8 @@ test_35b() { # bug 18674
 		at_max_set 0 mds client
 	fi
 
-	mkdir $MOUNT/$tdir || error "mkdir $MOUNT/$tdir failed"
+	rm -rf $MOUNT/$tdir
+	mkdir_on_mdt0 $MOUNT/$tdir || error "mkdir $MOUNT/$tdir failed"
 
 	log "Injecting EBUSY on MDS"
 	# Setting OBD_FAIL_MDS_RESEND=0x136
@@ -3955,7 +3956,8 @@ test_38() { # bug 14222
 	local FILES=$(find $SRC -type f -mtime +1 | head -n $COUNT)
 
 	log "copying $(echo $FILES | wc -w) files to $DIR/$tdir"
-	mkdir $DIR/$tdir || error "mkdir $DIR/$tdir failed"
+	rm -rf $DIR/$tdir
+	mkdir_on_mdt0 $DIR/$tdir || error "mkdir $DIR/$tdir failed"
 	tar cf - $FILES | tar xf - -C $DIR/$tdir ||
 		error "copying $SRC to $DIR/$tdir"
 	sync
@@ -4269,6 +4271,41 @@ test_42() { #bug 14693
 }
 run_test 42 "allow client/server mount/unmount with invalid config param"
 
+test_43a_check_nosquash_nids() {
+	local nidlist="$1"
+
+	set_persistent_param_and_check mds1                             \
+		"mdt.$FSNAME-MDT0000.nosquash_nids"                     \
+		"$FSNAME-MDTall.mdt.nosquash_nids"                      \
+		"$nidlist"
+	wait_update $HOSTNAME                                           \
+		"$LCTL get_param -n llite.${FSNAME}*.nosquash_nids"     \
+		"$nidlist" ||
+		error "check llite nosquash_nids failed!"
+
+	ST=$(stat -c "%n: owner uid %u (%A)" $DIR/$tfile-rootfile)
+	dd if=$DIR/$tfile-rootfile 1>/dev/null 2>/dev/null ||
+		error "$ST: root read permission is denied"
+	echo "$ST: root read permission is granted - ok"
+
+	echo "666" |
+	dd conv=notrunc of=$DIR/$tfile-rootfile 1>/dev/null 2>/dev/null ||
+		error "$ST: root write permission is denied"
+	echo "$ST: root write permission is granted - ok"
+
+	ST=$(stat -c "%n: owner uid %u (%A)" $DIR/$tdir-rootdir)
+	rm $DIR/$tdir-rootdir/tfile-1 ||
+		error "$ST: root unlink permission is denied"
+	echo "$ST: root unlink permission is granted - ok"
+	touch $DIR/$tdir-rootdir/tfile-2 ||
+		error "$ST: root create permission is denied"
+	echo "$ST: root create permission is granted - ok"
+
+	# Re-create test file deleted above in case this function is called
+	# again
+	touch $DIR/$tdir-rootdir/tfile-1 || error "touch failed"
+}
+
 test_43a() {
 	[[ "$MGS_VERSION" -ge $(version_code 2.5.58) ]] ||
 		skip "Need MDS version at least 2.5.58"
@@ -4387,35 +4424,44 @@ test_43a() {
 	#   put client's NID into nosquash_nids list,
 	#   root should be able to access root file after that
 	#
-	local NIDLIST=$($LCTL list_nids all | tr '\n' ' ')
-	NIDLIST="2@gni $NIDLIST 192.168.0.[2,10]@tcp"
-	NIDLIST=$(echo $NIDLIST | tr -s ' ' ' ')
-	set_persistent_param_and_check mds1				\
-		"mdt.$FSNAME-MDT0000.nosquash_nids"			\
-		"$FSNAME-MDTall.mdt.nosquash_nids"			\
-		"$NIDLIST"
-	wait_update $HOSTNAME						\
-		"$LCTL get_param -n llite.${FSNAME}*.nosquash_nids"	\
-		"$NIDLIST" ||
-		error "check llite nosquash_nids failed!"
+	local nidlist=$($LCTL list_nids all | tr '\n' ' ')
+	nidlist="2@gni $nidlist 192.168.0.[2,10]@tcp"
+	nidlist=$(echo $nidlist | tr -s ' ' ' ')
 
-	ST=$(stat -c "%n: owner uid %u (%A)" $DIR/$tfile-rootfile)
-	dd if=$DIR/$tfile-rootfile 1>/dev/null 2>/dev/null ||
-		error "$ST: root read permission is denied"
-	echo "$ST: root read permission is granted - ok"
+	test_43a_check_nosquash_nids "$nidlist"
 
-	echo "666" |
-	dd conv=notrunc of=$DIR/$tfile-rootfile 1>/dev/null 2>/dev/null ||
-		error "$ST: root write permission is denied"
-	echo "$ST: root write permission is granted - ok"
+	if ! [[ $NETTYPE =~ ^(tcp|o2ib) ]]; then
+		log "Skip nidmask test for NETTYPE = $NETTYPE"
+		cleanup || error "cleanup failed with $?"
+		return 0
+	fi
 
-	ST=$(stat -c "%n: owner uid %u (%A)" $DIR/$tdir-rootdir)
-	rm $DIR/$tdir-rootdir/tfile-1 ||
-		error "$ST: root unlink permission is denied"
-	echo "$ST: root unlink permission is granted - ok"
-	touch $DIR/$tdir-rootdir/tfile-2 ||
-		error "$ST: root create permission is denied"
-	echo "$ST: root create permission is granted - ok"
+	# check nosquash_nids:
+	#   create a nidmask that contains the client's NID and place it
+	#   into nosquash_nids list.
+	#   root should be able to access root file after that
+	local interfaces=( $(lnet_if_list) )
+	local intf netmasks nm
+
+	for intf in ${interfaces[@]}; do
+		nm=$(ip -o -4 a s ${intf} | awk '{print $4}')
+		[[ -n $nm ]] && netmasks+=" $nm@${NETTYPE}"
+		nm=$(ip -o -6 a s ${intf} | grep -v 'fe80::' | awk '{print $4}')
+		[[ -n $nm ]] && netmasks+=" $nm@${NETTYPE}"
+	done
+
+	netmasks="${netmasks/ }"
+
+	if [[ -z $netmasks ]]; then
+		error "Unable to determine netmasks for ${interfaces[@]}"
+	fi
+
+	test_43a_check_nosquash_nids "$netmasks"
+
+	# cleanup test dir/files
+	rm -rf $DIR/$tfile-* $DIR/$tdir-rootdir ||
+		error "Failed to remove test files/dir rc = $?"
+
 	cleanup || error "cleanup failed with $?"
 }
 run_test 43a "check root_squash and nosquash_nids"
@@ -5068,7 +5114,7 @@ test_51() {
 	setup_noconfig
 	check_mount || error "check_mount failed"
 
-	mkdir $MOUNT/$tdir || error "mkdir $MOUNT/$tdir failed"
+	mkdir_on_mdt0 $MOUNT/$tdir || error "mkdir $MOUNT/$tdir failed"
 	$LFS setstripe -c -1 $MOUNT/$tdir ||
 		error "$LFS setstripe -c -1 $MOUNT/$tdir failed"
 	#define OBD_FAIL_MDS_REINT_DELAY         0x142
@@ -8733,7 +8779,7 @@ test_101a() {
 	local dev=$FSNAME-OST0000-osc-MDT0000
 	setup
 
-	mkdir $DIR1/$tdir
+	mkdir_on_mdt0 $DIR1/$tdir
 	do_nodes $(comma_list $(osts_nodes)) $LCTL set_param \
 		seq.*OST*-super.width=$DATA_SEQ_MAX_WIDTH
 	createmany -o $DIR1/$tdir/$tfile-%d 50000 &
@@ -8764,7 +8810,7 @@ test_101b () {
 	local dir=$DIR1/$tdir
 	setup
 
-	mkdir $dir
+	mkdir_on_mdt0 $dir
 	$LFS setstripe -c 1 -i 0 $dir
 	do_facet $SINGLEMDS "$LCTL --device $dev deactivate;"
 #define OBD_FAIL_OSP_CON_EVENT_DELAY 0x2107
@@ -10364,24 +10410,29 @@ run_test 123ac "llog_print with --start and --end"
 test_123ad() { # LU-11566
 	remote_mgs_nodsh && skip "remote MGS with nodsh"
 	# older versions of lctl may not print all records properly
-	do_facet mgs "$LCTL help llog_print" 2>&1 | grep -q -- --start ||
-		skip "Need 'lctl llog_print --start' on MGS"
+	(( MGS_VERSION >= $(version_code 2.15.90) )) ||
+		skip "Need MGS version at least 2.15.90"
 
 	[ -d $MOUNT/.lustre ] || setup
 
 	# append a new record, to avoid issues if last record was cancelled
 	local old=$($LCTL get_param -n osc.*-OST0000-*.max_dirty_mb | head -1)
 	do_facet mgs $LCTL conf_param $FSNAME-OST0000.osc.max_dirty_mb=$old
+	stack_trap "do_facet mgs $LCTL conf_param -d $FSNAME-OST0000.osc.max_dirty_mb"
 
 	# logid:            [0x3:0xa:0x0]:0
 	# flags:            4 (plain)
 	# records_count:    72
 	# last_index:       72
 	local num=$(do_facet mgs $LCTL --device MGS llog_info $FSNAME-client |
-		    awk '/last_index:/ { print $2 - 1 }')
+		    awk '/last_index:/ { print $2 }')
 
-	# - { index: 71, event: set_timeout, num: 0x14, param: sys.timeout=20 }
-	local last=$(do_facet mgs $LCTL --device MGS llog_print $FSNAME-client |
+	do_facet mgs $LCTL --device MGS llog_print $FSNAME-client |
+		grep -q "$FSNAME-OST0000.*osc\.max_dirty_mb=$old" ||
+		error "ocs.max_dirty_mb=$old not found in $FSNAME-client"
+
+	# - { index: 72, event: marker, flags: 0x06, ... }
+	local last=$(do_facet mgs $LCTL --device MGS llog_print -r $FSNAME-client |
 		     tail -1 | awk '{ print $4 }' | tr -d , )
 	(( last == num )) || error "llog_print only showed $last/$num records"
 }
@@ -10713,6 +10764,39 @@ test_123G() {
 }
 run_test 123G "clear and reset all parameters using apply_yaml"
 
+test_123H() { #LU-18170
+	local old
+	local i
+
+	(( MGS_VERSION >= $(version_code 2.15.90) )) ||
+		skip "Need MGS version at least 2.15.90"
+
+	[ -d $MOUNT/.lustre ] || setup
+
+	old=$(do_facet mgs $LCTL get_param jobid_var)
+	stack_trap "do_facet mgs $LCTL set_param -d jobid_var"
+	stack_trap "do_facet mgs $LCTL set_param -P jobid_var=$old"
+
+	# fill the "params" llog file
+	for i in {1..50}; do
+		do_facet mgs $LCTL set_param -P jobid_var=TEST_123H
+		do_facet mgs $LCTL set_param -P jobid_var=$old
+	done
+
+	local llog_str
+	local num
+	llog_str=$(do_facet mgs $LCTL llog_print -r params) ||
+		error "'lctl llog_print -r params' failed"
+	num=$(wc -l <<< "$llog_str")
+
+	# llog_print parallel executions
+	do_facet mgs "seq 1 20 | "\
+		"xargs -P20 -I{} bash -c '$LCTL llog_print -r params | wc -l' | "\
+		"sort | uniq -c" |
+		awk '$2 == "'$num'" { print $0; if ($1 != 20) exit 1; }' ||
+		error "'corrupted output for 'lctl llog_print -r params'"
+}
+run_test 123H "check concurent accesses with 'lctl llog_print"
 
 test_124()
 {
@@ -10924,9 +11008,15 @@ test_127() {
 	local osc_tgt="$FSNAME-OST0000-osc-$($LFS getname -i $DIR)"
 	local avail1=($($LCTL get_param -n osc.${osc_tgt}.kbytesavail))
 
-	$LFS setstripe -i 0 $DIR/$tfile || error "failed creating $DIR/$tfile"
+	wait_delete_completed
+	$LFS setstripe -i 0 -c1 $DIR/$tfile || {
+		$LFS df $DIR
+		$LCTL get_param osc.*.*grant_bytes
+		error "failed creating $DIR/$tfile"
+	}
 	dd if=/dev/zero of=$DIR/$tfile bs=1M oflag=direct || true
 
+	sleep_maxage
 	local avail2=($($LCTL get_param -n osc.${osc_tgt}.kbytesavail))
 
 	if ((avail2 * 100 / avail1 > 1)); then
@@ -11181,38 +11271,74 @@ run_test 133 "stripe QOS: free space balance in a pool"
 test_134() {
 	[ "$mds1_FSTYPE" == "ldiskfs" ] || skip "ldiskfs only test"
 	local errors
-	local rc
+	local rc rc_corrupted
 	local mdt_dev=$(facet_device mds1)
 	local tmp_dir=$TMP/$tdir
+	local dir=$DIR/$tdir
 	local out=$tmp_dir/check_iam.txt
 	local CHECK_IAM=${CHECK_IAM:-$(do_facet mds1 "which check_iam 2> /dev/null || true")}
+	local iam_files=$(printf "oi.16.%d " {0..63})
 
 	[[ -n "$CHECK_IAM" ]] || skip "check_iam not found"
 
-	mkdir -p $tmp_dir
-	for ((i=0; i<64; i++)); do
-		local f=oi.16.$i
-		#cmd introduce a random corruption to IAM file
-		local cmd="dd if=/dev/urandom of=$tmp_dir/$f bs=2 conv=notrunc count=1 seek=$((RANDOM % 36))"
-		do_facet mds1 "mkdir -p $tmp_dir; \
-		   $DEBUGFS -c -R 'dump $f $tmp_dir/$f' $mdt_dev 2>&1; \
-		   $CHECK_IAM -v $tmp_dir/$f 2>&1; \
-		   echo $cmd; eval $cmd 2>/dev/null;
-		   $CHECK_IAM -v $tmp_dir/$f 2>&1; echo \\\$?" >> $out 2>&1
+	setupall
+
+	# Fill the iam files
+	test_mkdir -p $dir || error "failed to mkdir $DIR/$tdir"
+	stack_trap "rm -rf $dir"
+
+	touch $dir/$tfile.{0..1000} || error "failed to touch files"
+	stack_trap "find $dir -type f | xargs -P10 -n1 unlink"
+
+	local f
+	for f in $dir/$tfile.{0..10}; do
+		printf "%s\n" $f.ln.{0..500} | xargs -P10 -n1 ln $f ||
+			error "failed to create 500 hard links of $f"
 	done
 
-	tail -n50 $out
+	local nm_name=${TESTNAME:0:15}
+
+	do_facet mgs "$LCTL nodemap_add $nm_name"
+	stack_trap "do_facet mgs $LCTL nodemap_del $nm_name"
+	do_facet mgs "$LCTL nodemap_add_range --name $nm_name --range '121.23.2.[100-120]@tcp'"
+
+	do_facet mds1 "$LCTL lfsck_start -A && $LCTL lfsck_query -w > /dev/null"
+
+	if (( MDS1_VERSION >= $(version_code 2.16.0) )); then
+		# LU-18401
+		iam_files+=$(printf "LFSCK/lfsck_layout_%02u " {0..15})
+		iam_files+=$(printf "LFSCK/lfsck_namespace_%02u " {0..15})
+		iam_files+="CONFIGS/nodemap "
+	fi
+
+	mkdir -p $tmp_dir
+	for f in $iam_files; do
+		#cmd introduce a random corruption to IAM file
+		local tmp_file=$tmp_dir/$(basename $f)
+		local cmd="dd if=/dev/urandom of=$tmp_file bs=2 conv=notrunc count=1 seek=$((RANDOM % 36))"
+
+		local facet
+		[[ "$f" =~ nodemap ]] && facet=mgs || facet=mds1
+		do_facet $facet "mkdir -p $tmp_dir; \
+		   $DEBUGFS -c -R 'dump $f $tmp_file' $mdt_dev 2>&1; \
+		   $CHECK_IAM -rv $tmp_file 2>&1; \
+		   echo $cmd; eval $cmd 2>/dev/null;
+		   $CHECK_IAM -v $tmp_file 2>&1; \
+		   rc=\\\$?; echo \\\$rc; exit \\\$rc;" >> $out 2>&1 ||
+		   (( rc_corrupted += ($? == 255) )) || true
+	done
+
+	tail -n100 $out
 
 	stack_trap "rm -rf $tmp_dir && do_facet mds1 rm -rf $tmp_dir" EXIT
 
-	rc=$(grep -c "fault\|except" $out)
+	rc=$(grep -c "\<fault\>\|\<except" $out)
 	(( rc == 0 )) || { cat $out &&
 		error "check_iam failed with fault or exception $rc"; }
 
-	rc=$(grep -c "^255" $out)
 	errors=$(grep -c "FINISHED WITH ERRORS" $out)
 
-	(( rc == errors )) || { cat $out &&
+	(( rc_corrupted == errors )) || { cat $out &&
 		error "check_iam errcode does not fit with errors $rc $errors"; }
 }
 run_test 134 "check_iam works without faults"
@@ -11337,10 +11463,13 @@ cleanup_136 () {
 
 test_136() {
 	(( MDSCOUNT >= 2 )) || skip "needs >= 2 MDTs"
+	(( $MDS1_VERSION >= $(version_code v2_15_61-43-g55c143a66d) )) ||
+		skip "Need MDS >= 2.15.61.43 for obdecho on second MDT"
 
 	reformat
 	setup_noconfig
 
+	do_rpc_nodes $(facet_active_host mds2) "load_module obdecho/obdecho"
 	do_facet mds2 "$LCTL attach echo_client ec ec_uuid" ||
 	    error "echo attach fail"
 
@@ -11613,6 +11742,7 @@ test_152() {
 	local nostdevname=$(ostdevname $nost)
 
 	setupall
+	stack_trap "reformat_and_config"
 	test_mkdir -i 1 -c1 $DIR/$tdir || error "can't mkdir"
 
 	log "ADD OST$nost"
@@ -11661,17 +11791,17 @@ test_153a() {
 
 	local nid=$($LCTL list_nids | grep ${NETTYPE} | head -n1)
 	local net=${nid#*@}
-	local MGS_NID=$(do_facet mgs $LCTL list_nids | head -1)
-	local OST1_NID=$(do_facet ost1 $LCTL list_nids | head -1)
-	local FAKE_PNID="192.168.252.112@${net}"
-	local FAKE_NIDS="${FAKE_PNID},${FAKE_PNID}2"
-	local FAKE_FAILOVER="10.252.252.113@${net},10.252.252.113@${net}2"
-	local NIDS_AND_FAILOVER="$FAKE_NIDS:$FAKE_FAILOVER:$OST1_NID:$MGS_NID"
+	local mgs_nid=$(do_facet mgs $LCTL list_nids | head -1)
+	local ost1_nid=$(do_facet ost1 $LCTL list_nids | head -1)
+	local fake_pnid="192.168.252.112@${net}"
+	local fake_nids="${fake_pnid},${fake_pnid}2"
+	local fake_failover="10.252.252.113@${net},10.252.252.113@${net}2"
+	local nids_and_failover="$fake_nids:$fake_failover:$ost1_nid:$mgs_nid"
 	local period=0
 	local pid
 	local rc
 
-	mount -t lustre $NIDS_AND_FAILOVER:/lustre $MOUNT &
+	mount -t lustre $nids_and_failover:/lustre $MOUNT &
 	pid=$!
 	while (( period < 30 )); do
 		[[ -n "$(ps -p $pid -o pid=)" ]] || break
@@ -11679,7 +11809,7 @@ test_153a() {
 		sleep 5
 		period=$((period + 5))
 	done
-	$LCTL get_param mgc.MGC${FAKE_PNID}.import | grep "uptodate:"
+	$LCTL get_param mgc.MGC${fake_pnid}.import | grep "uptodate:"
 	check_mount || error "check_mount failed"
 	umount $MOUNT
 	cleanup || error "cleanup failed with rc $?"
@@ -11762,6 +11892,41 @@ test_153b() {
 	umount $MOUNT
 }
 run_test 153b "added IPv6 NID support"
+
+test_153c() {
+	reformat_and_config
+
+	start_mds || error "MDS start failed"
+	start_ost || error "OST start failed"
+
+	local nid=$($LCTL list_nids | grep ${NETTYPE} | head -n1)
+	local net=${nid#*@}
+	local fake_pnid="192.168.252.112@${net}"
+	local fake_failover="192.168.252.113@${net}:192.168.252.115@${net}"
+	local nids_and_failover="$fake_pnid:$fake_failover"
+	local period=0
+	local pid
+	local rc
+
+	umount_client $MOUNT
+	mount -t lustre $nids_and_failover:/lustre $MOUNT &
+	pid=$!
+	while (( period < 30 )); do
+		[[ -n "$(ps -p $pid -o pid=)" ]] || break
+		echo "waiting for mount ..."
+		sleep 5
+		period=$((period + 5))
+	done
+	$LCTL get_param mgc.MGC${fake_pnid}.import | grep "sec_ago"
+	conn=$($LCTL get_param mgc.MGC${fake_pnid}.import |
+		awk '/connection_attempts:/ {print $2}')
+	echo "connection attempts: $conn"
+	(( conn > 2)) || error "too few connection attempts"
+	echo "Waiting for mount to fail"
+	wait $pid
+	cleanup || error "cleanup failed with rc $?"
+}
+run_test 153c "don't stuck on unreached NID"
 
 test_154() {
 	[ "$mds1_FSTYPE" == "ldiskfs" ] || skip "ldiskfs only test"
@@ -11867,6 +12032,175 @@ test_154() {
 		error "e2fsck returned $?"
 }
 run_test 154 "expand .. on rename after MDT backup restore"
+
+cleanup_200() {
+	local modopts=$1
+	stopall
+	$LUSTRE_RMMOD
+	[[ -z $modopts ]] || MODOPTS_LIBCFS=$modopts
+}
+
+test_200a() {
+	cleanup_200
+
+	local cpus=$(lscpu | awk '/^CPU.s.:/ {print $NF}')
+	local old_modopts=$MODOPTS_LIBCFS
+	stack_trap "cleanup_200 $old_modopts"
+
+	MODOPTS_LIBCFS="cpu_npartitions=$cpus"
+
+	load_modules_local libcfs
+	$LCTL get_param -n cpu_partition_table
+
+	local expected=$(cat /sys/module/libcfs/parameters/cpu_npartitions)
+	local result=$($LCTL get_param -n cpu_partition_table | wc -l)
+
+	(( $result == $expected )) ||
+		error "CPU partitions not $expected, found: $result"
+}
+run_test 200a "check CPU partitions"
+
+test_200b() {
+	cleanup_200
+
+	local cpus=$(lscpu | awk '/^CPU.s.:/ {print $NF}')
+	local nodes=$(lscpu | awk '/NUMA node.s.:/ {print $NF}')
+	local old_modopts=$MODOPTS_LIBCFS
+	stack_trap "cleanup_200 $old_modopts"
+
+	local pattern="0[$(lscpu | awk '/CPU.s. list:/ {print $NF}')]"
+	MODOPTS_LIBCFS="cpu_pattern=\"$pattern\""
+
+	load_modules_local libcfs
+	grep . /sys/module/libcfs/parameters/cpu*
+	$LCTL get_param -n cpu_partition_table
+	local expected=cpus
+	local table=$($LCTL get_param -n cpu_partition_table)
+	# ignore partition num and ':'
+	local actual=$(( $(awk '{print NF; exit}' <<< $table) - 2 ))
+
+	(( expected == actual )) || {
+		echo -e "layout wrong:\n$table"
+		error "partition 0 is missing CPUs from pattern: '$pattern'"
+	}
+
+	(( $(echo $table | wc -l) == 1 )) || {
+		echo -e "layout wrong\n$table"
+		error "layout has too many partitions from pattern: '$pattern'"
+	}
+
+	(( cpus >= 4 )) || skip "need at least 4 cpu cores"
+	cleanup
+
+	pattern="0[1-2]"
+	MODOPTS_LIBCFS="cpu_pattern=\"$pattern\""
+
+	load_modules_local libcfs
+	$LCTL get_param -n cpu_partition_table
+	expected="0	: 1 2"
+	table=$($LCTL get_param -n cpu_partition_table)
+
+	[[ $table == $expected ]] ||
+		error "CPU pattern not $expected, found: $table"
+}
+run_test 200b "set CPU pattern using core selection"
+
+test_200c() {
+	cleanup_200
+
+	local cpus=$(lscpu | awk '/^CPU.s.:/ {print $NF}')
+	local nodes=$(lscpu | awk '/NUMA node.s.:/ {print $NF}')
+
+	local old_modopts=$MODOPTS_LIBCFS
+	stack_trap "cleanup_200 $old_modopts"
+
+	local pattern="N"
+	MODOPTS_LIBCFS="cpu_pattern=\"$pattern\""
+
+	load_modules_local libcfs
+	grep . /sys/module/libcfs/parameters/cpu*
+	$LCTL get_param -n cpu_partition_table
+	local expected=$nodes
+	local table=$($LCTL get_param -n cpu_partition_table)
+	local actual=$(echo $table | wc -l)
+
+	(( actual == expected )) ||
+		error "CPU partitions not $expected, found: $actual"
+
+	cleanup
+
+	pattern="0[$(lscpu | awk '/^NUMA node0 CPU.s.:/ {print $NF}')]"
+	MODOPTS_LIBCFS="cpu_pattern=\"$pattern\""
+
+	load_modules_local libcfs
+	expected=$($LCTL get_param -n cpu_partition_table)
+
+	cleanup
+
+	pattern="N 0[0]"
+	MODOPTS_LIBCFS="cpu_pattern=\"$pattern\""
+
+	load_modules_local libcfs
+	$LCTL get_param -n cpu_partition_table
+	local table=$($LCTL get_param -n cpu_partition_table)
+
+	[[ $table == $expected ]] ||
+		error "CPU pattern not $expected, found: $table"
+}
+run_test 200c "set CPU pattern using NUMA node layout"
+
+test_200e() {
+	cleanup_200
+
+	local cpus=$(lscpu | awk '/^CPU.s.:/ {print $NF}')
+	local nodes=$(lscpu | awk '/NUMA node.s.:/ {print $NF}')
+
+	local old_modopts=$MODOPTS_LIBCFS
+	stack_trap "cleanup_200 $old_modopts"
+
+	pattern="N"
+	MODOPTS_LIBCFS="cpu_pattern=\"$pattern\""
+
+	load_modules_local libcfs
+	echo "full_table:"
+	$LCTL get_param -n cpu_partition_table
+	local full_table=$($LCTL get_param -n cpu_partition_table)
+	(( $(awk '/0.:/ {print NF - 3; exit}' <<< $full_table) > 0 )) ||
+		skip "need at least 2 cores in each CPT to exclude one"
+
+	cleanup
+
+	pattern="N C[0]"
+	MODOPTS_LIBCFS="cpu_pattern=\"$pattern\""
+
+	load_modules_local libcfs
+	echo "table:"
+	grep . /sys/module/libcfs/parameters/cpu*
+	$LCTL get_param -n cpu_partition_table
+	table=$($LCTL get_param -n cpu_partition_table)
+
+	local expected
+	local actual
+	local excluded
+	local partition
+
+	for (( i = 0; i < nodes; i++ )); do
+		expected=$(awk '/'$i'.:/ {print NF - 3; exit}' <<< $full_table)
+		actual=$(awk '/'$i'.:/ {print NF - 2; exit}' <<< $table)
+
+		(( actual == expected )) ||
+			error "CPU count not $expected, found: $actual"
+
+		excluded=$(awk '/'$i'.:/ {print $3; exit}' <<< $full_table)
+		partition=$(awk '/'$i'.:/ {print $3; exit}' <<< $table)
+
+		! [[ "$partition" =~ "$excluded" ]] || {
+			echo -e "layout wrong:\n$table"
+			error "excluded the wrong CPU with pattern: $pattern"
+		}
+	done
+}
+run_test 200e "set CPU pattern using relative core exclusion"
 
 #
 # (This was sanity/802a)

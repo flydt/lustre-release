@@ -38,18 +38,9 @@
 
 #include "llite_internal.h"
 
-struct posix_acl *ll_get_acl(
- #ifdef HAVE_ACL_WITH_DENTRY
-	struct mnt_idmap *map, struct dentry *dentry, int type)
- #elif defined HAVE_GET_ACL_RCU_ARG
-	struct inode *inode, int type, bool rcu)
- #else
-	struct inode *inode, int type)
- #endif /* HAVE_GET_ACL_RCU_ARG */
+static struct posix_acl *
+ll_get_acl_common(struct inode *inode, int type, bool rcu)
 {
-#ifdef HAVE_ACL_WITH_DENTRY
-	struct inode *inode = dentry->d_inode;
-#endif
 	struct ll_inode_info *lli = ll_i2info(inode);
 	struct posix_acl *acl = NULL;
 	char *value = NULL;
@@ -58,10 +49,8 @@ struct posix_acl *ll_get_acl(
 	char *xname;
 	ENTRY;
 
-#ifdef HAVE_GET_ACL_RCU_ARG
 	if (rcu)
 		return ERR_PTR(-ECHILD);
-#endif
 
 	if (type == ACL_TYPE_ACCESS && lli->lli_posix_acl)
 		goto lli_acl;
@@ -92,7 +81,7 @@ struct posix_acl *ll_get_acl(
 	}
 	if (len > 0)
 		acl = posix_acl_from_xattr(&init_user_ns, value, len);
-	else if (len == -ENODATA || len == -ENOSYS)
+	else if (len == -ENODATA || len == -ENOSYS || len == -EOPNOTSUPP)
 		acl = NULL;
 	else
 		acl = ERR_PTR(len);
@@ -116,6 +105,31 @@ lli_acl:
 
 out:
 	RETURN(acl);
+}
+
+/* v6.1-rc1-3-gcac2f8b8d8b5 */
+struct posix_acl *ll_get_inode_acl(struct inode *inode, int type, bool rcu)
+{
+	return ll_get_acl_common(inode, type, rcu);
+}
+
+struct posix_acl *ll_get_acl(
+#ifdef HAVE_ACL_WITH_DENTRY
+	struct mnt_idmap *map, struct dentry *dentry, int type)
+#elif defined HAVE_GET_ACL_RCU_ARG
+	struct inode *inode, int type, bool rcu)
+#else
+	struct inode *inode, int type)
+#endif /* HAVE_GET_ACL_RCU_ARG */
+{
+#ifdef HAVE_ACL_WITH_DENTRY
+	struct inode *inode = dentry->d_inode;
+#endif
+#ifndef HAVE_GET_ACL_RCU_ARG
+	bool rcu = false;
+#endif
+
+	return ll_get_acl_common(inode, type, rcu);
 }
 
 #ifdef HAVE_IOP_SET_ACL

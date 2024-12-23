@@ -392,6 +392,7 @@ int client_obd_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 	atomic_set(&cli->cl_pending_r_pages, 0);
 	cli->cl_r_in_flight = 0;
 	cli->cl_w_in_flight = 0;
+	cli->cl_d_in_flight = 0;
 
 	cli->cl_stats_init = ktime_get_real();
 	spin_lock_init(&cli->cl_read_rpc_hist.oh_lock);
@@ -809,7 +810,8 @@ static inline int target_check_recovery_timer(struct obd_device *target)
 	ktime_t remaining;
 	s64 timeout;
 
-	if (!target->obd_recovering || target->obd_recovery_start == 0)
+	if (!test_bit(OBDF_RECOVERING, target->obd_flags) ||
+	    target->obd_recovery_start == 0)
 		return 0;
 
 	remaining = hrtimer_get_remaining(&target->obd_recovery_timer);
@@ -822,9 +824,9 @@ static inline int target_check_recovery_timer(struct obd_device *target)
 	 * the recovery of the whole cluster.
 	 */
 	spin_lock(&target->obd_dev_lock);
-	if (target->obd_recovering) {
+	if (test_bit(OBDF_RECOVERING, target->obd_flags)) {
 		CERROR("%s: Aborting recovery\n", target->obd_name);
-		target->obd_abort_recovery = 1;
+		set_bit(OBDF_ABORT_RECOVERY, target->obd_flags);
 		wake_up(&target->obd_next_transno_waitq);
 	}
 	spin_unlock(&target->obd_dev_lock);
@@ -874,7 +876,7 @@ static int target_handle_reconnect(struct lustre_handle *conn,
 		RETURN(-EALREADY);
 	}
 
-	if (!target->obd_recovering) {
+	if (!test_bit(OBDF_RECOVERING, target->obd_flags)) {
 		LCONSOLE_WARN("%s: Client %s (at %s) reconnecting\n",
 			target->obd_name, obd_uuid2str(&exp->exp_client_uuid),
 			obd_export_nid2str(exp));
@@ -1086,15 +1088,16 @@ int target_handle_connect(struct ptlrpc_request *req)
 	target = class_str2obd(str);
 	if (!target) {
 		deuuidify(str, NULL, &target_start, &target_len);
-		LCONSOLE_ERROR("%.*s: not available for connect from %s (no target). If you are running an HA pair check that the target is mounted on the other server.\n",
-			       target_len, target_start,
-			       libcfs_nidstr(&req->rq_peer.nid));
+		CERROR_SLOW(5,
+			    "%.*s: not available for connect from %s (no target). If you are running an HA pair check that the target is mounted on the other server.\n",
+			    target_len, target_start,
+			    libcfs_nidstr(&req->rq_peer.nid));
 		GOTO(out, rc = -ENODEV);
 	}
 
 	atomic_inc(&target->obd_conn_inprogress);
 
-	if (target->obd_stopping || !target->obd_set_up) {
+	if (target->obd_stopping || !test_bit(OBDF_SET_UP, target->obd_flags)) {
 		deuuidify(str, NULL, &target_start, &target_len);
 		LCONSOLE_INFO("%.*s: Not available for connect from %s (%s)\n",
 			      target_len, target_start,
@@ -1335,7 +1338,7 @@ no_export:
 
 	CDEBUG(D_HA, "%s: connection from %s@%s %st%llu exp %p cur %lld last %lld\n",
 	       target->obd_name, cluuid.uuid, libcfs_nidstr(&req->rq_peer.nid),
-	       target->obd_recovering ? "recovering/" : "", data->ocd_transno,
+	       test_bit(OBDF_RECOVERING, target->obd_flags) ? "recovering/" : "", data->ocd_transno,
 	       export, ktime_get_seconds(),
 	       export ? export->exp_last_request_time : 0);
 
@@ -1343,7 +1346,7 @@ no_export:
 	 * If this is the first time a client connects, reset the recovery
 	 * timer. Discard lightweight connections which might be local.
 	 */
-	if (!lw_client && rc == 0 && target->obd_recovering)
+	if (!lw_client && rc == 0 && test_bit(OBDF_RECOVERING, target->obd_flags))
 		check_and_start_recovery_timer(target, req, export == NULL);
 
 	/*
@@ -1367,7 +1370,8 @@ no_export:
 		 * allow "new" MDT to be connected during recovery, since we
 		 * need retrieve recovery update records from it
 		 */
-		if (target->obd_recovering && !lw_client && !mds_mds_conn) {
+		if (test_bit(OBDF_RECOVERING, target->obd_flags) &&
+		    !lw_client && !mds_mds_conn) {
 			struct hrtimer *timer = &target->obd_recovery_timer;
 			ktime_t remaining;
 			s64 timeout, left;
@@ -1524,7 +1528,8 @@ dont_check_exports:
 	if (rc != 0)
 		GOTO(out, rc);
 
-	if (target->obd_recovering && !export->exp_in_recovery && !lw_client) {
+	if (test_bit(OBDF_RECOVERING, target->obd_flags) &&
+	    !export->exp_in_recovery && !lw_client) {
 		int has_transno;
 		__u64 transno = data->ocd_transno;
 
@@ -1576,7 +1581,7 @@ dont_check_exports:
 	}
 
 	/* Tell the client we're in recovery, when client is involved in it. */
-	if (target->obd_recovering && !lw_client)
+	if (test_bit(OBDF_RECOVERING, target->obd_flags) && !lw_client)
 		lustre_msg_add_op_flags(req->rq_repmsg, MSG_CONNECT_RECOVERING);
 
 out:
@@ -1837,14 +1842,14 @@ void target_cleanup_recovery(struct obd_device *obd)
 	LIST_HEAD(clean_list);
 
 	spin_lock(&obd->obd_dev_lock);
-	if (!obd->obd_recovering) {
+	if (!test_bit(OBDF_RECOVERING, obd->obd_flags)) {
 		spin_unlock(&obd->obd_dev_lock);
 		EXIT;
 		return;
 	}
-	obd->obd_recovering = 0;
-	obd->obd_abort_recovery = 0;
-	obd->obd_abort_mdt_recovery = 0;
+	clear_bit(OBDF_RECOVERING, obd->obd_flags);
+	clear_bit(OBDF_ABORT_RECOVERY, obd->obd_flags);
+	clear_bit(OBDF_ABORT_MDT_RECOVERY, obd->obd_flags);
 	spin_unlock(&obd->obd_dev_lock);
 
 	spin_lock(&obd->obd_recovery_task_lock);
@@ -1887,7 +1892,8 @@ static void target_start_recovery_timer(struct obd_device *obd)
 		return;
 
 	spin_lock(&obd->obd_dev_lock);
-	if (!obd->obd_recovering || obd->obd_abort_recovery) {
+	if (!test_bit(OBDF_RECOVERING, obd->obd_flags) ||
+	    test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags)) {
 		spin_unlock(&obd->obd_dev_lock);
 		return;
 	}
@@ -1931,7 +1937,8 @@ static void extend_recovery_timer(struct obd_device *obd, timeout_t dr_timeout,
 	timeout_t left;
 
 	spin_lock(&obd->obd_dev_lock);
-	if (!obd->obd_recovering || obd->obd_abort_recovery ||
+	if (!test_bit(OBDF_RECOVERING, obd->obd_flags) ||
+	    test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags) ||
 	    obd->obd_stopping) {
 		spin_unlock(&obd->obd_dev_lock);
 		return;
@@ -2162,7 +2169,7 @@ static int check_for_next_lock(struct lu_target *lut)
 	} else if (atomic_read(&obd->obd_lock_replay_clients) == 0) {
 		CDEBUG(D_HA, "waking for completed lock replay\n");
 		wake_up = 1;
-	} else if (obd->obd_abort_recovery) {
+	} else if (test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags)) {
 		CDEBUG(D_HA, "waking for aborted recovery\n");
 		wake_up = 1;
 	} else if (obd->obd_recovery_expired) {
@@ -2206,7 +2213,7 @@ static int target_recovery_overseer(struct lu_target *lut,
 	time64_t last = 0;
 	time64_t now;
 repeat:
-	if (obd->obd_recovering && obd->obd_recovery_start == 0) {
+	if (test_bit(OBDF_RECOVERING, obd->obd_flags) && obd->obd_recovery_start == 0) {
 		now = ktime_get_seconds();
 		if (now - last > 600) {
 			LCONSOLE_INFO("%s: in recovery but waiting for the first client to connect\n",
@@ -2265,7 +2272,7 @@ repeat:
 			       "%s: there are still update replay (%#llx)in the queue.\n",
 			       obd->obd_name, next_update_transno);
 		} else {
-			obd->obd_abort_recovery = 1;
+			set_bit(OBDF_ABORT_RECOVERY, obd->obd_flags);
 			spin_unlock(&obd->obd_recovery_task_lock);
 			CWARN("%s recovery is aborted by hard timeout\n",
 			      obd->obd_name);
@@ -2441,7 +2448,7 @@ static int check_for_recovery_ready(struct lu_target *lut)
 	       "connected %d stale %d max_recoverable_clients %d abort %d expired %d\n",
 	       clnts, obd->obd_stale_clients,
 	       atomic_read(&obd->obd_max_recoverable_clients),
-	       obd->obd_abort_recovery, obd->obd_recovery_expired);
+	       test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags), obd->obd_recovery_expired);
 
 	if (!obd_recovery_abort(obd) && !obd->obd_recovery_expired) {
 		LASSERT(clnts <=
@@ -2753,7 +2760,7 @@ static int target_recovery_thread(void *arg)
 	trd->trd_processing_task = current->pid;
 
 	spin_lock(&obd->obd_dev_lock);
-	obd->obd_recovering = 1;
+	set_bit(OBDF_RECOVERING, obd->obd_flags);
 	spin_unlock(&obd->obd_dev_lock);
 	complete(&trd->trd_starting);
 
@@ -2803,7 +2810,8 @@ static int target_recovery_thread(void *arg)
 	tgt_boot_epoch_update(lut);
 
 	/* cancel update llogs upon recovery abort */
-	if (obd->obd_abort_recovery || obd->obd_abort_mdt_recovery)
+	if (test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags) ||
+	    test_bit(OBDF_ABORT_MDT_RECOVERY, obd->obd_flags))
 		obd->obd_type->typ_dt_ops->o_iocontrol(OBD_IOC_LLOG_CANCEL,
 						       obd->obd_self_export,
 						       0, trd, NULL);
@@ -2822,9 +2830,9 @@ static int target_recovery_thread(void *arg)
 	 * to regular mds_handle() since now
 	 */
 	spin_lock(&obd->obd_dev_lock);
-	obd->obd_recovering = 0;
-	obd->obd_abort_recovery = 0;
-	obd->obd_abort_mdt_recovery = 0;
+	clear_bit(OBDF_RECOVERING, obd->obd_flags);
+	clear_bit(OBDF_ABORT_RECOVERY, obd->obd_flags);
+	clear_bit(OBDF_ABORT_MDT_RECOVERY, obd->obd_flags);
 	spin_unlock(&obd->obd_dev_lock);
 	spin_lock(&obd->obd_recovery_task_lock);
 	target_cancel_recovery_timer(obd);
@@ -2880,7 +2888,7 @@ static int target_start_recovery_thread(struct lu_target *lut,
 	if (!IS_ERR(kthread_run(target_recovery_thread,
 				lut, "tgt_recover_%d", index))) {
 		wait_for_completion(&trd->trd_starting);
-		LASSERT(obd->obd_recovering != 0);
+		LASSERT(test_bit(OBDF_RECOVERING, obd->obd_flags));
 	} else {
 		rc = -ECHILD;
 	}
@@ -2894,9 +2902,9 @@ void target_stop_recovery_thread(struct obd_device *obd)
 		struct target_recovery_data *trd = &obd->obd_recovery_data;
 		/** recovery can be done but postrecovery is not yet */
 		spin_lock(&obd->obd_dev_lock);
-		if (obd->obd_recovering) {
+		if (test_bit(OBDF_RECOVERING, obd->obd_flags)) {
 			CERROR("%s: Aborting recovery\n", obd->obd_name);
-			obd->obd_abort_recovery = 1;
+			set_bit(OBDF_ABORT_RECOVERY, obd->obd_flags);
 			wake_up(&obd->obd_next_transno_waitq);
 		}
 		spin_unlock(&obd->obd_dev_lock);
@@ -3034,7 +3042,7 @@ int target_queue_recovery_request(struct ptlrpc_request *req,
 		DEBUG_REQ(D_HA, req, "queue final req");
 		wake_up(&obd->obd_next_transno_waitq);
 		spin_lock(&obd->obd_recovery_task_lock);
-		if (obd->obd_recovering) {
+		if (test_bit(OBDF_RECOVERING, obd->obd_flags)) {
 			struct ptlrpc_request *tmp;
 			struct ptlrpc_request *duplicate = NULL;
 
@@ -3084,7 +3092,7 @@ int target_queue_recovery_request(struct ptlrpc_request *req,
 		DEBUG_REQ(D_HA, req, "queue lock replay req");
 		wake_up(&obd->obd_next_transno_waitq);
 		spin_lock(&obd->obd_recovery_task_lock);
-		LASSERT(obd->obd_recovering);
+		LASSERT(test_bit(OBDF_RECOVERING, obd->obd_flags));
 		/* usually due to recovery abort */
 		if (!req->rq_export->exp_in_recovery) {
 			spin_unlock(&obd->obd_recovery_task_lock);
@@ -3157,7 +3165,7 @@ int target_queue_recovery_request(struct ptlrpc_request *req,
 
 	/* XXX O(n^2) */
 	spin_lock(&obd->obd_recovery_task_lock);
-	LASSERT(obd->obd_recovering);
+	LASSERT(test_bit(OBDF_RECOVERING, obd->obd_flags));
 	list_for_each_entry(reqiter, &obd->obd_req_replay_queue, rq_list) {
 		if (lustre_msg_get_transno(reqiter->rq_reqmsg) > transno) {
 			list_add_tail(&req->rq_list, &reqiter->rq_list);

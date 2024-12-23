@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -265,6 +247,8 @@ struct client_obd {
 	struct list_head	cl_loi_read_list;
 	__u32			cl_r_in_flight;
 	__u32			cl_w_in_flight;
+	/* The count of direct I/Os (using server-side locking) in flight */
+	__u32			cl_d_in_flight;
 	/* just a sum of the loi/lop pending numbers to be exported by /proc */
 	atomic_t		cl_pending_w_pages;
 	atomic_t		cl_pending_r_pages;
@@ -609,6 +593,16 @@ struct obd_llog_group {
 	spinlock_t	   olg_lock;
 };
 
+/* Obd flag bits */
+enum {
+	OBDF_ATTACHED,		/* finished attach */
+	OBDF_SET_UP,		/* finished setup */
+	OBDF_RECOVERING,	/* there are recoverable clients */
+	OBDF_ABORT_RECOVERY,	/* abort client and MDT recovery */
+	OBDF_ABORT_MDT_RECOVERY, /* abort recovery between MDTs */
+	OBDF_NUM_FLAGS,
+};
+
 /* corresponds to one of the obd's */
 #define OBD_DEVICE_MAGIC        0XAB5CD6EF
 
@@ -623,12 +617,8 @@ struct obd_device {
 	char				 obd_name[MAX_OBD_NAME];
 
 	/* bitfield modification is protected by obd_dev_lock */
+	DECLARE_BITMAP(obd_flags, OBDF_NUM_FLAGS);
 	unsigned long
-		obd_attached:1,		/* finished attach */
-		obd_set_up:1,		/* finished setup */
-		obd_recovering:1,	/* there are recoverable clients */
-		obd_abort_recovery:1,	/* abort client and MDT recovery */
-		obd_abort_mdt_recovery:1, /* abort recovery between MDTs */
 		obd_version_recov:1,	/* obd uses version checking */
 		obd_replayable:1,	/* recovery enabled; inform clients */
 		obd_no_recov:1,		/* fail instead of retry messages */
@@ -814,14 +804,14 @@ void obd_nid_del(struct obd_device *obd, struct obd_export *exp);
 /* both client and MDT recovery are aborted, or MDT is stopping  */
 static inline bool obd_recovery_abort(struct obd_device *obd)
 {
-	return obd->obd_stopping || obd->obd_abort_recovery;
+	return obd->obd_stopping || test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags);
 }
 
 /* MDT recovery is aborted, or MDT is stopping */
 static inline bool obd_mdt_recovery_abort(struct obd_device *obd)
 {
-	return obd->obd_stopping || obd->obd_abort_recovery ||
-	       obd->obd_abort_mdt_recovery;
+	return obd->obd_stopping || test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags) ||
+		test_bit(OBDF_ABORT_MDT_RECOVERY, obd->obd_flags);
 }
 #endif
 
@@ -1259,6 +1249,10 @@ struct md_ops {
 	int (*m_enqueue)(struct obd_export *, struct ldlm_enqueue_info *,
 			 const union ldlm_policy_data *, struct md_op_data *,
 			 struct lustre_handle *, __u64);
+
+	int (*m_enqueue_async)(struct obd_export *, struct ldlm_enqueue_info *,
+			       obd_enqueue_update_f, struct md_op_data *,
+			       const union ldlm_policy_data *, __u64);
 
 	int (*m_getattr)(struct obd_export *, struct md_op_data *,
 			 struct ptlrpc_request **);

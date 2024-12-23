@@ -64,7 +64,7 @@ static int jt_##name(int argc, char **argv)			\
 }
 
 /**
- * command_t pccdev_cmdlist - lctl pcc commands.
+ * command_t pcc_cmdlist - lctl pcc commands.
  */
 command_t pcc_cmdlist[] = {
 	{ .pc_name = "add", .pc_func = jt_pcc_add,
@@ -86,7 +86,142 @@ command_t pcc_cmdlist[] = {
 };
 JT_SUBCMD(pcc);
 
+/**
+ * command_t changelog_cmdlist - lctl changelog commands.
+ */
+command_t changelog_cmdlist[] = {
+	{.pc_name = "register", .pc_func = jt_changelog_register,
+	 .pc_help = "register a new persistent changelog user, returns id\n"
+	 "usage: {--device MDTNAME} changelog register [--help|-h]\n"
+	 "					       [--mask|-m MASK]\n"
+	 "					       [--nameonly|-n]\n"
+	 "					       [--user|-u USERNAME]"},
+	{.pc_name = "deregister", .pc_func = jt_changelog_deregister,
+	 .pc_help = "deregister an existing changelog user\n"
+	 "usage: {--device MDTNAME} changelog deregister [ID|clID]\n"
+	 "						 [--help|-h]\n"
+	 "						 [--user|-u USERNAME]"},
+	{.pc_help = NULL }
+};
+JT_SUBCMD(changelog);
+
+/**
+ * command_t net_drop_cmdlist - lctl net_drop commands.
+ */
+command_t net_drop_cmdlist[] = {
+	{.pc_name = "add", .pc_func = jt_ptl_drop_add,
+	 .pc_help = "Add LNet drop rule\n"
+	 "usage: net_drop add {-s | --source NID}\n"
+	 "		      {-d | --dest NID}\n"
+	 "		      {{-r | --rate DROP_RATE} | {-i | --interval SECONDS}}\n"
+	 "		      [-p | --portal PORTAL...]\n"
+	 "		      [-m | --message {PUT|ACK|GET|REPLY...}]\n"
+	 "		      [-e | --health_error]"},
+	{.pc_name = "del", .pc_func = jt_ptl_drop_del,
+	 .pc_help = "remove LNet drop rule\n"
+	 "usage: net_drop del {-a | --all} |\n"
+	 "		      {{-s | --source NID} {-d | --dest NID}}"},
+	{.pc_name = "reset", .pc_func = jt_ptl_drop_reset,
+	 .pc_help = "reset drop rule stats\n"
+	 "usage: net_drop reset"},
+	{.pc_name = "list", .pc_func = jt_ptl_drop_list,
+	 .pc_help = "list LNet drop rules\n"
+	 "usage: net_drop list"},
+	{ .pc_help = NULL }
+};
+JT_SUBCMD(net_drop);
+
+/**
+ * command_t net_delay_cmdlist - lctl net_delay commands.
+ */
+command_t net_delay_cmdlist[] = {
+	{.pc_name = "add", .pc_func = jt_ptl_delay_add,
+	 .pc_help = "Add LNet delay rule\n"
+	 "usage: net_delay add {-s | --source NID}\n"
+	 "		       {-d | --dest NID}\n"
+	 "		       {{-r | --rate DELAY_RATE} | {-i | --interval SECONDS}}\n"
+	 "		       {-l | --latency SECONDS>\n"
+	 "		       [-p | --portal PORTAL...]\n"
+	 "		       [-m | --message {PUT|ACK|GET|REPLY...}]"},
+	{.pc_name = "del", .pc_func = jt_ptl_delay_del,
+	 .pc_help = "remove LNet delay rule\n"
+	 "usage: net_delay del {-a | --all} |\n"
+	 "		       {{-s | --source NID} {-d | --dest NID}}"},
+	{.pc_name = "reset", .pc_func = jt_ptl_delay_reset,
+	 .pc_help = "reset delay rule stats\n"
+	 "usage: net_delay reset"},
+	{.pc_name = "list", .pc_func = jt_ptl_delay_list,
+	 .pc_help = "list LNet delay rules\n"
+	 "usage: net_delay list"},
+	{.pc_help = NULL }
+};
+JT_SUBCMD(net_delay);
+
 #ifdef HAVE_SERVER_SUPPORT
+/**
+ * command_t barrier_cmdlist - lctl barrier commands.
+ */
+command_t barrier_cmdlist[] = {
+	{ .pc_name = "freeze", .pc_func = jt_barrier_freeze,
+	  .pc_help = "freeze write barrier on MDTs\n"
+	 "usage: barrier freeze FSNAME [TIMEOUT_SECONDS]"},
+	{ .pc_name = "thaw", .pc_func = jt_barrier_thaw,
+	  .pc_help = "thaw write barrier on MDTs\n"
+	 "usage: barrier thaw FSNAME"},
+	{ .pc_name = "stat", .pc_func = jt_barrier_stat,
+	  .pc_help = "query write barrier status on MDTs\n"
+	 "usage: barrier stat [--state|-s] [--timeout|-t] FSNAME"},
+	{ .pc_name = "rescan", .pc_func = jt_barrier_rescan,
+	  .pc_help =
+	 "rescan the system to filter out inactive MDT(s) for barrier\n"
+	 "usage: barrier rescan FSNAME [TIMEOUT_SECONDS]"},
+	{ .pc_help = NULL }
+};
+JT_SUBCMD(barrier);
+
+/**
+ * command_t snaptshot_cmdlist - lctl snapshot commands.
+ */
+command_t snapshot_cmdlist[] = {
+	{ .pc_name = "create", .pc_func = jt_snapshot_create,
+	  .pc_help = "create the snapshot\n"
+	 "usage: snapshot create [-b | --barrier [on | off]]\n"
+	 "			 [-c | --comment COMMENT]\n"
+	 "			 {-F | --fsname FSNAME}\n"
+	 "			 [-h | --help] {-n | --name SSNAME}\n"
+	 "			 [-r | --rsh REMOTE_SHELL]\n"
+	 "			 [-t | --timeout TIMEOUT]"},
+	{.pc_name = "destroy", .pc_func = jt_snapshot_destroy,
+	 .pc_help = "destroy the snapshot\n"
+	 "usage: snapshot destroy [-f | --force]\n"
+	 "			  {-F | --fsname FSNAME} [-h | --help]\n"
+	 "			  {-n | --name SSNAME}\n"
+	 "			  [-r | --rsh REMOTE_SHELL]"},
+	{.pc_name = "modify", .pc_func = jt_snapshot_modify,
+	 .pc_help = "modify the snapshot\n"
+	 "usage: snapshot modify [-c | --comment COMMENT]\n"
+	 "			 {-F | --fsname FSNAME} [-h | --help]\n"
+	 "			 {-n | --name SSNAME} [-N | --new NEW_SSNAME]\n"
+	 "			 [-r | --rsh REMOTE_SHELL]"},
+	{.pc_name = "list", .pc_func = jt_snapshot_list,
+	 .pc_help = "query the snapshot(s)\n"
+	 "usage: snapshot list [-d | --detail]\n"
+	 "		       {-F | --fsname FSNAME} [-h | --help]\n"
+	 "		       [-n | --name SSNAME] [-r | --rsh REMOTE_SHELL]"},
+	{.pc_name = "mount", .pc_func = jt_snapshot_mount,
+	 .pc_help = "mount the snapshot\n"
+	 "usage: snapshot mount {-F | --fsname FSNAME} [-h | --help]\n"
+	 "			{-n | --name SSNAME}\n"
+	 "			[-r | --rsh REMOTE_SHELL]"},
+	{.pc_name = "umount", .pc_func = jt_snapshot_umount,
+	 .pc_help = "umount the snapshot\n"
+	 "usage: snapshot umount {-F | --fsname FSNAME} [-h | --help]\n"
+	 "			 {-n | --name SSNAME}\n"
+	 "			 [-r | --rsh REMOTE_SHELL]"},
+	{.pc_help = NULL }
+};
+JT_SUBCMD(snapshot);
+
 /**
  * command_t lfsck_cmdlist - lctl lfsck commands.
  */
@@ -162,38 +297,38 @@ command_t cmdlist[] = {
 	 "usage: show_route"},
 	{"ping", jt_ptl_ping, 0, "Check LNET connectivity\n"
 	 "usage: ping nid [timeout [pid]]"},
+
 	{"net_drop_add", jt_ptl_drop_add, 0, "Add LNet drop rule\n"
-	 "usage: net_drop_add <-s | --source NID>\n"
-	 "		      <-d | --dest NID>\n"
-	 "		      <<-r | --rate DROP_RATE> |\n"
-	 "		      <-i | --interval SECONDS>>\n"
-	 "		      [<-p | --portal> PORTAL...]\n"
-	 "		      [<-m | --message> <PUT|ACK|GET|REPLY>...]\n"
-	 "		      [< -e | --health_error]\n"},
+	 "usage: net_drop_add {-s | --source NID}\n"
+	 "		      {-d | --dest NID}\n"
+	 "		      {{-r | --rate DROP_RATE} | {-i | --interval SECONDS}}\n"
+	 "		      [-p | --portal PORTAL...]\n"
+	 "		      [-m | --message {PUT|ACK|GET|REPLY...}]\n"
+	 "		      [-e | --health_error]"},
 	{"net_drop_del", jt_ptl_drop_del, 0, "remove LNet drop rule\n"
-	 "usage: net_drop_del <[-a | --all] |\n"
-	 "		      <-s | --source NID>\n"
-	 "		      <-d | --dest NID>>\n"},
+	 "usage: net_drop_del {-a | --all} |\n"
+	 "		      {{-s | --source NID} {-d | --dest NID}}"},
 	{"net_drop_reset", jt_ptl_drop_reset, 0, "reset drop rule stats\n"
 	 "usage: net_drop_reset"},
 	{"net_drop_list", jt_ptl_drop_list, 0, "list LNet drop rules\n"
 	 "usage: net_drop_list"},
+	{"net_drop", jt_net_drop, net_drop_cmdlist, ""},
+
 	{"net_delay_add", jt_ptl_delay_add, 0, "Add LNet delay rule\n"
-	 "usage: net_delay_add <-s | --source NID>\n"
-	 "		       <-d | --dest NID>\n"
-	 "		       <<-r | --rate DROP_RATE> |\n"
-	 "			<-i | --interval SECONDS>>\n"
-	 "		       <-l | --latency SECONDS>\n"
-	 "		       [<-p | --portal> PORTAL...]\n"
-	 "		       [<-m | --message> <PUT|ACK|GET|REPLY>...]\n"},
+	 "usage: net_delay_add {-s | --source NID}\n"
+	 "		       {-d | --dest NID}\n"
+	 "		       {{-r | --rate DELAY_RATE} | {-i | --interval SECONDS}}\n"
+	 "		       {-l | --latency SECONDS>\n"
+	 "		       [-p | --portal PORTAL...]\n"
+	 "		       [-m | --message {PUT|ACK|GET|REPLY...}]"},
 	{"net_delay_del", jt_ptl_delay_del, 0, "remove LNet delay rule\n"
-	 "usage: net_delay_del <[-a | --all] |\n"
-	 "		       <-s | --source NID>\n"
-	 "		       <-d | --dest NID>>\n"},
+	 "usage: net_delay_del {-a | --all} |\n"
+	 "		       {{-s | --source NID} {-d | --dest NID}}"},
 	{"net_delay_reset", jt_ptl_delay_reset, 0, "reset delay rule stats\n"
 	 "usage: net_delay_reset"},
 	{"net_delay_list", jt_ptl_delay_list, 0, "list LNet delay rules\n"
 	 "usage: net_delay_list"},
+	{"net_delay", jt_net_delay, net_delay_cmdlist, ""},
 
 	/* Device selection commands */
 	{"==== obd device selection ====", NULL, 0, "device selection"},
@@ -311,54 +446,56 @@ command_t cmdlist[] = {
 	{"===  Barrier ==", NULL, 0, "barrier management"},
 	{"barrier_freeze", jt_barrier_freeze, 0,
 	 "freeze write barrier on MDTs\n"
-	 "usage: barrier_freeze <fsname> [timeout (in seconds)]"},
+	 "usage: barrier_freeze FSNAME [TIMEOUT_SECONDS]"},
 	{"barrier_thaw", jt_barrier_thaw, 0,
 	 "thaw write barrier on MDTs\n"
-	 "usage: barrier_thaw <fsname>"},
+	 "usage: barrier_thaw FSNAME"},
 	{"barrier_stat", jt_barrier_stat, 0,
 	 "query write barrier status on MDTs\n"
-	 "usage: barrier_stat [--state|-s] [--timeout|-t] <fsname>"},
+	 "usage: barrier_stat [--state|-s] [--timeout|-t] FSNAME"},
 	{"barrier_rescan", jt_barrier_rescan, 0,
 	 "rescan the system to filter out inactive MDT(s) for barrier\n"
-	 "usage: barrier_rescan <fsname> [timeout (in seconds)]"},
+	 "usage: barrier_rescan FSNAME [TIMEOUT_SECONDS]"},
+	{"barrier", jt_barrier, barrier_cmdlist, ""},
 
 	/* Snapshot commands */
 	{"===  Snapshot ==", NULL, 0, "Snapshot management"},
 	{"snapshot_create", jt_snapshot_create, 0,
 	 "create the snapshot\n"
 	 "usage: snapshot_create [-b | --barrier [on | off]]\n"
-	 "			 [-c | --comment comment]\n"
-	 "			 <-F | --fsname fsname>\n"
-	 "			 [-h | --help] <-n | --name ssname>\n"
-	 "			 [-r | --rsh remote_shell]\n"
-	 "			 [-t | --timeout timeout]"},
+	 "			 [-c | --comment COMMENT]\n"
+	 "			 {-F | --fsname FSNAME}\n"
+	 "			 [-h | --help] {-n | --name SSNAME}\n"
+	 "			 [-r | --rsh REMOTE_SHELL]\n"
+	 "			 [-t | --timeout TIMEOUT]"},
 	{"snapshot_destroy", jt_snapshot_destroy, 0,
 	 "destroy the snapshot\n"
 	 "usage: snapshot_destroy [-f | --force]\n"
-	 "			  <-F | --fsname fsname> [-h | --help]\n"
-	 "			  <-n | --name ssname>\n"
-	 "			  [-r | --rsh remote_shell]"},
+	 "			  {-F | --fsname FSNAME} [-h | --help]\n"
+	 "			  {-n | --name SSNAME}\n"
+	 "			  [-r | --rsh REMOTE_SHELL]"},
 	{"snapshot_modify", jt_snapshot_modify, 0,
 	 "modify the snapshot\n"
-	 "usage: snapshot_modify [-c | --comment comment]\n"
-	 "			 <-F | --fsname fsname> [-h | --help]\n"
-	 "			 <-n | --name ssname> [-N | --new new_ssname]\n"
-	 "			 [-r | --rsh remote_shell]"},
+	 "usage: snapshot_modify [-c | --comment COMMENT]\n"
+	 "			 {-F | --fsname FSNAME} [-h | --help]\n"
+	 "			 {-n | --name SSNAME} [-N | --new NEW_SSNAME]\n"
+	 "			 [-r | --rsh REMOTE_SHELL]"},
 	{"snapshot_list", jt_snapshot_list, 0,
 	 "query the snapshot(s)\n"
 	 "usage: snapshot_list [-d | --detail]\n"
-	 "		       <-F | --fsname fsname> [-h | --help]\n"
-	 "		       [-n | --name ssname] [-r | --rsh remote_shell]"},
+	 "		       {-F | --fsname FSNAME} [-h | --help]\n"
+	 "		       [-n | --name SSNAME] [-r | --rsh REMOTE_SHELL]"},
 	{"snapshot_mount", jt_snapshot_mount, 0,
 	 "mount the snapshot\n"
-	 "usage: snapshot_mount <-F | --fsname fsname> [-h | --help]\n"
-	 "			<-n | --name ssname>\n"
-	 "			[-r | --rsh remote_shell]"},
+	 "usage: snapshot_mount {-F | --fsname FSNAME} [-h | --help]\n"
+	 "			{-n | --name SSNAME}\n"
+	 "			[-r | --rsh REMOTE_SHELL]"},
 	{"snapshot_umount", jt_snapshot_umount, 0,
 	 "umount the snapshot\n"
-	 "usage: snapshot_umount <-F | --fsname fsname> [-h | --help]\n"
-	 "			 <-n | --name ssname>\n"
-	 "			 [-r | --rsh remote_shell]"},
+	 "usage: snapshot_umount {-F | --fsname FSNAME} [-h | --help]\n"
+	 "			 {-n | --name SSNAME}\n"
+	 "			 [-r | --rsh REMOTE_SHELL]"},
+	{"snapshot", jt_snapshot, snapshot_cmdlist, ""},
 #endif /* HAVE_SERVER_SUPPORT */
 	/* Nodemap commands */
 	{"=== Nodemap ===", NULL, 0, "nodemap management"},
@@ -367,16 +504,16 @@ command_t cmdlist[] = {
 	 "usage: nodemap_activate {0|1}"},
 	{"nodemap_add", jt_nodemap_add, 0,
 	 "add a new nodemap\n"
-	 "usage: nodemap_add <nodemap_name>"},
+	 "usage: nodemap_add [-d|--dynamic] NODEMAP_NAME"},
 	{"nodemap_del", jt_nodemap_del, 0,
 	 "remove a nodemap\n"
-	 "usage: nodemap_del <nodemap_name>"},
+	 "usage: nodemap_del NODEMAP_NAME"},
 	{"nodemap_add_range", jt_nodemap_add_range, 0,
 	 "add a range to a nodemap\n"
-	 "usage: nodemap_add_range <nid_range>"},
+	 "usage: nodemap_add_range --name NODEMAP_NAME --range NID_RANGE"},
 	{"nodemap_del_range", jt_nodemap_del_range, 0,
-	 "add a range to a nodemap\n"
-	 "usage: nodemap_del_range <nid_range>"},
+	 "delete a range from a nodemap\n"
+	 "usage: nodemap_del_range --name NODEMAP_NAME --range NID_RANGE"},
 	{"nodemap_modify", jt_nodemap_modify, 0,
 	 "modify a nodemap parameters\n"
 	 "usage: nodemap_modify nodemap_name param value"},
@@ -401,15 +538,16 @@ command_t cmdlist[] = {
 	{"===  Changelogs ==", NULL, 0, "changelog user management"},
 	{"changelog_register", jt_changelog_register, 0,
 	 "register a new persistent changelog user, returns id\n"
-	 "usage: --device <mdtname> changelog_register [--help|-h]\n"
-	 "					       [--mask|-m <[+|-]mask1[<,|+|->mask2...]>]\n"
+	 "usage: {--device MDTNAME} changelog_register [--help|-h]\n"
+	 "					       [--mask|-m MASK]\n"
 	 "					       [--nameonly|-n]\n"
-	 "					       [--user|-u <username>]"},
+	 "					       [--user|-u USERNAME]"},
 	{"changelog_deregister", jt_changelog_deregister, 0,
 	 "deregister an existing changelog user\n"
-	 "usage: --device <mdtname> changelog_deregister [<id>|cl<id>...]\n"
+	 "usage: {--device MDTNAME} changelog_deregister [ID|clID]\n"
 	 "						 [--help|-h]\n"
-	 "						 [--user|-u <username>]\n"},
+	 "						 [--user|-u USERNAME]"},
+	{"changelog", jt_changelog, changelog_cmdlist, ""},
 
 	/* Persistent Client Cache (PCC) commands */
 	{"=== Persistent Client Cache ===", NULL, 0, "PCC user management"},

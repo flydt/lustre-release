@@ -1,28 +1,7 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2013, 2017, Intel Corporation.
- *
- * lustre/target/out_handler.c
  *
  * Object update handler between targets.
  *
@@ -80,10 +59,17 @@ static int out_create(struct tgt_session_info *tsi)
 	ENTRY;
 
 	wobdo = object_update_param_get(update, 0, &size);
-	if (IS_ERR(wobdo) || size != sizeof(*wobdo)) {
-		CERROR("%s: obdo is NULL, invalid RPC: rc = %ld\n",
-		       tgt_name(tsi->tsi_tgt), PTR_ERR(wobdo));
-		RETURN(PTR_ERR(wobdo));
+	if (IS_ERR(wobdo)) {
+		rc = PTR_ERR(wobdo);
+		CERROR("%s: obdo is NULL, invalid RPC: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), rc);
+		RETURN(rc);
+	}
+	if (size != sizeof(*wobdo)) {
+		rc = -EPROTO;
+		CERROR("%s: wrong size for obdo %zu != %zu, invalid RPC: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), size, sizeof(*wobdo), rc);
+		RETURN(rc);
 	}
 
 	if (req_capsule_req_need_swab(tsi->tsi_pill))
@@ -94,10 +80,17 @@ static int out_create(struct tgt_session_info *tsi)
 	dof->dof_type = dt_mode_to_dft(attr->la_mode);
 	if (update->ou_params_count > 1) {
 		fid = object_update_param_get(update, 1, &size);
-		if (IS_ERR(fid) || size != sizeof(*fid)) {
-			CERROR("%s: invalid fid: rc = %ld\n",
-			       tgt_name(tsi->tsi_tgt), PTR_ERR(fid));
-			RETURN(PTR_ERR(fid));
+		if (IS_ERR(fid)) {
+			rc = PTR_ERR(fid);
+			CERROR("%s: invalid fid: rc = %d\n",
+			       tgt_name(tsi->tsi_tgt), rc);
+			RETURN(rc);
+		}
+		if (size != sizeof(*fid)) {
+			rc = -EPROTO;
+			CERROR("%s: wrong size for fid %zu != %zu: rc = %d\n",
+			       tgt_name(tsi->tsi_tgt), size, sizeof(*fid), rc);
+			RETURN(rc);
 		}
 		if (req_capsule_req_need_swab(tsi->tsi_pill))
 			lustre_swab_lu_fid(fid);
@@ -133,10 +126,17 @@ static int out_attr_set(struct tgt_session_info *tsi)
 	ENTRY;
 
 	wobdo = object_update_param_get(update, 0, &size);
-	if (IS_ERR(wobdo) || size != sizeof(*wobdo)) {
-		CERROR("%s: empty obdo in the update: rc = %ld\n",
-		       tgt_name(tsi->tsi_tgt), PTR_ERR(wobdo));
-		RETURN(PTR_ERR(wobdo));
+	if (IS_ERR(wobdo)) {
+		rc = PTR_ERR(wobdo);
+		CERROR("%s: empty obdo in the update: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), rc);
+		RETURN(rc);
+	}
+	if (size != sizeof(*wobdo)) {
+		rc = -EPROTO;
+		CERROR("%s: wrong size for obdo %zu != %zu in the update: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), size, sizeof(*wobdo), rc);
+		RETURN(rc);
 	}
 
 	attr->la_valid = 0;
@@ -402,10 +402,17 @@ static int out_xattr_set(struct tgt_session_info *tsi)
 	lbuf->lb_len = buf_len;
 
 	tmp = object_update_param_get(update, 2, &size);
-	if (IS_ERR(tmp) || size != sizeof(*tmp)) {
-		CERROR("%s: emptry or wrong size %zu flag: rc = %ld\n",
-		       tgt_name(tsi->tsi_tgt), size, PTR_ERR(tmp));
-		RETURN(PTR_ERR(tmp));
+	if (IS_ERR(tmp)) {
+		rc = PTR_ERR(tmp);
+		CERROR("%s: emptry flag: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), rc);
+		RETURN(rc);
+	}
+	if (size != sizeof(*tmp)) {
+		rc = -EPROTO;
+		CERROR("%s: wrong size for flag %zu != %zu: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), size, sizeof(*tmp), rc);
+		RETURN(rc);
 	}
 
 	if (req_capsule_req_need_swab(tsi->tsi_pill))
@@ -499,10 +506,17 @@ static int out_index_insert(struct tgt_session_info *tsi)
 	}
 
 	fid = object_update_param_get(update, 1, &size);
-	if (IS_ERR(fid) || size != sizeof(*fid)) {
-		CERROR("%s: invalid fid: rc = %ld\n",
-		       tgt_name(tsi->tsi_tgt), PTR_ERR(fid));
-		RETURN(PTR_ERR(fid));
+	if (IS_ERR(fid)) {
+		rc = PTR_ERR(fid);
+		CERROR("%s: invalid fid: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), rc);
+		RETURN(rc);
+	}
+	if (size != sizeof(*fid)) {
+		rc = -EPROTO;
+		CERROR("%s: wrong size for fid %zu != %zu: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), size, sizeof(*fid), rc);
+		RETURN(rc);
 	}
 
 	if (req_capsule_req_need_swab(tsi->tsi_pill))
@@ -515,10 +529,17 @@ static int out_index_insert(struct tgt_session_info *tsi)
 	}
 
 	ptype = object_update_param_get(update, 2, &size);
-	if (IS_ERR(ptype) || size != sizeof(*ptype)) {
-		CERROR("%s: invalid type for index insert: rc = %ld\n",
-		       tgt_name(tsi->tsi_tgt), PTR_ERR(ptype));
-		RETURN(PTR_ERR(ptype));
+	if (IS_ERR(ptype)) {
+		rc = PTR_ERR(ptype);
+		CERROR("%s: invalid type for index insert: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), rc);
+		RETURN(rc);
+	}
+	if (size != sizeof(*ptype)) {
+		rc = -EPROTO;
+		CERROR("%s: wrong size for index insert %zu != %zu: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), size, sizeof(*ptype), rc);
+		RETURN(rc);
 	}
 
 	if (req_capsule_req_need_swab(tsi->tsi_pill))
@@ -610,19 +631,33 @@ static int out_write(struct tgt_session_info *tsi)
 	ENTRY;
 
 	buf = object_update_param_get(update, 0, &buf_len);
-	if (IS_ERR(buf) || buf_len == 0) {
-		CERROR("%s: empty buf for xattr set: rc = %ld\n",
-		       tgt_name(tsi->tsi_tgt), PTR_ERR(buf));
-		RETURN(PTR_ERR(buf));
+	if (IS_ERR(buf)) {
+		rc = PTR_ERR(buf);
+		CERROR("%s: empty buf for xattr set: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), rc);
+		RETURN(rc);
+	}
+	if (buf_len == 0) {
+		rc = -EPROTO;
+		CERROR("%s: wrong buf_len %zu != 0 for xattr set: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), buf_len, rc);
+		RETURN(rc);
 	}
 	lbuf->lb_buf = buf;
 	lbuf->lb_len = buf_len;
 
 	tmp = object_update_param_get(update, 1, &size);
-	if (IS_ERR(tmp) || size != sizeof(*tmp)) {
-		CERROR("%s: empty or wrong size %zu pos: rc = %ld\n",
-		       tgt_name(tsi->tsi_tgt), size, PTR_ERR(tmp));
-		RETURN(PTR_ERR(tmp));
+	if (IS_ERR(tmp)) {
+		rc = PTR_ERR(tmp);
+		CERROR("%s: empty pos: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), rc);
+		RETURN(rc);
+	}
+	if (size != sizeof(*tmp)) {
+		rc = -EPROTO;
+		CERROR("%s: wrong size for pos %zu != %zu: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), size, sizeof(*tmp), rc);
+		RETURN(rc);
 	}
 
 	if (req_capsule_req_need_swab(tsi->tsi_pill))

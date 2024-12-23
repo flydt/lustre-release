@@ -1,33 +1,16 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
+
 #ifndef _LUSTRE_CL_OBJECT_H
 #define _LUSTRE_CL_OBJECT_H
 
@@ -189,6 +172,7 @@ enum cl_attr_valid {
 	CAT_UID		= BIT(7),
 	CAT_GID		= BIT(8),
 	CAT_PROJID	= BIT(9),
+	CAT_COMPRESSIBLE= BIT(10),
 };
 
 /**
@@ -1403,8 +1387,14 @@ struct cl_read_ahead {
 	void		*cra_dlmlock;
 	void		*cra_oio;
 
+	/*
+	 * Linkage to track all cl_read_aheads for a read-ahead operations,
+	 * used for releasing DLM locks acquired during read-ahead.
+	 */
+	struct list_head cra_linkage;
+
 	/* whether lock is in contention */
-	bool		cra_contention;
+	bool		 cra_contention;
 };
 
 static inline void cl_read_ahead_release(const struct lu_env *env,
@@ -1412,7 +1402,6 @@ static inline void cl_read_ahead_release(const struct lu_env *env,
 {
 	if (ra->cra_release != NULL)
 		ra->cra_release(env, ra);
-	memset(ra, 0, sizeof(*ra));
 }
 
 
@@ -1928,13 +1917,6 @@ struct cl_io {
 	 */
 			     ci_unaligned_dio:1,
 	/**
-	 * there is a compat issue with unupgraded ZFS targets which means we
-	 * must refuse to do unaligned DIO to these targets, so this is used
-	 * to annotate that in the IO (since we learn if there is a problematic
-	 * OST/MDT target as we build the IO)
-	 */
-			     ci_target_is_zfs:1,
-	/**
 	 * there is an interop issue with unpatched clients/servers that
 	 * exceed 4k read/write offsets with I/O exceeding LNET_MTU.
 	 * This flag cleared if a target is not patched.
@@ -2241,8 +2223,6 @@ void cl_page_completion(const struct lu_env *env, struct cl_page *pg,
 			 enum cl_req_type crt, int ioret);
 int cl_page_make_ready(const struct lu_env *env, struct cl_page *pg,
 		       enum cl_req_type crt);
-int cl_page_cache_add(const struct lu_env *env, struct cl_io *io,
-		      struct cl_page *pg, enum cl_req_type crt);
 void cl_page_clip(const struct lu_env *env, struct cl_page *pg,
 		  int from, int to);
 int cl_page_flush(const struct lu_env *env, struct cl_io *io,
@@ -2521,16 +2501,21 @@ struct cl_sync_io {
 };
 
 /** direct IO pages */
-struct ll_dio_pages {
+struct cl_dio_pages {
 	/*
 	 * page array for RDMA - for aligned i/o, this is the user provided
 	 * pages, but for unaligned i/o, this is the internal buffer
 	 */
-	struct page		**ldp_pages;
+	struct page		**cdp_pages;
 	/** # of pages in the array. */
-	size_t			ldp_count;
+	size_t			cdp_count;
 	/* the file offset of the first page. */
-	loff_t			ldp_file_offset;
+	loff_t                  cdp_file_offset;
+	/* the first and last page can be incomplete, this records the
+	 * offsets
+	 */
+	int			cdp_from;
+	int			cdp_to;
 };
 
 /* Top level struct used for AIO and DIO */
@@ -2558,7 +2543,7 @@ struct cl_sub_dio {
 	struct cl_page_list	csd_pages;
 	ssize_t			csd_bytes;
 	struct cl_dio_aio	*csd_ll_aio;
-	struct ll_dio_pages	csd_dio_pages;
+	struct cl_dio_pages	csd_dio_pages;
 	struct iov_iter		csd_iter;
 	struct cl_iter_dup	csd_dup;
 	spinlock_t		csd_lock;
@@ -2574,8 +2559,8 @@ static inline u64 cl_io_nob_aligned(u64 off, u32 nob, u32 pgsz)
 }
 
 void ll_release_user_pages(struct page **pages, int npages);
-int ll_allocate_dio_buffer(struct ll_dio_pages *pvec, size_t io_size);
-void ll_free_dio_buffer(struct ll_dio_pages *pvec);
+int ll_allocate_dio_buffer(struct cl_dio_pages *cdp, size_t io_size);
+void ll_free_dio_buffer(struct cl_dio_pages *cdp);
 ssize_t ll_dio_user_copy(struct cl_sub_dio *sdio);
 
 #ifndef HAVE_KTHREAD_USE_MM

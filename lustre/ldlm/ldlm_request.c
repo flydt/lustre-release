@@ -462,10 +462,8 @@ int ldlm_cli_enqueue_local(const struct lu_env *env,
 	ENTRY;
 
 	LASSERT(!(*flags & LDLM_FL_REPLAY));
-	if (unlikely(ns_is_client(ns))) {
-		CERROR("Trying to enqueue local lock in a shadow namespace\n");
-		LBUG();
-	}
+	LASSERTF(unlikely(!ns_is_client(ns)),
+		 "Trying to enqueue local lock in a shadow namespace\n");
 
 	lock = ldlm_lock_create(ns, res_id, type, mode, &cbs, data, lvb_len,
 				lvb_type);
@@ -498,10 +496,7 @@ int ldlm_cli_enqueue_local(const struct lu_env *env,
 	if (client_cookie != NULL)
 		lock->l_client_cookie = *client_cookie;
 	if (type == LDLM_EXTENT) {
-		/* extent lock without policy is a bug */
-		if (policy == NULL)
-			LBUG();
-
+		LASSERT(policy);
 		lock->l_req_extent = policy->l_extent;
 	}
 
@@ -627,7 +622,7 @@ int ldlm_cli_enqueue_fini(struct obd_export *exp, struct req_capsule *pill,
 	}
 
 	LASSERTF(ergo(lvb_len != 0, lvb_len == lock->l_lvb_len),
-		 "lvb_len = %d, l_lvb_len = %d\n", lvb_len, lock->l_lvb_len);
+		 "lvb_len = %u, l_lvb_len = %u\n", lvb_len, lock->l_lvb_len);
 
 	if (rc != ELDLM_OK) {
 		LASSERT(!is_replay);
@@ -945,6 +940,15 @@ struct ptlrpc_request *ldlm_enqueue_pack(struct obd_export *exp, int lvb_len)
 }
 EXPORT_SYMBOL(ldlm_enqueue_pack);
 
+static void ldlm_lock_add_to_enqueueing(struct ldlm_lock *lock)
+{
+	struct ldlm_resource *res = lock->l_resource;
+
+	lock_res(res);
+	ldlm_resource_add_lock(res, &res->lr_enqueueing, lock);
+	unlock_res(res);
+}
+
 /**
  * Client-side lock enqueue.
  *
@@ -1008,11 +1012,10 @@ int ldlm_cli_enqueue(struct obd_export *exp, struct ptlrpc_request **reqp,
 			lock->l_policy_data = *policy;
 
 		if (einfo->ei_type == LDLM_EXTENT) {
-			/* extent lock without policy is a bug */
-			if (policy == NULL)
-				LBUG();
-
+			LASSERT(policy);
 			lock->l_req_extent = policy->l_extent;
+		} else if (einfo->ei_type == LDLM_FLOCK) {
+			ldlm_lock_add_to_enqueueing(lock);
 		}
 		LDLM_DEBUG(lock, "client-side enqueue START, flags %#llx",
 			   *flags);
@@ -1434,7 +1437,7 @@ int ldlm_cli_cancel_req(struct obd_export *exp, struct ldlm_lock *lock,
 
 			top_dev = exp->exp_obd->obd_lu_dev->ld_site->ls_top_dev;
 			if (top_dev != NULL &&
-			    top_dev->ld_obd->obd_recovering)
+			    test_bit(OBDF_RECOVERING, top_dev->ld_obd->obd_flags))
 				req->rq_allow_replay = 1;
 		}
 

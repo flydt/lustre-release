@@ -3112,6 +3112,7 @@ int llapi_mirror_find_stale(struct llapi_layout *layout,
 		comp[idx].lrc_mirror_id = mirror_id;
 		comp[idx].lrc_start = start;
 		comp[idx].lrc_end = end;
+		comp[idx].lrc_synced = true;
 		idx++;
 
 		if (idx >= comp_size) {
@@ -3254,15 +3255,13 @@ int llapi_mirror_resync_many_params(int fd, struct llapi_layout *layout,
 	size_t total_bytes_read = 0;
 	size_t total_bytes_written = 0;
 	off_t write_estimation_bytes = 0;
+	struct stat st;
 
-	if (bandwidth_bytes_sec > 0 || stats_interval_sec) {
-		struct stat st;
-
-		rc = fstat(fd, &st);
-		if (rc < 0)
-			return -errno;
+	rc = fstat(fd, &st);
+	if (rc < 0)
+		return -errno;
+	if (bandwidth_bytes_sec > 0 || stats_interval_sec)
 		write_estimation_bytes = st.st_size * comp_size;
-	}
 
 	/* limit transfer size to what can be sent in one second */
 	if (bandwidth_bytes_sec && bandwidth_bytes_sec < buflen)
@@ -3427,17 +3426,7 @@ do_read:
 					buf + pos2 - pos,
 					to_write2, pos2);
 			if (written < 0) {
-				/**
-				 * this component is not written successfully,
-				 * mark it using its lrc_synced, it is supposed
-				 * to be false before getting here.
-				 *
-				 * And before this function returns, all
-				 * elements of comp_array will reverse their
-				 * lrc_synced flag to reflect their true
-				 * meanings.
-				 */
-				comp_array[i].lrc_synced = true;
+				comp_array[i].lrc_synced = false;
 				llapi_error(LLAPI_MSG_ERROR, written,
 					    "component %u not synced",
 					    comp_array[i].lrc_id);
@@ -3518,21 +3507,29 @@ do_read:
 
 	/**
 	 * no fatal error happens, each lrc_synced tells whether the component
-	 * has been resync successfully (note: we'd reverse the value to
-	 * reflect its true meaning.
+	 * has been resync successfully.
 	 */
 	for (i = 0; i < comp_size; i++) {
-		comp_array[i].lrc_synced = !comp_array[i].lrc_synced;
-		if (comp_array[i].lrc_synced && pos & (page_size - 1)) {
-			rc = llapi_mirror_truncate(fd,
-					comp_array[i].lrc_mirror_id, pos);
-			/* Ignore truncate error on encrypted file without the
-			 * key if tried on LUSTRE_ENCRYPTION_UNIT_SIZE boundary.
-			 */
-			if (rc < 0 && (rc != -ENOKEY ||
-				       pos & ~LUSTRE_ENCRYPTION_MASK))
-				comp_array[i].lrc_synced = false;
+		struct llapi_resync_comp *comp = comp_array + i;
+
+		if (!comp->lrc_synced)
+			continue;
+		if (pos < comp->lrc_start || pos >= comp->lrc_end)
+			continue;
+
+		if (pos < st.st_size) {
+			rc = llapi_mirror_punch(fd, comp->lrc_mirror_id, pos,
+						comp->lrc_end - pos);
+		} else {
+			rc = llapi_mirror_truncate(fd, comp->lrc_mirror_id,
+						   pos);
 		}
+
+		/* Ignore truncate error on encrypted file without the
+		 * key if tried on LUSTRE_ENCRYPTION_UNIT_SIZE boundary.
+		 */
+		if (rc < 0 && (rc != -ENOKEY || pos & ~LUSTRE_ENCRYPTION_MASK))
+			comp->lrc_synced = false;
 	}
 
 	/**

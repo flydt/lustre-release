@@ -104,15 +104,12 @@ static int ptl_send_buf(struct lnet_handle_md *mdh, void *base, int len,
 	RETURN(0);
 }
 
-#define mdunlink_iterate_helper(mds, count) \
-		__mdunlink_iterate_helper(mds, count, false)
-static void __mdunlink_iterate_helper(struct lnet_handle_md *bd_mds,
-				      int count, bool discard)
+static void mdunlink_iterate_helper(struct lnet_handle_md *bd_mds, int count)
 {
 	int i;
 
 	for (i = 0; i < count; i++)
-		__LNetMDUnlink(bd_mds[i], discard);
+		LNetMDUnlink(bd_mds[i]);
 }
 
 #ifdef HAVE_SERVER_SUPPORT
@@ -289,7 +286,7 @@ void ptlrpc_abort_bulk(struct ptlrpc_bulk_desc *desc)
 	 * but we must still wait_event_idle_timeout() in this case, to give
 	 * us a chance to run server_bulk_callback()
 	 */
-	__mdunlink_iterate_helper(desc->bd_mds, desc->bd_md_max_brw, true);
+	mdunlink_iterate_helper(desc->bd_mds, desc->bd_md_max_brw);
 
 	for (;;) {
 		/* Network access will complete in finite time but the HUGE
@@ -550,7 +547,7 @@ static void ptlrpc_at_set_reply(struct ptlrpc_request *req, int flags)
 	 * b=15815
 	 */
 	if (req->rq_type == PTL_RPC_MSG_ERR &&
-	    (req->rq_export == NULL || obd->obd_recovering)) {
+	    (req->rq_export == NULL || test_bit(OBDF_RECOVERING, obd->obd_flags))) {
 		lustre_msg_set_timeout(req->rq_repmsg, 0);
 	} else {
 		timeout_t timeout;
@@ -762,6 +759,19 @@ int ptl_send_rpc(struct ptlrpc_request *request, int noreply)
 		request->rq_status = -ENODEV;
 		RETURN(-ENODEV);
 	}
+
+	/* drop request over non-uptodate peers at connection stage,
+	 * otherwise LNet peer discovery may pin request for much longer
+	 * time than own ptlrpc expiration timeout. LU-17906
+	 */
+	spin_lock(&imp->imp_lock);
+	if (imp->imp_conn_current && imp->imp_conn_current->oic_uptodate <= 0 &&
+	    imp->imp_state == LUSTRE_IMP_CONNECTING) {
+		spin_unlock(&imp->imp_lock);
+		request->rq_sent = ktime_get_real_seconds();
+		RETURN(0);
+	}
+	spin_unlock(&imp->imp_lock);
 
 	connection = imp->imp_connection;
 

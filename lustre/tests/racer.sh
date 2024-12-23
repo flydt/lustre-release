@@ -18,6 +18,8 @@ LUSTRE=${LUSTRE:-$(dirname $0)/..}
 init_test_env "$@"
 init_logging
 
+ALWAYS_EXCEPT="$RACER_EXCEPT "
+
 build_test_filter
 
 racer=$LUSTRE/tests/racer/racer.sh
@@ -48,18 +50,17 @@ if $RACER_FAILOVER; then
 	echo Victim facets "${victims[@]}"
 fi
 
+init_stripe_dir_params RACER_ENABLE_REMOTE_DIRS \
+	RACER_ENABLE_STRIPED_DIRS
+
 if ((MDSCOUNT > 1)); then
-	(( $MDS1_VERSION >= $(version_code 2.5.0) )) &&
-		RACER_ENABLE_REMOTE_DIRS=${RACER_ENABLE_REMOTE_DIRS:-true}
-	(( $MDS1_VERSION >= $(version_code 2.8.0) )) &&
-		RACER_ENABLE_STRIPED_DIRS=${RACER_ENABLE_STRIPED_DIRS:-true}
 	(( $MDS1_VERSION >= $(version_code 2.13.57) )) &&
 		RACER_ENABLE_MIGRATION=${RACER_ENABLE_MIGRATION:-true}
 	(( $MDS1_VERSION >= $(version_code 2.15.55.45) )) &&
 		RACER_MIGRATE_STRIPE_MAX=$MDSCOUNT
 fi
 
-[[ "$MDS1_VERSION" -lt $(version_code 2.9.54) || $mgs_FSTYPE != zfs ]] &&
+[[ "$MDS1_VERSION" -lt $(version_code 2.9.54) || $mds1_FSTYPE != zfs ]] &&
 	RACER_ENABLE_SNAPSHOT=false
 
 (( "$MDS1_VERSION" <= $(version_code 2.9.55) )) &&
@@ -78,8 +79,6 @@ fi
 	RACER_ENABLE_FALLOCATE=false
 check_set_fallocate || RACER_ENABLE_FALLOCATE=false
 
-RACER_ENABLE_REMOTE_DIRS=${RACER_ENABLE_REMOTE_DIRS:-false}
-RACER_ENABLE_STRIPED_DIRS=${RACER_ENABLE_STRIPED_DIRS:-false}
 RACER_ENABLE_MIGRATION=${RACER_ENABLE_MIGRATION:-false}
 RACER_ENABLE_SNAPSHOT=${RACER_ENABLE_SNAPSHOT:-true}
 RACER_ENABLE_FILE_MIGRATE=${RACER_ENABLE_FILE_MIGRATE:-true}

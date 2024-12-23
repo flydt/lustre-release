@@ -492,7 +492,7 @@ static int class_name2dev_nolock(const char *name)
 			 * out any references
 			 */
 			LASSERT(obd->obd_magic == OBD_DEVICE_MAGIC);
-			if (obd->obd_attached) {
+			if (test_bit(OBDF_ATTACHED, obd->obd_flags)) {
 				ret = obd->obd_minor;
 				return ret;
 			}
@@ -596,7 +596,7 @@ struct obd_device *class_name2obd(const char *name)
 			 * out any references
 			 */
 			LASSERT(obd->obd_magic == OBD_DEVICE_MAGIC);
-			if (obd->obd_attached)
+			if (test_bit(OBDF_ATTACHED, obd->obd_flags))
 				break;
 		}
 	}
@@ -688,7 +688,7 @@ struct obd_device *class_str2obd(const char *str)
 			 * out any references
 			 */
 			LASSERT(obd->obd_magic == OBD_DEVICE_MAGIC);
-			if (obd->obd_attached) {
+			if (test_bit(OBDF_ATTACHED, obd->obd_flags)) {
 				class_incref(obd, "find", current);
 				break;
 			}
@@ -758,7 +758,7 @@ int class_notify_sptlrpc_conf(const char *fsname, int namelen)
 
 	obd_device_lock();
 	obd_device_for_each(dev_no, obd) {
-		if (obd->obd_set_up == 0 || obd->obd_stopping)
+		if (!test_bit(OBDF_SET_UP, obd->obd_flags) || obd->obd_stopping)
 			continue;
 
 		/* only notify mdc, osc, osp, lwp, mdt, ost
@@ -1321,7 +1321,7 @@ static void class_export_recovery_cleanup(struct obd_export *exp)
 	struct obd_device *obd = exp->exp_obd;
 
 	spin_lock(&obd->obd_recovery_task_lock);
-	if (obd->obd_recovering) {
+	if (test_bit(OBDF_RECOVERING, obd->obd_flags)) {
 		if (exp->exp_in_recovery) {
 			spin_lock(&exp->exp_lock);
 			exp->exp_in_recovery = 0;

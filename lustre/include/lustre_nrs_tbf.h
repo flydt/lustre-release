@@ -1,32 +1,15 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License version 2 for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (C) 2013 DataDirect Networks, Inc.
  *
  * Copyright (c) 2014, Intel Corporation.
  */
+
 /*
+ * This file is part of Lustre, http://www.lustre.org/
  *
  * Network Request Scheduler (NRS) Token Bucket Filter(TBF) policy
- *
  */
 
 #ifndef _LUSTRE_NRS_TBF_H
@@ -51,18 +34,14 @@ struct nrs_tbf_jobid {
 	struct list_head tj_linkage;
 };
 
-#define MAX_U32_STR_LEN	10
-#define NRS_TBF_KEY_LEN	(LNET_NIDSTR_SIZE + LUSTRE_JOBID_SIZE + \
-			 MAX_U32_STR_LEN + MAX_U32_STR_LEN + 3 + 2)
-
 enum nrs_tbf_flag {
-	NRS_TBF_FLAG_INVALID    = 0x0000000,
-	NRS_TBF_FLAG_JOBID      = 0x0000001,
-	NRS_TBF_FLAG_NID        = 0x0000002,
-	NRS_TBF_FLAG_OPCODE     = 0x0000004,
-	NRS_TBF_FLAG_GENERIC    = 0x0000008,
-	NRS_TBF_FLAG_UID        = 0x0000010,
-	NRS_TBF_FLAG_GID        = 0x0000020,
+	NRS_TBF_FLAG_INVALID	= 0x0000000,
+	NRS_TBF_FLAG_JOBID	= 0x0000001,
+	NRS_TBF_FLAG_NID	= 0x0000002,
+	NRS_TBF_FLAG_OPCODE	= 0x0000004,
+	NRS_TBF_FLAG_UID	= 0x0000008,
+	NRS_TBF_FLAG_GID	= 0x0000010,
+	NRS_TBF_FLAG_GENERIC	= 0x0000020,
 };
 
 struct tbf_id {
@@ -76,22 +55,21 @@ struct nrs_tbf_id {
 	struct list_head	nti_linkage;
 };
 
+struct nrs_tbf_key {
+	struct lnet_nid		tk_nid;
+	__u32			tk_opcode;
+	struct tbf_id		tk_id;	/* UID and GID */
+	char			tk_jobid[LUSTRE_JOBID_SIZE];
+};
+
 struct nrs_tbf_client {
 	/** Resource object for policy instance. */
 	struct ptlrpc_nrs_resource	 tc_res;
 	/** Node in the hash table. */
 	struct rhash_head		 tc_rhash;
 	struct hlist_node		 tc_hnode;
-	/** NID of the client. */
-	struct lnet_nid			 tc_nid;
-	/** Jobid of the client. */
-	char				 tc_jobid[LUSTRE_JOBID_SIZE];
-	/** opcode of the client. */
-	__u32				 tc_opcode;
-	/** gid or uid of the client. */
-	struct tbf_id			tc_id;
-	/** Hash key of the client. */
-	char				 tc_key[NRS_TBF_KEY_LEN];
+	/** Key of the TBF cli. */
+	struct nrs_tbf_key		 tc_key;
 	/** Reference number of the client. */
 	refcount_t			 tc_ref;
 	/** Lock to protect rule and linkage. */
@@ -137,6 +115,11 @@ struct nrs_tbf_client {
 	 */
 	struct rcu_head			 tc_rcu_head;
 };
+
+#define tc_nid		tc_key.tk_nid
+#define tc_opcode	tc_key.tk_opcode
+#define tc_id		tc_key.tk_id
+#define tc_jobid	tc_key.tk_jobid
 
 #define MAX_TBF_NAME (16)
 

@@ -666,7 +666,7 @@ int class_attach(struct lustre_cfg *lcfg)
 		RETURN(rc);
 	}
 
-	obd->obd_attached = 1;
+	set_bit(OBDF_ATTACHED, obd->obd_flags);
 	CDEBUG(D_IOCTL, "OBD: dev %d attached type %s with refcount %d\n",
 	       obd->obd_minor, typename, kref_read(&obd->obd_refcount));
 
@@ -693,12 +693,12 @@ int class_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 		 obd, obd->obd_magic, OBD_DEVICE_MAGIC);
 
 	/* have we attached a type to this device? */
-	if (!obd->obd_attached) {
+	if (!test_bit(OBDF_ATTACHED, obd->obd_flags)) {
 		CERROR("Device %d not attached\n", obd->obd_minor);
 		RETURN(-ENODEV);
 	}
 
-	if (obd->obd_set_up) {
+	if (test_bit(OBDF_SET_UP, obd->obd_flags)) {
 		CERROR("Device %d already setup (type %s)\n",
 		       obd->obd_minor, obd->obd_type->typ_name);
 		RETURN(-EEXIST);
@@ -713,7 +713,7 @@ int class_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 		RETURN(-EEXIST);
 	}
 	/*
-	 * just leave this on forever.  I can't use obd_set_up here because
+	 * just leave this on forever.  I can't use OBDF_SET_UP here because
 	 * other fns check that status, and we're not actually set up yet.
 	 */
 	obd->obd_starting = 1;
@@ -764,7 +764,7 @@ int class_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 		GOTO(err_uuid_hash, err);
 #endif /* ! HAVE_SERVER_SUPPORT */
 
-	obd->obd_set_up = 1;
+	set_bit(OBDF_SET_UP, obd->obd_flags);
 
 	spin_lock(&obd->obd_dev_lock);
 	/* cleanup drops this */
@@ -807,18 +807,18 @@ int class_detach(struct obd_device *obd, struct lustre_cfg *lcfg)
 {
 	ENTRY;
 
-	if (obd->obd_set_up) {
+	if (test_bit(OBDF_SET_UP, obd->obd_flags)) {
 		CERROR("OBD device %d still set up\n", obd->obd_minor);
 		RETURN(-EBUSY);
 	}
 
 	spin_lock(&obd->obd_dev_lock);
-	if (!obd->obd_attached) {
+	if (!test_bit(OBDF_ATTACHED, obd->obd_flags)) {
 		spin_unlock(&obd->obd_dev_lock);
 		CERROR("OBD device %d not attached\n", obd->obd_minor);
 		RETURN(-ENODEV);
 	}
-	obd->obd_attached = 0;
+	clear_bit(OBDF_ATTACHED, obd->obd_flags);
 
 	/* cleanup in progress. we don't like to find this device after now */
 	class_unregister_device(obd);
@@ -846,7 +846,7 @@ int class_cleanup(struct obd_device *obd, struct lustre_cfg *lcfg)
 
 	CFS_RACE(OBD_FAIL_LDLM_RECOV_CLIENTS);
 
-	if (!obd->obd_set_up) {
+	if (!test_bit(OBDF_SET_UP, obd->obd_flags)) {
 		CERROR("Device %d not setup\n", obd->obd_minor);
 		RETURN(-ENODEV);
 	}
@@ -927,7 +927,7 @@ int class_cleanup(struct obd_device *obd, struct lustre_cfg *lcfg)
 	}
 #endif /* HAVE_SERVER_SUPPORT */
 	class_decref(obd, "setup", obd);
-	obd->obd_set_up = 0;
+	clear_bit(OBDF_SET_UP, obd->obd_flags);
 
 	RETURN(0);
 }
@@ -950,7 +950,7 @@ static void class_decref_free(struct kref *kref)
 	struct obd_export *exp;
 
 	obd = container_of(kref, struct obd_device, obd_refcount);
-	LASSERT(!obd->obd_attached);
+	LASSERT(!test_bit(OBDF_ATTACHED, obd->obd_flags));
 	/*
 	 * All exports have been destroyed; there should
 	 * be no more in-progress ops by this point.
@@ -2240,7 +2240,7 @@ out_done:
 out_overflow:
 	/* Return consumed bytes.  If the buffer overflowed, zero last byte */
 	rc = ptr - buf;
-	if (rc > size) {
+	if (rc >= size) {
 		rc = -EOVERFLOW;
 		*(end - 1) = '\0';
 	}

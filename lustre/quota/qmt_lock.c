@@ -21,8 +21,6 @@
 
 #include "qmt_internal.h"
 
-struct workqueue_struct *qmt_lvbo_free_wq;
-
 /* intent policy function called from mdt_intent_opc() when the intent is of
  * quota type */
 int qmt_intent_policy(const struct lu_env *env, struct lu_device *ld,
@@ -272,6 +270,8 @@ static bool qmt_clear_lgeg_arr_nu(struct lquota_entry *lqe, int stype, int idx)
 		if (lgd) {
 			int lge_idx = qmt_map_lge_idx(lgd, idx);
 
+			if (lge_idx < 0)
+				return false;
 			lgd->lqeg_arr[lge_idx].lge_qunit_nu = 0;
 			lgd->lqeg_arr[lge_idx].lge_edquot_nu = 0;
 			/* We shouldn't call revoke for DOM case, it will be
@@ -301,6 +301,7 @@ static bool qmt_set_revoke(struct lu_env *env, struct lquota_entry *lqe_gl,
 		int lge_idx;
 
 		lge_idx = qmt_map_lge_idx(lgd, idx);
+		LASSERT(lge_idx >= 0);
 		if (lgd->lqeg_arr[lge_idx].lge_qunit == least_qunit) {
 			struct lquota_entry *lqe;
 			int i;
@@ -532,6 +533,8 @@ int qmt_lvbo_fill(struct lu_device *ld, struct ldlm_lock *lock, void *lvb,
  */
 int qmt_lvbo_free(struct lu_device *ld, struct ldlm_resource *res)
 {
+	struct qmt_device *qmt = lu2qmt_dev(ld);
+
 	ENTRY;
 
 	if (res->lr_lvb_data == NULL)
@@ -540,7 +543,7 @@ int qmt_lvbo_free(struct lu_device *ld, struct ldlm_resource *res)
 	if (res->lr_name.name[LUSTRE_RES_ID_QUOTA_SEQ_OFF] != 0) {
 		struct lquota_entry *lqe = res->lr_lvb_data;
 
-		queue_work(qmt_lvbo_free_wq, &lqe->lqe_work);
+		queue_work(qmt->qmt_lvbo_free_wq, &lqe->lqe_work);
 	} else {
 		struct dt_object *obj = res->lr_lvb_data;
 		/* release object reference */
@@ -640,6 +643,8 @@ again:
 
 		goto again;
 	}
+	if (unlikely(count == 0))
+		qmt_free_lock_array(array);
 	RETURN(0);
 }
 
@@ -667,6 +672,7 @@ static void qmt_setup_id_desc(struct ldlm_lock *lock, union ldlm_gl_desc *desc,
 		lgd = lqe->lqe_glbl_data;
 		if (lgd) {
 			lge_idx = qmt_map_lge_idx(lgd, idx);
+			LASSERT(lge_idx >= 0);
 			edquot = lgd->lqeg_arr[lge_idx].lge_edquot;
 			qunit = lgd->lqeg_arr[lge_idx].lge_qunit;
 		} else {
@@ -886,6 +892,7 @@ static int qmt_id_lock_cb(struct ldlm_lock *lock, struct lquota_entry *lqe)
 	if (lgd) {
 		int lge_idx = qmt_map_lge_idx(lgd, idx);
 
+		LASSERT(lge_idx >= 0);
 		CDEBUG(D_QUOTA,
 		       "tgt idx:%d lge_idx:%d edquot_nu:%d qunit_nu:%d\n",
 		       idx, lge_idx, lgd->lqeg_arr[lge_idx].lge_edquot_nu,

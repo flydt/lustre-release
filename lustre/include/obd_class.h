@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+/* SPDX-License-Identifier: GPL-2.0 */
 
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
@@ -10,10 +10,7 @@
 /*
  * This file is part of Lustre, http://www.lustre.org/
  *
- * lustre/include/obd_class.h
- *
  * Header defining common operations on OBD devices.
- *
  */
 
 #ifndef __CLASS_OBD_H
@@ -423,7 +420,7 @@ static inline enum obd_option exp_flags_from_obd(struct obd_device *obd)
 {
 	return ((obd->obd_fail ? OBD_OPT_FAILOVER : 0) |
 		(obd->obd_force ? OBD_OPT_FORCE : 0) |
-		(obd->obd_abort_recovery ? OBD_OPT_ABORT_RECOV : 0) |
+		(test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags) ? OBD_OPT_ABORT_RECOV : 0) |
 		0);
 }
 
@@ -474,7 +471,8 @@ do {								\
 	if (rc)							\
 		return rc;					\
 								\
-	if (!(obd)->obd_set_up || (obd)->obd_stopping) {	\
+	if (!test_bit(OBDF_SET_UP, (obd)->obd_flags) ||	       	\
+	    (obd)->obd_stopping) {				\
 		CERROR("Device %d not setup\n",			\
 		       (obd)->obd_minor);			\
 		RETURN(-ENODEV);				\
@@ -1246,7 +1244,8 @@ static inline void obd_import_event(struct obd_device *obd,
 		return;
 	}
 
-	if (obd->obd_set_up && obd->obd_type->typ_dt_ops->o_import_event)
+	if (test_bit(OBDF_SET_UP, obd->obd_flags) &&
+	    obd->obd_type->typ_dt_ops->o_import_event)
 		obd->obd_type->typ_dt_ops->o_import_event(obd, imp, event);
 
 	EXIT;
@@ -1264,7 +1263,7 @@ static inline int obd_notify(struct obd_device *obd,
 	if (rc)
 		return rc;
 
-	if (!obd->obd_set_up) {
+	if (!test_bit(OBDF_SET_UP, obd->obd_flags)) {
 		CDEBUG(D_HA, "obd %s not set up\n", obd->obd_name);
 		RETURN(-EINVAL);
 	}
@@ -1361,7 +1360,7 @@ static inline int obd_health_check(const struct lu_env *env,
 		CERROR("cleaned up obd\n");
 		RETURN(-EOPNOTSUPP);
 	}
-	if (!obd->obd_set_up || obd->obd_stopping)
+	if (!test_bit(OBDF_SET_UP, obd->obd_flags) || obd->obd_stopping)
 		RETURN(0);
 	if (!obd->obd_type->typ_dt_ops->o_health_check)
 		RETURN(0);
@@ -1396,6 +1395,7 @@ enum mps_stat_idx {
 	LPROC_MD_CLOSE,
 	LPROC_MD_CREATE,
 	LPROC_MD_ENQUEUE,
+	LPROC_MD_ENQUEUE_ASYNC,
 	LPROC_MD_GETATTR,
 	LPROC_MD_INTENT_LOCK,
 	LPROC_MD_LINK,
@@ -1509,6 +1509,29 @@ static inline int md_enqueue(struct obd_export *exp,
 	return exp->exp_obd->obd_type->typ_md_ops->m_enqueue(exp, einfo, policy,
 							     op_data, lockh,
 							     extra_lock_flags);
+}
+
+static inline int md_enqueue_async(struct obd_export *exp,
+				   struct ldlm_enqueue_info *einfo,
+				   obd_enqueue_update_f upcall,
+				   struct md_op_data *op_data,
+				   const union ldlm_policy_data *policy,
+				   __u64 lock_flags)
+{
+	int rc;
+
+	ENTRY;
+	rc = exp_check_ops(exp);
+	if (rc)
+		RETURN(rc);
+
+	lprocfs_counter_incr(exp->exp_obd->obd_md_stats,
+			     LPROC_MD_ENQUEUE_ASYNC);
+
+	rc = exp->exp_obd->obd_type->typ_md_ops->m_enqueue_async(exp, einfo,
+			upcall, op_data,
+			policy, lock_flags);
+	RETURN(rc);
 }
 
 static inline int md_getattr_name(struct obd_export *exp,

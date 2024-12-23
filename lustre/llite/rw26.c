@@ -243,17 +243,17 @@ static int ll_releasepage(struct page *vmpage, RELEASEPAGE_ARG_TYPE gfp_mask)
 #endif /* HAVE_AOPS_RELEASE_FOLIO */
 
 static ssize_t ll_get_user_pages(int rw, struct iov_iter *iter,
-				struct ll_dio_pages *pvec,
+				struct cl_dio_pages *cdp,
 				size_t maxsize)
 {
 #if defined(HAVE_DIO_ITER)
 	size_t start;
 	size_t result;
 
-	result = iov_iter_get_pages_alloc2(iter, &pvec->ldp_pages, maxsize,
+	result = iov_iter_get_pages_alloc2(iter, &cdp->cdp_pages, maxsize,
 					  &start);
 	if (result > 0) {
-		pvec->ldp_count = DIV_ROUND_UP(result + start, PAGE_SIZE);
+		cdp->cdp_count = DIV_ROUND_UP(result + start, PAGE_SIZE);
 		if (user_backed_iter(iter))
 			iov_iter_revert(iter, result);
 	}
@@ -276,25 +276,25 @@ static ssize_t ll_get_user_pages(int rw, struct iov_iter *iter,
 
 	size = min_t(size_t, maxsize, iter->iov->iov_len);
 	page_count = (size + PAGE_SIZE - 1) >> PAGE_SHIFT;
-	OBD_ALLOC_PTR_ARRAY_LARGE(pvec->ldp_pages, page_count);
-	if (pvec->ldp_pages == NULL)
+	OBD_ALLOC_PTR_ARRAY_LARGE(cdp->cdp_pages, page_count);
+	if (cdp->cdp_pages == NULL)
 		return -ENOMEM;
 
 	mmap_read_lock(current->mm);
 	result = get_user_pages(current, current->mm, addr, page_count,
-				rw == READ, 0, pvec->ldp_pages, NULL);
+				rw == READ, 0, cdp->cdp_pages, NULL);
 	mmap_read_unlock(current->mm);
 
 	if (unlikely(result != page_count)) {
-		ll_release_user_pages(pvec->ldp_pages, page_count);
-		pvec->ldp_pages = NULL;
+		ll_release_user_pages(cdp->cdp_pages, page_count);
+		cdp->cdp_pages = NULL;
 
 		if (result >= 0)
 			return -EFAULT;
 
 		return result;
 	}
-	pvec->ldp_count = page_count;
+	cdp->cdp_count = page_count;
 
 	return size;
 #endif
@@ -338,47 +338,56 @@ static unsigned long iov_iter_alignment_vfs(const struct iov_iter *i)
  * Lustre could relax a bit for alignment, io count is not
  * necessary page alignment.
  */
-unsigned long ll_iov_iter_alignment(struct iov_iter *i)
+bool ll_iov_iter_is_unaligned(struct iov_iter *i)
 {
 	size_t orig_size = i->count;
 	size_t count = orig_size & ~PAGE_MASK;
 	unsigned long res;
 
+	if (iov_iter_count(i) & ~PAGE_MASK)
+		return true;
+
+	if (!iov_iter_is_aligned(i, ~PAGE_MASK, 0))
+		return true;
+
 	if (!count)
-		return iov_iter_alignment_vfs(i);
+		return iov_iter_alignment_vfs(i) & ~PAGE_MASK;
 
 	if (orig_size > PAGE_SIZE) {
 		iov_iter_truncate(i, orig_size - count);
 		res = iov_iter_alignment_vfs(i);
 		iov_iter_reexpand(i, orig_size);
 
-		return res;
+		return res & ~PAGE_MASK;
 	}
 
 	res = iov_iter_alignment_vfs(i);
 	/* start address is page aligned */
 	if ((res & ~PAGE_MASK) == orig_size)
-		return PAGE_SIZE;
+		return false;
 
-	return res;
+	return res & ~PAGE_MASK;
 }
 
 static int
 ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 		   int rw, struct inode *inode, struct cl_sub_dio *sdio)
 {
-	struct ll_dio_pages *pv = &sdio->csd_dio_pages;
+	struct cl_dio_pages *cdp = &sdio->csd_dio_pages;
 	struct cl_sync_io *anchor = &sdio->csd_sync;
 	struct cl_2queue *queue = &io->ci_queue;
 	struct cl_object *obj = io->ci_obj;
 	struct cl_page *page;
 	int iot = rw == READ ? CRT_READ : CRT_WRITE;
-	loff_t offset = pv->ldp_file_offset;
+	loff_t offset = cdp->cdp_file_offset;
 	int io_pages = 0;
 	ssize_t rc = 0;
 	int i = 0;
 
 	ENTRY;
+
+	cdp->cdp_from = offset & ~PAGE_MASK;
+	cdp->cdp_to = (offset + size) & ~PAGE_MASK;
 
 	cl_2queue_init(queue);
 	while (size > 0) {
@@ -386,7 +395,7 @@ ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 		size_t to = min(from + size, PAGE_SIZE);
 
 		page = cl_page_find(env, obj, offset >> PAGE_SHIFT,
-				    pv->ldp_pages[i], CPT_TRANSIENT);
+				    cdp->cdp_pages[i], CPT_TRANSIENT);
 		if (IS_ERR(page))
 			GOTO(out, rc = PTR_ERR(page));
 
@@ -420,10 +429,10 @@ ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 		offset += to - from;
 		size -= to - from;
 	}
-	/* on success, we should hit every page in the pvec and have no bytes
+	/* on success, we should hit every page in the cdp and have no bytes
 	 * left in 'size'
 	 */
-	LASSERT(i == pv->ldp_count);
+	LASSERT(i == cdp->cdp_count);
 	LASSERT(size == 0);
 
 	atomic_add(io_pages, &anchor->csi_sync_nr);
@@ -487,7 +496,7 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 	ssize_t tot_bytes = 0, result = 0;
 	loff_t file_offset = iocb->ki_pos;
 	bool sync_submit = false;
-	bool unaligned = false;
+	bool unaligned;
 	struct vvp_io *vio;
 	ssize_t rc2;
 
@@ -495,13 +504,8 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 
 	if (file_offset & ~PAGE_MASK)
 		unaligned = true;
-
-	if ((file_offset + count < i_size_read(inode)) && (count & ~PAGE_MASK))
-		unaligned = true;
-
-	/* Check that all user buffers are aligned as well */
-	if (ll_iov_iter_alignment(iter) & ~PAGE_MASK)
-		unaligned = true;
+	else
+		unaligned = ll_iov_iter_is_unaligned(iter);
 
 	lcc = ll_cl_find(inode);
 	if (lcc == NULL)
@@ -528,40 +532,6 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 	if (rw == READ && file_offset >= i_size_read(inode))
 		RETURN(0);
 
-	/* unaligned DIO support can be turned off, so is it on? */
-	if (unaligned && !ll_sbi_has_unaligned_dio(ll_i2sbi(inode)))
-		RETURN(-EINVAL);
-
-	/* the requirement to not return EIOCBQUEUED for pipes (see bottom of
-	 * this function) plays havoc with the unaligned I/O lifecycle, so
-	 * don't allow unaligned I/O on pipes
-	 */
-	if (unaligned && iov_iter_is_pipe(iter))
-		RETURN(0);
-
-	/* Unpatched older servers which cannot safely support unaligned DIO
-	 * (osd-zfs) or i/o with page size interop issues should abort here
-	 */
-	if (unaligned && !cl_io_top(io)->ci_allow_unaligned_dio) {
-		unsigned int md0_offset;
-
-		if (cl_io_top(io)->ci_target_is_zfs)
-			RETURN(-EINVAL);
-
-		/* unpatched ldiskfs is fine, unless MD0 does not align/fit */
-		md0_offset = file_offset & (MD_MAX_INTEROP_PAGE_SIZE - 1);
-		if ((count + md0_offset) >= LNET_MTU) {
-			u64 iomax, iomin;
-
-			iomax = cl_io_nob_aligned(file_offset, count,
-						  MD_MAX_INTEROP_PAGE_SIZE);
-			iomin = cl_io_nob_aligned(file_offset, count,
-						  MD_MIN_INTEROP_PAGE_SIZE);
-			if (iomax != iomin)
-				RETURN(-EINVAL);
-		}
-	}
-
 	/* if one part of an I/O is unaligned, just handle all of it that way -
 	 * otherwise we create significant complexities with managing the iovec
 	 * in different ways, etc, all for very marginal benefits
@@ -575,9 +545,30 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 	LASSERT(ll_dio_aio);
 	LASSERT(ll_dio_aio->cda_iocb == iocb);
 
+	/* unaligned DIO support can be turned off, so is it on? */
+	if (unaligned && !ll_sbi_has_unaligned_dio(ll_i2sbi(inode)))
+		RETURN(-EINVAL);
+
 	/* unaligned AIO is not supported - see LU-18032 */
 	if (unaligned && ll_dio_aio->cda_is_aio)
 		RETURN(-EINVAL);
+
+	/* the requirement to not return EIOCBQUEUED for pipes (see bottom of
+	 * this function) plays havoc with the unaligned I/O lifecycle, so
+	 * don't allow unaligned I/O on pipes
+	 */
+	if (unaligned && iov_iter_is_pipe(iter))
+		RETURN(0);
+
+	/* returning 0 here forces the remaining I/O through buffered I/O
+	 * while returning -EINVAL stops the I/O from continuing
+	 */
+
+	/* Unpatched older servers which cannot safely support unaligned DIO
+	 * should abort here
+	 */
+	if (unaligned && !cl_io_top(io)->ci_allow_unaligned_dio)
+		RETURN(0);
 
 	/* We cannot do parallel submission of sub-I/Os - for AIO or regular
 	 * DIO - unless lockless because it causes us to release the lock
@@ -593,7 +584,7 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 		sync_submit = true;
 
 	while (iov_iter_count(iter)) {
-		struct ll_dio_pages *pvec;
+		struct cl_dio_pages *cdp;
 
 		count = min_t(size_t, iov_iter_count(iter), MAX_DIO_SIZE);
 		if (rw == READ) {
@@ -613,11 +604,11 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 		if (!sdio)
 			GOTO(out, result = -ENOMEM);
 
-		pvec = &sdio->csd_dio_pages;
-		pvec->ldp_file_offset = file_offset;
+		cdp = &sdio->csd_dio_pages;
+		cdp->cdp_file_offset = file_offset;
 
 		if (!unaligned) {
-			result = ll_get_user_pages(rw, iter, pvec, count);
+			result = ll_get_user_pages(rw, iter, cdp, count);
 			/* ll_get_user_pages returns bytes in the IO or error*/
 			count = result;
 		} else {
@@ -627,7 +618,7 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 
 			/* same calculation used in ll_get_user_pages */
 			count = min_t(size_t, count, len);
-			result = ll_allocate_dio_buffer(pvec, count);
+			result = ll_allocate_dio_buffer(cdp, count);
 			/* allocate_dio_buffer returns number of pages or
 			 * error, so do not set count = result
 			 */
@@ -965,16 +956,10 @@ static int ll_tiny_write_end(struct file *file, struct address_space *mapping,
 	struct cl_page *clpage = (struct cl_page *) vmpage->private;
 	loff_t kms = pos+copied;
 	loff_t to = kms & (PAGE_SIZE-1) ? kms & (PAGE_SIZE-1) : PAGE_SIZE;
-	__u16 refcheck;
-	struct lu_env *env = cl_env_get(&refcheck);
+	struct lu_env *env;
 	int rc = 0;
 
 	ENTRY;
-
-	if (IS_ERR(env)) {
-		rc = PTR_ERR(env);
-		goto out;
-	}
 
 	/* This page is dirty in cache, so it should have a cl_page pointer
 	 * set in vmpage->private.
@@ -982,16 +967,17 @@ static int ll_tiny_write_end(struct file *file, struct address_space *mapping,
 	LASSERT(clpage != NULL);
 
 	if (copied == 0)
-		goto out_env;
+		goto out;
+
+	/* env_percpu_get cannot fail */
+	env = cl_env_percpu_get();
 
 	/* Update the underlying size information in the OSC/LOV objects this
 	 * page is part of.
 	 */
 	cl_page_touch(env, clpage, to);
 
-out_env:
-	cl_env_put(env, &refcheck);
-
+	cl_env_percpu_put(env);
 out:
 	/* Must return page unlocked. */
 	unlock_page(vmpage);

@@ -738,7 +738,7 @@ export LINUX_VERSION_CODE=$(version_code ${LINUX_VERSION//\./ })
 
 # Report the Lustre build version string (e.g. 1.8.7.3 or 2.4.1).
 #
-# usage: lustre_build_version
+# usage: lustre_build_version_node
 #
 # All Lustre versions support "lctl get_param" to report the version of the
 # code running in the kernel (what our tests are interested in), but it
@@ -765,21 +765,19 @@ export LINUX_VERSION_CODE=$(version_code ${LINUX_VERSION//\./ })
 # lctl --version:		lctl 2.6.50
 #
 # output: prints version string to stdout in (up to 4) dotted-decimal values
-lustre_build_version() {
-	local facet=${1:-client}
-	local facet_version=${facet}_VERSION
-
-	# if the global variable is already set, then use that
-	[ -n "${!facet_version}" ] && echo ${!facet_version} && return
+lustre_build_version_node() {
+	local node=$1
+	local ver
+	local lver
 
 	# this is the currently-running version of the kernel modules
-	local ver=$(do_facet $facet "$LCTL get_param -n version 2>/dev/null")
+	ver=$(do_node $node "$LCTL get_param -n version 2>/dev/null")
 	# we mostly test 2.10+ systems, only try others if the above fails
 	if [ -z "$ver" ]; then
-		ver=$(do_facet $facet "$LCTL lustre_build_version 2>/dev/null")
+		ver=$(do_node $node "$LCTL lustre_build_version 2>/dev/null")
 	fi
 	if [ -z "$ver" ]; then
-		ver=$(do_facet $facet "$LCTL --version 2>/dev/null" |
+		ver=$(do_node $node "$LCTL --version 2>/dev/null" |
 		      cut -d' ' -f2)
 	fi
 	local lver=$(egrep -i "lustre: |version: " <<<"$ver" | head -n 1)
@@ -788,6 +786,19 @@ lustre_build_version() {
 	lver=$(sed -e 's/[^:]*: //' -e 's/^v//' -e 's/[ -].*//' <<<$ver |
 	       tr _ . | cut -d. -f1-4)
 
+	echo $lver
+}
+
+lustre_build_version() {
+	local facet=${1:-client}
+	local node=$(facet_active_host $facet)
+	local facet_version=${facet}_VERSION
+	local lver
+
+	# if the global variable is already set, then use that
+	[ -n "${!facet_version}" ] && echo ${!facet_version} && return
+
+	lver=$(lustre_build_version_node $node)
 	# save in global variable for the future
 	export $facet_version=$lver
 
@@ -1010,7 +1021,9 @@ load_lnet() {
 	# system with 2 or 4 cores
 	local saved_opts="$MODOPTS_LIBCFS"
 
-	if [ $ncpus -le 4 ] && [ $ncpus -gt 1 ]; then
+	echo "MODOPTS_LIBCFS=$MODOPTS_LIBCFS"
+	if ! [[ "$MODOPTS_LIBCFS" =~ "cpu_" ]] &&
+	   (( $ncpus <= 4 && $ncpus > 1 )); then
 		# force to enable multiple CPU partitions
 		echo "Force libcfs to create 2 CPU partitions"
 		MODOPTS_LIBCFS="cpu_npartitions=2 $MODOPTS_LIBCFS"
@@ -1177,9 +1190,13 @@ check_mem_leak () {
 	if [ "$LEAK_LUSTRE" -o "$LEAK_PORTALS" ]; then
 		echo "$LEAK_LUSTRE" 1>&2
 		echo "$LEAK_PORTALS" 1>&2
-		mv $TMP/debug $TMP/debug-leak.`date +%s` || true
 		echo "Memory leaks detected"
-		[ -n "$IGNORE_LEAK" ] &&
+		if [ $DEBUG -a -z $DEBUG_RMMOD ]; then
+			debug_file=$TMP/debug-leak.$(date +%s)
+			mv $TMP/debug $debug_file &&
+			echo "Save $TMP/debug to $debug_file"
+		fi
+		[[ -n "$IGNORE_LEAK" ]] &&
 			{ echo "ignoring leaks" && return 0; } || true
 		return 1
 	fi
@@ -1207,9 +1224,22 @@ unload_modules() {
 
 	if $LOAD_MODULES_REMOTE; then
 		local list=$(comma_list $(remote_nodes_list))
-		if [ -n "$list" ]; then
-			echo "unloading modules on: '$list'"
-			do_rpc_nodes "$list" unload_modules_local
+
+		if (( MDS1_VERSION >= $(version_code 2.15.51) )); then
+			# unload_module_local is only available after 2.15.51
+			if [ -n "$list" ]; then
+				echo "unloading modules via unload_modules_local on: '$list'"
+				do_rpc_nodes "$list" unload_modules_local
+			fi
+		else
+			if [ -n "$list" ]; then
+				echo "unloading modules on: '$list'"
+				do_rpc_nodes "$list" $LUSTRE_RMMOD ldiskfs
+				do_rpc_nodes "$list" check_mem_leak
+				do_rpc_nodes "$list" "rm -f /etc/udev/rules.d/99-lustre-test.rules"
+				do_rpc_nodes "$list" "udevadm control --reload-rules"
+				do_rpc_nodes "$list" "udevadm trigger"
+			fi
 		fi
 	fi
 
@@ -2011,8 +2041,9 @@ set_default_debug_facet () {
 }
 
 set_params_nodes() {
+	(( $# >= 2 )) || return 0
 	local nodes=$1
-	shift
+	shift || true
 	local params="$@"
 
 	[[ -n "$params" ]] || return 0
@@ -2021,27 +2052,24 @@ set_params_nodes() {
 }
 
 set_params_clients() {
-	(( $# >= 2 )) || return 0
 	local clients=${1:-$CLIENTS}
-	shift
+	shift || true
 	local params="${@:-$CLIENT_LCTL_SETPARAM_PARAM}"
 
 	set_params_nodes $clients $params
 }
 
 set_params_mdts() {
-	(( $# >= 2 )) || return 0
 	local mdts=${1:-$(comma_list $(mdts_nodes))}
-	shift
+	shift || true
 	local params="${@:-$MDS_LCTL_SETPARAM_PARAM}"
 
 	set_params_nodes $mdts $params
 }
 
 set_params_osts() {
-	(( $# >= 2 )) || return 0
 	local osts=${1:-$(comma_list $(osts_nodes))}
-	shift
+	shift || true
 	local params="${@:-$OSS_LCTL_SETPARAM_PARAM}"
 
 	set_params_nodes $osts $params
@@ -3226,7 +3254,6 @@ start_client_load() {
 	eval export ${var}=$load
 
 	do_node $client "PATH=$PATH MOUNT=$MOUNT ERRORS_OK=$ERRORS_OK \
-			BREAK_ON_ERROR=$BREAK_ON_ERROR \
 			END_RUN_FILE=$END_RUN_FILE \
 			LOAD_PID_FILE=$LOAD_PID_FILE \
 			TESTLOG_PREFIX=$TESTLOG_PREFIX \
@@ -3234,9 +3261,12 @@ start_client_load() {
 			DBENCH_LIB=$DBENCH_LIB \
 			DBENCH_SRC=$DBENCH_SRC \
 			CLIENT_COUNT=$((CLIENTCOUNT - 1)) \
+			RECOVERY_SCALE_ENABLE_REMOTE_DIRS=$RECOVERY_SCALE_ENABLE_REMOTE_DIRS \
+			RECOVERY_SCALE_ENABLE_STRIPED_DIRS=$RECOVERY_SCALE_ENABLE_STRIPED_DIRS \
 			LFS=$LFS \
 			LCTL=$LCTL \
 			FSNAME=$FSNAME \
+			MPI_USER=$MPI_USER \
 			MPIRUN=$MPIRUN \
 			MPIRUN_OPTIONS=\\\"$MPIRUN_OPTIONS\\\" \
 			MACHINEFILE_OPTION=\\\"$MACHINEFILE_OPTION\\\" \
@@ -3578,7 +3608,7 @@ wait_zfs_commit() {
 	# the occupied disk space will be released
 	# only after TXGs are committed
 	if [[ $(facet_fstype $1) == zfs ]]; then
-		echo "sleep $zfs_wait for ZFS $(facet_fstype $1)"
+		echo "sleep $zfs_wait for ZFS $(facet_type $1)"
 		sleep $zfs_wait
 	fi
 }
@@ -3779,7 +3809,7 @@ wait_for_host() {
 	for host in ${hostlist//,/ }; do
 		check_network "$host" 900
 	done
-	while ! do_nodes $hostlist hostname  > /dev/null; do sleep 5; done
+	while ! do_nodes $hostlist hostname; do sleep 5; done
 }
 
 wait_for_facet() {
@@ -4150,6 +4180,9 @@ facet_failover() {
 		local host=$(facet_active_host $facet)
 
 		hostlist=$(expand_list $hostlist $host)
+		local fhost=$(facet_host $facet)
+		local ffhost=$(facet_failover_host $facet)
+		echo "facet: $facet facet_host: $fhost facet_failover_host: $ffhost"
 		if [ $(facet_host $facet) = \
 			$(facet_failover_host $facet) ]; then
 			waithostlist=$(expand_list $waithostlist $host)
@@ -4160,7 +4193,7 @@ facet_failover() {
 		for host in ${hostlist//,/ }; do
 			reboot_node $host
 		done
-		echo "$(date +'%H:%M:%S (%s)') $hostlist rebooted"
+		echo "$(date +'%H:%M:%S (%s)') $hostlist rebooted; waithostlist: $waithostlist"
 		# We need to wait the rebooted hosts in case if
 		# facet_HOST == facetfailover_HOST
 		if ! [ -z "$waithostlist" ]; then
@@ -6265,7 +6298,7 @@ do_check_and_setup_lustre() {
 	# If auster does not want us to setup, then don't.
 	! ${do_setup} && return
 
-	echo "=== $TESTSUITE: start setup $(date +'%H:%M:%S (%s)') ==="
+	log "=== $TESTSUITE: start setup $(date +'%H:%M:%S (%s)') ==="
 
 	sanitize_parameters
 	nfs_client_mode && return
@@ -6367,7 +6400,11 @@ do_check_and_setup_lustre() {
 	set_params_clients
 	set_params_mdts
 	set_params_osts
-	echo "=== $TESTSUITE: finish setup $(date +'%H:%M:%S (%s)') ==="
+
+	TESTNAME="start setup" check_dmesg_for_errors ||
+		TESTNAME="test_setup" error "Error in dmesg detected"
+
+	log "=== $TESTSUITE: finish setup $(date +'%H:%M:%S (%s)') ==="
 
 	if [[ "$ONLY" == "setup" ]]; then
 		exit 0
@@ -6569,7 +6606,7 @@ log_zfs_info() {
 }
 
 do_check_and_cleanup_lustre() {
-	echo "=== $TESTSUITE: start cleanup $(date +'%H:%M:%S (%s)') ==="
+	log "=== $TESTSUITE: start cleanup $(date +'%H:%M:%S (%s)') ==="
 
 	if [[ "$LFSCK_ALWAYS" == "yes" && "$TESTSUITE" != "sanity-lfsck" && \
 	      "$TESTSUITE" != "sanity-scrub" ]]; then
@@ -6599,7 +6636,10 @@ do_check_and_cleanup_lustre() {
 		unset I_MOUNTED
 	fi
 
-	echo "=== $TESTSUITE: finish cleanup $(date +'%H:%M:%S (%s)') ==="
+	TESTNAME="start cleanup" check_dmesg_for_errors ||
+		TESTNAME="test_cleanup" error "Error in dmesg detected"
+
+	log "=== $TESTSUITE: finish cleanup $(date +'%H:%M:%S (%s)') ==="
 }
 
 check_and_cleanup_lustre() {
@@ -6998,15 +7038,27 @@ default_lru_size()
 
 lru_resize_enable()
 {
-	lctl set_param ldlm.namespaces.*$1*.lru_size=0
+	$LCTL set_param -n ldlm.namespaces.*$1*.lru_size=0
 }
 
 lru_resize_disable()
 {
 	local dev=${1}
 	local lru_size=${2:-$(default_lru_size)}
+	local size_param="ldlm.namespaces.*$dev*.lru_size"
+	local age_param="ldlm.namespaces.*$dev*.lru_max_age"
+	local old_age=($($LCTL get_param -n $age_param))
+	# can't save/restore lru_size since it reports the *current* lru count
 
-	$LCTL set_param ldlm.namespaces.*$dev*.lru_size=$lru_size
+	echo "$size_param=0->$lru_size"
+	echo "$age_param=$old_age->3900s"
+
+	# increase lru_max_age also, to prevent lock cancel due to age
+	$LCTL set_param -n $size_param=$lru_size
+	$LCTL set_param -n $age_param=3900s
+	stack_trap "cancel_lru_locks $dev || true"
+	stack_trap "lru_resize_enable $dev || true"
+	stack_trap "$LCTL set_param -n $age_param=$old_age || true"
 }
 
 flock_is_enabled()
@@ -7258,7 +7310,8 @@ skip_eopnotsupp() {
 # Add a list of tests to ALWAYS_EXCEPT due to an issue.
 # Usage: always_except LU-4815 23 42q ...
 #
-function always_except() {
+function \
+always_except() {
 	local issue="${1:-}" # single jira style issue ("LU-4815")
 	local test_num
 
@@ -7287,6 +7340,28 @@ build_test_filter() {
 			eval ONLY_${O}=true
 		fi
 	done
+
+	local nodes=$(comma_list $(facets_nodes mds1,ost1))
+	local exceptions="$LUSTRE/tests/except/$TESTSUITE.*ex"
+
+	do_nodes --verbose $nodes "ls $exceptions || true"
+	while read facet op need_ver jira subs; do
+		local have_ver_code=${facet^^*}_VERSION
+		local need_ver_code
+
+		[[ "$facet" =~ "#" ]] && continue
+		[[ "$need_ver" =~ _VERSION ]] && need_ver_code=$need_ver ||
+			need_ver_code=$(version_code $need_ver)
+
+		(( ${!have_ver_code} $op $need_ver_code )) &&
+			echo "- see $facet $op $need_ver for $jira, go $subs" ||
+		{
+			log "- need $facet $op $need_ver for $jira, skip $subs"
+			for E in $subs; do
+				eval EXCEPT_${E}=true
+			done
+		}
+	done < <(do_nodes $nodes "cat $exceptions 2>/dev/null ||true" | sort -u)
 
 	[[ -z "$EXCEPT$ALWAYS_EXCEPT" ]] ||
 		log "excepting tests: $(echo $EXCEPT $ALWAYS_EXCEPT)"
@@ -7492,12 +7567,17 @@ banner() {
 
 check_dmesg_for_errors() {
 	local res
-	local errors="VFS: Busy inodes after unmount of\|\
-ldiskfs_check_descriptors: Checksum for group 0 failed\|\
-group descriptors corrupted"
+	local errors
+	local testid=$(tr '_' ' ' <<< $TESTNAME)
 
-	res=$(do_nodes -q $(comma_list $(nodes_list)) "dmesg" | grep "$errors")
-	[ -z "$res" ] && return 0
+	errors="VFS: Busy inodes after unmount of"
+	errors+="\|ldiskfs_check_descriptors: Checksum for group 0 failed"
+	errors+="\|group descriptors corrupted"
+	errors+="\|UBSAN\|KASAN"
+
+	res=$(do_nodes -q $(comma_list $(nodes_list)) "dmesg" |
+		tac | sed "/$testid/,$ d" | grep "$errors")
+	[[ -n "$res" ]] || return 0
 	echo "Kernel error detected: $res"
 	return 1
 }
@@ -7569,20 +7649,20 @@ run_one_logged() {
 		local repeat_end_sec=$((SECONDS + ONLY_MINUTES * 60))
 	fi
 
-	local testiter=1
+	export ONLY_REPEAT_ITER=1
 	while true; do
 		local before_sub=$SECONDS
+		local iter
 
 		log_sub_test_begin $TESTNAME
 		# remove temp files between repetitions to avoid test failures
 		if [[ -n "$append" ]]; then
 			[[ -n "$tdir" ]] && rm -rvf $DIR/$tdir*
 			[[ -n "$tfile" ]] && rm -vf $DIR/$tfile*
-			echo "subtest iteration $testiter/$repeat " \
-				"($(((SECONDS-before)/60))/$ONLY_MINUTES min)"
+			iter=" (repeat $ONLY_REPEAT_ITER/$repeat iter, $(((SECONDS-before)/60))/$ONLY_MINUTES min)"
 		fi
 		# loop around subshell so stack_trap EXIT triggers each time
-		(run_one $testnum "$testmsg") 2>&1 | tee -i $append $test_log
+		(run_one $testnum "$testmsg$iter") 2>&1 | tee -i $append $test_log
 		rc=${PIPESTATUS[0]}
 		local append=-a
 		local duration_sub=$((SECONDS - before_sub))
@@ -7620,10 +7700,10 @@ run_one_logged() {
 		# no repeat options were set, break after the first iteration
 		[[ -z "$repeat" && -z "$repeat_end_sec" ]] && break
 		# break if any repeat options were set and have been met
-		[[ -n "$repeat" ]] && (( $testiter >= $repeat )) && break
+		[[ -n "$repeat" ]] && (( ONLY_REPEAT_ITER >= repeat )) && break
 		[[ -n "$repeat_end_sec" ]] &&
 			(( $SECONDS >= $repeat_end_sec )) && break
-		((testiter++))
+		((ONLY_REPEAT_ITER++))
 	done
 
 	[[ $KPTR_ON_MOUNT ]] || kptr_restore
@@ -7947,9 +8027,14 @@ mdts_nodes () {
 	echo -n $(facets_nodes $(get_facets MDS))
 }
 
-# Get all of the active OSS nodes.
-osts_nodes () {
-	echo -n $(facets_nodes $(get_facets OST))
+# Get all of the active OSS nodes in a comma-separated list.
+osts_nodes() {
+	comma_list $(facets_nodes $(get_facets OST))
+}
+
+# Get all of the active server nodes in a comma-separated list.
+tgts_nodes() {
+	comma_list $(facets_nodes $(get_facets MDS OST))
 }
 
 # Get all of the client nodes and active server nodes.
@@ -7994,22 +8079,19 @@ all_mdts_nodes () {
 }
 
 # Get all of the OSS nodes, including active and passive nodes.
-all_osts_nodes () {
+all_osts_nodes() {
 	local host
 	local failover_host
-	local nodes=
-	local nodes_sort
+	local nodes=""
 	local i
 
-	for i in $(seq $OSTCOUNT); do
+	for ((i = 1; i <= $OSTCOUNT; i++)); do
 		host=ost${i}_HOST
 		failover_host=ost${i}failover_HOST
 		nodes="$nodes ${!host} ${!failover_host}"
 	done
 
-	[ -n "$nodes" ] || nodes="${ost_HOST} ${ostfailover_HOST}"
-	nodes_sort=$(for i in $nodes; do echo $i; done | sort -u)
-	echo -n $nodes_sort
+	comma_list $nodes
 }
 
 # Get all of the server nodes, including active and passive nodes.
@@ -8324,7 +8406,15 @@ calc_stats() {
 	local stat="$2"
 
 	lctl get_param -n $paramfile |
-		awk '/^'$stat'/ { sum += $2 } END { printf("%0.0f", sum) }'
+		awk '/^'$stat' / { sum += $2 } END { printf("%0.0f", sum) }'
+}
+
+calc_stats_sum() {
+	local paramfile="$1"
+	local stat="$2"
+
+	lctl get_param -n $paramfile |
+		awk '/^'$stat' / { sum += $7 } END { printf("%0.0f", sum) }'
 }
 
 calc_sum () {
@@ -8503,6 +8593,9 @@ run_mdtest () {
 
 	if (( num_dirs > 1 )); then
 		num_entries=$((num_files / num_dirs))
+		# md_validate_tests requires items must be a multiple of
+		# items per directory
+		num_files=$((num_entries * num_dirs))
 		log "split $num_files files to $num_dirs" \
 			"with $num_entries files each"
 		mdtest_options+=(-I=$num_entries)
@@ -8989,14 +9082,17 @@ create_pool() {
 	local fsname=${1%%.*}
 	local poolname=${1##$fsname.}
 	local keep_pools=${2:-false}
+	local mdscount=${3:-$MDSCOUNT}
+	# can't pass an empty argument to destroy_test_pools
+	local dtp_fsname=${fsname:-$FSNAME}
 
-	stack_trap "destroy_test_pools $fsname" EXIT
+	stack_trap "destroy_test_pools $dtp_fsname $mdscount" EXIT
 	do_facet mgs lctl pool_new $1
 	local RC=$?
 	# get param should return err unless pool is created
 	[[ $RC -ne 0 ]] && return $RC
 
-	for mds_id in $(seq $MDSCOUNT); do
+	for ((mds_id = 1; mds_id < $mdscount; mds_id++)); do
 		local mdt_id=$((mds_id-1))
 		local lodname=$fsname-MDT$(printf "%04x" $mdt_id)-mdtlov
 		wait_update_facet mds$mds_id \
@@ -9052,6 +9148,7 @@ destroy_pool_int() {
 destroy_pool() {
 	local fsname=${1%%.*}
 	local poolname=${1##$fsname.}
+	local mdscount=${2:-$MDSCOUNT}
 
 	[[ x$fsname = x$poolname ]] && fsname=$FSNAME
 
@@ -9062,7 +9159,7 @@ destroy_pool() {
 	destroy_pool_int $fsname.$poolname
 	RC=$?
 	[[ $RC -ne 0 ]] && return $RC
-	for mds_id in $(seq $MDSCOUNT); do
+	for ((mds_id = 1; mds_id < $mdscount; mds_id++)); do
 		local mdt_id=$((mds_id-1))
 		local lodname=$fsname-MDT$(printf "%04x" $mdt_id)-mdtlov
 		wait_update_facet mds$mds_id \
@@ -9080,6 +9177,7 @@ destroy_pool() {
 
 destroy_pools () {
 	local fsname=${1:-$FSNAME}
+	local mdscount=${2:-$MDSCOUNT}
 	local poolname
 	local listvar=${fsname}_CREATED_POOLS
 
@@ -9087,13 +9185,15 @@ destroy_pools () {
 
 	echo "Destroy the created pools: ${!listvar}"
 	for poolname in ${!listvar//,/ }; do
-		destroy_pool $fsname.$poolname
+		destroy_pool $fsname.$poolname $mdscount
 	done
 }
 
 destroy_test_pools () {
 	local fsname=${1:-$FSNAME}
-	destroy_pools $fsname || true
+	local mdscount=${2:-$MDSCOUNT}
+
+	destroy_pools $fsname $mdscount || true
 }
 
 gather_logs () {
@@ -10203,7 +10303,14 @@ precreated_ost_obj_count()
 			osp.$proc_path.prealloc_last_id)
 	local next_id=$(do_facet mds$((mdt_idx + 1)) lctl get_param -n \
 			osp.$proc_path.prealloc_next_id)
-	echo $((last_id - next_id + 1))
+	local ost_obj_count=$((last_id - next_id + 1))
+
+	echo " - precreated_ost_obj_count $proc_path" \
+	     "prealloc_last_id: $last_id" \
+	     "prealloc_next_id: $next_id" \
+	     "count: $ost_obj_count" 1>&2
+
+	echo $ost_obj_count
 }
 
 check_file_in_pool()
@@ -10227,10 +10334,11 @@ check_file_in_pool()
 }
 
 pool_add() {
-	echo "Creating new pool"
 	local pool=$1
+	local mdscount=${2:-$MDSCOUNT}
 
-	create_pool $FSNAME.$pool ||
+	echo "Creating new pool $pool"
+	create_pool $FSNAME.$pool false $mdscount ||
 		{ error_noexit "No pool created, result code $?"; return 1; }
 	[ $($LFS pool_list $FSNAME | grep -c "$FSNAME.${pool}\$") -eq 1 ] ||
 		{ error_noexit "$pool not in lfs pool_list"; return 2; }
@@ -10242,6 +10350,7 @@ pool_add_targets() {
 	local first=$2
 	local last=${3:-$first}
 	local step=${4:-1}
+	local mdscount=${5:-$MDSCOUNT}
 
 	local list=$(seq $first $step $last)
 
@@ -10260,7 +10369,7 @@ pool_add_targets() {
 	fi
 
 	# wait for OSTs to be added to the pool
-	for mds_id in $(seq $MDSCOUNT); do
+	for ((mds_id = 1; mds_id < $mdscount; mds_id++)); do
 		local mdt_id=$((mds_id-1))
 		local lodname=$FSNAME-MDT$(printf "%04x" $mdt_id)-mdtlov
 		wait_update_facet mds$mds_id \
@@ -10563,34 +10672,45 @@ killall_process () {
 	do_nodes $clients "killall $signal $name"
 }
 
+lsnapshot () {
+	local cmd=$1
+	shift
+
+	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+		do_facet mgs "$LCTL snapshot $cmd -F $FSNAME $*"
+	else
+		do_facet mgs "$LCTL snapshot_$cmd -F $FSNAME $*"
+	fi
+}
+
 lsnapshot_create()
 {
-	do_facet mgs "$LCTL snapshot_create -F $FSNAME $*"
+	lsnapshot create $*
 }
 
 lsnapshot_destroy()
 {
-	do_facet mgs "$LCTL snapshot_destroy -F $FSNAME $*"
+	lsnapshot destroy $*
 }
 
 lsnapshot_modify()
 {
-	do_facet mgs "$LCTL snapshot_modify -F $FSNAME $*"
+	lsnapshot modify $*
 }
 
 lsnapshot_list()
 {
-	do_facet mgs "$LCTL snapshot_list -F $FSNAME $*"
+	lsnapshot list $*
 }
 
 lsnapshot_mount()
 {
-	do_facet mgs "$LCTL snapshot_mount -F $FSNAME $*"
+	lsnapshot mount $*
 }
 
 lsnapshot_umount()
 {
-	do_facet mgs "$LCTL snapshot_umount -F $FSNAME $*"
+	lsnapshot umount $*
 }
 
 lss_err()
@@ -10866,6 +10986,11 @@ __changelog_deregister() {
 	local cl_user=$2
 	local rc=0
 
+	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+		changelog_deregister="changelog deregister"
+	else
+		changelog_deregister="changelog_deregister"
+	fi
 	# skip cleanup if no user registered for this MDT
 	[ -z "$cl_user" ] && echo "$mdt: no changelog user" && return 0
 	# user is no longer registered, skip cleanup
@@ -10875,12 +11000,17 @@ __changelog_deregister() {
 	# From this point, if any operation fails, it is an error
 	__changelog_clear $facet $cl_user 0 ||
 		error_noexit "$mdt: changelog_clear $cl_user 0 fail: $rc"
-	do_facet $facet $LCTL --device $mdt changelog_deregister $cl_user ||
+	do_facet $facet $LCTL --device $mdt $changelog_deregister $cl_user ||
 		error_noexit "$mdt: changelog_deregister '$cl_user' fail: $rc"
 }
 
 declare -Ax CL_USERS
 changelog_register() {
+	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+		changelog_register="changelog register"
+	else
+		changelog_register="changelog_register"
+	fi
 	for M in $(seq $MDSCOUNT); do
 		local facet=mds$M
 		local mdt="$(facet_svc $facet)"
@@ -10895,7 +11025,7 @@ changelog_register() {
 
 		local cl_user
 		cl_user=$(do_facet $facet $LCTL --device $mdt \
-			changelog_register -n "$@") ||
+			$changelog_register -n "$@") ||
 			error "$mdt: register changelog user failed: $?"
 		stack_trap "__changelog_deregister $facet $cl_user" EXIT
 
@@ -11227,6 +11357,26 @@ save_layout_restore_at_exit() {
 	local layout=$(save_layout $dir)
 
 	stack_trap "restore_layout $dir $layout" EXIT
+}
+
+init_stripe_dir_params() {
+	local varremote=$1
+	local varstriped=$2
+
+	if ((MDSCOUNT > 1 &&
+		$MDS1_VERSION >=
+		$(version_code 2.8.0))); then
+		eval $varremote=${!varremote:-true}
+		eval $varstriped=${!varstriped:-true}
+	elif ((MDSCOUNT > 1 &&
+		$MDS1_VERSION >=
+		$(version_code 2.5.0))); then
+		eval $varremote=${!varremote:-true}
+		eval $varstriped=${!varstriped:-false}
+	fi
+
+	eval $varremote=${!varremote:-false}
+	eval $varstriped=${!varstriped:-false}
 }
 
 verify_yaml_layout() {
@@ -12006,6 +12156,9 @@ function check_fallocate_supported()
 	local fa_mode="osd-ldiskfs.$(facet_svc $facet).fallocate_zero_blocks"
 	local mode=$(do_facet $facet $LCTL get_param -n $fa_mode 2>/dev/null |
 		     head -n 1)
+	! [[ "$facet" =~ "mds" ]] || # older MDS doesn't support fallocate
+		(( MDS1_VERSION >= $(version_code v2_14_53-10-g163870abfb) )) ||
+			mode=""
 
 	if [[ -z "$mode" ]]; then
 		echo "fallocate not supported on $facet" 1>&2

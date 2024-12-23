@@ -1494,6 +1494,8 @@ void lustre_assert_wire_constants(void)
 		 OBD_CONNECT2_CONN_POLICY);
 	LASSERTF(OBD_CONNECT2_MIRROR_ID_FIX == 0x2000000000ULL, "found 0x%.16llxULL\n",
 		 OBD_CONNECT2_MIRROR_ID_FIX);
+	LASSERTF(OBD_CONNECT2_UPDATE_LAYOUT == 0x4000000000ULL, "found 0x%.16llxULL\n",
+		 OBD_CONNECT2_UPDATE_LAYOUT);
 
 	LASSERTF(OBD_CKSUM_CRC32 == 0x00000001UL, "found 0x%.8xUL\n",
 		(unsigned)OBD_CKSUM_CRC32);
@@ -5180,6 +5182,10 @@ void lustre_assert_wire_constants(void)
 		 (long long)LAYOUT_INTENT_PCCRO_SET);
 	LASSERTF(LAYOUT_INTENT_PCCRO_CLEAR == 8, "found %lld\n",
 		 (long long)LAYOUT_INTENT_PCCRO_CLEAR);
+	LASSERTF(LAYOUT_INTENT_CHANGE == 9, "found %lld\n",
+		 (long long)LAYOUT_INTENT_CHANGE);
+	LASSERTF(LAIF_INCOMPRESSIBLE == 1, "found %lld\n",
+		 (long long)LAIF_INCOMPRESSIBLE);
 
 	/* Checks for struct hsm_action_item */
 	LASSERTF((int)sizeof(struct hsm_action_item) == 72, "found %lld\n",
@@ -6360,18 +6366,18 @@ void lustre_assert_wire_constants(void)
 		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_roles));
 	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_roles) == 8, "found %lld\n",
 		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_roles));
-	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_unused1) == 8, "found %lld\n",
-		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_unused1));
-	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_unused1) == 8, "found %lld\n",
-		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_unused1));
-	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_unused2) == 16, "found %lld\n",
-		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_unused2));
-	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_unused2) == 8, "found %lld\n",
-		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_unused2));
-	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_unused3) == 24, "found %lld\n",
-		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_unused3));
-	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_unused3) == 8, "found %lld\n",
-		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_unused3));
+	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding1) == 8, "found %lld\n",
+		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding1));
+	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding1) == 8, "found %lld\n",
+		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding1));
+	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding2) == 16, "found %lld\n",
+		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding2));
+	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding2) == 8, "found %lld\n",
+		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding2));
+	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding3) == 24, "found %lld\n",
+		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding3));
+	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding3) == 8, "found %lld\n",
+		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding3));
 
 	/* Checks for union nodemap_rec */
 	LASSERTF((int)sizeof(union nodemap_rec) == 32, "found %lld\n",
@@ -6474,7 +6480,9 @@ void lustre_assert_wire_constants(void)
 		(unsigned)NODEMAP_RBAC_CHLG_OPS);
 	LASSERTF(NODEMAP_RBAC_FSCRYPT_ADMIN == 0x00000020UL, "found 0x%.8xUL\n",
 		(unsigned)NODEMAP_RBAC_FSCRYPT_ADMIN);
-	LASSERTF(NODEMAP_RBAC_NONE == 0xffffffc0UL, "found 0x%.8xUL\n",
+	LASSERTF(NODEMAP_RBAC_SERVER_UPCALL == 0x00000040UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RBAC_SERVER_UPCALL);
+	LASSERTF(NODEMAP_RBAC_NONE == 0xffffff80UL, "found 0x%.8xUL\n",
 		(unsigned)NODEMAP_RBAC_NONE);
 	LASSERTF(NODEMAP_RBAC_ALL == 0xffffffffUL, "found 0x%.8xUL\n",
 		(unsigned)NODEMAP_RBAC_ALL);

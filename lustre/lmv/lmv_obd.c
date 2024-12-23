@@ -326,7 +326,7 @@ static int lmv_connect_mdc(struct obd_device *obd, struct lmv_tgt_desc *tgt)
 	       mdc_obd->obd_name, mdc_obd->obd_uuid.uuid,
 	       tgt->ltd_uuid.uuid, obd->obd_uuid.uuid);
 
-	if (!mdc_obd->obd_set_up) {
+	if (!test_bit(OBDF_SET_UP, mdc_obd->obd_flags)) {
 		CERROR("target %s is not set up\n", tgt->ltd_uuid.uuid);
 		RETURN(-EINVAL);
 	}
@@ -2314,6 +2314,34 @@ lmv_enqueue(struct obd_export *exp, struct ldlm_enqueue_info *einfo,
 
 	rc = md_enqueue(tgt->ltd_exp, einfo, policy, op_data, lockh,
 			extra_lock_flags);
+
+	RETURN(rc);
+}
+
+static int
+lmv_enqueue_async(struct obd_export *exp, struct ldlm_enqueue_info *einfo,
+		  obd_enqueue_update_f upcall, struct md_op_data *op_data,
+		  const union ldlm_policy_data *policy, __u64 flags)
+{
+	struct obd_device        *obd = exp->exp_obd;
+	struct lmv_obd           *lmv = &obd->u.lmv;
+	struct lmv_tgt_desc      *tgt;
+	int                       rc;
+
+	ENTRY;
+
+	CDEBUG(D_INODE, "ENQUEUE ASYNC on "DFID"\n",
+			PFID(&op_data->op_fid1));
+
+	tgt = lmv_fid2tgt(lmv, &op_data->op_fid1);
+	if (IS_ERR(tgt))
+		RETURN(PTR_ERR(tgt));
+
+	CDEBUG(D_INODE, "ENQUEUE ASYNC on "DFID" -> mds #%d\n",
+	       PFID(&op_data->op_fid1), tgt->ltd_index);
+
+	rc = md_enqueue_async(tgt->ltd_exp, einfo, upcall, op_data, policy,
+			      flags);
 
 	RETURN(rc);
 }
@@ -4463,6 +4491,7 @@ static const struct md_ops lmv_md_ops = {
 	.m_close                = lmv_close,
 	.m_create               = lmv_create,
 	.m_enqueue              = lmv_enqueue,
+	.m_enqueue_async        = lmv_enqueue_async,
 	.m_getattr              = lmv_getattr,
 	.m_getxattr             = lmv_getxattr,
 	.m_getattr_name         = lmv_getattr_name,

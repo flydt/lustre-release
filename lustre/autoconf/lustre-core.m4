@@ -1146,6 +1146,23 @@ AC_DEFUN([LC_HAVE_BLK_INTEGRITY_ITER], [
 ]) # LC_HAVE_BLK_INTEGRITY_ITER
 
 #
+# LC_HAVE_LM_GRANT_2ARGS
+#
+# 3.17 removed unused argument from lm_grant
+#
+AC_DEFUN([LC_HAVE_LM_GRANT_2ARGS], [
+LB_CHECK_COMPILE([if 'lock_manager_operations.lm_grant' takes two args],
+lm_grant, [
+	#include <linux/fs.h>
+],[
+	((struct lock_manager_operations *)NULL)->lm_grant(NULL, 0);
+],[
+	AC_DEFINE(HAVE_LM_GRANT_2ARGS, 1,
+		[lock_manager_operations.lm_grant takes two args])
+])
+]) # LC_HAVE_LM_GRANT_2ARGS
+
+#
 # LC_NFS_FILLDIR_USE_CTX
 #
 # 3.18 kernel moved from void cookie to struct dir_context
@@ -3960,6 +3977,30 @@ AC_DEFUN([LC_HAVE_USER_BACKED_ITER], [
 ]) # LC_HAVE_USER_BACKED_ITER
 
 #
+# LC_HAVE_IOV_ITER_IS_ALIGNED
+#
+# Linux commit v5.19-rc4-8-gcfa320f72882
+#    iov: introduce iov_iter_aligned
+#
+AC_DEFUN([LC_SRC_HAVE_IOV_ITER_IS_ALIGNED], [
+	LB2_LINUX_TEST_SRC([iov_iter_is_aligned], [
+		#include <linux/uio.h>
+	],[
+		struct iov_iter *iter = NULL;
+		bool result __attribute__ ((unused));
+
+		result = iov_iter_is_aligned(iter, ~PAGE_MASK, ~PAGE_MASK);
+	],[-Werror])
+])
+AC_DEFUN([LC_HAVE_IOV_ITER_IS_ALIGNED], [
+	LB2_MSG_LINUX_TEST_RESULT([if iov_iter_is_aligned() is available],
+	[iov_iter_is_aligned], [
+		AC_DEFINE(HAVE_IOV_ITER_IS_ALIGNED, 1,
+			[iov_iter_is_aligned() is available])
+	])
+]) # LC_HAVE_IOV_ITER_IS_ALIGNED
+
+#
 # LC_HAVE_GET_RANDOM_U32_AND_U64
 #
 # Linux commit v4.10-rc3-6-gc440408cf690
@@ -4116,6 +4157,49 @@ AC_DEFUN([LC_HAVE_ACL_WITH_DENTRY], [
 ]) # LC_HAVE_ACL_WITH_DENTRY
 
 #
+# LC_IOP_GET_INODE_ACL
+#
+# linux kernel v6.1-rc1-3-gcac2f8b8d8
+#   fs: rename current get acl method
+#
+AC_DEFUN([LC_SRC_IOP_GET_INODE_ACL], [
+	LB2_LINUX_TEST_SRC([inode_ops_get_inode_acl], [
+		#include <linux/fs.h>
+	],[
+		struct inode_operations iop;
+		iop.get_inode_acl = NULL;
+	])
+])
+AC_DEFUN([LC_IOP_GET_INODE_ACL], [
+	LB2_MSG_LINUX_TEST_RESULT([if inode_operations has .get_inode_acl member function],
+	[inode_ops_get_inode_acl], [
+		AC_DEFINE(HAVE_IOP_GET_INODE_ACL, 1,
+			[inode_operations has .get_inode_acl member function])
+	])
+]) # LC_IOP_GET_INODE_ACL
+
+#
+# LC_HAVE_FOLIO_MAPCOUNT
+#
+# linux kernel v6.1-rc4-186-gcb67f4282bf9
+#   mm,thp,rmap: simplify compound page mapcount handling
+#
+AC_DEFUN([LC_SRC_HAVE_FOLIO_MAPCOUNT], [
+	LB2_LINUX_TEST_SRC([folio_mapcount], [
+		#include <linux/mm.h>
+	],[
+		(void)folio_mapcount((const struct folio *)NULL);
+	],[-Werror])
+])
+AC_DEFUN([LC_HAVE_FOLIO_MAPCOUNT], [
+	LB2_MSG_LINUX_TEST_RESULT([if 'folio_mapcount()' is available],
+	[folio_mapcount], [
+		AC_DEFINE(HAVE_FOLIO_MAPCOUNT, 1,
+			['folio_mapcount()' is available])
+	])
+]) # LC_HAVE_FOLIO_MAPCOUNT
+
+#
 # LC_HAVE_U64_CAPABILITY
 #
 # linux kernel v6.2-13111-gf122a08b197d
@@ -4188,6 +4272,8 @@ AC_DEFUN([LC_HAVE_LOCKS_LOCK_FILE_WAIT_IN_FILELOCK], [
 			[kernel has locks_lock_file_wait in filelock.h])
 		AC_DEFINE(HAVE_LINUX_FILELOCK_HEADER, 1,
 			[linux/filelock.h is present])
+		AC_DEFINE(HAVE_LM_GRANT_2ARGS, 1,
+			[lock_manager_operations.lm_grant takes two args])
 	])
 ]) # LC_HAVE_LOCKS_LOCK_FILE_WAIT_IN_FILELOCK
 
@@ -4893,16 +4979,18 @@ AC_DEFUN([LC_PROG_LINUX_SRC], [
 	LC_SRC_HAVE_VFS_SETXATTR_NON_CONST_VALUE
 	LC_SRC_HAVE_IOV_ITER_GET_PAGES_ALLOC2
 	LC_SRC_HAVE_USER_BACKED_ITER
-	LC_HAVE_ADD_TO_PAGE_CACHE_LOCKED
+	LC_SRC_HAVE_IOV_ITER_IS_ALIGNED
 
 	# 6.1
 	LC_SRC_HAVE_GET_RANDOM_U32_AND_U64
 	LC_SRC_NFS_FILLDIR_USE_CTX_RETURN_BOOL
 	LC_SRC_HAVE_FILEMAP_GET_FOLIOS_CONTIG
+	LC_SRC_IOP_GET_INODE_ACL
 
 	# 6.2
 	LC_SRC_HAVE_GET_RANDOM_U32_BELOW
 	LC_SRC_HAVE_ACL_WITH_DENTRY
+	LC_SRC_HAVE_FOLIO_MAPCOUNT
 
 	# 6.3
 	LC_SRC_HAVE_MNT_IDMAP_ARG
@@ -5010,6 +5098,7 @@ AC_DEFUN([LC_PROG_LINUX_RESULTS], [
 	LC_HAVE_INTERVAL_BLK_INTEGRITY
 	LC_KEY_MATCH_DATA
 	LC_HAVE_BLK_INTEGRITY_ITER
+	LC_HAVE_LM_GRANT_2ARGS
 
 	# 3.18
 	LC_PERCPU_COUNTER_INIT
@@ -5208,15 +5297,18 @@ AC_DEFUN([LC_PROG_LINUX_RESULTS], [
 	LC_HAVE_VFS_SETXATTR_NON_CONST_VALUE
 	LC_HAVE_IOV_ITER_GET_PAGES_ALLOC2
 	LC_HAVE_USER_BACKED_ITER
+	LC_HAVE_IOV_ITER_IS_ALIGNED
 
 	# 6.1
 	LC_HAVE_GET_RANDOM_U32_AND_U64
 	LC_NFS_FILLDIR_USE_CTX_RETURN_BOOL
 	LC_HAVE_FILEMAP_GET_FOLIOS_CONTIG
+	LC_IOP_GET_INODE_ACL
 
 	# 6.2
 	LC_HAVE_GET_RANDOM_U32_BELOW
 	LC_HAVE_ACL_WITH_DENTRY
+	LC_HAVE_FOLIO_MAPCOUNT
 
 	# 6.3
 	LC_HAVE_MNT_IDMAP_ARG
@@ -5287,6 +5379,9 @@ AC_DEFUN([LC_PROG_LINUX], [
 
 	# 5.2 - Check export
 	LC_ACCOUNT_PAGE_DIRTIED
+
+	# 6.0 - Check export
+	LC_HAVE_ADD_TO_PAGE_CACHE_LOCKED
 
 ]) # LC_PROG_LINUX
 
@@ -5655,6 +5750,7 @@ lustre/doc/Makefile
 lustre/include/Makefile
 lustre/include/lustre/Makefile
 lustre/include/uapi/linux/lustre/Makefile
+lustre/kernel_patches/targets/5.14-rhel9.5.target
 lustre/kernel_patches/targets/5.14-rhel9.4.target
 lustre/kernel_patches/targets/5.14-rhel9.3.target
 lustre/kernel_patches/targets/5.14-rhel9.2.target

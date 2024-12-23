@@ -154,7 +154,7 @@ test_3() {
 run_test 3 "|X| mkdir adir, mkdir adir/bdir "
 
 test_4() {
-	mkdir $MOUNT1/adir
+	mkdir_on_mdt0 $MOUNT1/adir
 	replay_barrier $SINGLEMDS
 	mkdir $MOUNT1/adir  && return 1
 	mkdir $MOUNT2/adir/bdir
@@ -436,7 +436,7 @@ test_18() { # bug 3822 - evicting client with enqueued lock
 	#set -vx
 	local DLMTRACE=$(do_facet $SINGLEMDS lctl get_param debug)
 	do_facet $SINGLEMDS lctl set_param debug=+dlmtrace
-	mkdir -p $MOUNT1/$tdir || error "mkdir $MOUNT1/$tdir failed"
+	mkdir_on_mdt0 $MOUNT1/$tdir || error "mkdir $MOUNT1/$tdir failed"
 	touch $MOUNT1/$tdir/${tfile}0 || error "touch file failed"
 	statmany -s $MOUNT1/$tdir/$tfile 1 500 &
 	OPENPID=$!
@@ -1085,6 +1085,8 @@ test_26() {
 run_test 26 "dbench and tar with mds failover"
 
 test_28() {
+	wait_delete_completed
+
 	$LFS setstripe -i 0 -c 1 $DIR2/$tfile
 	dd if=/dev/zero of=$DIR2/$tfile bs=4096 count=1
 

@@ -19,6 +19,7 @@
 #include <linux/pagemap.h>
 /* For sys_open & sys_close */
 #include <linux/syscalls.h>
+#include <net/net_namespace.h>
 #include <net/sock.h>
 #include <linux/inetdevice.h>
 
@@ -26,6 +27,7 @@
 #include <libcfs/linux/linux-net.h>
 #include <libcfs/libcfs.h>
 #include <lnet/lib-lnet.h>
+#include <lnet/lnet_compat.h>
 
 int
 lnet_sock_write(struct socket *sock, void *buffer, int nob, int timeout)
@@ -190,6 +192,12 @@ retry:
 	}
 
 	sock->sk->sk_reuseport = 1;
+#ifdef HAVE_SOCK_NOT_OWNED_BY_ME
+	/* Set sk_net_refcnt and namespace for orphan cleanup LU-18137 */
+	sock->sk->sk_net_refcnt = 1;
+	get_net(ns);
+	sock_inuse_add(ns, 1);
+#endif
 
 	if (interface >= 0 || local_port != 0) {
 		struct sockaddr_storage locaddr = {};
@@ -454,7 +462,8 @@ static int lnet_inet4_enumerate(struct net_device *dev, int flags,
 			tmp = krealloc(ifaces, *nalloc * sizeof(*tmp),
 				       GFP_KERNEL);
 			if (!tmp) {
-				kfree(*dev_list);
+				kfree(ifaces);
+				*nalloc = 0;
 				*dev_list = NULL;
 				return -ENOMEM;
 			}
@@ -508,7 +517,8 @@ static int lnet_inet6_enumerate(struct net_device *dev, int flags,
 			tmp = krealloc(ifaces, *nalloc * sizeof(*tmp),
 				       GFP_KERNEL);
 			if (!tmp) {
-				kfree(*dev_list);
+				kfree(ifaces);
+				*nalloc = 0;
 				*dev_list = NULL;
 				return -ENOMEM;
 			}

@@ -1569,7 +1569,7 @@ lnet_nid4_cpt_hash(lnet_nid_t nid, unsigned int number)
 	__u16 lnd = LNET_NETTYP(LNET_NIDNET(nid));
 	unsigned int cpt;
 
-	if (lnd == KFILND || lnd == GNILND) {
+	if (lnd == KFILND) {
 		cpt = hash_long(key, LNET_CPT_BITS);
 
 		/* NB: The number of CPTs needn't be a power of 2 */
@@ -2070,10 +2070,7 @@ lnet_ping_target_install_locked(struct lnet_ping_buffer *pbuf)
 	 * must be the loopback interface.
 	 */
 	rc = lnet_ping_info_validate(&pbuf->pb_info);
-	if (rc) {
-		LCONSOLE_EMERG("Invalid ping target: %d\n", rc);
-		LBUG();
-	}
+	LASSERTF(!rc, "Invalid ping target: %d\n", rc);
 	LNET_PING_BUFFER_SEQNO(pbuf) =
 		atomic_inc_return(&the_lnet.ln_ping_target_seqno);
 }

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Simple function used by run_*.sh scripts
+# functions used by other scripts
 
 assert_env() {
 	local failed=""
@@ -353,6 +353,24 @@ run_compilebench() {
 	rm -rf $testdir
 }
 
+# try to understand why a test is running out of space/quota
+find_space_usage() {
+	local dir=$1
+	local tmpfile=$(mktemp)
+
+	$LFS df $dir || df $dir
+	$LFS df -i $dir || df -i $dir
+	$LFS quota -u mpiuser $dir
+	$LFS quota -u root $dir
+
+	du -skx $dir/../* | sort -nr | tee $tmpfile
+	local topdir=$(awk '{ print $2; exit; }' $tmpfile)
+	du -skx $topdir/* | sort -nr | tee $tmpfile
+	topdir=$(awk '{ print $2; exit; }' $tmpfile)
+	du -skx $topdir/* | sort -nr
+	rm -f $tmpfile
+}
+
 run_metabench() {
 	local dir=${1:-$DIR}
 	local mntpt=${2:-$MOUNT}
@@ -374,6 +392,9 @@ run_metabench() {
 	# mpi_run uses mpiuser
 	chmod 0777 $testdir
 
+	# try to understand why this test is running out of space/quota
+	find_space_usage $dir
+
 	# -C             Run the file creation tests. Creates zero byte files.
 	# -S             Run the file stat tests.
 	# -c nfile       Number of files to be used in each test.
@@ -393,6 +414,7 @@ run_metabench() {
 
 	local rc=$?
 	if [ $rc != 0 ] ; then
+		find_space_usage $dir
 		error "metabench failed! $rc"
 	fi
 
@@ -647,7 +669,7 @@ run_ior() {
 
 	print_opts IOR ior_THREADS ior_DURATION MACHINEFILE
 
-	test_mkdir -p $testdir
+	client_load_mkdir $testdir
 
 	# mpi_run uses mpiuser
 	chmod 0777 $testdir
@@ -1005,13 +1027,13 @@ run_statahead () {
 }
 
 cleanup_rr_alloc () {
-	trap 0
 	local clients="$1"
 	local mntpt_root="$2"
 	local rr_alloc_MNTPTS="$3"
 	local mntpt_dir=$(dirname ${mntpt_root})
 
-	for i in $(seq 0 $((rr_alloc_MNTPTS - 1))); do
+	$LFS find $DIR/$tdir -type f | xargs -n1 -P8 unlink
+	for ((i=0; i < rr_alloc_MNTPTS; i++)); do
 		zconf_umount_clients $clients ${mntpt_root}$i ||
 		error_exit "Failed to umount lustre on ${mntpt_root}$i"
 	done
@@ -1021,12 +1043,13 @@ cleanup_rr_alloc () {
 run_rr_alloc() {
 	remote_mds_nodsh && skip "remote MDS with nodsh"
 
+	RR_ALLOC=${RR_ALLOC:-$(which rr_alloc 2> /dev/null || true)}
+	[[ -n "$RR_ALLOC" ]] || skip_env "rr_alloc not found"
+
 	echo "===Test gives more reproduction percentage if number of "
 	echo "   client and ost are more. Test with 44 or more clients "
 	echo "   and 73 or more OSTs gives 100% reproduction rate=="
 
-	RR_ALLOC=${RR_ALLOC:-$(which rr_alloc 2> /dev/null || true)}
-	[ x$RR_ALLOC = x ] && skip_env "rr_alloc not found"
 	declare -a diff_max_min_arr
 	local ost_idx
 	local qos_prec_objs="${TMP}/qos_and_precreated_objects"
@@ -1034,13 +1057,19 @@ run_rr_alloc() {
 	local rr_alloc_MNTPTS=${rr_alloc_MNTPTS:-11}
 	local total_MNTPTS=$((rr_alloc_MNTPTS * num_clients))
 	local mntpt_root="${TMP}/rr_alloc_mntpt/lustre"
-	test_mkdir $DIR/$tdir
+	test_mkdir -c $MDSCOUNT $DIR/$tdir
 	setstripe_getstripe $DIR/$tdir $rr_alloc_STRIPEPARAMS
 
+	ost_set_temp_seq_width_all $DATA_SEQ_MAX_WIDTH
+
+	(( ONLY_REPEAT_ITER == 1 )) || wait_delete_completed
+
+	$LFS df $DIR/$tdir
+	$LFS df -i $DIR/$tdir
 	chmod 0777 $DIR/$tdir
 
-	trap "cleanup_rr_alloc $clients $mntpt_root $rr_alloc_MNTPTS" EXIT ERR
-	for i in $(seq 0 $((rr_alloc_MNTPTS - 1))); do
+	stack_trap "cleanup_rr_alloc $clients $mntpt_root $rr_alloc_MNTPTS"
+	for ((i=0; i < rr_alloc_MNTPTS; i++)); do
 		zconf_mount_clients $clients ${mntpt_root}$i $MOUNT_OPTS ||
 		error_exit "Failed to mount lustre on ${mntpt_root}$i $clients"
 	done
@@ -1051,50 +1080,74 @@ run_rr_alloc() {
 		"lod.$FSNAME-MDT0000*.qos_threshold_rr" > $qos_prec_objs
 	save_lustre_params mds1 \
 		"osp.$FSNAME-OST*-osc-MDT0000.create_count" >> $qos_prec_objs
-
-	local old_create_count=$(grep -e "create_count" $qos_prec_objs |
-		cut -d'=' -f 2 | sort -nr | head -n1)
+	stack_trap "restore_lustre_params <$qos_prec_objs; rm -f $qos_prec_objs"
 
 	# Make sure that every osp has enough precreated objects for the file
 	# creation app
 
-	# create_count is always set to the power of 2 only, so if the files
-	# per OST are not multiple of that then it will be set to nearest
-	# lower power of 2. So set 'create_count' to the upper power of 2.
+	# The MDS does not precreate objects if there are at least
+	# create_count / 2 precreated objects available for the OST.
+	# Set 'create_count' to 2x required number to force creation.
 
 	# foeo = file on each ost. calc = calculated.
 	local foeo_calc=$((rr_alloc_NFILES * total_MNTPTS / OSTCOUNT))
 	local create_count=$((2 * foeo_calc))
+	local max_create_count=$(do_facet $SINGLEMDS "$LCTL get_param -n \
+				 osp.*OST0000*MDT0000.max_create_count")
 
 	# create_count accepted values:
 	#   [OST_MIN_PRECREATE=32, OST_MAX_PRECREATE=20000]
-	# values exceeding OST_MAX_PRECREATE are lowered to the maximum.
-	[[ $create_count -lt 32 ]] && create_count=32
-	local i
-	for i in $(seq $MDSCOUNT); do
-		do_facet mds$i "$LCTL set_param -n \
-			lod.$FSNAME-MDT*.qos_threshold_rr=100 \
-			osp.$FSNAME-OST*-osc-MDT*.create_count=$create_count"
-	done
+	# values exceeding OST_MAX_PRECREATE are lowered to half of the maximum.
+	(( create_count >= 32 )) || create_count=32
+	(( create_count <= max_create_count )) ||
+		create_count=$((max_create_count / 2))
 
-	# Create few temporary files in order to increase the precreated objects
-	# to a desired value, before starting 'rr_alloc' app. Due to default
-	# value 32 of precreation count (OST_MIN_PRECREATE=32), precreated
-	# objects available are 32 initially, these gets exhausted very soon,
-	# which causes skip of some osps when very large number of files
-	# is created per OSTs.
-	createmany -o $DIR/$tdir/foo- $(((old_create_count + 1) * OSTCOUNT)) \
-		> /dev/null
-	unlinkmany $DIR/$tdir/foo- $(((old_create_count + 1)  * OSTCOUNT))
+	local mdts=$(comma_list $(mdts_nodes))
+
+	do_nodes $mdts "$LCTL set_param lod.*.qos_threshold_rr=100 \
+		osp.*.create_count=$create_count"
 
 	# Check for enough precreated objects... We should not
 	# fail here because code(osp_precreate.c) also takes care of it.
 	# So we have good chances of passing test even if this check fails.
-	local mdt_idx=0
-	for ((ost_idx = 0; ost_idx < $OSTCOUNT; ost_idx++ )); do
-		(($(precreated_ost_obj_count $mdt_idx $ost_idx) >= foeo_calc))||
-		echo "Warning: test may fail from too few objs on OST$ost_idx"
+	local stop=$((SECONDS + 60))
+	local forced
+	local waited
+
+	while ((SECONDS < stop)); do
+		local sleep=0
+
+		for ((mdt_idx = 0; mdt_idx < $MDSCOUNT; mdt_idx++)); do
+			for ((ost_idx = 0; ost_idx < $OSTCOUNT; ost_idx++)); do
+				local count=$(precreated_ost_obj_count \
+					      $mdt_idx $ost_idx)
+				if ((count < foeo_calc / 6)); then
+					local this_pair=mdt$mdt_idx.$ost_idx
+
+					sleep=1
+
+					# allow one iteration to precreate,
+					# then force create new sequence once
+					[[ "$forced" =~ "$this_pair" ]] &&
+						continue
+
+					if [[ "$waited" =~ "$this_pair" ]]; then
+						mkdir -p $DIR/$tdir.2
+						force_new_seq_ost $DIR/$tdir.2 \
+						    mds$((mdt_idx+1)) $ost_idx
+						forced="$forced $this_pair"
+					else
+						waited="$waited $this_pair"
+					fi
+				fi
+			done
+		done
+
+		(( sleep > 0 )) || break
+
+		sleep $sleep
 	done
+	[[ -d $DIR/$tdir.2 ]] && stack_trap "rm -rf $DIR/$tdir.2"
 
 	local cmd="$RR_ALLOC $mntpt_root/$tdir/f $rr_alloc_NFILES $num_clients"
 
@@ -1105,31 +1158,25 @@ run_rr_alloc() {
 		error "No mount point"
 	fi
 
-	restore_lustre_params < $qos_prec_objs
-	rm -f $qos_prec_objs
-
 	diff_max_min_arr=($($LFS getstripe -r $DIR/$tdir/ |
 			    awk '/lmm_stripe_offset:/ {print $2}' |
-			    sort | uniq -c |
+			    sort | uniq -c | tee /dev/stderr |
 			    awk 'NR==1 {min=max=$1} \
 				 { $1<min ? min=$1:min; $1>max ? max=$1:max} \
 				 END {print max-min, max, min}'))
 
-	$LFS find $DIR/$tdir -type f | xargs -n1 -P8 unlink
-
-
-	# In-case of fairly large number of file creation using RR (round-robin)
+	# In case of fairly large number of file creation using RR (round-robin)
 	# there can be two cases in which deviation will occur than the regular
 	# RR algo behaviour-
 	# 1- When rr_alloc does not start right with 'lqr_start_count' reseeded,
 	# 2- When rr_alloc does not finish with 'lqr_start_count == 0'.
-	# So the difference of files b/w any 2 OST should not be more than 2.
-	# In some cases it may be more, but shouldn't be > 0.3% of the files.
-	local max_diff=$((create_count > 600 ? create_count / 300 : 2))
+	# So the difference of files for any 2 OST should not be more than 2-3.
+	# In some cases it may be more, but shouldn't be > .3% of the files.
+	local max_diff=$((create_count > 600 ? create_count / 200 : $MDSCOUNT))
 
 	(( ${diff_max_min_arr[0]} <= $max_diff )) || {
-		$LFS getstripe -r $DIR/$tdir |
-			awk '/lmm_stripe_offset:/ {print $2}' | sort | uniq -c
+		$LFS df $DIR/$tdir
+		$LFS df -i $DIR/$tdir
 
 		error "max/min OST objects (${diff_max_min_arr[1]} : ${diff_max_min_arr[2]}) too different"
 	}
@@ -1351,4 +1398,43 @@ run_xdd() {
 	[ $rc = 0 ] || error "xdd failed: $rc"
 
 	rm -rf $testdir
+}
+
+client_load_mkdir () {
+	local dir=$1
+	local parent=$(dirname $dir)
+
+	local mdtcount=$($LFS df $parent 2> /dev/null | grep -c MDT)
+	if [ $mdtcount -le 1 ] || ! is_lustre ${parent}; then
+		mkdir $dir || return 1
+		return 0
+	else
+		mdt_idx=$((RANDOM % mdtcount))
+		if $RECOVERY_SCALE_ENABLE_STRIPED_DIRS; then
+			# stripe_count in range [1,mdtcount]
+			# $LFS mkdir treats stripe_count 0 and 1 the same
+			stripe_count_opt="-c$((RANDOM % mdtcount + 1))"
+		else
+			stripe_count_opt=""
+		fi
+	fi
+
+	if $RECOVERY_SCALE_ENABLE_REMOTE_DIRS ||
+	   $RECOVERY_SCALE_ENABLE_STRIPED_DIRS; then
+		$LFS mkdir -i$mdt_idx $stripe_count_opt $dir ||
+			return 1
+	else
+		mkdir $dir || return 1
+	fi
+	$LFS getdirstripe $dir || return 1
+
+	if [ -n "$client_load_SETSTRIPEPARAMS" ]; then
+		$LFS setstripe $client_load_SETSTRIPEPARAMS $dir ||
+		return 1
+	fi
+	$LFS getstripe $dir || return 1
+}
+
+enospc_detected () {
+	grep "No space left on device" $1 | grep -qv grep
 }

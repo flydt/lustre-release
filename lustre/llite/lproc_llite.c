@@ -1131,6 +1131,63 @@ static ssize_t statahead_timeout_store(struct kobject *kobj,
 }
 LUSTRE_RW_ATTR(statahead_timeout);
 
+static ssize_t
+statahead_fname_predict_hit_show(struct kobject *kobj, struct attribute *attr,
+				 char *buf)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+
+	return snprintf(buf, PAGE_SIZE, "%u\n", sbi->ll_sa_fname_predict_hit);
+}
+
+static ssize_t
+statahead_fname_predict_hit_store(struct kobject *kobj, struct attribute *attr,
+				  const char *buffer, size_t count)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+	unsigned long val;
+	int rc;
+
+	rc = kstrtoul(buffer, 0, &val);
+	if (rc)
+		return rc;
+
+	sbi->ll_sa_fname_predict_hit = val;
+	return count;
+}
+LUSTRE_RW_ATTR(statahead_fname_predict_hit);
+
+
+static ssize_t
+statahead_fname_match_hit_show(struct kobject *kobj, struct attribute *attr,
+			       char *buf)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+
+	return snprintf(buf, PAGE_SIZE, "%u\n", sbi->ll_sa_fname_match_hit);
+}
+
+static ssize_t
+statahead_fname_match_hit_store(struct kobject *kobj, struct attribute *attr,
+				const char *buffer, size_t count)
+{
+	struct ll_sb_info *sbi = container_of(kobj, struct ll_sb_info,
+					      ll_kset.kobj);
+	unsigned long val;
+	int rc;
+
+	rc = kstrtoul(buffer, 0, &val);
+	if (rc)
+		return rc;
+
+	sbi->ll_sa_fname_match_hit = val;
+	return count;
+}
+LUSTRE_RW_ATTR(statahead_fname_match_hit);
+
 static ssize_t statahead_agl_show(struct kobject *kobj,
 				  struct attribute *attr,
 				  char *buf)
@@ -2410,6 +2467,8 @@ static struct attribute *llite_attrs[] = {
 	&lustre_attr_statahead_max.attr,
 	&lustre_attr_statahead_min.attr,
 	&lustre_attr_statahead_timeout.attr,
+	&lustre_attr_statahead_fname_predict_hit.attr,
+	&lustre_attr_statahead_fname_match_hit.attr,
 	&lustre_attr_statahead_agl.attr,
 	&lustre_attr_lazystatfs.attr,
 	&lustre_attr_statfs_max_age.attr,
@@ -2509,6 +2568,9 @@ static const struct llite_file_opcode {
 	{ LPROC_LL_PCC_ATTACH,  LPROCFS_TYPE_REQS,	"pcc_attach" },
 	{ LPROC_LL_PCC_DETACH,  LPROCFS_TYPE_REQS,	"pcc_detach" },
 	{ LPROC_LL_PCC_AUTOAT, LPROCFS_TYPE_REQS,	"pcc_auto_attach" },
+	{ LPROC_LL_PCC_HIT_BYTES, LPROCFS_TYPE_BYTES_FULL, "pcc_hit_bytes" },
+	{ LPROC_LL_PCC_ATTACH_BYTES, LPROCFS_TYPE_BYTES_FULL,
+		"pcc_attach_bytes" },
 	/* hybrid IO switch from buffered I/O (BIO) to direct I/O (DIO) */
 	{ LPROC_LL_HYBRID_NOSWITCH, LPROCFS_TYPE_REQS, "hybrid_noswitch" },
 	{ LPROC_LL_HYBRID_WRITESIZE_SWITCH, LPROCFS_TYPE_REQS,
@@ -2566,8 +2628,22 @@ int ll_debugfs_register_super(struct super_block *sb, const char *name)
 	ENTRY;
 	LASSERT(sbi);
 
+	/* Yes we also register sysfs mount kset here as well */
+	sbi->ll_kset.kobj.parent = llite_kobj;
+	sbi->ll_kset.kobj.ktype = &sbi_ktype;
+	init_completion(&sbi->ll_kobj_unregister);
+	err = kobject_set_name(&sbi->ll_kset.kobj, "%s", name);
+	if (err)
+		RETURN(err);
+
+	err = kset_register(&sbi->ll_kset);
+	if (err)
+		RETURN(err);
+
+	lsi->lsi_kobj = kobject_get(&sbi->ll_kset.kobj);
+
 	if (IS_ERR_OR_NULL(llite_root))
-		goto out_ll_kset;
+		RETURN(0);
 
 	sbi->ll_debugfs_entry = debugfs_create_dir(name, llite_root);
 	ldebugfs_add_vars(sbi->ll_debugfs_entry, lprocfs_llite_obd_vars, sb);
@@ -2586,9 +2662,11 @@ int ll_debugfs_register_super(struct super_block *sb, const char *name)
 			    &ll_rw_offset_stats_fops);
 
 	/* File operations stats */
-	sbi->ll_stats = lprocfs_stats_alloc(LPROC_LL_FILE_OPCODES,
-					    LPROCFS_STATS_FLAG_NONE);
-	if (sbi->ll_stats == NULL)
+	sbi->ll_stats = ldebugfs_stats_alloc(LPROC_LL_FILE_OPCODES, "stats",
+					     sbi->ll_debugfs_entry,
+					     &sbi->ll_kset.kobj,
+					     LPROCFS_STATS_FLAG_NONE);
+	if (!sbi->ll_stats)
 		GOTO(out_debugfs, err = -ENOMEM);
 
 	/* do counter init */
@@ -2597,9 +2675,6 @@ int ll_debugfs_register_super(struct super_block *sb, const char *name)
 				     llite_opcode_table[id].lfo_opcode,
 				     llite_opcode_table[id].lfo_config,
 				     llite_opcode_table[id].lfo_opname);
-
-	debugfs_create_file("stats", 0644, sbi->ll_debugfs_entry,
-			    sbi->ll_stats, &ldebugfs_stats_seq_fops);
 
 	sbi->ll_ra_stats = lprocfs_stats_alloc(ARRAY_SIZE(ra_stat_string),
 					       LPROCFS_STATS_FLAG_NONE);
@@ -2621,24 +2696,7 @@ int ll_debugfs_register_super(struct super_block *sb, const char *name)
 	debugfs_create_file("read_ahead_stats", 0644, sbi->ll_debugfs_entry,
 			    sbi->ll_ra_stats, &ldebugfs_stats_seq_fops);
 
-out_ll_kset:
-	/* Yes we also register sysfs mount kset here as well */
-	sbi->ll_kset.kobj.parent = llite_kobj;
-	sbi->ll_kset.kobj.ktype = &sbi_ktype;
-	init_completion(&sbi->ll_kobj_unregister);
-	err = kobject_set_name(&sbi->ll_kset.kobj, "%s", name);
-	if (err)
-		GOTO(out_ra_stats, err);
-
-	err = kset_register(&sbi->ll_kset);
-	if (err)
-		GOTO(out_ra_stats, err);
-
-	lsi->lsi_kobj = kobject_get(&sbi->ll_kset.kobj);
-
 	RETURN(0);
-out_ra_stats:
-	lprocfs_stats_free(&sbi->ll_ra_stats);
 out_stats:
 	lprocfs_stats_free(&sbi->ll_stats);
 out_debugfs:

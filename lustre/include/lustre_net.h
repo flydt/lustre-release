@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2010, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- */
-/** \defgroup PtlRPC Portal RPC and networking module.
  *
  * PortalRPC is the layer used by rest of lustre code to achieve network
  * communications: establish connections with corresponding export and import
@@ -37,10 +17,7 @@
  * replaying, reconnections, pinger.
  *
  * PortalRPC utilizes LNet as its transport layer.
- *
- * @{
  */
-
 
 #ifndef _LUSTRE_NET_H
 #define _LUSTRE_NET_H
@@ -2489,10 +2466,8 @@ ptlrpc_client_recv(struct ptlrpc_request *req)
 	return req->rq_receiving_reply;
 }
 
-#define ptlrpc_cli_wait_unlink(req) __ptlrpc_cli_wait_unlink(req, NULL)
-
 static inline int
-__ptlrpc_cli_wait_unlink(struct ptlrpc_request *req, bool *discard)
+ptlrpc_client_recv_or_unlink(struct ptlrpc_request *req)
 {
 	int rc;
 
@@ -2504,15 +2479,6 @@ __ptlrpc_cli_wait_unlink(struct ptlrpc_request *req, bool *discard)
 	if (req->rq_req_deadline > ktime_get_real_seconds()) {
 		spin_unlock(&req->rq_lock);
 		return 1;
-	}
-
-	if (discard) {
-		*discard = false;
-		if (req->rq_reply_unlinked && req->rq_req_unlinked == 0) {
-			*discard = true;
-			spin_unlock(&req->rq_lock);
-			return 1; /* Should call again after LNetMDUnlink */
-		}
 	}
 
 	rc = !req->rq_req_unlinked || !req->rq_reply_unlinked ||

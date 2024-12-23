@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2010, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -48,6 +30,9 @@
 #include <lustre_import.h>
 #include <lustre_handles.h>
 #include <linux/interval_tree_generic.h>
+#ifdef HAVE_LINUX_FILELOCK_HEADER
+#include <linux/filelock.h>
+#endif
 
 #include "lustre_dlm_flags.h"
 
@@ -769,6 +754,7 @@ enum lvb_type {
 	LVB_T_OST	= 1,
 	LVB_T_LQUOTA	= 2,
 	LVB_T_LAYOUT	= 3,
+	LVB_T_END
 };
 
 /**
@@ -820,27 +806,29 @@ struct ldlm_lock {
 	 * Internal structures per lock type..
 	 */
 	union {
-		/* LDLM_EXTENT locks only */
-		struct {
+		struct { /* LDLM_EXTENT locks only */
 			/* Originally requested extent for the extent lock. */
 			struct ldlm_extent	l_req_extent;
 			struct rb_node		l_rb;
 			u64			l_subtree_last;
 			struct list_head	l_same_extent;
 		};
-		/* LDLM_PLAIN and LDLM_IBITS locks */
-		struct {
+		struct { /* LDLM_PLAIN and LDLM_IBITS locks */
 			/**
 			 * Protected by lr_lock, linkages to "skip lists".
-			 * For more explanations of skip lists see ldlm/ldlm_inodebits.c
+			 * For explanations of skip lists see
+			 * ldlm/ldlm_inodebits.c
 			 */
 			struct list_head	l_sl_mode;
 			struct list_head	l_sl_policy;
 
 			struct ldlm_ibits_node  *l_ibits_node;
+			/* separate ost_lvb used mostly by Data-on-MDT for now.
+			 * It is introduced to don't mix with layout lock data.
+			 */
+			struct ost_lvb		 l_ost_lvb;
 		};
-		/* LDLM_FLOCK locks */
-		struct {
+		struct { /* LDLM_FLOCK locks */
 			/**
 			 * Per export hash of flock locks.
 			 * Protected by per-bucket exp->exp_flock_hash locks.
@@ -857,15 +845,32 @@ struct ldlm_lock {
 	 * Protected by per-bucket exp->exp_lock_hash locks.
 	 */
 	struct hlist_node	l_exp_hash;
+
+	/* Requested mode. Protected by lr_lock. */
+	enum ldlm_mode		l_req_mode:9;
+	/* Granted mode, also protected by lr_lock.  */
+	enum ldlm_mode		l_granted_mode:9;
+
 	/**
-	 * Requested mode.
-	 * Protected by lr_lock.
+	 * Whether the blocking AST was sent for this lock.
+	 * This is for debugging. Valid values are 0 and 1, if there is an
+	 * attempt to send blocking AST more than once, an assertion would be
+	 * hit. \see ldlm_work_bl_ast_lock
 	 */
-	enum ldlm_mode		l_req_mode;
-	/**
-	 * Granted mode, also protected by lr_lock.
+	unsigned int		l_bl_ast_run:1;
+
+	/* content type for lock value block */
+	enum lvb_type		l_lvb_type:3;
+	/* unsigned int		l_unused_bits:10; */
+	u16			l_lvb_len;
+	/* u16			l_unused; */
+
+	/*
+	 * Temporary storage for a LVB received during an enqueue operation.
+	 * May be vmalloc'd, so needs to be freed with OBD_FREE_LARGE().
 	 */
-	enum ldlm_mode		l_granted_mode;
+	void			*l_lvb_data;
+
 	/** Lock completion handler pointer. Called when lock is granted. */
 	ldlm_completion_callback l_completion_ast;
 	/**
@@ -935,19 +940,6 @@ struct ldlm_lock {
 	 */
 	ktime_t			l_last_used;
 
-	/*
-	 * Client-side-only members.
-	 */
-
-	enum lvb_type	      l_lvb_type;
-
-	/**
-	 * Temporary storage for a LVB received during an enqueue operation.
-	 * May be vmalloc'd, so needs to be freed with OBD_FREE_LARGE().
-	 */
-	__u32			l_lvb_len;
-	void			*l_lvb_data;
-
 	/** Private storage for lock user. Opaque to LDLM. */
 	void			*l_ast_data;
 
@@ -961,10 +953,6 @@ struct ldlm_lock {
 		time64_t	l_blast_sent;
 	};
 
-	/* separate ost_lvb used mostly by Data-on-MDT for now.
-	 * It is introduced to don't mix with layout lock data.
-	 */
-	struct ost_lvb		 l_ost_lvb;
 	/*
 	 * Server-side-only members.
 	 */
@@ -996,14 +984,8 @@ struct ldlm_lock {
 
 	/** Local PID of process which created this lock. */
 	__u32			l_pid;
+	/* __u32		l_unused; */
 
-	/**
-	 * Number of times blocking AST was sent for this lock.
-	 * This is for debugging. Valid values are 0 and 1, if there is an
-	 * attempt to send blocking AST more than once, an assertion would be
-	 * hit. \see ldlm_work_bl_ast_lock
-	 */
-	int			l_bl_ast_run;
 	/** List item ldlm_add_ast_work_item() for case of blocking ASTs. */
 	struct list_head	l_bl_ast;
 	/** List item ldlm_add_ast_work_item() for case of completion ASTs. */
@@ -1131,6 +1113,8 @@ struct ldlm_resource {
 	 * that are waiting for conflicts to go away
 	 */
 	struct list_head	lr_waiting;
+	/* List of locks that waiting to enqueueing for flock */
+	struct list_head	lr_enqueueing;
 	/** @} */
 
 	/** Resource name */
@@ -1153,18 +1137,19 @@ struct ldlm_resource {
 	};
 
 	/** Type of locks this resource can hold. Only one type per resource. */
-	enum ldlm_type		lr_type; /* LDLM_{PLAIN,EXTENT,FLOCK,IBITS} */
+	enum ldlm_type		lr_type:4; /* LDLM_{PLAIN,EXTENT,FLOCK,IBITS} */
+	/* unsigned int		lr_unused_bits:4; */
+	/* char			lr_unused[5]; */
 
 	/**
 	 * Server-side-only lock value block elements.
 	 * To serialize lvbo_init.
 	 */
-	int			lr_lvb_len;
+	bool			lr_lvb_initialized;
+	char			lr_lvb_len;
 	struct mutex		lr_lvb_mutex;
 	/** protected by lr_lock */
 	void			*lr_lvb_data;
-	/** is lvb initialized ? */
-	bool			lr_lvb_initialized;
 };
 
 static inline int ldlm_is_granted(struct ldlm_lock *lock)
@@ -1305,6 +1290,27 @@ struct ldlm_enqueue_info {
 
 #define ei_res_id	ei_cb_gl
 
+enum ldlm_flock_flags {
+	FA_FL_CANCEL_RQST	= 1,
+	FA_FL_CANCELED		= 2,
+};
+
+struct ldlm_flock_info {
+	struct file		*fa_file;
+	struct file_lock	*fa_fl; /* original file_lock */
+	struct file_lock	fa_flc; /* lock copy */
+	enum ldlm_flock_flags	fa_flags;
+	enum ldlm_mode		fa_mode;
+#ifdef HAVE_LM_GRANT_2ARGS
+	int (*fa_notify)(struct file_lock *, int);
+#else
+	int (*fa_notify)(struct file_lock *, struct file_lock *, int);
+#endif
+	int			fa_err;
+	int			fa_ready;
+	wait_queue_head_t       fa_waitq;
+};
+
 extern char *ldlm_lockname[];
 extern char *ldlm_typename[];
 extern const char *ldlm_it2str(enum ldlm_intent_flags it);
@@ -1439,6 +1445,9 @@ int ldlm_replay_locks(struct obd_import *imp);
 
 /* ldlm_flock.c */
 int ldlm_flock_completion_ast(struct ldlm_lock *lock, __u64 flags, void *data);
+struct ldlm_flock_info *
+ldlm_flock_completion_ast_async(struct ldlm_lock *lock, __u64 flags,
+				void *data);
 
 /* ldlm_extent.c */
 __u64 ldlm_extent_shift_kms(struct ldlm_lock *lock, __u64 old_kms);

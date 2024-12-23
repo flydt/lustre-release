@@ -704,6 +704,7 @@ check_obd_connect_data(void)
 	CHECK_DEFINE_64X(OBD_CONNECT2_UNALIGNED_DIO);
 	CHECK_DEFINE_64X(OBD_CONNECT2_CONN_POLICY);
 	CHECK_DEFINE_64X(OBD_CONNECT2_MIRROR_ID_FIX);
+	CHECK_DEFINE_64X(OBD_CONNECT2_UPDATE_LAYOUT);
 
 	BLANK_LINE();
 	CHECK_VALUE_X(OBD_CKSUM_CRC32);
@@ -2543,6 +2544,9 @@ static void check_layout_intent(void)
 	CHECK_VALUE(LAYOUT_INTENT_RESTORE);
 	CHECK_VALUE(LAYOUT_INTENT_PCCRO_SET);
 	CHECK_VALUE(LAYOUT_INTENT_PCCRO_CLEAR);
+	CHECK_VALUE(LAYOUT_INTENT_CHANGE);
+
+	CHECK_VALUE(LAIF_INCOMPRESSIBLE);
 }
 
 static void check_hsm_state_set(void)
@@ -2972,9 +2976,9 @@ static void check_nodemap_cluster_roles_rec(void)
 	BLANK_LINE();
 	CHECK_STRUCT(nodemap_cluster_roles_rec);
 	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_roles);
-	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_unused1);
-	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_unused2);
-	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_unused3);
+	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_padding1);
+	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_padding2);
+	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_padding3);
 }
 
 static void check_nodemap_rec(void)
@@ -3037,6 +3041,7 @@ static void check_nodemap_key(void)
 	CHECK_VALUE_X(NODEMAP_RBAC_BYFID_OPS);
 	CHECK_VALUE_X(NODEMAP_RBAC_CHLG_OPS);
 	CHECK_VALUE_X(NODEMAP_RBAC_FSCRYPT_ADMIN);
+	CHECK_VALUE_X(NODEMAP_RBAC_SERVER_UPCALL);
 	CHECK_VALUE_X(NODEMAP_RBAC_NONE);
 	CHECK_VALUE_X(NODEMAP_RBAC_ALL);
 }

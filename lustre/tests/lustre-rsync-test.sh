@@ -63,9 +63,9 @@ fini_changelog() {
 }
 
 init_src() {
-	rm -rf $TGT/$tdir $TGT/d*.lustre_rsync-test 2> /dev/null
-	rm -rf $TGT2/$tdir $TGT2/d*.lustre_rsync-test 2> /dev/null
-	rm -rf ${DIR}/$tdir $DIR/d*.lustre_rsync-test ${DIR}/tgt 2> /dev/null
+	rm -rf $TGT/$tdir $TGT/d*.lustre-rsync-test 2> /dev/null
+	rm -rf $TGT2/$tdir $TGT2/d*.lustre-rsync-test 2> /dev/null
+	rm -rf ${DIR}/$tdir $DIR/d*.lustre-rsync-test ${DIR}/tgt 2> /dev/null
 	rm -f $LREPL_LOG
 
 	mkdir_on_mdt0 $DIR/$tdir || error "Failed to create target: " $DIR/$tdir
@@ -455,7 +455,8 @@ test_4() {
 	init_changelog
 
 	END_RUN_FILE=${DIR}/$tdir/run LOAD_PID_FILE=${DIR}/$tdir/pid \
-		MOUNT=${DIR}/$tdir run_iozone.sh &
+		MOUNT=${DIR}/$tdir RECOVERY_SCALE_ENABLE_REMOTE_DIRS=false \
+		RECOVERY_SCALE_ENABLE_STRIPED_DIRS=false run_iozone.sh &
 	sleep 30
 	child_pid=$(pgrep iozone)
 	stop_procs $child_pid

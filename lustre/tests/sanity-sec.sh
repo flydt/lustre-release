@@ -2277,6 +2277,9 @@ test_27aa() { #LU-17922
 	local idmap
 	local id=500
 
+	(( $MDS1_VERSION >= $(version_code v2_15_64-86-g8445f7b92f) )) ||
+		skip "need MDS >= 2.15.64.86 for nodemap range"
+
 	do_facet mgs $LCTL nodemap_add Test17922 ||
 		error "unable to add Test17922 as nodemap"
 	stack_trap "do_facet mgs $LCTL nodemap_del Test17922 || true"
@@ -2589,9 +2592,12 @@ test_31() {
 	local addr1=${mdsnid%@*}
 	local nid2=${addr}@$net2
 	local addr2 failover_mds1
+	local all=$(comma_list $(all_nodes))
 
 	export LNETCTL=$(which lnetctl 2> /dev/null)
 
+	(( $MDS1_VERSION >= $(version_code 2.15.0) )) ||
+		skip "Need MDS >= 2.15.0"
 	[ -z "$LNETCTL" ] && skip "without lnetctl support." && return
 	local_mode && skip "in local mode."
 
@@ -2610,7 +2616,7 @@ test_31() {
 	fi
 
 	# build list of interface on nodes
-	for node in $(all_nodes); do
+	for node in ${all//,/ }; do
 		infname=inf_$(echo $node | cut -d'.' -f1 | sed s+-+_+g)
 		itf=$(do_node $node $LNETCTL net show --net $net |
 		      awk 'BEGIN{inf=0} \
@@ -2622,6 +2628,7 @@ test_31() {
 	local mgsnid_orig=$MGSNID
 	# compute new MGSNID
 	local mgsnid_new=${MGSNID%@*}@$net2
+	local tgts=$(tgts_nodes)
 
 	# save mds failover nids for restore at cleanup
 	failover_mds1=$(do_facet mds1 $TUNEFS --dryrun $(mdsdevname 1))
@@ -2642,24 +2649,22 @@ test_31() {
 	fi
 
 	do_facet mgs "$LCTL set_param mgs.MGS.exports.clear=clear"
-	do_nodes $(comma_list $(mdts_nodes) $(osts_nodes)) \
-		"$LCTL set_param *.${FSNAME}*.exports.clear=clear"
+	do_nodes $tgts "$LCTL set_param *.${FSNAME}*.exports.clear=clear"
 
 	# check exports on servers are empty for client
 	wait_update_facet_cond mgs \
 		"$LCTL get_param -N mgs.MGS.exports.* | grep $nid |
 		cut -d'.' -f4-" '!=' $nid
-	for node in $(mdts_nodes) $(osts_nodes); do
+	for node in ${tgts//,/ }; do
 		wait_update_cond $node \
 			"$LCTL get_param -N *.${FSNAME}*.exports | grep $nid |
 			cut -d'.' -f4-" '!=' $nid
 	done
-	do_facet mgs "lctl get_param *.MGS*.exports.*.export"
-	do_facet mgs "lctl get_param -n *.MGS*.exports.'$nid'.uuid 2>/dev/null |
+	do_facet mgs "$LCTL get_param *.MGS*.exports.*.export"
+	do_facet mgs "$LCTL get_param -n *.MGS*.exports.'$nid'.uuid 2>/dev/null|
 		      grep -q -" && error "export on MGS should be empty"
-	do_nodes $(comma_list $(mdts_nodes) $(osts_nodes)) \
-		 "lctl get_param -n *.${FSNAME}*.exports.'$nid'.uuid \
-		  2>/dev/null | grep -q -" &&
+	do_nodes $tgts "$LCTL get_param -n *.${FSNAME}*.exports.'$nid'.uuid \
+			 2>/dev/null | grep -q -" &&
 		error "export on servers should be empty"
 
 	KZPOOL=$KEEP_ZPOOL
@@ -2669,9 +2674,8 @@ test_31() {
 		error "Failed to unload modules"
 
 	# add network $net2 on all nodes
-	do_rpc_nodes $(comma_list $(all_nodes)) load_modules ||
-		error "unable to load modules on $(all_nodes)"
-	for node in $(all_nodes); do
+	do_rpc_nodes $all load_modules || error "unable to load modules on $all"
+	for node in ${all//,/ }; do
 		do_node $node "$LNETCTL lnet configure" ||
 			error "unable to configure lnet on node $node"
 		infname=inf_$(echo $node | cut -d'.' -f1 | sed s+-+_+g)
@@ -2712,34 +2716,29 @@ test_31() {
 		error "unable to remount client"
 
 	# check export on MGS
-	do_facet mgs "lctl get_param *.MGS*.exports.*.export"
-	do_facet mgs "lctl get_param -n *.MGS*.exports.'$nid'.uuid 2>/dev/null |
-		      grep -"
-	[ $? -ne 0 ] ||	error "export for $nid on MGS should not exist"
+	do_facet mgs "$LCTL get_param *.MGS*.exports.*.export"
+	do_facet mgs "$LCTL get_param -n *.MGS*.exports.'$nid'.uuid 2>/dev/null|
+		      grep -" &&
+		error "export for $nid on MGS should not exist"
 
-	do_facet mgs \
-		"lctl get_param -n *.MGS*.exports.'$nid2'.uuid \
-		 2>/dev/null | grep -"
-	[ $? -eq 0 ] ||
+	do_facet mgs "$LCTL get_param -n *.MGS*.exports.'$nid2'.uuid"|grep - ||
 		error "export for $nid2 on MGS should exist"
 
 	# check {mdc,osc} imports
-	lctl get_param mdc.${FSNAME}-*.import | grep current_connection |
-	    grep $net2
-	[ $? -eq 0 ] ||
+	$LCTL get_param mdc.${FSNAME}-*.import | grep current_connection |
+		grep $net2 ||
 		error "import for mdc should use ${addr1}@$net2"
-	lctl get_param osc.${FSNAME}-*.import | grep current_connection |
-	    grep $net2
-	[ $? -eq 0 ] ||
+	$LCTL get_param osc.${FSNAME}-*.import | grep current_connection |
+		grep $net2 ||
 		error "import for osc should use ${addr1}@$net2"
 
 	# no NIDs on other networks should be listed
-	lctl get_param mdc.${FSNAME}-*.import | grep failover_nids |
+	$LCTL get_param mdc.${FSNAME}-*.import | grep failover_nids |
 	    grep -w ".*@$net" &&
 		error "MDC import shouldn't have failnids at @$net"
 
 	# failover NIDs on net999 should be listed
-	lctl get_param mdc.${FSNAME}-*.import | grep failover_nids |
+	$LCTL get_param mdc.${FSNAME}-*.import | grep failover_nids |
 	    grep ${addr2}@$net2 ||
 		error "MDC import should have failnid ${addr2}@$net2"
 
@@ -2747,24 +2746,22 @@ test_31() {
 	zconf_umount $HOSTNAME $MOUNT || error "unable to umount client"
 
 	do_facet mgs "$LCTL set_param mgs.MGS.exports.clear=clear"
-	do_nodes $(comma_list $(mdts_nodes) $(osts_nodes)) \
-		"$LCTL set_param *.${FSNAME}*.exports.clear=clear"
+	do_nodes $tgts "$LCTL set_param *.${FSNAME}*.exports.clear=clear"
 
 	wait_update_facet_cond mgs \
 		"$LCTL get_param -N mgs.MGS.exports.* | grep $nid2 |
 		cut -d'.' -f4-" '!=' $nid2
-	for node in $(mdts_nodes) $(osts_nodes); do
+	for node in ${tgts//,/ }; do
 		wait_update_cond $node \
 			"$LCTL get_param -N *.${FSNAME}*.exports | grep $nid2 |
 			cut -d'.' -f4-" '!=' $nid2
 	done
-	do_facet mgs "lctl get_param *.MGS*.exports.*.export"
+	do_facet mgs "$LCTL get_param *.MGS*.exports.*.export"
 
 	# on client, configure LNet and turn LNet Dynamic Discovery on (default)
 	$LUSTRE_RMMOD || error "$LUSTRE_RMMOD failed (2)"
 	load_modules || error "Failed to load modules"
-	$LNETCTL lnet configure ||
-		error "unable to configure lnet on client"
+	$LNETCTL lnet configure || error "unable to configure lnet on client"
 	infname=inf_$(echo $(hostname -s) | sed s+-+_+g)
 	$LNETCTL net add --if ${!infname} --net $net2 ||
 		error "unable to configure NID on $net2 on client (2)"
@@ -2774,7 +2771,7 @@ test_31() {
 	mount_client $MOUNT ${MOUNT_OPTS},network=$net2 &&
 		error "client mount with '-o network' option should be refused"
 
-	echo
+	return 0
 }
 run_test 31 "client mount option '-o network'"
 
@@ -4483,7 +4480,11 @@ test_51() {
 	old_cap=($(do_nodes $mdts $LCTL get_param -n $cap_param 2>/dev/null))
 	if [[ -n "$old_cap" ]]; then
 		local new_cap="+cap_chown+cap_fowner+cap_dac_override+cap_dac_read_search"
-		(( $MDS1_VERSION > $(version_code 2.14.0.135) )) || new_cap=0xf
+
+		(( MDS1_VERSION >= $(version_code 2.15.63.14) )) ||
+		(( MDS1_VERSION < $(version_code 2.15.0) &&
+		   MDS1_VERSION > $(version_code 2.14.0.135) )) ||
+			new_cap=0xf
 		echo "old_cap: $old_cap new_cap: $new_cap"
 		do_nodes $mdts $LCTL set_param $cap_param=$new_cap
 		stack_trap "do_nodes $mdts $LCTL set_param $cap_param=$old_cap"
@@ -5857,10 +5858,14 @@ cleanup_64() {
 
 test_64a() {
 	local testfile=$DIR/$tdir/$tfile
+	local srv_uc=""
 	local rbac
 
 	(( MDS1_VERSION >= $(version_code 2.15.54) )) ||
 		skip "Need MDS >= 2.15.54 for role-based controls"
+
+	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
+		srv_uc="server_upcall"
 
 	stack_trap cleanup_64 EXIT
 	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
@@ -5874,14 +5879,18 @@ test_64a() {
 		    byfid_ops \
 		    chlg_ops \
 		    fscrypt_admin \
+		    $srv_uc \
 		    ;
 	do
 		[[ "$rbac" =~ "$role" ]] ||
 			error "role '$role' not in default '$rbac'"
 	done
 
+	rbac="file_perms"
+	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
 	do_facet mgs $LCTL nodemap_modify --name c0 \
-		 --property rbac --value file_perms
+		 --property rbac --value $rbac ||
+		error "setting rbac $rbac failed (1)"
 	wait_nm_sync c0 rbac
 	touch $testfile
 	stack_trap "set +vx"
@@ -5892,7 +5901,15 @@ test_64a() {
 	$LFS project -p 1000 $testfile || error "setting project failed"
 	set +vx
 	rm -f $testfile
-	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac --value none
+	rbac="none"
+	if [ -z "$srv_uc" ]; then
+		rbac="none"
+	else
+		rbac="$srv_uc"
+	fi
+	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac \
+		--value $rbac ||
+		error "setting rbac $rbac failed (2)"
 	wait_nm_sync c0 rbac
 	touch $testfile
 	set -vx
@@ -5907,11 +5924,16 @@ run_test 64a "Nodemap enforces file_perms RBAC roles"
 test_64b() {
 	local testdir=$DIR/$tdir/${tfile}.d
 	local dir_restripe
+	local srv_uc=""
+	local rbac
 
 	(( MDS1_VERSION >= $(version_code 2.15.54) )) ||
 		skip "Need MDS >= 2.15.54 for role-based controls"
 
 	(( MDSCOUNT >= 2 )) || skip "mdt count $MDSCOUNT, skipping dne_ops role"
+
+	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
+		srv_uc="server_upcall"
 
 	stack_trap cleanup_64 EXIT
 	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
@@ -5925,8 +5947,11 @@ test_64b() {
 			error "enabling dir_restripe failed"
 	stack_trap "do_nodes $(comma_list $(all_mdts_nodes)) \
 	      $LCTL set_param mdt.*.enable_dir_restripe=$dir_restripe" EXIT
+	rbac="dne_ops"
+	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
 	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac \
-		 --value dne_ops
+		 --value $rbac ||
+		error "setting rbac $rbac failed (1)"
 	wait_nm_sync c0 rbac
 	$LFS mkdir -i 0 ${testdir}_for_migr ||
 		error "$LFS mkdir ${testdir}_for_migr failed (1)"
@@ -5958,7 +5983,15 @@ test_64b() {
 	$LFS mkdir -i 1 ${testdir}_mdt1 ||
 		error "$LFS mkdir ${testdir}_mdt1 failed (2)"
 
-	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac --value none
+	rbac="none"
+	if [ -z "$srv_uc" ]; then
+		rbac="none"
+	else
+		rbac="$srv_uc"
+	fi
+	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac \
+		--value $rbac ||
+		error "setting rbac $rbac failed (2)"
 	wait_nm_sync c0 rbac
 	set -vx
 	$LFS mkdir -i 1 $testdir && error "$LFS mkdir should fail (1)"
@@ -5975,15 +6008,24 @@ test_64b() {
 run_test 64b "Nodemap enforces dne_ops RBAC roles"
 
 test_64c() {
+	local srv_uc=""
+	local rbac
+
 	(( MDS1_VERSION >= $(version_code 2.15.54) )) ||
 		skip "Need MDS >= 2.15.54 for role-based controls"
+
+	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
+		srv_uc="server_upcall"
 
 	stack_trap cleanup_64 EXIT
 	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
 	setup_64
 
+	rbac="quota_ops"
+	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
 	do_facet mgs $LCTL nodemap_modify --name c0 \
-		 --property rbac --value quota_ops
+		 --property rbac --value $rbac ||
+		error "setting rbac $rbac failed (1)"
 	wait_nm_sync c0 rbac
 	set -vx
 	$LFS setquota -u $USER0 -b 307200 -B 309200 -i 10000 -I 11000 $MOUNT ||
@@ -6016,7 +6058,15 @@ test_64c() {
 	$LFS setquota -p 1000 --delete $MOUNT
 	set +vx
 
-	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac --value none
+	rbac="none"
+	if [ -z "$srv_uc" ]; then
+		rbac="none"
+	else
+		rbac="$srv_uc"
+	fi
+	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac \
+		--value $rbac ||
+		error "setting rbac $rbac failed (2)"
 	wait_nm_sync c0 rbac
 
 	set -vx
@@ -6051,17 +6101,25 @@ run_test 64c "Nodemap enforces quota_ops RBAC roles"
 
 test_64d() {
 	local testfile=$DIR/$tdir/$tfile
+	local srv_uc=""
+	local rbac
 	local fid
 
 	(( MDS1_VERSION >= $(version_code 2.15.54) )) ||
 		skip "Need MDS >= 2.15.54 for role-based controls"
 
+	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
+		srv_uc="server_upcall"
+
 	stack_trap cleanup_64 EXIT
 	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
 	setup_64
 
+	rbac="byfid_ops"
+	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
 	do_facet mgs $LCTL nodemap_modify --name c0 \
-		 --property rbac --value byfid_ops
+		 --property rbac --value $rbac ||
+		error "setting rbac $rbac failed (1)"
 	wait_nm_sync c0 rbac
 
 	touch $testfile
@@ -6072,7 +6130,15 @@ test_64d() {
 	lfs rmfid $MOUNT $fid || error "lfs rmfid failed"
 	set +vx
 
-	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac --value none
+	rbac="none"
+	if [ -z "$srv_uc" ]; then
+		rbac="none"
+	else
+		rbac="$srv_uc"
+	fi
+	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac \
+		--value $rbac ||
+		error "setting rbac $rbac failed (2)"
 	wait_nm_sync c0 rbac
 
 	touch $testfile
@@ -6089,9 +6155,14 @@ run_test 64d "Nodemap enforces byfid_ops RBAC roles"
 test_64e() {
 	local testfile=$DIR/$tdir/$tfile
 	local testdir=$DIR/$tdir/${tfile}.d
+	local srv_uc=""
+	local rbac
 
 	(( MDS1_VERSION >= $(version_code 2.15.54) )) ||
 		skip "Need MDS >= 2.15.54 for role-based controls"
+
+	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
+		srv_uc="server_upcall"
 
 	stack_trap cleanup_64 EXIT
 	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
@@ -6108,8 +6179,11 @@ test_64e() {
 	mkdir $testdir || error "failed to mkdir $testdir"
 	touch $testfile || error "failed to touch $testfile"
 
+	rbac="chlg_ops"
+	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
 	do_facet mgs $LCTL nodemap_modify --name c0 \
-		 --property rbac --value chlg_ops
+		 --property rbac --value $rbac ||
+		error "setting rbac $rbac failed (1)"
 	wait_nm_sync c0 rbac
 
 	# access changelogs
@@ -6120,7 +6194,15 @@ test_64e() {
 
 	rm -rf $testdir $testfile || error "rm -rf $testdir $testfile failed"
 
-	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac --value none
+	rbac="none"
+	if [ -z "$srv_uc" ]; then
+		rbac="none"
+	else
+		rbac="$srv_uc"
+	fi
+	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac \
+		--value $rbac ||
+		error "setting rbac $rbac failed (2)"
 	wait_nm_sync c0 rbac
 
 	# do some IOs
@@ -6134,7 +6216,9 @@ test_64e() {
 	changelog_clear 0 && error "clear changelogs should fail"
 	rm -rf $testdir $testfile
 
-	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac --value all
+	do_facet mgs $LCTL nodemap_modify --name c0 \
+		--property rbac --value all ||
+		error "setting rbac all failed (3)"
 	wait_nm_sync c0 rbac
 }
 run_test 64e "Nodemap enforces chlg_ops RBAC roles"
@@ -6144,9 +6228,14 @@ test_64f() {
 	local cli_enc
 	local policy
 	local protector
+	local srv_uc=""
+	local rbac
 
 	(( MDS1_VERSION >= $(version_code 2.15.54) )) ||
 		skip "Need MDS >= 2.15.54 for role-based controls"
+
+	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
+		srv_uc="server_upcall"
 
 	cli_enc=$($LCTL get_param mdc.*.import | grep client_encryption)
 	[ -n "$cli_enc" ] || skip "Need enc support, skip fscrypt_admin role"
@@ -6165,8 +6254,11 @@ test_64f() {
 	stack_trap "rm -rf $MOUNT/.fscrypt"
 
 	# file_perms is required because fscrypt uses chmod/chown
+	rbac="fscrypt_admin,file_perms"
+	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
 	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac \
-		--value fscrypt_admin,file_perms
+		--value $rbac ||
+		error "setting rbac $rbac failed (1)"
 	wait_nm_sync c0 rbac
 
 	mkdir -p $vaultdir
@@ -6185,8 +6277,11 @@ test_64f() {
 
 	cancel_lru_locks
 	# file_perms is required because fscrypt uses chmod/chown
+	rbac="file_perms"
+	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
 	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac \
-		--value file_perms
+		--value $rbac ||
+		error "setting rbac $rbac failed (2)"
 	wait_nm_sync c0 rbac
 
 	set -vx
@@ -6205,7 +6300,9 @@ test_64f() {
 	set +vx
 
 	cancel_lru_locks
-	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac  --value all
+	do_facet mgs $LCTL nodemap_modify --name c0 \
+		--property rbac  --value all ||
+		error "setting rbac all failed (3)"
 	wait_nm_sync c0 rbac
 
 	set -vx
@@ -6218,6 +6315,61 @@ test_64f() {
 	rm -rf ${vaultdir}*
 }
 run_test 64f "Nodemap enforces fscrypt_admin RBAC roles"
+
+test_64g() {
+	local testfile=$DIR/$tdir/$tfile
+
+	(( MDS1_VERSION >= $(version_code 2.16.50) )) ||
+		skip "Need MDS >= 2.16.50 for role-based controls"
+
+	# Add groups, and client to new group, on client only.
+	# Server is not aware.
+	groupadd -g 5000 grptest64g1
+	stack_trap "groupdel grptest64g1" EXIT
+	groupadd -g 5001 grptest64g2
+	stack_trap "groupdel grptest64g2" EXIT
+	groupadd -g 5002 grptest64g3
+	stack_trap "groupdel grptest64g3" EXIT
+
+	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
+	chmod 750 $DIR/$tdir
+	chgrp grptest64g1 $DIR/$tdir
+	echo hi > $DIR/$tdir/fileA
+	chmod 640 $DIR/$tdir/fileA
+	chgrp grptest64g3 $DIR/$tdir/fileA
+	setfacl -m g:grptest64g2:r $DIR/$tdir/fileA
+	setfacl -m g:grptest64g2:rwx $DIR/$tdir
+	ls -lR $DIR/$tdir
+
+	setup_64
+	stack_trap cleanup_64 EXIT
+
+	# remove server_upcall from rbac roles,
+	# to make this client use INTERNAL upcall
+	do_facet mgs $LCTL nodemap_modify --name c0 \
+		 --property rbac --value file_perms ||
+		error "setting rbac file_perms failed"
+	wait_nm_sync c0 rbac
+
+	$RUNAS touch $DIR/$tdir/fileB &&
+		error "touch $DIR/$tdir/fileB should fail"
+	do_nodes $(comma_list $(all_mdts_nodes)) \
+		$LCTL set_param mdt.*.identity_int_flush=$RUNAS_ID
+	$RUNAS -G 5001 touch $DIR/$tdir/fileB ||
+		error "touch $DIR/$tdir/fileB failed"
+	do_nodes $(comma_list $(all_mdts_nodes)) \
+		$LCTL set_param mdt.*.identity_int_flush=$RUNAS_ID
+	$RUNAS -G 5000,5001 touch $DIR/$tdir/fileC ||
+		error "touch $DIR/$tdir/fileC failed"
+	do_nodes $(comma_list $(all_mdts_nodes)) \
+		$LCTL set_param mdt.*.identity_int_flush=$RUNAS_ID
+	$RUNAS cat $DIR/$tdir/fileA && error "cat $DIR/$tdir/fileA should fail"
+	do_nodes $(comma_list $(all_mdts_nodes)) \
+		$LCTL set_param mdt.*.identity_int_flush=$RUNAS_ID
+	$RUNAS -G 5000,5001 cat $DIR/$tdir/fileA ||
+		error "cat $DIR/$tdir/fileA failed"
+}
+run_test 64g "Nodemap enforces server_upcall RBAC role"
 
 look_for_files() {
 	local pattern=$1
@@ -6450,9 +6602,20 @@ test_70() {
 		$param_copy' $(ostdevname 1)"
 	do_facet ost1 "llog_reader $param_copy" | grep -vE "SKIP|marker" |
 		grep "^#" > $param_copy
-	cat $param_copy
+	cat -A $param_copy
 	cmp -bl $param_mgs $param_copy ||
-		error "sptlrpc llog differ in oss"
+		error "sptlrpc llog differ at ost1"
+	rm -f $param_copy
+
+	do_facet ost2 "sync ; sync"
+	do_facet ost2 "$DEBUGFS -c -R 'ls CONFIGS/' $(ostdevname 2)"
+	do_facet ost2 "$DEBUGFS -c -R 'dump CONFIGS/$FSNAME-sptlrpc \
+		$param_copy' $(ostdevname 2)"
+	do_facet ost2 "llog_reader $param_copy" | grep -vE "SKIP|marker" |
+		grep "^#" > $param_copy
+	cat -A $param_copy
+	cmp -bl $param_mgs $param_copy ||
+		error "sptlrpc llog differ at ost2"
 }
 run_test 70 "targets have local copy of sptlrpc llog"
 
@@ -6517,6 +6680,82 @@ test_71() {
 		error "project id should have inherit flag (3)"
 }
 run_test 71 "encryption does not remove project flag"
+
+test_72() {
+	local mgsnm=mgsnm
+	local mgsnids=1.1.0.[1-100]@tcp
+	local mgsnids2=1.0.0.[1-100]@tcp
+	local mgsclid=600
+	local mgsfsid=2000
+	local nm=nm_test71
+	local nids=1.1.1.[1-100]@tcp
+	local startnid=1.1.1.1@tcp
+	local endnid=1.1.1.100@tcp
+	local val
+
+	(( OST1_VERSION >= $(version_code 2.15.64) )) ||
+		skip "Need MDS >= 2.15.64 dynamic nodemaps"
+
+	[[ "$(facet_active_host mgs)" != "$(facet_active_host ost1)" ]] ||
+		skip "Need servers on different hosts"
+
+	do_facet mgs $LCTL nodemap_add $mgsnm ||
+		error "adding $mgsnm on MGS failed"
+	stack_trap "do_facet mgs $LCTL nodemap_del $mgsnm" EXIT
+	do_facet mgs $LCTL nodemap_add_range --name $mgsnm --range $mgsnids ||
+		error "add_range for $mgsnm on MGS failed"
+	do_facet mgs $LCTL nodemap_add_idmap --name $mgsnm --idtype uid \
+		--idmap $mgsclid:$mgsfsid ||
+		error "add_idmap for $mgsnm on MGS failed"
+	wait_nm_sync $mgsnm idmap '' inactive
+
+	stack_trap "do_facet ost1 $LCTL nodemap_del $nm || true" EXIT
+	do_facet ost1 $LCTL nodemap_add $nm &&
+		error "static nodemap on server should fail"
+	do_facet ost1 $LCTL nodemap_add -d $nm ||
+		error "dynamic nodemap on server failed"
+	val=$(do_facet ost1 $LCTL get_param -n nodemap.$nm.id)
+	if [[ "x$val" == "x" ]] || [[ "x$val" == "x0" ]]; then
+		error "dynamic nodemap wrong id $val"
+	fi
+
+	do_facet ost1 $LCTL nodemap_add_range --name $nm --range $nids ||
+		error "dynamic add_range on server failed"
+	val=$(do_facet ost1 $LCTL get_param nodemap.$nm.ranges |
+		awk 'BEGIN{RS=", "} $1=="start_nid:"{print $2 ; exit}')
+	if [[ "x$val" != "x$startnid" ]]; then
+		error "dynamic nodemap wrong start nid range $val"
+	fi
+	val=$(do_facet ost1 $LCTL get_param nodemap.$nm.ranges |
+		awk 'BEGIN{RS=", "} $1=="end_nid:"{print $2 ; exit}')
+	if [[ "x$val" != "x$endnid" ]]; then
+		error "dynamic nodemap wrong end nid range $val"
+	fi
+
+	do_facet ost1 $LCTL nodemap_del_range --name $nm --range $nids ||
+		error "dynamic del_range on server failed"
+	val=$(do_facet ost1 $LCTL get_param nodemap.$nm.ranges |
+		awk 'BEGIN{RS=", "} $1=="start_nid:"{print $2 ; exit}')
+	if [[ "x$val" != "x" ]]; then
+		error "nid range should be empty, got $val"
+	fi
+
+	do_facet ost1 $LCTL nodemap_del $nm ||
+		error "dynamic nodemap del on server failed"
+	val=$(do_facet ost1 $LCTL get_param nodemap.$nm.id)
+	if [[ "x$val" != "x" ]]; then
+		error "nodemap should be gone, got $val"
+	fi
+
+	do_facet ost1 $LCTL nodemap_add_range --name $mgsnm --range $mgsnids2 &&
+			error "add_range $mgsnm on server should fail"
+	do_facet ost1 $LCTL nodemap_del_range --name $mgsnm --range $mgsnids &&
+		error "del_range $mgsnm on server should fail"
+	do_facet ost1 $LCTL nodemap_del $mgsnm &&
+		error "nodemap del $mgsnm on server should fail"
+	do_facet ost1 $LCTL get_param -R 'nodemap.*'
+}
+run_test 72 "dynamic nodemap properties"
 
 log "cleanup: ======================================================"
 

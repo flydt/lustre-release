@@ -653,7 +653,7 @@ static int ofd_prepare(const struct lu_env *env, struct lu_device *pdev,
 	obd->obd_no_conn = 0;
 	spin_unlock(&obd->obd_dev_lock);
 
-	if (obd->obd_recovering == 0)
+	if (!test_bit(OBDF_RECOVERING, obd->obd_flags))
 		ofd_postrecov(env, ofd);
 
 	RETURN(rc);
@@ -721,7 +721,7 @@ static void ofd_procfs_fini(struct ofd_device *ofd)
 	tgt_tunables_fini(&ofd->ofd_lut);
 	lprocfs_free_per_client_stats(obd);
 	lprocfs_obd_cleanup(obd);
-	lprocfs_free_obd_stats(obd);
+	ldebugfs_free_obd_stats(obd);
 	lprocfs_job_stats_fini(obd);
 }
 
@@ -1503,7 +1503,7 @@ static int ofd_create_hdl(struct tgt_session_info *tsi)
 
 	if ((oa->o_valid & OBD_MD_FLFLAGS) &&
 	    (oa->o_flags & OBD_FL_RECREATE_OBJS)) {
-		if (!ofd_obd(ofd)->obd_recovering ||
+		if (!test_bit(OBDF_RECOVERING, ofd_obd(ofd)->obd_flags) ||
 		    oid > ofd_seq_last_oid(oseq)) {
 			CERROR("%s: recreate objid "DOSTID" > last id %llu"
 			       "\n", ofd_name(ofd), POSTID(&oa->o_oi),

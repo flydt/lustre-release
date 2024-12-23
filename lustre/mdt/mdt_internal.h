@@ -291,6 +291,7 @@ struct mdt_device {
 	__u32			   mdt_brw_size;
 
 	struct upcall_cache	  *mdt_identity_cache;
+	struct upcall_cache	  *mdt_identity_cache_int;
 
 	unsigned int		   mdt_evict_tgt_nids:1,
 				   mdt_dom_read_open:1,
@@ -1055,7 +1056,8 @@ static inline bool agent_req_in_final_state(enum agent_req_status ars)
 #define UC_IDCACHE_HASH_SIZE 128
 extern struct upcall_cache_ops mdt_identity_upcall_cache_ops;
 
-struct md_identity *mdt_identity_get(struct upcall_cache *, __u32);
+struct md_identity *mdt_identity_get(struct upcall_cache *cache, __u32 uid,
+				     struct mdt_thread_info *info);
 
 void mdt_identity_put(struct upcall_cache *, struct md_identity *);
 
@@ -1420,6 +1422,7 @@ int mdt_obd_commitrw(const struct lu_env *env, int cmd, struct obd_export *exp,
 		     ktime_t kstart);
 int mdt_punch_hdl(struct tgt_session_info *tsi);
 int mdt_fallocate_hdl(struct tgt_session_info *tsi);
+int mdt_fiemap_get(struct tgt_session_info *tsi);
 int mdt_glimpse_enqueue(struct mdt_thread_info *mti, struct ldlm_namespace *ns,
 			struct ldlm_lock **lockp, __u64 flags);
 int mdt_brw_enqueue(struct mdt_thread_info *info, struct ldlm_namespace *ns,

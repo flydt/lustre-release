@@ -4996,6 +4996,9 @@ test_135() {
 	# All files to ost1
 	$LFS setstripe -S $((128 * 1024)) -i 0 $DIR/$tdir
 
+	# Create 20 files so we have 20 ost locks
+	touch $DIR/$tdir/file.{1..20}
+
 	# Init all the clients connections (write lastrcv on the OST)
 	clients_up
 	replay_barrier ost1
@@ -5004,11 +5007,13 @@ test_135() {
 	$LCTL set_param ldlm.cancel_unused_locks_before_replay=0
 	stack_trap "$LCTL set_param $old_replay" EXIT
 
-	# Create 20 files so we have 20 ost locks
-	for i in $(seq 20) ; do
-		echo blah > $DIR/$tdir/file.${i} & PID+="$! "
-	done
-	wait $PID
+	local old_debug=$($LCTL get_param -n debug)
+	local old_debug_mb=$($LCTL get_param -n debug_mb)
+	$LCTL set_param debug_mb=100 debug='+info +ha +dlmtrace'
+	stack_trap "$LCTL set_param debug_mb=$old_debug_mb debug='$old_debug'"
+
+	printf "%s\n" $DIR/$tdir/file.{1..20} |
+		xargs -I{} -P20 dd if=/dev/urandom of={} bs=1K count=1 &> /dev/null
 
 	stop ost1
 	change_active ost1
@@ -5019,6 +5024,7 @@ test_135() {
 	do_rpc_nodes $(facet_active_host ost1) \
 		load_module ../libcfs/libcfs/libcfs
 	do_facet ost1 "$LCTL set_param fail_loc=0x32d fail_val=20"
+	do_facet ost1 "$LCTL set_param debug_mb=100 debug='+info +ha +dlmtrace'"
 	mount_facet ost1
 
 	# Now make sure we notice
@@ -5341,6 +5347,28 @@ test_201() {
 	(( duration < 20 )) || error "Cascading timeouts on disconnect"
 }
 run_test 201 "MDT umount cascading disconnects timeouts"
+
+test_202() {
+	local td=$DIR/$tdir
+	local tf=$td/$tfile
+
+	(( $MDS1_VERSION >= $(version_code 2.16.0) )) ||
+	   (( $MDS1_VERSION < $(version_code v2_15_55-64-g13557aa869) &&
+	   $MDS1_VERSION >= $(version_code 2.14.0-ddn178) )) ||
+	   (( $MDS1_VERSION < $(version_code 2.14.0-ddn87-14-gf1bd967799) )) ||
+		skip "need MDS with LU-18416 fix for layout version"
+
+	mkdir_on_mdt0 $td || error "can't mkdir"
+	$LFS setstripe -E128M -c1 -Eeof -c2 $td || error "can't setstripe"
+	replay_barrier mds1
+	touch $tf
+	local before=$($LFS getstripe -v $tf|awk '/lcm_layout_gen:/{print $2}')
+	fail mds1
+	cancel_lru_locks mdc
+	local after=$($LFS getstripe -v $tf|awk '/lcm_layout_gen:/{print $2}')
+	(( $before == $after )) || error "layout gen changed: $before -> $after"
+}
+run_test 202 "pfl replay should recovery layout generation"
 
 
 complete_test $SECONDS

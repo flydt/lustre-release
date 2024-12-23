@@ -1,28 +1,13 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (C) 2013, Trustees of Indiana University
  *
  * Copyright (c) 2017, Intel Corporation.
+ */
+
+/*
+ * This file is part of Lustre, http://www.lustre.org/
  *
  * Author: Joshua Walgenbach <jjw@iu.edu>
  */
@@ -47,6 +32,7 @@ static const struct nodemap_rbac_name {
 	{ NODEMAP_RBAC_BYFID_OPS,	"byfid_ops"	},
 	{ NODEMAP_RBAC_CHLG_OPS,	"chlg_ops"	},
 	{ NODEMAP_RBAC_FSCRYPT_ADMIN,   "fscrypt_admin"	},
+	{ NODEMAP_RBAC_SERVER_UPCALL,	"server_upcall"	},
 };
 
 struct nodemap_pde {
@@ -113,6 +99,8 @@ struct lu_nodemap {
 
 	/* used when loading/unloading nodemaps */
 	struct list_head	 nm_list;
+	/* is a dynamic nodemap */
+	bool			 nm_dyn;
 };
 
 /* Store handles to local MGC storage to save config locally. In future
@@ -126,7 +114,7 @@ struct nm_config_file {
 };
 
 void nodemap_activate(const bool value);
-int nodemap_add(const char *nodemap_name);
+int nodemap_add(const char *nodemap_name, bool dynamic);
 int nodemap_del(const char *nodemap_name);
 int nodemap_add_member(struct lnet_nid *nid, struct obd_export *exp);
 void nodemap_del_member(struct obd_export *exp);
@@ -155,9 +143,9 @@ int nodemap_add_idmap(const char *nodemap_name, enum nodemap_id_type id_type,
 		      const __u32 map[2]);
 int nodemap_del_idmap(const char *nodemap_name, enum nodemap_id_type id_type,
 		      const __u32 map[2]);
-int nodemap_set_fileset(const char *name, const char *fileset);
+int nodemap_set_fileset(const char *name, const char *fileset, bool checkperm);
 char *nodemap_get_fileset(const struct lu_nodemap *nodemap);
-int nodemap_set_sepol(const char *name, const char *sepol);
+int nodemap_set_sepol(const char *name, const char *sepol, bool checkperm);
 const char *nodemap_get_sepol(const struct lu_nodemap *nodemap);
 __u32 nodemap_map_id(struct lu_nodemap *nodemap,
 		     enum nodemap_id_type id_type,

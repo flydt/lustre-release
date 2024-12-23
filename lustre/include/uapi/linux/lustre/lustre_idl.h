@@ -1,38 +1,19 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  *
  * Lustre wire protocol definitions.
  */
 
-/** \defgroup lustreidl lustreidl
- *
+/*
  * Lustre wire protocol definitions.
  *
  * ALL structs passing over the wire should be declared here.  Structs
@@ -59,8 +40,6 @@
  * can be used.  Some structs might allow addition at the end (verify this
  * in the code to ensure that new/old clients that see this larger struct
  * do not fail, otherwise you need to implement protocol compatibility).
- *
- * @{
  */
 
 #ifndef _LUSTRE_IDL_H_
@@ -867,6 +846,7 @@ struct ptlrpc_body_v2 {
 #define OBD_CONNECT2_UNALIGNED_DIO	0x400000000ULL /* unaligned DIO */
 #define OBD_CONNECT2_CONN_POLICY	0x800000000ULL /* server-side connection policy */
 #define OBD_CONNECT2_MIRROR_ID_FIX     0x2000000000ULL /* rr_mirror_id move */
+#define OBD_CONNECT2_UPDATE_LAYOUT     0x4000000000ULL /* update compressibility */
 /* XXX README XXX README XXX README XXX README XXX README XXX README XXX
  * Please DO NOT add OBD_CONNECT flags before first ensuring that this value
  * is not in use by some other branch/patch.  Email adilger@whamcloud.com
@@ -3460,6 +3440,16 @@ enum layout_intent_opc {
 	LAYOUT_INTENT_RESTORE	= 6,	/** reserved for HSM restore */
 	LAYOUT_INTENT_PCCRO_SET	= 7,	/** set read-only layout for PCC */
 	LAYOUT_INTENT_PCCRO_CLEAR = 8,	/** clear read-only layout */
+	LAYOUT_INTENT_CHANGE    = 9,    /** change layout flag */
+};
+
+/**
+ * used for lai_flags/lai_values, 32bit field; if a bit is set in lai_flags,
+ * and the corresponding bit value in lai_values determines whether that state
+ * should be set or cleared.
+ */
+enum layout_intent_flags {
+	LAIF_INCOMPRESSIBLE	= 1U << 0,   /* 0x0001 change compressibility */
 };
 
 /* enqueue layout lock with intent */
@@ -3832,12 +3822,14 @@ enum nodemap_rbac_roles {
 	NODEMAP_RBAC_BYFID_OPS		= 0x00000008,
 	NODEMAP_RBAC_CHLG_OPS		= 0x00000010,
 	NODEMAP_RBAC_FSCRYPT_ADMIN	= 0x00000020,
+	NODEMAP_RBAC_SERVER_UPCALL	= 0x00000040,
 	NODEMAP_RBAC_NONE	= (__u32)~(NODEMAP_RBAC_FILE_PERMS	|
 					   NODEMAP_RBAC_DNE_OPS	|
 					   NODEMAP_RBAC_QUOTA_OPS	|
 					   NODEMAP_RBAC_BYFID_OPS	|
 					   NODEMAP_RBAC_CHLG_OPS	|
-					   NODEMAP_RBAC_FSCRYPT_ADMIN),
+					   NODEMAP_RBAC_FSCRYPT_ADMIN	|
+					   NODEMAP_RBAC_SERVER_UPCALL),
 	NODEMAP_RBAC_ALL	= 0xFFFFFFFF, /* future caps ON by default */
 };
 

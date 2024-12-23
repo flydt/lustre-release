@@ -312,8 +312,6 @@ test_0a() {
 	# create parent directory
 	mkdir $td || error "mkdir $td failed"
 
-	$mirror_cmd $tf &> /dev/null && error "miss -N option"
-
 	$mirror_cmd -N $tf || error "create mirrored file $tf failed"
 	verify_mirror_count $tf 1
 	id=$($LFS getstripe -I $tf)
@@ -1337,9 +1335,9 @@ test_33b() {
 	# remount ost2
 	start_osts 2
 
-	[ $((r1 * 100)) -gt $((ra * 105)) -a $r1 -gt $((ra + 2)) ] &&
+	(( (r1 * 100) > (ra * 105) && (r1 > ra + 30) )) &&
 		error "read mirror too slow without ost1, from $ra to $r1"
-	[ $((r2 * 100)) -gt $((ra * 105)) -a $r2 -gt $((ra + 2)) ] &&
+	(( (r2 * 100) > (ra * 105) && (r2 > ra + 30) )) &&
 		error "read mirror too slow without ost2, from $ra to $r2"
 
 	wait_osc_import_ready client ost2
@@ -2483,8 +2481,8 @@ verify_46() {
 
 	$LFS setstripe --copy=$src $dst || error "setstripe $dst failed"
 
-	local layout1=$(get_layout_param $src)
-	local layout2=$(get_layout_param $dst)
+	local layout1=$(SKIP_INDEX=yes get_layout_param $src)
+	local layout2=$(SKIP_INDEX=yes get_layout_param $dst)
 	# compare their layout info
 	[ "$layout1" == "$layout2" ] ||
 		error "$msg_prefix $src <=> $dst layouts are not equal"
@@ -2817,6 +2815,8 @@ test_50a() {
 		skip "OST does not support SEEK_HOLE"
 	[ "$FSTYPE" != "zfs" ] ||
 		skip "lseek for ZFS is not accurate if obj is not committed"
+	(( OST1_VERSION >= $(version_code 2.15.58) )) ||
+		skip "Need OST version at least 2.15.58 for unaligned DIO"
 
 	local file=$DIR/$tdir/$tfile
 	local offset
@@ -3206,7 +3206,7 @@ test_61a() { # LU-14508
 	check_times_61 $file "${tim[@]}"
 
 	echo "normal user migrate $tfile and test timestamps"
-	$RUNAS $LFS migrate -n $file || error "cannot migrate $file"
+	$RUNAS -G0 $LFS migrate -n $file || error "cannot migrate $file"
 	check_times_61 $file "${tim[@]}"
 }
 run_test 61a "mirror extend and migrate preserve timestamps"
@@ -3245,7 +3245,7 @@ test_61b() { # LU-14508
 	check_times_61 $file "${tim[@]}"
 
 	echo "normal user mirror extend $tfile and test timestamps"
-	$RUNAS $LFS mirror extend -N -c1 -i1 $file ||
+	$RUNAS -G0 $LFS mirror extend -N -c1 -i1 $file ||
 		error "cannot extend mirror $file"
 	check_times_61 $file "${tim[@]}"
 }
@@ -4534,6 +4534,33 @@ test_210b() {
 	[[ -z $ino ]] || error "still CAN access obj object: $objpath"
 }
 run_test 210b "handle broken mirrored lovea (unlink)"
+
+# LU-18468
+test_211() {
+	local tf=$DIR/$tfile
+
+	dd if=/dev/zero of=$tf bs=4k count=10 oflag=direct ||
+		error "error writing initial data to '$tf'"
+
+	$LFS mirror extend -N $tf || error "error extending mirror for '$tf'"
+
+	dd if=/dev/zero of=$tf bs=4k count=1 oflag=direct ||
+		error "error writing 4k to '$tf'"
+	echo "size after second write"
+	ls -la $tf
+	md5_1=$(md5sum $tf) || error "error getting first md5sum of '$tf'"
+
+	$LFS mirror resync $tf || error "error resync-ing '$tf'"
+
+	$LFS mirror delete --mirror-id=1 $tf ||
+		error "error deleting mirror 1 of '$tf'"
+	echo "size after mirror delete"
+	ls -la $tf
+	md5_2=$(md5sum $tf) || error "error getting second md5sum of '$tf'"
+	[[ "${md5_1%% *}" = "${md5_2%% *}" ]] ||
+		error "md5sums don't match after mirror ops on '$tf'"
+}
+run_test 211 "mirror delete should not cause bad size"
 
 complete_test $SECONDS
 check_and_cleanup_lustre

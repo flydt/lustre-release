@@ -225,8 +225,11 @@ static void pcc_cmd_fini(struct pcc_cmd *cmd)
 	if (cmd->pccc_cmd == PCC_ADD_DATASET) {
 		if (!list_empty(&cmd->u.pccc_add.pccc_conds))
 			pcc_rule_conds_free(&cmd->u.pccc_add.pccc_conds);
-		OBD_FREE(cmd->u.pccc_add.pccc_conds_str,
-			 strlen(cmd->u.pccc_add.pccc_conds_str) + 1);
+		if (cmd->u.pccc_add.pccc_conds_str) {
+			OBD_FREE(cmd->u.pccc_add.pccc_conds_str,
+				 strlen(cmd->u.pccc_add.pccc_conds_str) + 1);
+			cmd->u.pccc_add.pccc_conds_str = NULL;
+		}
 	}
 }
 
@@ -751,6 +754,7 @@ pcc_dataset_rule_init(struct pcc_match_rule *rule, struct pcc_cmd *cmd)
 	int rc = 0;
 
 	LASSERT(cmd->u.pccc_add.pccc_conds_str);
+	INIT_LIST_HEAD(&rule->pmr_conds);
 	OBD_ALLOC(rule->pmr_conds_str,
 		  strlen(cmd->u.pccc_add.pccc_conds_str) + 1);
 	if (rule->pmr_conds_str == NULL)
@@ -760,7 +764,6 @@ pcc_dataset_rule_init(struct pcc_match_rule *rule, struct pcc_cmd *cmd)
 	       cmd->u.pccc_add.pccc_conds_str,
 	       strlen(cmd->u.pccc_add.pccc_conds_str));
 
-	INIT_LIST_HEAD(&rule->pmr_conds);
 	if (!list_empty(&cmd->u.pccc_add.pccc_conds))
 		rc = pcc_conds_parse(rule->pmr_conds_str,
 				     &rule->pmr_conds);
@@ -1199,7 +1202,7 @@ static bool pathname_is_valid(const char *pathname)
 static struct pcc_cmd *
 pcc_cmd_parse(char *buffer, unsigned long count)
 {
-	static struct pcc_cmd *cmd;
+	struct pcc_cmd *cmd;
 	char *token;
 	char *val;
 	int rc = 0;
@@ -1220,12 +1223,14 @@ pcc_cmd_parse(char *buffer, unsigned long count)
 		GOTO(out_free_cmd, rc = -EINVAL);
 
 	/* Type of the command */
-	if (strcmp(token, "add") == 0)
+	if (strcmp(token, "add") == 0) {
 		cmd->pccc_cmd = PCC_ADD_DATASET;
-	else if (strcmp(token, "del") == 0)
+		INIT_LIST_HEAD(&cmd->u.pccc_add.pccc_conds);
+	} else if (strcmp(token, "del") == 0) {
 		cmd->pccc_cmd = PCC_DEL_DATASET;
-	else
+	} else {
 		GOTO(out_free_cmd, rc = -EINVAL);
+	}
 
 	/* Pathname of the dataset */
 	token = strsep(&val, " ");
@@ -2374,6 +2379,8 @@ int pcc_file_open(struct inode *inode, struct file *file)
 	} else {
 		pccf->pccf_file = pcc_file;
 		pccf->pccf_type = pcci->pcci_type;
+		ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_PCC_HIT_BYTES,
+				   inode->i_size);
 	}
 
 out_unlock:
@@ -2401,10 +2408,14 @@ void pcc_file_release(struct inode *inode, struct file *file)
 		goto out;
 
 	pcci = ll_i2pcci(inode);
-	LASSERT(pcci);
-	path = &pcci->pcci_path;
-	CDEBUG(D_CACHE, "releasing pcc file \"%pd\"\n", path->dentry);
-	pcc_inode_put(pcci);
+	if (pcci) {
+		path = &pcci->pcci_path;
+		CDEBUG(D_CACHE, "releasing pcc file \"%pd\"\n", path->dentry);
+		pcc_inode_put(pcci);
+	} else {
+		CDEBUG(D_CACHE, "PCC copy "DFID" was unlinked?\n",
+		       PFID(ll_inode2fid(inode)));
+	}
 
 	LASSERT(file_count(pccf->pccf_file) > 0);
 	fput(pccf->pccf_file);
@@ -3235,8 +3246,8 @@ static int pcc_inode_remove(struct inode *inode, struct dentry *pcc_dentry)
 	int rc;
 
 	rc = vfs_unlink(&nop_mnt_idmap, d_inode(parent), pcc_dentry);
-	if (rc)
-		CWARN("%s: failed to unlink PCC file %pd, rc = %d\n",
+	if (rc && rc != -ENOENT)
+		CWARN("%s: failed to unlink PCC file %pd: rc = %d\n",
 		      ll_i2sbi(inode)->ll_fsname, pcc_dentry, rc);
 
 	dput(parent);
@@ -3717,6 +3728,7 @@ int pcc_readwrite_attach(struct file *file, struct inode *inode,
 	struct pcc_dataset *dataset;
 	struct ll_inode_info *lli = ll_i2info(inode);
 	struct pcc_super *super = ll_i2pccs(inode);
+	ktime_t kstart = ktime_get();
 	struct pcc_inode *pcci;
 	struct dentry *dentry;
 	int rc;
@@ -3758,7 +3770,10 @@ out_unlock:
 		revert_creds(old_cred);
 		dput(dentry);
 	} else {
-		ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_PCC_ATTACH, 1);
+		ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_PCC_ATTACH,
+				   ktime_us_delta(ktime_get(), kstart));
+		ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_PCC_ATTACH_BYTES,
+				   inode->i_size);
 	}
 out_dataset_put:
 	pcc_dataset_put(dataset);
@@ -3907,6 +3922,7 @@ static int pcc_readonly_attach(struct file *file,
 	const struct cred *old_cred;
 	struct pcc_dataset *dataset;
 	struct pcc_inode *pcci = NULL;
+	ktime_t kstart = ktime_get();
 	struct dentry *dentry;
 	bool attached = false;
 	bool unlinked = false;
@@ -3983,7 +3999,10 @@ out_put_unlock:
 		else
 			dput(dentry);
 	} else {
-		ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_PCC_ATTACH, 1);
+		ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_PCC_ATTACH,
+				   ktime_us_delta(ktime_get(), kstart));
+		ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_PCC_ATTACH_BYTES,
+				   inode->i_size);
 	}
 	revert_creds(old_cred);
 	pcc_inode_unlock(inode);
@@ -4207,6 +4226,12 @@ int pcc_ioctl_state(struct file *file, struct inode *inode,
 	path = dentry_path_raw(pcci->pcci_path.dentry, buf, buf_len);
 	if (IS_ERR(path))
 		GOTO(out_unlock, rc = PTR_ERR(path));
+
+	if (!pcci->pcci_path.dentry->d_inode ||
+	    pcci->pcci_path.dentry->d_inode->i_nlink == 0) {
+		state->pccs_flags |= PCC_STATE_FL_UNLINKED;
+		pcc_inode_detach_put(inode);
+	}
 
 	if (strscpy(state->pccs_path, path, buf_len) < 0)
 		GOTO(out_unlock, rc = -ENAMETOOLONG);

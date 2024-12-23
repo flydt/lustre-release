@@ -711,6 +711,8 @@ run_test 16i "read after truncate file"
 test_16j()
 {
 	(( $OSTCOUNT >= 2 )) || skip "needs >= 2 OSTs"
+	(( $OST1_VERSION >= $(version_code v2_15_57-52-g43c3a804fe) )) ||
+		skip "Need OST version at least 2.15.57.52 for unaligned DIO"
 
 	local stripe_size=$((1024 * 1024)) #1 MiB
 	# Max i/o below is ~ 4 * stripe_size, so this gives ~5 i/os
@@ -1591,6 +1593,8 @@ test_33e() {
 	(( MDSCOUNT > 1 )) || skip "needs >= 2 MDTs"
 	(( MDS1_VERSION >= $(version_code 2.7.63) )) ||
 		skip "DNE CoS not supported"
+	(( MDS1_VERSION >= $(version_code 2.15.56.127) )) ||
+		skip "need MDS >= v2_15_56-127-g2a78a9e2cda1 for CoS fix"
 
 	$LFS mkdir -i 0 $DIR/$tdir
 	$LFS mkdir -i 0 $DIR/$tdir/d1

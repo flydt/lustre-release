@@ -57,7 +57,7 @@ int LNetGetId(unsigned int index, struct lnet_processid *id, bool large_nids);
 int LNetDist(struct lnet_nid *nid, struct lnet_nid *srcnid, __u32 *order);
 void LNetPrimaryNID(struct lnet_nid *nid);
 bool LNetIsPeerLocal(struct lnet_nid *nid);
-bool LNetPeerDiscovered(struct lnet_nid *nid);
+int LNetPeerDiscovered(struct lnet_nid *nid);
 
 /** @} lnet_addr */
 
@@ -104,8 +104,7 @@ int LNetMDBind(const struct lnet_md *md_in,
 	       enum lnet_unlink unlink_in,
 	       struct lnet_handle_md *md_handle_out);
 
-int __LNetMDUnlink(struct lnet_handle_md md_in, bool discard);
-#define LNetMDUnlink(handle) __LNetMDUnlink(handle, false)
+int LNetMDUnlink(struct lnet_handle_md md_in);
 
 void lnet_assert_handler_unused(lnet_handler_t handler);
 /** @} lnet_md */

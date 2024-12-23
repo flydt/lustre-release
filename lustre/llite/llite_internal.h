@@ -148,6 +148,8 @@ enum ll_sa_pattern {
 	LSA_PATTERN_MASK		= (LSA_PATTERN_LIST |
 					   LSA_PATTERN_FNAME |
 					   LSA_PATTERN_ADVISE),
+	LSA_PATTERN_SFNAME		= (LSA_PATTERN_FNAME |
+					   LSA_PATTERN_FN_SHARED),
 	LSA_PATTERN_MAX,
 };
 
@@ -493,6 +495,10 @@ static inline void lli_replace_acl(struct ll_inode_info *lli,
 	if (lli->lli_posix_acl)
 		posix_acl_release(lli->lli_posix_acl);
 	lli->lli_posix_acl = acl;
+	if (!acl) {
+		forget_cached_acl(&lli->lli_vfs_inode, ACL_TYPE_ACCESS);
+		forget_cached_acl(&lli->lli_vfs_inode, ACL_TYPE_DEFAULT);
+	}
 	write_unlock(&lli->lli_lock);
 }
 #else
@@ -799,6 +805,11 @@ struct ra_io_arg {
 	 */
 	loff_t		ria_length;
 	loff_t		ria_bytes;
+	/*
+	 * list of cl_read_aheads used during read-ahead, used to release DLM
+	 * locks acquired during read-ahead.
+	 */
+	struct list_head	ria_cl_ra_list;
 };
 
 /* LL_HIST_MAX=32 causes an overflow */
@@ -960,6 +971,7 @@ struct ll_sb_info {
 	atomic_t		  ll_sa_total;   /* sa thread started count */
 	atomic_t		  ll_sa_wrong;   /* sa stopped low hit ratio */
 	atomic_t		  ll_sa_running; /* running sa thread count */
+	atomic_t		  ll_sa_refcnt;	 /* inuse reference count */
 	atomic_t		  ll_agl_total;  /* AGL thread started count */
 	atomic_t		  ll_sa_hit_total;  /* total hit count */
 	atomic_t		  ll_sa_miss_total; /* total miss count */
@@ -973,6 +985,8 @@ struct ll_sb_info {
 	 * the user is no longer using this directory.
 	 */
 	unsigned long		  ll_sa_timeout;
+	unsigned int		  ll_sa_fname_predict_hit;
+	unsigned int		  ll_sa_fname_match_hit;
 	/* save s_dev before assign for clustred nfs */
 	dev_t			  ll_sdev_orig;
 	/* root squash */
@@ -1298,6 +1312,8 @@ enum {
 	LPROC_LL_PCC_ATTACH,
 	LPROC_LL_PCC_DETACH,
 	LPROC_LL_PCC_AUTOAT,
+	LPROC_LL_PCC_HIT_BYTES,
+	LPROC_LL_PCC_ATTACH_BYTES,
 	LPROC_LL_HYBRID_NOSWITCH,
 	LPROC_LL_HYBRID_WRITESIZE_SWITCH,
 	LPROC_LL_HYBRID_READSIZE_SWITCH,
@@ -1338,6 +1354,10 @@ int ll_md_blocking_ast(struct ldlm_lock *lock, struct ldlm_lock_desc *ldesc,
 struct dentry *ll_splice_alias(struct inode *inode, struct dentry *de);
 int ll_rmdir_entry(struct inode *dir, char *name, int namelen);
 void ll_update_times(struct ptlrpc_request *request, struct inode *inode);
+int ll_intent_lock(struct obd_export *exp, struct md_op_data *op_data,
+		   struct lookup_intent *it, struct ptlrpc_request **reqp,
+		   ldlm_blocking_callback cb_blocking, __u64 extra_lock_flags,
+		   bool tryagain);
 
 /* llite/rw.c */
 int ll_writepage(struct page *page, struct writeback_control *wbc);
@@ -1393,6 +1413,9 @@ struct posix_acl *ll_get_acl(
 #else
 	struct inode *inode, int type);
 #endif /* HAVE_GET_ACL_RCU_ARG */
+
+struct posix_acl *
+ll_get_inode_acl(struct inode *inode, int type, bool rcu);
 
 int ll_set_acl(struct mnt_idmap *mnt_userns,
 #ifdef HAVE_ACL_WITH_DENTRY
@@ -1791,8 +1814,8 @@ void ll_ra_stats_inc(struct inode *inode, enum ra_stat which);
 #define LL_SA_CACHE_SIZE        (1 << LL_SA_CACHE_BIT)
 #define LL_SA_CACHE_MASK        (LL_SA_CACHE_SIZE - 1)
 
-#define LSA_FN_PREDICT_HIT	2
-#define LSA_FN_MATCH_HIT	4
+#define LSA_FN_PREDICT_HIT_DEF	2
+#define LSA_FN_MATCH_HIT_DEF	4
 
 /* statahead controller, per process struct, for dir only */
 struct ll_statahead_info {
@@ -2125,6 +2148,13 @@ int ll_prepare_lookup(struct inode *dir, struct dentry *de,
 int ll_setup_filename(struct inode *dir, const struct qstr *iname,
 		      int lookup, struct llcrypt_name *fname,
 		      struct lu_fid *fid);
+#ifdef CONFIG_LL_ENCRYPTION
+const char *ll_get_symlink(struct inode *inode, const void *caddr,
+			   unsigned int max_size,
+			   struct delayed_call *done);
+#else
+#define ll_get_symlink(inode, caddr, max_size, done)   ERR_PTR(-EOPNOTSUPP)
+#endif
 int ll_fname_disk_to_usr(struct inode *inode,
 			 u32 hash, u32 minor_hash,
 			 struct llcrypt_str *iname, struct llcrypt_str *oname,
@@ -2150,6 +2180,6 @@ bool ll_foreign_is_removable(struct dentry *dentry, bool unset);
 
 int ll_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
 
-unsigned long ll_iov_iter_alignment(struct iov_iter *i);
+bool ll_iov_iter_is_unaligned(struct iov_iter *i);
 
 #endif /* LLITE_INTERNAL_H */

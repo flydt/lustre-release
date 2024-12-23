@@ -213,7 +213,6 @@ struct lnet_libmd {
  * call.
  */
 #define LNET_MD_FLAG_HANDLING	 BIT(3)
-#define LNET_MD_FLAG_DISCARD	 BIT(4)
 #define LNET_MD_FLAG_GPU	 BIT(5) /**< Special mapping needs */
 
 static inline bool lnet_md_is_gpu(struct lnet_libmd *md)
@@ -249,6 +248,9 @@ struct netstrfns {
 	int	(*nf_print_addrlist)(char *buffer, int count,
 				     struct list_head *list);
 	int	(*nf_match_addr)(u32 addr, struct list_head *list);
+	int	(*nf_match_netmask)(const __be32 *addr, size_t asize,
+				    const __be32 *netmask,
+				    const __be32 *netaddr);
 	int	(*nf_min_max)(struct list_head *nidlist, u32 *min_nid,
 			      u32 *max_nid);
 };
@@ -2070,12 +2072,6 @@ struct lnet {
 	struct work_struct		ln_pb_update_work;
 
 	atomic_t                        ln_pb_update_ready;
-};
-
-struct genl_filter_list {
-	struct list_head	 lp_list;
-	void			*lp_cursor;
-	bool			 lp_first;
 };
 
 static const struct nla_policy scalar_attr_policy[LN_SCALAR_MAX + 1] = {

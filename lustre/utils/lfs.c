@@ -51,6 +51,7 @@
 #include <err.h>
 #include <pwd.h>
 #include <grp.h>
+#include <regex.h>
 #include <sys/ioctl.h>
 #include <sys/quota.h>
 #include <sys/time.h>
@@ -133,6 +134,7 @@ static int lfs_swap_layouts(int argc, char **argv);
 static int lfs_mv(int argc, char **argv);
 static int lfs_ladvise(int argc, char **argv);
 static int lfs_getsom(int argc, char **argv);
+static int lfs_somsync(int argc, char **argv);
 static int lfs_heat_get(int argc, char **argv);
 static int lfs_heat_set(int argc, char **argv);
 static int lfs_mirror(int argc, char **argv);
@@ -146,6 +148,7 @@ static int lfs_pcc_attach_fid(int argc, char **argv);
 static int lfs_pcc_detach(int argc, char **argv);
 static int lfs_pcc_detach_fid(int argc, char **argv);
 static int lfs_pcc_state(int argc, char **argv);
+static int lfs_pcc_delete(int argc, char **argv);
 static int lfs_pcc(int argc, char **argv);
 
 static int lfs_migrate_to_dom(int fd_src, int fd_dst, char *name,
@@ -191,24 +194,6 @@ static inline int lfs_mirror_create(int argc, char **argv)
 
 static inline int lfs_mirror_extend(int argc, char **argv)
 {
-	int i;
-
-	for (i = 0; i < argc; i++)
-		if (strstr(argv[i], "-N") ||
-		    strstr(argv[i], "--mirror-count"))
-			break;
-
-	/* add -N if not specified */
-	if (i == argc) {
-		char *tmp[argc + 1];
-
-		tmp[0] = argv[0]; /* extend */
-		tmp[1] = "-N";
-		memcpy(tmp + 2, argv + 1, (argc - 1) * sizeof(*argv));
-
-		return lfs_setstripe_internal(argc + 1, tmp, SO_MIRROR_EXTEND);
-	}
-
 	return lfs_setstripe_internal(argc, argv, SO_MIRROR_EXTEND);
 }
 
@@ -281,11 +266,10 @@ command_t mirror_cmdlist[] = {
 	},
 	{ .pc_name = "extend", .pc_func = lfs_mirror_extend,
 	  .pc_help = "Extend a mirrored file.\n"
-		"Usage: lfs mirror extend "
-		"--mirror-count|-N[MIRROR_COUNT] [--no-verify]|\n"
-		"\t\t[--stats|--stats-interval=STATS_INTERVAL]|\n"
+"Usage: lfs mirror extend [--mirror-count|-N[MIRROR_COUNT]]\n"
+		"\t\t[--no-verify] [--stats|--stats-interval=STATS_INTERVAL]\n"
 		"\t\t[--bandwidth-limit|--W BANDWIDTH]\n"
-		"\t\t[[-f VICTIM_FILE] |\n"
+		"\t\t[-f VICTIM_FILE]\n"
 		"\t\t" SSM_SETSTRIPE_OPT "]"
 		" FILENAME ...\n" },
 	{ .pc_name = "split", .pc_func = lfs_mirror_split,
@@ -347,6 +331,9 @@ command_t pcc_cmdlist[] = {
 	{ .pc_name = "detach_fid", .pc_func = lfs_pcc_detach_fid,
 	  .pc_help = "Detach given files from PCC by FID(s).\n"
 		"usage: lfs pcc detach_fid {--mnt|-m MOUNTPATH} FID...\n" },
+	{ .pc_name = "delete", .pc_func = lfs_pcc_delete,
+	  .pc_help = "Delete the PCC layout component for given files.\n"
+		"usage: lfs pcc delete <FILE> ...\n" },
 	{ .pc_help = NULL }
 };
 
@@ -579,6 +566,10 @@ command_t cmdlist[] = {
 	 "\t-s: Only show the size value of the SOM data for a given file\n"
 	 "\t-b: Only show the blocks value of the SOM data for a given file\n"
 	 "\t-f: Only show the flags value of the SOM data for a given file\n"},
+	{"somsync", lfs_somsync, 0,
+	 "Synchronize SOM xattr(s) for given file(s) or FID(s).\n"
+	 "usage: somsync FILE ...\n"
+	 "       somsync --by-fid MOUNT FID ...\n"},
 	{"heat_get", lfs_heat_get, 0,
 	 "To get heat of files.\n"
 	 "usage: heat_get <file> ...\n"},
@@ -1664,10 +1655,11 @@ struct mirror_args {
  * Flags for extending a mirrored file.
  */
 enum mirror_flags {
-	MF_NO_VERIFY	= 0x1,
-	MF_DESTROY	= 0x2,
-	MF_COMP_ID	= 0x4,
-	MF_COMP_POOL	= 0x8,
+	MF_NO_VERIFY	= 0x01,
+	MF_DESTROY	= 0x02,
+	MF_COMP_ID	= 0x04,
+	MF_COMP_POOL	= 0x08,
+	MF_FOREIGN	= 0x10,
 };
 
 /**
@@ -2183,6 +2175,28 @@ static int mirror_extend(char *fname, struct mirror_args *mirror_list,
 	return rc;
 }
 
+static int find_foreign_id(struct llapi_layout *layout, void *cbdata)
+{
+	uint64_t pattern;
+	uint32_t id;
+	int rc;
+
+	rc = llapi_layout_pattern_get(layout, &pattern);
+	if (rc < 0)
+		return rc;
+
+	if (pattern == LLAPI_LAYOUT_FOREIGN) {
+		rc = llapi_layout_mirror_id_get(layout, &id);
+		if (rc < 0)
+			return rc;
+
+		*(uint32_t *)cbdata = id;
+		return LLAPI_LAYOUT_ITER_STOP;
+	}
+
+	return LLAPI_LAYOUT_ITER_CONT;
+}
+
 static int find_mirror_id(struct llapi_layout *layout, void *cbdata)
 {
 	uint32_t id;
@@ -2383,6 +2397,9 @@ static int mirror_split(const char *fname, __u32 id, const char *pool,
 	} else if (mflags & MF_COMP_ID) {
 		rc = llapi_layout_comp_iterate(layout, find_comp_id, &id);
 		mirror_id = mirror_id_of(id);
+	} else if (mflags & MF_FOREIGN) {
+		rc = llapi_layout_comp_iterate(layout, find_foreign_id, &id);
+		mirror_id = id;
 	} else {
 		rc = llapi_layout_comp_iterate(layout, find_mirror_id, &id);
 		mirror_id = id;
@@ -2401,6 +2418,11 @@ static int mirror_split(const char *fname, __u32 id, const char *pool,
 			fprintf(stderr,
 				"error %s: file '%s' does not contain mirror with comp-id %u\n",
 				progname, fname, id);
+			goto free_layout;
+		} else if (mflags & MF_FOREIGN) {
+			fprintf(stderr,
+				"error %s: file '%s' does not contain foreign component\n",
+				progname, fname);
 			goto free_layout;
 		} else {
 			fprintf(stderr,
@@ -3607,7 +3629,7 @@ enum {
 	LFS_STATS_INTERVAL_OPT,
 	LFS_LINKS_OPT,
 	LFS_ATTRS_OPT,
-	LFS_XATTRS_MATCH_OPT
+	LFS_XATTRS_MATCH_OPT,
 };
 
 #ifndef LCME_USER_MIRROR_FLAGS
@@ -3619,39 +3641,40 @@ enum {
 static int lfs_setstripe_internal(int argc, char **argv,
 				  enum setstripe_origin opc)
 {
-	struct lfs_setstripe_args	 lsa = { 0 };
-	struct llapi_stripe_param	*param = NULL;
-	struct find_param		 migrate_mdt_param = {
+	struct lfs_setstripe_args lsa = { 0 };
+	struct llapi_stripe_param *param = NULL;
+	struct find_param migrate_mdt_param = {
 		.fp_max_depth = -1,
 		.fp_mdt_index = -1,
 	};
-	char				*fname;
-	int				 result = 0;
-	int				 result2 = 0;
-	char				*end;
-	int				 c;
-	int				 delete = 0;
-	unsigned long long		 size_units = 1;
-	bool				 migrate_mode = false;
-	bool				 migrate_mdt_mode = false;
-	bool				 setstripe_mode = false;
-	bool				 migration_block = false;
-	__u64				 migration_flags = 0;
-	__u32				 tgts[LOV_MAX_STRIPE_COUNT] = { 0 };
-	int				 comp_del = 0, comp_set = 0;
-	int				 comp_add = 0;
-	__u32				 comp_id = 0;
-	struct llapi_layout		*layout = NULL;
-	struct llapi_layout		**lpp = &layout;
-	bool				 mirror_mode = false;
-	bool				 has_m_file = false;
-	__u32				 mirror_count = 0;
-	enum mirror_flags		 mirror_flags = 0;
-	struct mirror_args		*mirror_list = NULL;
-	struct mirror_args		*new_mirror = NULL;
-	struct mirror_args		*last_mirror = NULL;
-	__u16				 mirror_id = 0;
-	char				 cmd[PATH_MAX];
+	char *fname;
+	int result = 0;
+	int result2 = 0;
+	char *end;
+	int c;
+	int delete = 0;
+	unsigned long long size_units = 1;
+	bool migrate_mode = false;
+	bool migrate_mdt_mode = false;
+	bool setstripe_mode = false;
+	bool migration_block = false;
+	__u64 migration_flags = 0;
+	__u32 tgts[LOV_MAX_STRIPE_COUNT] = { 0 };
+	int comp_del = 0, comp_set = 0;
+	int comp_add = 0;
+	__u32 comp_id = 0;
+	struct llapi_layout *layout = NULL;
+	struct llapi_layout **lpp = &layout;
+	bool mirror_mode = false;
+	bool mirror_total_mode = false;
+	bool has_m_file = false;
+	__u32 mirror_count = 0;
+	enum mirror_flags mirror_flags = 0;
+	struct mirror_args *mirror_list = NULL;
+	struct mirror_args *new_mirror = NULL;
+	struct mirror_args *last_mirror = NULL;
+	__u16 mirror_id = 0;
+	char cmd[PATH_MAX];
 	bool from_yaml = false;
 	bool from_copy = false;
 	char *template = NULL;
@@ -4149,12 +4172,18 @@ static int lfs_setstripe_internal(int argc, char **argv,
 			migration_flags |= LLAPI_MIGRATION_NONBLOCK;
 			break;
 		case 'N':
+create_mirror:
 			if (opc == SO_SETSTRIPE) {
 				opc = SO_MIRROR_CREATE;
 				mirror_mode = true;
 			}
+			mirror_total_mode = false;
 			mirror_count = 1;
 			if (optarg) {
+				if (optarg[0] == '=') {
+					mirror_total_mode = true;
+					optarg++; /* skip '=' */
+				}
 				errno = 0;
 				mirror_count = strtoul(optarg, &end, 0);
 				if (errno != 0 || *end != '\0' ||
@@ -4165,6 +4194,32 @@ static int lfs_setstripe_internal(int argc, char **argv,
 						progname, optarg);
 					result = -EINVAL;
 					goto error;
+				}
+			}
+
+			if (mirror_total_mode) {
+				char *path = argv[argc-1];
+				struct lov_comp_md_v1 *comp_v1;
+
+				result = llapi_get_lmm_from_path(path, (struct lov_user_md_v1 **)&comp_v1);
+				if (result) {
+					fprintf(stderr,
+						"error: %s: cannot get layout from %s: %s\n",
+						progname, path, strerror(-result));
+					goto error;
+				}
+
+				if (comp_v1->lcm_mirror_count >= mirror_count)
+					mirror_count = 0;
+				else
+					mirror_count -= comp_v1->lcm_mirror_count;
+
+				if (!mirror_count) {
+					fprintf(stderr,
+						"warning: the file '%s' already has %d mirrors. No new mirrors will be created\n",
+						path,
+						comp_v1->lcm_mirror_count);
+					break;
 				}
 			}
 
@@ -4342,15 +4397,9 @@ static int lfs_setstripe_internal(int argc, char **argv,
 		return CMD_HELP;
 	}
 
-	if (mirror_mode && mirror_count == 0) {
-		fprintf(stderr,
-			"error: %s: --mirror-count|-N option is required\n",
-			progname);
-		result = -EINVAL;
-		goto error;
-	}
-
-	if (mirror_mode) {
+	if (mirror_mode && (!mirror_total_mode || mirror_count)) {
+		if (mirror_count == 0)
+			goto create_mirror;
 		if (!setstripe_args_specified(&lsa))
 			last_mirror->m_inherit = true;
 		if (lsa.lsa_comp_end == 0)
@@ -6112,79 +6161,96 @@ static int lfs_find(int argc, char **argv)
 		case 'm':
 		case 'i':
 		case 'O': {
-			char *buf, *token, *next, *p;
-			int len = 1;
-			void *tmp;
-
-			buf = strdup(optarg);
-			if (!buf) {
-				ret = -ENOMEM;
-				goto err;
-			}
+			int len, rc2;
+			int *p_num, *p_alloc;
+			struct obd_uuid **pp_uuid, *tmp;
+			const char *p1 = optarg, *p2;
+			char buf[UUID_MAX];
+			const char *pattern = "^([0-9]+)-([0-9]+)$";
+			regex_t reg;
+			regmatch_t pmatch[3];
 
 			param.fp_exclude_obd = !!neg_opt;
-
-			token = buf;
-			while (token && *token) {
-				token = strchr(token, ',');
-				if (token) {
-					len++;
-					token++;
-				}
-			}
 			if (c == 'm') {
-				param.fp_exclude_mdt = !!neg_opt;
-				param.fp_num_alloc_mdts += len;
-				tmp = realloc(param.fp_mdt_uuid,
-					      param.fp_num_alloc_mdts *
-					      sizeof(*param.fp_mdt_uuid));
-				if (!tmp) {
-					ret = -ENOMEM;
-					goto err_free;
-				}
-
-				param.fp_mdt_uuid = tmp;
+				p_num = &param.fp_num_mdts;
+				p_alloc = &param.fp_num_alloc_mdts;
+				pp_uuid = &param.fp_mdt_uuid;
 			} else {
-				param.fp_exclude_obd = !!neg_opt;
-				param.fp_num_alloc_obds += len;
-				tmp = realloc(param.fp_obd_uuid,
-					      param.fp_num_alloc_obds *
-					      sizeof(*param.fp_obd_uuid));
-				if (!tmp) {
-					ret = -ENOMEM;
-					goto err_free;
-				}
-
-				param.fp_obd_uuid = tmp;
+				p_num = &param.fp_num_obds;
+				p_alloc = &param.fp_num_alloc_obds;
+				pp_uuid = &param.fp_obd_uuid;
 			}
-			for (token = buf; token && *token; token = next) {
-				struct obd_uuid *puuid;
+			regcomp(&reg, pattern, REG_EXTENDED);
 
-				if (c == 'm') {
-					puuid =
-					&param.fp_mdt_uuid[param.fp_num_mdts++];
-				} else {
-					puuid =
-					&param.fp_obd_uuid[param.fp_num_obds++];
-				}
-				p = strchr(token, ',');
-				next = 0;
-				if (p) {
-					*p = 0;
-					next = p+1;
-				}
+			while (p1 && *p1 != '\0') {
+				/* grab one uuid/idx/idx_range */
+				p2 = strchr(p1, ',');
+				if (p2 == NULL)
+					p2 = p1 + strlen(p1);
 
-				if (strlen(token) > sizeof(puuid->uuid) - 1) {
+				len = p2 - p1;
+				if (len >= sizeof(buf)) {
+					regfree(&reg);
 					ret = -E2BIG;
-					goto err_free;
+					goto err;
+				}
+				strncpy(buf, p1, len);
+				buf[len] = '\0';
+
+				if (*p2 == '\0')
+					p1 = p2;
+				else
+					p1 = p2 + 1;
+
+				/* extend array if necessary */
+				if (*p_num >= *p_alloc) {
+					tmp = realloc(*pp_uuid,
+						      (*p_alloc + 16) *
+						      sizeof((*pp_uuid)[0]));
+					if (tmp == NULL) {
+						regfree(&reg);
+						ret = -ENOMEM;
+						goto err;
+					}
+					*pp_uuid = tmp;
+					*p_alloc += 16;
 				}
 
-				strncpy(puuid->uuid, token,
-					sizeof(puuid->uuid));
+				/* check pattern */
+				rc2 = regexec(&reg, buf, 3, pmatch, 0);
+				if (rc2 == 0) {
+					/* idx range such as 0-3 */
+					int start, end;
+
+					start = atoi(&buf[pmatch[1].rm_so]);
+					end = atoi(&buf[pmatch[2].rm_so]);
+					for ( ; start <= end; start++) {
+						if (*p_num >= *p_alloc) {
+							tmp = realloc(*pp_uuid,
+								      (*p_alloc + 16) *
+								      sizeof((*pp_uuid)[0]));
+							if (tmp == NULL) {
+								regfree(&reg);
+								ret = -ENOMEM;
+								goto err;
+							}
+							*pp_uuid = tmp;
+							*p_alloc += 16;
+						}
+						sprintf(buf, "%d", start);
+						strcpy((*pp_uuid)[(*p_num)++].uuid, buf);
+					}
+				} else if (rc2 == REG_NOMATCH) {
+					/* single idx or uuid */
+					strcpy((*pp_uuid)[(*p_num)++].uuid, buf);
+				} else {
+					regfree(&reg);
+					ret = -errno;
+					goto err;
+				}
 			}
-err_free:
-			if (buf)
-				free(buf);
+
+			regfree(&reg);
 			break;
 		}
 #if LUSTRE_VERSION_CODE >= OBD_OCD_VERSION(2, 18, 53, 0)
@@ -9877,7 +9943,7 @@ quota_type:
 			fprintf(stderr, "%s quota: no quota type to iterate\n",
 				progname);
 			rc = CMD_HELP;
-			return rc;
+			goto out;
 		}
 
 		if (end_qid != 0 && start_qid > end_qid) {
@@ -9885,7 +9951,7 @@ quota_type:
 				"%s quota: end qid is smaller than start qid\n",
 				progname);
 			rc = CMD_HELP;
-			return rc;
+			goto out;
 		}
 
 		qctl->qc_allquota_qid_start = start_qid;
@@ -10515,7 +10581,7 @@ static int lfs_fid2path(int argc, char **argv)
 		goto out;
 	}
 
-	if (*path_or_fsname == '/') {
+	if (path_or_fsname && *path_or_fsname == '/') {
 		print_mnt_dir = true;
 		rc = llapi_search_mounts(path_or_fsname, 0, mnt_dir, NULL);
 	} else {
@@ -12359,6 +12425,169 @@ static inline int verify_mirror_id_by_fd(int fd, __u16 mirror_id)
 	return 0;
 }
 
+static inline int lfs_somsync_by_fd(int fd)
+{
+	struct stat st;
+	int rc = 0;
+
+	/* flush dirty pages from clients */
+	rc = llapi_fsync(fd);
+	if (rc < 0)
+		goto out;
+
+	rc = fstat(fd, &st);
+	if (rc < 0)
+		rc = -errno;
+
+	/*
+	 * After call fstat(), it already gets OST attrs to the client,
+	 * when close the file, MDS will update the LSOM data itself
+	 * according the size and blocks information from the client.
+	 */
+out:
+	close(fd);
+	return rc;
+}
+
+static inline int lfs_somsync_by_path(const char *fname)
+{
+	int fd;
+	int rc = 0;
+
+	fd = open(fname, O_RDONLY | O_NOATIME);
+	if (fd < 0) {
+		rc = -errno;
+		fprintf(stderr,
+			"%s somsync: cannot open '%s': %s\n",
+			progname, fname, strerror(errno));
+		return rc;
+	}
+
+	rc = lfs_somsync_by_fd(fd);
+	if (rc < 0) {
+		fprintf(stderr,
+			"%s somsync: cannot synchronize SOM data of '%s': %s\n",
+			progname, fname, strerror(-rc));
+		return rc;
+	}
+
+	return 0;
+}
+
+static inline int lfs_somsync_by_fid(const char *lustre_dir,
+				     const struct lu_fid *fid)
+{
+	int fd = -1;
+	char fidstr[FID_LEN];
+	int rc = 0;
+
+	snprintf(fidstr, sizeof(fidstr), DFID, PFID(fid));
+	fd = llapi_open_by_fid(lustre_dir, fid, O_RDONLY | O_NOATIME);
+	if (fd < 0) {
+		rc = -errno;
+		fprintf(stderr,
+			"%s somsync: cannot open '%s': %s\n",
+			progname, fidstr, strerror(-rc));
+		return rc;
+	}
+
+	rc = lfs_somsync_by_fd(fd);
+	if (rc < 0) {
+		fprintf(stderr,
+			"%s somsync: cannot synchronize SOM data of '%s': %s\n",
+			progname, fidstr, strerror(-rc));
+		return rc;
+	}
+
+	return 0;
+}
+
+enum {
+	LFS_SOMSYNC_CLIENT_MOUNT = 1,
+};
+
+static int lfs_somsync(int argc, char **argv)
+{
+	struct option long_opts[] = {
+		{ "by-fid", required_argument, NULL, LFS_SOMSYNC_CLIENT_MOUNT },
+		{ NULL },
+	};
+	const char *client_mount = NULL;
+	int c;
+	int rc = 0, rc1;
+
+	while ((c = getopt_long(argc, argv, "", long_opts, NULL)) != -1) {
+		switch (c) {
+		case LFS_SOMSYNC_CLIENT_MOUNT:
+			client_mount = optarg;
+			break;
+		default:
+			fprintf(stderr,
+				"%s somsync: unrecognized option '%s'\n",
+				progname, argv[optind - 1]);
+			return CMD_HELP;
+		}
+	}
+
+	if (client_mount != NULL) {
+		/* lfs somsync --by-fid MOUNT FID ... */
+		char mntdir[PATH_MAX];
+		struct lu_fid fid;
+		char *fidstr;
+		int found;
+
+		if (argc == optind) {
+			fprintf(stderr, "%s somsync: missing FID\n", progname);
+			return CMD_HELP;
+		}
+
+		rc = llapi_search_mounts(client_mount, 0, mntdir, NULL);
+		if (rc < 0) {
+			fprintf(stderr,
+				"%s somsync: invalid MOUNT '%s': %s\n",
+				progname, client_mount, strerror(-rc));
+			return rc;
+		}
+
+		rc = 0;
+		while (optind < argc) {
+			found = 0;
+
+			fidstr = argv[optind++];
+			while (*fidstr == '[')
+				fidstr++;
+			found = sscanf(fidstr, SFID, RFID(&fid));
+			if (found != 3) {
+				fprintf(stderr,
+					"%s somsync: unrecognized FID: %s\n",
+					progname, argv[optind - 1]);
+				return -EINVAL;
+			}
+
+			rc1 = lfs_somsync_by_fid(mntdir, &fid);
+			if (rc1 && !rc)
+				rc = rc1;
+		}
+
+		return rc;
+	}
+
+	/* lfs somsync FILE ... */
+	if (argc == optind) {
+		fprintf(stderr, "%s somsync: missing FILE\n", progname);
+		return CMD_HELP;
+	}
+
+	rc = 0;
+	while (optind < argc) {
+		rc1 = lfs_somsync_by_path(argv[optind++]);
+		if (rc1 && !rc)
+			rc = rc1;
+	}
+
+	return rc;
+}
+
 /**
  * Check whether two files are the same file
  * \retval	0  same file
@@ -13986,10 +14215,9 @@ static int lfs_pcc_detach(int argc, char **argv)
 		}
 
 		rc2 = llapi_pcc_detach_file(fullpath, detach_flags);
-		if (rc2 < 0) {
+		if (rc2 < 0 && rc2 != -ENOENT) {
 			rc2 = -errno;
-			fprintf(stderr,
-				"%s: cannot detach '%s' from PCC: %s\n",
+			fprintf(stderr, "%s: cannot detach '%s' from PCC: %s\n",
 				argv[0], path, strerror(errno));
 			if (rc == 0)
 				rc = rc2;
@@ -14125,10 +14353,44 @@ static int lfs_pcc_state(int argc, char **argv)
 		}
 
 		printf(", PCC_file: %s", state.pccs_path);
+		if (state.pccs_flags & PCC_STATE_FL_UNLINKED)
+			printf(" (unlinked)");
 		printf(", open_count: %u", state.pccs_open_count);
 		printf(", flags: %x", state.pccs_flags);
 		printf("\n");
 	}
+	return rc;
+}
+
+static int lfs_pcc_delete(int argc, char **argv)
+{
+	int rc = 0;
+	const char *path;
+
+	optind = 1;
+
+	if (argc <= 1) {
+		fprintf(stderr, "%s: must specify one or more file names\n",
+			argv[0]);
+		return CMD_HELP;
+	}
+
+	while (optind < argc) {
+		int rc2;
+
+		path = argv[optind++];
+		rc2 = mirror_split(path, 0, NULL,
+				   MF_DESTROY | MF_FOREIGN, NULL);
+		if (rc2 < 0) {
+			if (rc == 0)
+				rc = rc2;
+			fprintf(stderr,
+				"%s: failed to delete PCC for '%s': %s\n",
+				argv[0], path, strerror(-rc2));
+			continue;
+		}
+	}
+
 	return rc;
 }
 
