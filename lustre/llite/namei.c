@@ -245,11 +245,11 @@ static int ll_dom_lock_cancel(struct inode *inode, struct ldlm_lock *lock)
 	RETURN(rc);
 }
 
-static void ll_lock_cancel_bits(struct ldlm_lock *lock, __u64 to_cancel)
+static void ll_lock_cancel_bits(struct ldlm_lock *lock,
+				enum mds_ibits_locks bits)
 {
 	struct inode *inode = ll_inode_from_resource_lock(lock);
 	struct ll_inode_info *lli;
-	__u64 bits = to_cancel;
 	int rc;
 
 	ENTRY;
@@ -284,7 +284,7 @@ static void ll_lock_cancel_bits(struct ldlm_lock *lock, __u64 to_cancel)
 	 */
 	if (bits & MDS_INODELOCK_OPEN)
 		ll_have_md_lock(lock->l_conn_export, inode, &bits,
-				lock->l_req_mode);
+				lock->l_req_mode, 0);
 
 	if (bits & MDS_INODELOCK_OPEN) {
 		fmode_t fmode;
@@ -312,7 +312,8 @@ static void ll_lock_cancel_bits(struct ldlm_lock *lock, __u64 to_cancel)
 	if (bits & (MDS_INODELOCK_LOOKUP | MDS_INODELOCK_UPDATE |
 		    MDS_INODELOCK_LAYOUT | MDS_INODELOCK_PERM |
 		    MDS_INODELOCK_DOM))
-		ll_have_md_lock(lock->l_conn_export, inode, &bits, LCK_MINMODE);
+		ll_have_md_lock(lock->l_conn_export, inode, &bits, LCK_MINMODE,
+				0);
 
 	if (bits & MDS_INODELOCK_DOM) {
 		rc =  ll_dom_lock_cancel(inode, lock);
@@ -412,15 +413,16 @@ static void ll_lock_cancel_bits(struct ldlm_lock *lock, __u64 to_cancel)
 static int ll_md_need_convert(struct ldlm_lock *lock)
 {
 	struct ldlm_namespace *ns = ldlm_lock_to_ns(lock);
-	struct inode *inode;
 	__u64 wanted = lock->l_policy_data.l_inodebits.cancel_bits;
-	__u64 bits = lock->l_policy_data.l_inodebits.bits & ~wanted;
 	enum ldlm_mode mode = LCK_MINMODE;
+	enum mds_ibits_locks bits;
+	struct inode *inode;
 
 	if (!lock->l_conn_export ||
 	    !exp_connect_lock_convert(lock->l_conn_export))
 		return 0;
 
+	bits = lock->l_policy_data.l_inodebits.bits & ~wanted;
 	if (!wanted || !bits || ldlm_is_cancel(lock))
 		return 0;
 
@@ -461,7 +463,7 @@ static int ll_md_need_convert(struct ldlm_lock *lock)
 	unlock_res_and_lock(lock);
 
 	inode = ll_inode_from_resource_lock(lock);
-	ll_have_md_lock(lock->l_conn_export, inode, &bits, mode);
+	ll_have_md_lock(lock->l_conn_export, inode, &bits, mode, 0);
 	iput(inode);
 	return !!(bits);
 }
@@ -477,7 +479,7 @@ int ll_md_blocking_ast(struct ldlm_lock *lock, struct ldlm_lock_desc *ld,
 	switch (flag) {
 	case LDLM_CB_BLOCKING:
 	{
-		__u64 cancel_flags = LCF_ASYNC;
+		enum ldlm_cancel_flags cancel_flags = LCF_ASYNC;
 
 		/* if lock convert is not needed then still have to
 		 * pass lock via ldlm_cli_convert() to keep all states
@@ -504,7 +506,8 @@ int ll_md_blocking_ast(struct ldlm_lock *lock, struct ldlm_lock_desc *ld,
 	}
 	case LDLM_CB_CANCELING:
 	{
-		__u64 to_cancel = lock->l_policy_data.l_inodebits.bits;
+		enum mds_ibits_locks to_cancel =
+					lock->l_policy_data.l_inodebits.bits;
 
 		/* Nothing to do for non-granted locks */
 		if (!ldlm_is_granted(lock))
@@ -1962,7 +1965,7 @@ again:
 				lum->lum_max_inherit;
 			md.def_lsm_obj->lso_lsm.lsm_md_max_inherit_rr =
 				lum->lum_max_inherit_rr;
-			atomic_set(&md.def_lsm_obj->lso_refs, 1);
+			kref_init(&md.def_lsm_obj->lso_refs);
 
 			err = ll_update_inode(dir, &md);
 			md_put_lustre_md(sbi->ll_md_exp, &md);

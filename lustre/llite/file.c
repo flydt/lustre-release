@@ -116,11 +116,16 @@ static void ll_prepare_close(struct inode *inode, struct md_op_data *op_data,
 	 * stored into lli_lazysize in ll_merge_attr(), so set proper file size
 	 * now that we are closing.
 	 */
-	if (llcrypt_require_key(inode) == -ENOKEY &&
-	    ll_i2info(inode)->lli_attr_valid & OBD_MD_FLLAZYSIZE)
+	if (ll_require_key(inode) == -ENOKEY &&
+	    ll_i2info(inode)->lli_attr_valid & OBD_MD_FLLAZYSIZE) {
 		op_data->op_attr.ia_size = ll_i2info(inode)->lli_lazysize;
-	else
+		if (IS_PCCCOPY(inode)) {
+			inode->i_flags &= ~S_PCCCOPY;
+			i_size_write(inode, op_data->op_attr.ia_size);
+		}
+	} else {
 		op_data->op_attr.ia_size = i_size_read(inode);
+	}
 	op_data->op_attr.ia_valid |= (ATTR_MODE | ATTR_ATIME | ATTR_ATIME_SET |
 				      ATTR_MTIME | ATTR_MTIME_SET |
 				      ATTR_CTIME);
@@ -397,7 +402,7 @@ static int ll_md_close(struct inode *inode, struct file *file)
 	/* LU-4398: do not cache write open lock if the file has exec bit */
 	if ((lockmode == LCK_CW && inode->i_mode & 0111) ||
 	    !md_lock_match(ll_i2mdexp(inode), flags, ll_inode2fid(inode),
-			   LDLM_IBITS, &policy, lockmode, &lockh))
+			   LDLM_IBITS, &policy, lockmode, 0, &lockh))
 		rc = ll_md_real_close(inode, lfd->fd_omode);
 
 out:
@@ -490,7 +495,7 @@ static inline int ll_dom_readpage(void *data, struct page *page)
 	kunmap_atomic(kaddr);
 
 	if (inode && IS_ENCRYPTED(inode) && S_ISREG(inode->i_mode)) {
-		if (!llcrypt_has_encryption_key(inode)) {
+		if (!ll_has_encryption_key(inode)) {
 			CDEBUG(D_SEC, "no enc key for "DFID"\n",
 			       PFID(ll_inode2fid(inode)));
 			rc = -ENOKEY;
@@ -646,7 +651,7 @@ out_io:
 	EXIT;
 }
 
-static int ll_intent_file_open(struct dentry *de, void *lmm, int lmmsize,
+static int ll_intent_file_open(struct dentry *de, void *lmm, ssize_t lmmsize,
 				struct lookup_intent *itp)
 {
 	struct ll_sb_info *sbi = ll_i2sbi(de->d_inode);
@@ -1530,7 +1535,7 @@ static int ll_merge_attr_nolock(const struct lu_env *env, struct inode *inode)
 	CDEBUG(D_VFSTRACE, DFID" updating i_size %llu i_blocks %llu\n",
 	       PFID(&lli->lli_fid), attr->cat_size, attr->cat_blocks);
 
-	if (llcrypt_require_key(inode) == -ENOKEY) {
+	if (ll_require_key(inode) == -ENOKEY) {
 		/* Without the key, round up encrypted file size to next
 		 * LUSTRE_ENCRYPTION_UNIT_SIZE. Clear text size is put in
 		 * lli_lazysize for proper file size setting at close time.
@@ -2684,7 +2689,8 @@ static ssize_t ll_file_write(struct file *file, const char __user *buf,
 #endif /* !HAVE_FILE_OPERATIONS_READ_WRITE_ITER */
 
 int ll_lov_setstripe_ea_info(struct inode *inode, struct dentry *dentry,
-			     __u64 flags, struct lov_user_md *lum, int lum_size)
+			     __u64 flags, struct lov_user_md *lum,
+			     ssize_t lum_size)
 {
 	struct lookup_intent oit = {
 		.it_op = IT_OPEN,
@@ -2864,7 +2870,7 @@ static int ll_lov_setea(struct inode *inode, struct file *file,
 {
 	__u64 flags = MDS_OPEN_HAS_OBJS | FMODE_WRITE;
 	struct lov_user_md *lump;
-	int lum_size = sizeof(*lump) + sizeof(struct lov_user_ost_data);
+	ssize_t lum_size = sizeof(*lump) + sizeof(struct lov_user_ost_data);
 	int rc;
 
 	ENTRY;
@@ -2907,20 +2913,20 @@ static int ll_file_getstripe(struct inode *inode, void __user *lum, size_t size)
 	RETURN(rc);
 }
 
-static int ll_lov_setstripe(struct inode *inode, struct file *file,
+static ssize_t ll_lov_setstripe(struct inode *inode, struct file *file,
 			    void __user *arg)
 {
 	struct lov_user_md __user *lum = arg;
 	struct lov_user_md *klum;
-	int lum_size, rc;
+	ssize_t	lum_size;
+	int rc;
 	__u64 flags = FMODE_WRITE;
 
 	ENTRY;
-	rc = ll_copy_user_md(lum, &klum);
-	if (rc < 0)
-		RETURN(rc);
+	lum_size = ll_copy_user_md(lum, &klum);
+	if (lum_size < 0)
+		RETURN(lum_size);
 
-	lum_size = rc;
 	rc = ll_lov_setstripe_ea_info(inode, file_dentry(file), flags, klum,
 				      lum_size);
 	if (!rc) {
@@ -4316,6 +4322,7 @@ static long ll_file_unlock_lease(struct file *file, struct ll_ioc_lease *ioc,
 		if (ioc->lil_count != 1)
 			RETURN(-EINVAL);
 
+		/* PCC-RW is not supported for encrypted files. */
 		if (IS_ENCRYPTED(inode))
 			RETURN(-EOPNOTSUPP);
 
@@ -4916,6 +4923,14 @@ out_ladvise:
 				   sizeof(*attach)))
 			GOTO(out_pcc, rc = -EFAULT);
 
+		/* We only support pcc for encrypted files if we have the
+		 * encryption key and if it is PCC-RO.
+		 */
+		if (IS_ENCRYPTED(inode) &&
+		    (!llcrypt_has_encryption_key(inode) ||
+		     attach->pcca_type != LU_PCC_READONLY))
+			GOTO(out_pcc, rc = -EOPNOTSUPP);
+
 		rc = pcc_ioctl_attach(file, inode, attach);
 out_pcc:
 		OBD_FREE_PTR(attach);
@@ -5022,7 +5037,7 @@ static loff_t ll_lseek(struct file *file, loff_t offset, int whence)
 	/* Without the key, SEEK_HOLE return value has to be
 	 * rounded up to next LUSTRE_ENCRYPTION_UNIT_SIZE.
 	 */
-	if (llcrypt_require_key(inode) == -ENOKEY && whence == SEEK_HOLE)
+	if (ll_require_key(inode) == -ENOKEY && whence == SEEK_HOLE)
 		retval = round_up(retval, LUSTRE_ENCRYPTION_UNIT_SIZE);
 
 	RETURN(retval);
@@ -5290,15 +5305,14 @@ static int ll_file_flock_lock(struct file *file, struct file_lock *file_lock)
 	 *    on the server.
 	 * 2. unlock - never conflicts with anything.
 	 */
-	file_lock->fl_flags &= ~FL_SLEEP;
+	file_lock->C_FLC_FLAGS &= ~FL_SLEEP;
 #ifdef HAVE_LOCKS_LOCK_FILE_WAIT
 	rc = locks_lock_file_wait(file, file_lock);
 #else
-	if (file_lock->fl_flags & FL_FLOCK) {
+	if (file_lock->C_FLC_FLAGS & FL_FLOCK)
 		rc = flock_lock_file_wait(file, file_lock);
-	} else if (file_lock->fl_flags & FL_POSIX) {
+	else if (file_lock->C_FLC_FLAGS & FL_POSIX)
 		rc = posix_lock_file(file, file_lock, NULL);
-	}
 #endif /* HAVE_LOCKS_LOCK_FILE_WAIT */
 	if (rc)
 		CDEBUG_LIMIT(rc == -ENOENT ? D_DLMTRACE : D_ERROR,
@@ -5460,7 +5474,6 @@ ll_file_flock(struct file *file, int cmd, struct file_lock *file_lock)
 	struct md_op_data *op_data;
 	struct lustre_handle lockh = { 0 };
 	union ldlm_policy_data flock = { { 0 } };
-	struct file_lock flbuf = *file_lock;
 	int fl_type = file_lock->C_FLC_TYPE;
 	ktime_t kstart = ktime_get();
 	__u64 flags = 0;
@@ -5521,11 +5534,6 @@ ll_file_flock(struct file *file, int cmd, struct file_lock *file_lock)
 	case F_GETLK64:
 #endif
 		flags = LDLM_FL_TEST_LOCK;
-		/*
-		 * To work with lockd we should check local lock first,
-		 * else lock_owner could disappear in conflict case.
-		 */
-		posix_test_lock(file, &flbuf);
 		break;
 	case F_CANCELLK:
 		CDEBUG(D_DLMTRACE, "F_CANCELLK owner=%llx %llu-%llu\n",
@@ -5571,7 +5579,7 @@ ll_file_flock(struct file *file, int cmd, struct file_lock *file_lock)
 	    flags == LDLM_FL_BLOCK_NOWAIT /* F_SETLK/F_SETLK64 */) {
 
 		cb_data->fa_notify = file_lock->fl_lmops->lm_grant;
-		flags = (file_lock->fl_flags & FL_SLEEP) ?
+		flags = (file_lock->C_FLC_FLAGS & FL_SLEEP) ?
 			0 : LDLM_FL_BLOCK_NOWAIT;
 		einfo.ei_cb_cp = ll_flock_completion_ast_async;
 		get_file(file);
@@ -5592,7 +5600,7 @@ ll_file_flock(struct file *file, int cmd, struct file_lock *file_lock)
 			 * with reordering of unlock & lock responses from
 			 * server.
 			 */
-			cb_data->fa_flc.fl_flags |= FL_EXISTS;
+			cb_data->fa_flc.C_FLC_FLAGS |= FL_EXISTS;
 			rc = ll_file_flock_lock(file, &cb_data->fa_flc);
 			if (rc) {
 				if (rc == -ENOENT) {
@@ -5639,16 +5647,13 @@ out:
 	}
 
 	if (rc == 0 && (flags & LDLM_FL_TEST_LOCK) &&
-	    flbuf.C_FLC_TYPE != file_lock->C_FLC_TYPE) { /* Verify local & remote */
-		CERROR("Flock LR mismatch! inode="DFID", flags=%#llx, mode=%u, "
-		       "pid=%u/%u, start=%llu/%llu, end=%llu/%llu,type=%u/%u\n",
-		       PFID(ll_inode2fid(inode)), flags, einfo.ei_mode,
-		       file_lock->C_FLC_PID, flbuf.C_FLC_PID,
-		       file_lock->fl_start, flbuf.fl_start,
-		       file_lock->fl_end, flbuf.fl_end,
-		       file_lock->C_FLC_TYPE, flbuf.C_FLC_TYPE);
-		/* return local */
-		*file_lock = flbuf;
+	    file_lock->C_FLC_TYPE != F_UNLCK) {
+		struct file_lock flbuf;
+
+		/* Take a extra reference for lockowner while
+		 * working with lockd.
+		 */
+		locks_copy_conflock(&flbuf, file_lock);
 	}
 
 	if (!rc)
@@ -5883,12 +5888,14 @@ ll_file_noflock(struct file *file, int cmd, struct file_lock *file_lock)
  * - if found clear the common lock bits in *bits
  * - the bits not found, are kept in *bits
  * \param inode [IN]
- * \param bits [IN] searched lock bits [IN]
- * \param l_req_mode [IN] searched lock mode
+ * \param bits [IN]		searched lock bits [IN]
+ * \param l_req_mode [IN]	searched lock mode
+ * \param match_flags [IN]	match flags
  * \retval boolean, true iff all bits are found
  */
-int ll_have_md_lock(struct obd_export *exp, struct inode *inode, __u64 *bits,
-		    enum ldlm_mode l_req_mode)
+int ll_have_md_lock(struct obd_export *exp, struct inode *inode,
+		    enum mds_ibits_locks *bits, enum ldlm_mode l_req_mode,
+		    enum ldlm_match_flags match_flags)
 {
 	struct lustre_handle lockh;
 	union ldlm_policy_data policy;
@@ -5913,7 +5920,7 @@ int ll_have_md_lock(struct obd_export *exp, struct inode *inode, __u64 *bits,
 			continue;
 
 		if (md_lock_match(exp, flags, fid, LDLM_IBITS, &policy, mode,
-				  &lockh)) {
+				  match_flags, &lockh)) {
 			struct ldlm_lock *lock;
 
 			lock = ldlm_handle2lock(&lockh);
@@ -5942,7 +5949,7 @@ enum ldlm_mode ll_take_md_lock(struct inode *inode, __u64 bits,
 	CDEBUG(D_INFO, "trying to match res "DFID"\n", PFID(fid));
 
 	rc = md_lock_match(ll_i2mdexp(inode), LDLM_FL_BLOCK_GRANTED|flags,
-			   fid, LDLM_IBITS, &policy, mode, lockh);
+			   fid, LDLM_IBITS, &policy, mode, 0, lockh);
 
 	RETURN(rc);
 }

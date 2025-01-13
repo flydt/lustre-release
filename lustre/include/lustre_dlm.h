@@ -287,6 +287,8 @@ typedef int (*ldlm_res_policy)(const struct lu_env *env,
 
 typedef int (*ldlm_cancel_cbt)(struct ldlm_lock *lock);
 
+typedef int (*ldlm_hp_handler_t)(struct ldlm_lock *lock);
+
 /**
  * LVB operations.
  * LVB is Lock Value Block. This is a special opaque (to LDLM) value that could
@@ -547,6 +549,12 @@ struct ldlm_namespace {
 	 */
 	ldlm_cancel_cbt		ns_cancel;
 
+	/**
+	 * Callback to check whether an object protected by a lock needs to
+	 * be handled with high priority (i.e. in case of lock blocking AST).
+	 */
+	ldlm_hp_handler_t	ns_hp_handler;
+
 	/** LDLM lock stats */
 	struct lprocfs_stats	*ns_stats;
 
@@ -630,6 +638,13 @@ static inline void ns_register_cancel(struct ldlm_namespace *ns,
 {
 	LASSERT(ns != NULL);
 	ns->ns_cancel = arg;
+}
+
+static inline void ns_register_hp_handler(struct ldlm_namespace *ns,
+					  ldlm_hp_handler_t arg)
+{
+	LASSERT(ns != NULL);
+	ns->ns_hp_handler = arg;
 }
 
 struct ldlm_lock;
@@ -1023,6 +1038,7 @@ enum ldlm_match_flags {
 	LDLM_MATCH_AST_ANY = BIT(2),
 	LDLM_MATCH_RIGHT   = BIT(3),
 	LDLM_MATCH_GROUP   = BIT(4),
+	LDLM_MATCH_SKIP_UNUSED = BIT(5),
 };
 
 #ifdef HAVE_INTERVAL_TREE_CACHED
@@ -1641,18 +1657,19 @@ enum ldlm_mode ldlm_lock_match_with_skip(struct ldlm_namespace *ns,
 					 enum ldlm_type type,
 					 union ldlm_policy_data *policy,
 					 enum ldlm_mode mode,
-					 struct lustre_handle *lh,
-					 enum ldlm_match_flags match_flags);
+					 enum ldlm_match_flags match_flags,
+					 struct lustre_handle *lh);
 static inline enum ldlm_mode ldlm_lock_match(struct ldlm_namespace *ns,
 					     __u64 flags,
 					     const struct ldlm_res_id *res_id,
 					     enum ldlm_type type,
 					     union ldlm_policy_data *policy,
 					     enum ldlm_mode mode,
+					     enum ldlm_match_flags m_flags,
 					     struct lustre_handle *lh)
 {
 	return ldlm_lock_match_with_skip(ns, flags, 0, res_id, type, policy,
-					 mode, lh, 0);
+					 mode, m_flags, lh);
 }
 struct ldlm_lock *search_itree(struct ldlm_resource *res,
 			       struct ldlm_match_data *data);

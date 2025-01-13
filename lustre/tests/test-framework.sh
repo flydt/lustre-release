@@ -1046,7 +1046,9 @@ load_lnet() {
 	LNDPATH=${LNDPATH:-"../lnet/klnds"}
 	if [ -z "$LNETLND" ]; then
 		case $NETTYPE in
-		o2ib*)	LNETLND="o2iblnd/ko2iblnd" ;;
+		o2ib*)  [[ -f ${LNDPATH}/o2iblnd/ko2iblnd.ko ]] &&
+				LNETLND="o2iblnd/ko2iblnd" ||
+				LNETLND="in-kernel-o2iblnd/ko2iblnd";;
 		tcp*)	LNETLND="socklnd/ksocklnd" ;;
 		kfi*)	LNETLND="kfilnd/kkfilnd" ;;
 		gni*)	LNETLND="gnilnd/kgnilnd" ;;
@@ -1373,7 +1375,7 @@ start_gss_daemons() {
 		do_nodes $nodes "$LSVCGSSD -vvv $options" || return 1
 	fi
 
-	nodes=$(comma_list $(osts_nodes))
+	nodes=$(osts_nodes)
 	echo "Starting gss daemon on ost: $nodes"
 	if $GSS_SK; then
 		# Start all versions, in case of switching
@@ -1389,8 +1391,7 @@ start_gss_daemons() {
 	#
 	# check daemons are running
 	#
-	nodes=$(comma_list $(mdts_nodes) $(osts_nodes))
-	check_gss_daemon_nodes $nodes "$LSVCGSSD" || return 5
+	check_gss_daemon_nodes $(tgts_nodes) "$LSVCGSSD" || return 5
 }
 
 stop_gss_daemons() {
@@ -1398,7 +1399,7 @@ stop_gss_daemons() {
 
 	send_sigint $nodes lsvcgssd lgssd
 
-	nodes=$(comma_list $(osts_nodes))
+	nodes=$(osts_nodes)
 	send_sigint $nodes lsvcgssd
 
 	nodes=${CLIENTS:-$HOSTNAME}
@@ -1560,12 +1561,7 @@ init_gss() {
 		fi
 		# This is required for servers as well, if S2S in use
 		if $SK_S2S; then
-			do_nodes $(comma_list $(mdts_nodes)) \
-				"cp $SK_PATH/$FSNAME-s2s-server.key \
-				$SK_PATH/$FSNAME-s2s-client.key; $LGSS_SK \
-				-t client -m $SK_PATH/$FSNAME-s2s-client.key \
-				>/dev/null 2>&1"
-			do_nodes $(comma_list $(osts_nodes)) \
+			do_nodes $(tgts_nodes) \
 				"cp $SK_PATH/$FSNAME-s2s-server.key \
 				$SK_PATH/$FSNAME-s2s-client.key; $LGSS_SK \
 				-t client -m $SK_PATH/$FSNAME-s2s-client.key \
@@ -2068,7 +2064,7 @@ set_params_mdts() {
 }
 
 set_params_osts() {
-	local osts=${1:-$(comma_list $(osts_nodes))}
+	local osts=${1:-$(osts_nodes)}
 	shift || true
 	local params="${@:-$OSS_LCTL_SETPARAM_PARAM}"
 
@@ -3593,10 +3589,10 @@ sync_all_data_mdts() {
 }
 
 sync_all_data_osts() {
-	do_nodes $(comma_list $(osts_nodes)) \
-	    "lctl set_param -n osd*.*OS*.force_sync=1" 2>&1 |
+	do_nodes $(osts_nodes) "lctl set_param -n osd*.*OS*.force_sync=1" 2>&1 |
 		grep -v 'Found no match'
 }
+
 sync_all_data() {
 	sync_all_data_mdts
 	sync_all_data_osts
@@ -3885,7 +3881,7 @@ wait_mds_ost_sync () {
 	then
 		# old way, use mds_sync
 		new_wait=false
-		list=$(comma_list $(osts_nodes))
+		list=$(osts_nodes)
 		cmd="$LCTL get_param -n obdfilter.*.mds_sync"
 	fi
 
@@ -6525,8 +6521,7 @@ check_shared_dir() {
 }
 
 run_lfsck() {
-	do_nodes $(comma_list $(mdts_nodes) $(osts_nodes)) \
-		$LCTL set_param printk=+lfsck
+	do_nodes $(tgts_nodes) $LCTL set_param printk=+lfsck
 	do_facet $SINGLEMDS "$LCTL lfsck_start -M $FSNAME-MDT0000 -r -A -t all"
 
 	for k in $(seq $MDSCOUNT); do
@@ -6543,7 +6538,7 @@ run_lfsck() {
 	local rep_mdt=$(do_nodes $(comma_list $(mdts_nodes)) \
 			$LCTL get_param -n mdd.$FSNAME-*.lfsck_* |
 			awk '/repaired/ { print $2 }' | calc_sum)
-	local rep_ost=$(do_nodes $(comma_list $(osts_nodes)) \
+	local rep_ost=$(do_nodes $(osts_nodes) \
 			$LCTL get_param -n obdfilter.$FSNAME-*.lfsck_* |
 			awk '/repaired/ { print $2 }' | calc_sum)
 	local repaired=$((rep_mdt + rep_ost))
@@ -6905,40 +6900,44 @@ drop_reint_reply() {
 }
 
 drop_update_reply() {
-# OBD_FAIL_OUT_UPDATE_NET_REP
 	local index=$1
 	shift 1
-	RC=0
-	do_facet mds${index} lctl set_param fail_loc=0x1701
-	do_facet client "$@" || RC=$?
-	do_facet mds${index} lctl set_param fail_loc=0
-	return $RC
+	local rc=0
+
+	# OBD_FAIL_OUT_UPDATE_NET_REP			0x1701
+	do_facet mds${index} $LCTL set_param fail_loc=0x1701
+	do_facet client "$@" || rc=$?
+	do_facet mds${index} $LCTL set_param fail_loc=0
+
+	return $rc
 }
 
 pause_bulk() {
-#define OBD_FAIL_OST_BRW_PAUSE_BULK      0x214
-	RC=0
-
+	local cmd=${1:-0}
 	local timeout=${2:-0}
+	local rc=0
+
 	# default is (obd_timeout / 4) if unspecified
-	echo "timeout is $timeout/$2"
-	do_facet ost1 lctl set_param fail_val=$timeout fail_loc=0x80000214
-	do_facet client "$1" || RC=$?
+	echo "timeout is $timeout"
+	#define OBD_FAIL_OST_BRW_PAUSE_BULK		0x214
+	do_facet ost1 $LCTL set_param fail_val=$timeout fail_loc=0x80000214
+	do_facet client "$cmd" || rc=$?
 	do_facet client "sync"
-	do_facet ost1 lctl set_param fail_loc=0
-	return $RC
+	do_facet ost1 $LCTL set_param fail_loc=0
+
+	return $rc
 }
 
 drop_ldlm_cancel() {
-#define OBD_FAIL_LDLM_CANCEL_NET			0x304
-	local RC=0
-	local list=$(comma_list $(mdts_nodes) $(osts_nodes))
-	do_nodes $list lctl set_param fail_loc=0x304
+	local tgts=$(tgts_nodes)
+	local rc=0
 
-	do_facet client "$@" || RC=$?
+	#define OBD_FAIL_LDLM_CANCEL_NET		0x304
+	do_nodes $tgts $LCTL set_param fail_loc=0x304
+	do_facet client "$@" || rc=$?
+	do_nodes $tgts $LCTL set_param fail_loc=0
 
-	do_nodes $list lctl set_param fail_loc=0
-	return $RC
+	return $rc
 }
 
 drop_bl_callback_once() {
@@ -7767,7 +7766,7 @@ check_grant() {
 
 	echo -n "checking grant......"
 
-	local osts=$(comma_list $(osts_nodes))
+	local osts=$(osts_nodes)
 	local clients=$CLIENTS
 	[ -z "$clients" ] && clients=$(hostname)
 
@@ -7791,8 +7790,7 @@ check_grant() {
 		srv_grant=$(grant_from_servers $osts)
 	done
 	if [[ $cli_grant -ne $srv_grant ]]; then
-		do_nodes $(comma_list $(osts_nodes)) \
-			"$LCTL get_param obdfilter.${FSNAME}-OST*.tot*" \
+		do_nodes $osts "$LCTL get_param obdfilter.${FSNAME}-OST*.tot*" \
 			"obdfilter.${FSNAME}-OST*.grant_*"
 		do_nodes $clients "$LCTL get_param osc.${FSNAME}-*.cur_*_bytes"
 		error "failed grant check: client:$cli_grant server:$srv_grant"
@@ -8320,11 +8318,19 @@ check_runas_id() {
 get_mpiuser_id() {
 	local mpi_user=$1
 
-	MPI_USER_UID=$(do_facet client "getent passwd $mpi_user | cut -d: -f3;
-exit \\\${PIPESTATUS[0]}") || error_exit "failed to get the UID for $mpi_user"
+	if [[ -z "$MPI_USER_UID" ]]; then
+		MPI_USER_UID=$(do_facet client "getent passwd $mpi_user |
+			       cut -d: -f3; exit \\\${PIPESTATUS[0]}") ||
+			skip_env "failed to get the UID for $mpi_user"
+		echo "mpi_user=$1 MPI_USER_UID=$MPI_USER_UID"
+	fi
 
-	MPI_USER_GID=$(do_facet client "getent passwd $mpi_user | cut -d: -f4;
-exit \\\${PIPESTATUS[0]}") || error_exit "failed to get the GID for $mpi_user"
+	if [[ -z "$MPI_USER_GID" ]]; then
+		MPI_USER_GID=$(do_facet client "getent passwd $mpi_user |
+			       cut -d: -f4; exit \\\${PIPESTATUS[0]}") ||
+			skip_env "failed to get the GID for $mpi_user"
+		echo "mpi_user=$1 MPI_USER_GID=$MPI_USER_GID"
+	fi
 }
 
 # Run multiop in the background, but wait for it to print
@@ -9039,30 +9045,31 @@ wait_osp_active() {
 }
 
 oos_full() {
-	local -a AVAILA
-	local -a GRANTA
-	local -a TOTALA
-	local OSCFULL=1
-	AVAILA=($(do_nodes $(comma_list $(osts_nodes)) \
-	          $LCTL get_param obdfilter.*.kbytesavail))
-	GRANTA=($(do_nodes $(comma_list $(osts_nodes)) \
-	          $LCTL get_param -n obdfilter.*.tot_granted))
-	TOTALA=($(do_nodes $(comma_list $(osts_nodes)) \
-	          $LCTL get_param -n obdfilter.*.kbytestotal))
-	for ((i=0; i<${#AVAILA[@]}; i++)); do
-		local -a AVAIL1=(${AVAILA[$i]//=/ })
-		local -a TOTAL=(${TOTALA[$i]//=/ })
-		GRANT=$((${GRANTA[$i]}/1024))
+	local -a availa
+	local -a granta
+	local -a totala
+	local oscfull=1
+	local osts=$(osts_nodes)
+
+	availa=($(do_nodes $osts "$LCTL get_param obdfilter.*.kbytesavail"))
+	granta=($(do_nodes $osts "$LCTL get_param -n obdfilter.*.tot_granted"))
+	totala=($(do_nodes $osts "$LCTL get_param -n obdfilter.*.kbytestotal"))
+	for ((i=0; i<${#availa[@]}; i++)); do
+		local -a avail1=(${availa[$i]//=/ })
+		local -a total=(${totala[$i]//=/ })
+		local grant=$((${granta[$i]}/1024))
 		# allow 1% of total space in bavail because of delayed
 		# allocation with ZFS which might release some free space after
 		# txg commit.  For small devices, we set a mininum of 8MB
-		local LIMIT=$((${TOTAL} / 100 + 8000))
-		echo -n $(echo ${AVAIL1[0]} | cut -d"." -f2) avl=${AVAIL1[1]} \
-			grnt=$GRANT diff=$((AVAIL1[1] - GRANT)) limit=${LIMIT}
-		[ $((AVAIL1[1] - GRANT)) -lt $LIMIT ] && OSCFULL=0 && \
+		local limit=$((total / 100 + 8000))
+
+		echo -n $(echo ${avail1[0]} | cut -d"." -f2) avl=${avail1[1]} \
+			  grnt=$grant diff=$((avail1[1] - grant)) limit=${limit}
+		[ $((avail1[1] - grant)) -lt $limit ] && oscfull=0 &&
 			echo " FULL" || echo
 	done
-	return $OSCFULL
+
+	return $oscfull
 }
 
 list_pool() {
@@ -10925,7 +10932,7 @@ lfsck_verify_pfid()
 	cancel_lru_locks osc
 
 	# make sure PFID is set correctly for files
-	do_nodes $(comma_list $(osts_nodes)) \
+	do_nodes $(osts_nodes) \
 	       "$LCTL set_param -n obdfilter.${FSNAME}-OST*.lfsck_verify_pfid=1"
 
 	for f in "$@"; do
@@ -10933,7 +10940,7 @@ lfsck_verify_pfid()
 			{ rc=$?; echo "verify $f failed"; break; }
 	done
 
-	do_nodes $(comma_list $(osts_nodes)) \
+	do_nodes $(osts_nodes) \
 	       "$LCTL set_param -n obdfilter.${FSNAME}-OST*.lfsck_verify_pfid=0"
 	return $rc
 }
@@ -11234,6 +11241,11 @@ changelog2array()
 			;;
 		x)
 			key=xattr
+			;;
+		s)
+			key=source-fid
+			value="${value#[}"
+			value="${value%]}"
 			;;
 		*)
 			;;
@@ -12192,7 +12204,7 @@ function check_set_fallocate()
 		{ echo "keep default fallocate mode: $old_mode"; return 0; }
 	[[ "$new_mode" && "$old_mode" == "$new_mode" ]] &&
 		{ echo "keep current fallocate mode: $old_mode"; return 0; }
-	local osts=$(comma_list $(osts_nodes))
+	local osts=$(osts_nodes)
 
 	stack_trap "do_nodes $osts $LCTL set_param $fa_mode=$old_mode"
 	do_nodes $osts $LCTL set_param $fa_mode=${new_mode:-0} ||
@@ -12432,8 +12444,10 @@ force_new_seq_all() {
 }
 
 ost_set_temp_seq_width_all() {
-	local osts=$(comma_list $(osts_nodes))
+	local osts=$(osts_nodes)
 	local width=$(do_facet ost1 $LCTL get_param -n seq.*OST0000-super.width)
+
+	(( $width != $1 )) || return 0
 
 	do_nodes $osts $LCTL set_param seq.*OST*-super.width=$1
 	stack_trap "do_nodes $osts $LCTL set_param seq.*OST*-super.width=$width"
@@ -12471,4 +12485,123 @@ zfs_or_rotational() {
 	else
 		return 1
 	fi
+}
+
+ost_fid2_objpath() {
+	local facet=$1
+	local fid=$2
+
+	fid=$(echo $fid | tr -d '[]')
+
+	seq=$(echo $fid | awk -F ':' '{ print $1 }' | sed -e "s/^0x//g")
+	oidhex=$(echo $fid | awk -F ':' '{ print $2 }')
+
+	if [ $seq == 0 ] || [ $(facet_fstype $facet) == zfs ]; then
+		oid=$((16#${oidhex#0x}))
+	else
+		oid=${oidhex#0x}
+	fi
+
+	echo "O/$seq/d$((oidhex%32))/$oid"
+}
+
+check_seq_oid()
+{
+	log "check file $1"
+
+	lmm_count=$($LFS getstripe -c $1)
+	lmm_seq=$($LFS getstripe -v $1 | awk '/lmm_seq/ { print $2 }')
+	lmm_oid=$($LFS getstripe -v $1 | awk '/lmm_object_id/ { print $2 }')
+
+	local old_ifs="$IFS"
+	IFS=$'[:]'
+	fid=($($LFS path2fid $1))
+	IFS="$old_ifs"
+
+	log "FID seq ${fid[1]}, oid ${fid[2]} ver ${fid[3]}"
+	log "LOV seq $lmm_seq, oid $lmm_oid, count: $lmm_count"
+
+	# compare lmm_seq and lu_fid->f_seq
+	[ $lmm_seq = ${fid[1]} ] || error "SEQ mismatch"
+	# compare lmm_object_id and lu_fid->oid
+	[ $lmm_oid = ${fid[2]} ] || error "OID mismatch"
+
+	# check the trusted.fid attribute of the OST objects of the file
+	local have_obdidx=false
+	local stripe_nr=0
+	$LFS getstripe $1 | while read obdidx oid hex seq; do
+		# skip lines up to and including "obdidx"
+		[ -z "$obdidx" ] && break
+		[ "$obdidx" = "obdidx" ] && have_obdidx=true && continue
+		$have_obdidx || continue
+
+		local ost=$((obdidx + 1))
+		local dev=$(ostdevname $ost)
+
+		log "want: stripe:$stripe_nr ost:$obdidx oid:$oid/$hex seq:$seq"
+
+		local obj_file=$(ost_fid2_objpath ost$ost "$seq:$hex:0")
+
+		local ff=""
+		#
+		# Don't unmount/remount the OSTs if we don't need to do that.
+		# LU-2577 changes filter_fid to be smaller, so debugfs needs
+		# update too, until that use mount/ll_decode_filter_fid/mount.
+		# Re-enable when debugfs will understand new filter_fid.
+		#
+		if [ $(facet_fstype ost$ost) == ldiskfs ]; then
+			ff=$(do_facet ost$ost "$DEBUGFS -c -R 'stat $obj_file' \
+				$dev 2>/dev/null" | grep "parent=")
+		fi
+		if [ -z "$ff" ]; then
+			stop ost$ost
+			mount_fstype ost$ost
+			ff=$(do_facet ost$ost $LL_DECODE_FILTER_FID \
+				$(facet_mntpt ost$ost)/$obj_file)
+			unmount_fstype ost$ost
+			start ost$ost $dev $OST_MOUNT_OPTS
+			clients_up
+		fi
+
+		[ -z "$ff" ] && error "$obj_file: no filter_fid info"
+
+		echo "$ff" | sed -e 's#.*objid=#got: objid=#'
+
+		# /mnt/O/0/d23/23: objid=23 seq=0 parent=[0x200000400:0x1e:0x1]
+		# fid: objid=23 seq=0 parent=[0x200000400:0x1e:0x0] stripe=1
+		#
+		# fid: parent=[0x200000400:0x1e:0x0] stripe=1 stripe_count=2 \
+		#	stripe_size=1048576 component_id=1 component_start=0 \
+		#	component_end=33554432
+		local ff_parent=$(sed -e 's/.*parent=.//' <<<$ff)
+		local ff_pseq=$(cut -d: -f1 <<<$ff_parent)
+		local ff_poid=$(cut -d: -f2 <<<$ff_parent)
+		local ff_pstripe
+		if grep -q 'stripe=' <<<$ff; then
+			ff_pstripe=$(sed -e 's/.*stripe=//' -e 's/ .*//' <<<$ff)
+		else
+			# $LL_DECODE_FILTER_FID does not print "stripe="; look
+			# into f_ver in this case.  See comment on ff_parent.
+			ff_pstripe=$(cut -d: -f3 <<<$ff_parent | sed -e 's/]//')
+		fi
+
+		# compare lmm_seq and filter_fid->ff_parent.f_seq
+		[ $ff_pseq = $lmm_seq ] ||
+			error "FF parent SEQ $ff_pseq != $lmm_seq"
+		# compare lmm_object_id and filter_fid->ff_parent.f_oid
+		[ $ff_poid = $lmm_oid ] ||
+			error "FF parent OID $ff_poid != $lmm_oid"
+		(($ff_pstripe == $stripe_nr)) ||
+			error "FF stripe $ff_pstripe != $stripe_nr"
+
+		stripe_nr=$((stripe_nr + 1))
+		[ $CLIENT_VERSION -lt $(version_code 2.9.55) ] &&
+			continue
+		if grep -q 'stripe_count=' <<<$ff; then
+			local ff_scnt=$(sed -e 's/.*stripe_count=//' \
+					    -e 's/ .*//' <<<$ff)
+			[ $lmm_count = $ff_scnt ] ||
+				error "FF stripe count $lmm_count != $ff_scnt"
+		fi
+	done
 }

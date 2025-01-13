@@ -470,10 +470,10 @@ ll_read_ahead_pages(const struct lu_env *env, struct cl_io *io,
 
 				list_add_tail(&ra->cra_linkage,
 					      &ria->ria_cl_ra_list);
-				 /*
-				  * Only shrink ria_end_idx if the matched
-				  * LDLM lock doesn't cover more.
-				  */
+				/*
+				 * Only shrink ria_end_idx if the matched
+				 * LDLM lock doesn't cover more.
+				 */
 				if (page_idx > ra->cra_end_idx) {
 					ria->ria_end_idx = ra->cra_end_idx;
 					break;
@@ -722,10 +722,11 @@ static void ll_readahead_handle_work(struct work_struct *wq)
 		if (rc == 0)
 			task_io_account_read(PAGE_SIZE * count);
 	}
-	if (ria->ria_end_idx == ra_end_idx && ra_end_idx == (kms >> PAGE_SHIFT))
-		ll_ra_stats_inc(inode, RA_STAT_EOF);
 
 	ll_readahead_locks_release(env, &ria->ria_cl_ra_list);
+
+	if (ria->ria_end_idx == ra_end_idx && ra_end_idx == (kms >> PAGE_SHIFT))
+		ll_ra_stats_inc(inode, RA_STAT_EOF);
 
 	if (ra_end_idx != ria->ria_end_idx)
 		ll_ra_stats_inc(inode, RA_STAT_FAILED_REACH_END);
@@ -949,6 +950,10 @@ static int ll_readpages(const struct lu_env *env, struct cl_io *io,
 		else if (ret == 0) /* ret 1 is already uptodate */
 			count++;
 	}
+
+	if (count)
+		ll_ra_stats_add(vvp_object_inode(io->ci_obj),
+				RA_STAT_FORCEREAD_PAGES, count);
 
 	RETURN(count > 0 ? count : ret);
 }
@@ -1720,6 +1725,9 @@ int ll_io_read_page(const struct lu_env *env, struct cl_io *io,
 	if (file) {
 		lfd = file->private_data;
 		ras = &lfd->fd_ras;
+
+		if (file->f_mode & FMODE_RANDOM)
+			io->ci_rand_read = 1;
 	}
 
 	/* PagePrivate2 is set in ll_io_zero_page() to tell us the vmpage

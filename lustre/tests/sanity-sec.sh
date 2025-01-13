@@ -1214,7 +1214,7 @@ create_fops_nodemaps() {
 	for client in $clients; do
 		local client_ip=$(host_nids_address $client $NETTYPE)
 		local client_nid=$(h2nettype $client_ip)
-		[[ "$client_nid" =~ ":" ]] && client_nid+="/128"
+
 		do_facet mgs $LCTL nodemap_add c${i} || return 1
 		do_facet mgs $LCTL nodemap_add_range 	\
 			--name c${i} --range $client_nid || {
@@ -2331,6 +2331,112 @@ test_27aa() { #LU-17922
 }
 run_test 27aa "test nodemap idmap range"
 
+test_27ab() { #LU-18109
+	local idmap
+	local id=500
+	local offset
+
+	do_facet mgs $LCTL nodemap_add Test18109 ||
+		error "unable to add Test18109 as nodemap"
+	stack_trap "do_facet mgs $LCTL nodemap_del Test18109 || true"
+
+	do_facet mgs $LCTL nodemap_add OffsetTest ||
+		error "unable to add OffsetTest as nodemap"
+	stack_trap "do_facet mgs $LCTL nodemap_del OffsetTest || true"
+
+	do_facet mgs $LCTL nodemap_add_offset --name Test18109 \
+		--offset 100000 --limit 200000 ||
+			error "cannot set offset 100000-299999 for Test18109"
+
+	#expected error, invalid offset range supplied
+	do_facet mgs $LCTL nodemap_add_offset --name OffsetTest \
+		--offset 150000 --limit 100000 &&
+			error "cannot set offset 150000-249999 for OffsetTest"
+
+	do_facet mgs $LCTL nodemap_add_idmap --name Test18109 \
+		 --idtype uid --idmap 500-509:0-9 ||
+		 error "unable to add idmap range 500-509:0-9"
+
+	idmap=$(do_facet mgs $LCTL get_param nodemap.Test18109.idmap |
+		grep idtype)
+	while IFS= read -r idmap; do
+		if (( $id <= 509 )); then
+			[[ "$idmap" == *"client_id: $id"* ]] ||
+				error "could not find 'client_id: ${id}' inside of ${idmap}"
+		fi
+		((id++))
+	done < <(echo "$idmap")
+
+	do_facet mgs $LCTL nodemap_del_idmap --name Test18109 \
+		 --idtype uid --idmap 500-509:0 ||
+			error "cannot delete idmap range 500-509:0"
+
+	#expected error, invalid secondary range supplied
+	do_facet mgs $LCTL nodemap_add --name Test18109 \
+		 --idtype uid --idmap 500-509:200000-200010 &&
+		 error "Invalid range 200000-200010 was supplied"
+
+	(( $(do_facet mgs $LCTL get_param nodemap.Test18109.idmap |
+		grep -c idtype) == 0 )) ||
+		error "invalid range 200000-200010 supplied and passed"
+
+	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+		 grep start_uid)
+	[[ "$offset" == *"start_uid: 100000"* ]] ||
+		error "expected start_uid of 100000 not found before remounting"
+
+	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+		 grep limit_uid)
+	[[ "$offset" == *"limit_uid: 200000"* ]] ||
+		error "expected limit_uid of 200000 not found before remounting"
+
+	stopall || error "failed to unmount servers"
+	setupall || error "failed to remount servers"
+
+	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+		 grep start_uid)
+	[[ "$offset" == *"start_uid: 100000"* ]] ||
+		error "expected start_uid of 100000 not found after remounting"
+
+	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+		 grep limit_uid)
+	[[ "$offset" == *"limit_uid: 200000"* ]] ||
+		error "expected limit_uid of 200000 not found after remounting"
+
+	do_facet mgs $LCTL nodemap_del_offset --name Test18109 ||
+		error "cannot del offset from Test18109"
+
+	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+		 grep start_uid)
+	[[ "$offset" == *"start_uid: 0"* ]] ||
+		error "expected start_uid 0, found $offset"
+
+	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+		 grep limit_uid)
+	[[ "$offset" == *"limit_uid: 0"* ]] ||
+		error "expected limit_uid 0, found $offset"
+
+	stopall || error "failed to unmount servers"
+	setupall || error "failed to remount servers"
+
+	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+		 grep start_uid)
+	[[ "$offset" == *"start_uid: 0"* ]] ||
+		error "expected start_uid 0, found $offset after remounting"
+
+	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+		 grep limit_uid)
+	[[ "$offset" == *"limit_uid: 0"* ]] ||
+		error "expected limit_uid 0, found $offset after remounting"
+
+	do_facet mgs $LCTL nodemap_del Test18109 ||
+		error "failed to remove nodemap Test18109"
+
+	do_facet mgs $LCTL nodemap_del OffsetTest ||
+		error "failed to remove nodemap OffsetTest"
+}
+run_test 27ab "test nodemap idmap offset"
+
 test_27b() { #LU-10703
 	[ "$MDS1_VERSION" -lt $(version_code 2.11.50) ] &&
 		skip "Need MDS >= 2.11.50"
@@ -3295,18 +3401,11 @@ test_37() {
 	do_facet ost1 "sync; sync"
 
 	# check that content on ost is encrypted
-	local fid=($($LFS getstripe $testfile | grep 0x))
-	local seq=${fid[3]#0x}
-	local oid=${fid[1]}
-	local oid_hex
+	local fids=($($LFS getstripe $testfile | grep 0x))
+	local fid="${fids[3]}:${fids[2]}:0"
+	local objpath=$(ost_fid2_objpath ost1 $fid)
 
-	if [ $seq == 0 ]; then
-		oid_hex=${fid[1]}
-	else
-		oid_hex=${fid[2]#0x}
-	fi
-	do_facet ost1 "$DEBUGFS -c -R 'cat O/$seq/d$(($oid % 32))/$oid_hex' \
-		 $(ostdevname 1)" > $objdump
+	do_facet ost1 "$DEBUGFS -c -R 'cat $objpath' $(ostdevname 1)" > $objdump
 	cmp -s $objdump $tmpfile &&
 		error "file $testfile is not encrypted on ost"
 
@@ -5073,10 +5172,10 @@ test_55() {
 
 	client_ip=$(host_nids_address $HOSTNAME $NETTYPE)
 	client_nid=$(h2nettype $client_ip)
-	[[ "$client_nid" =~ ":" ]] && client_nid+="/128"
 	do_facet mgs $LCTL nodemap_add c0
 	do_facet mgs $LCTL nodemap_add_range \
-		 --name c0 --range $client_nid
+		 --name c0 --range $client_nid ||
+		error "Add range $client_nid to c0 failed rc = $?"
 	do_facet mgs $LCTL nodemap_modify --name c0 \
 		 --property admin --value 0
 	do_facet mgs $LCTL nodemap_modify --name c0 \
@@ -5519,7 +5618,6 @@ setup_61() {
 
 	client_ip=$(host_nids_address $HOSTNAME $NETTYPE)
 	client_nid=$(h2nettype $client_ip)
-	[[ "$client_nid" =~ ":" ]] && client_nid+="/128"
 	do_facet mgs $LCTL nodemap_add c0
 	do_facet mgs $LCTL nodemap_add_range \
 		 --name c0 --range $client_nid || {
@@ -5831,10 +5929,10 @@ setup_64() {
 
 	client_ip=$(host_nids_address $HOSTNAME $NETTYPE)
 	client_nid=$(h2nettype $client_ip)
-	[[ "$client_nid" =~ ":" ]] && client_nid+="/128"
 	do_facet mgs $LCTL nodemap_add c0
 	do_facet mgs $LCTL nodemap_add_range \
-		 --name c0 --range $client_nid
+		 --name c0 --range $client_nid ||
+		error "Add range $client_nid to c0 failed rc = $?"
 	do_facet mgs $LCTL nodemap_modify --name c0 \
 		 --property admin --value 1
 	do_facet mgs $LCTL nodemap_modify --name c0 \
@@ -6756,6 +6854,147 @@ test_72() {
 	do_facet ost1 $LCTL get_param -R 'nodemap.*'
 }
 run_test 72 "dynamic nodemap properties"
+
+test_73() {
+	local vaultdir1=$DIR/$tdir/vault1
+	local vaultdir2=$DIR/$tdir/vault2
+	local shortfname="short=a"
+	local longfname="longfilenamewitha=inthemiddletotestbehaviorregardingthedigestedform"
+	local fid
+	local digshort1
+	local digshort2
+	local diglong1
+	local diglong2
+
+	(( $MDS1_VERSION >= $(version_code 2.16.50) )) ||
+		skip "Need MDS version at least 2.16.50"
+
+	[[ $($LCTL get_param mdc.*.import) =~ client_encryption ]] ||
+		skip "need encryption support"
+	which fscrypt || skip_env "Need fscrypt"
+
+	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
+
+	yes | fscrypt setup --force --verbose ||
+		echo "fscrypt global setup already done"
+	sed -i 's/\(.*\)policy_version\(.*\):\(.*\)\"[0-9]*\"\(.*\)/\1policy_version\2:\3"2"\4/' \
+		/etc/fscrypt.conf
+	yes | fscrypt setup --verbose $MOUNT ||
+		echo "fscrypt setup $MOUNT already done"
+	stack_trap "rm -rf $MOUNT/.fscrypt"
+
+	# enable_filename_encryption tunable only available for client
+	# built against embedded llcrypt. If client is built against in-kernel
+	# fscrypt, file names are always encrypted.
+	$LCTL get_param mdc.*.connect_flags | grep -q name_encryption &&
+	  nameenc=$(lctl get_param -n llite.*.enable_filename_encryption |
+			head -n1)
+
+	# begin with non-encrypted names
+	if [ -n "$nameenc" ] && (( nameenc != 0 )); then
+	        $LCTL set_param llite.*.enable_filename_encryption=0
+		[ $? -eq 0 ] ||
+			error "set_param \
+			       llite.*.enable_filename_encryption=1 failed"
+	fi
+
+	mkdir -p $vaultdir1
+	stack_trap "rm -rf $vaultdir1"
+
+	echo -e 'mypass\nmypass' | fscrypt encrypt --verbose \
+	     --source=custom_passphrase --name=protector_73a $vaultdir1 ||
+		error "fscrypt encrypt $vaultdir1 failed"
+
+	# activate changelogs
+	changelog_register || error "changelog_register failed"
+	local cl_user="${CL_USERS[$SINGLEMDS]%% *}"
+	changelog_users $SINGLEMDS | grep -q $cl_user ||
+		error "User $cl_user not found in changelog_users"
+	changelog_chmask ALL
+
+	touch $vaultdir1/$shortfname ||
+		error "touch $vaultdir1/$shortfname failed"
+	fid=$($LFS path2fid $vaultdir1/$shortfname)
+	fid="${fid:1:-1}"
+	fscrypt lock $vaultdir1 || error "fscrypt lock $vaultdir1 failed"
+	digshort1=$($LFS fid2path $MOUNT $fid)
+	digshort1=$(basename $digshort1)
+	echo mypass | fscrypt unlock $vaultdir1 ||
+		error "fscrypt unlock $vaultdir1 failed"
+	mrename $vaultdir1/$shortfname $vaultdir1/$longfname ||
+		error "mrename $vaultdir1/$shortfname failed"
+	fscrypt lock $vaultdir1 || error "fscrypt lock $vaultdir1 failed"
+	diglong1=$($LFS fid2path $MOUNT $fid)
+	diglong1=$(basename $diglong1)
+
+	# access changelogs
+	echo "changelogs dump"
+	changelog_dump || error "failed to dump changelogs"
+	digshort2=$(changelog_find -type CREAT -target-fid $fid |
+			awk '{print $12}')
+	[[ $digshort1 == $digshort2 ]] ||
+		error "name $digshort2 in CREAT is not $digshort1"
+	digshort2=$(changelog_find -type RENME -source-fid $fid |
+			awk '{print $15}')
+	[[ $digshort1 == $digshort2 ]] ||
+		error "name $digshort2 in RENME is not $digshort1"
+	diglong2=$(changelog_find -type RENME -source-fid $fid |
+			awk '{print $12}')
+	[[ $diglong1 == $diglong2 ]] ||
+		error "name $diglong2 in RENME is not $diglong1"
+
+	echo "changelogs clear"
+	changelog_clear 0 || error "failed to clear changelogs"
+
+	# now switch to encrypted names
+	if [ -n "$nameenc" ] && (( nameenc != 1 )); then
+	        $LCTL set_param llite.*.enable_filename_encryption=1
+		[ $? -eq 0 ] ||
+			error "set_param \
+			       llite.*.enable_filename_encryption=1 failed"
+		stack_trap \
+			"$LCTL set_param llite.*.enable_filename_encryption=0"
+	fi
+
+	$LFS mkdir -c1 -i $((MDSCOUNT-1)) $vaultdir2
+	stack_trap "rm -rf $vaultdir2"
+
+	echo -e 'mypass\nmypass' | fscrypt encrypt --verbose \
+	     --source=custom_passphrase --name=protector_73b $vaultdir2 ||
+		error "fscrypt encrypt $vaultdir2 failed"
+
+	touch $vaultdir2/$shortfname ||
+		error "touch $vaultdir2/$shortfname failed"
+	fid=$($LFS path2fid $vaultdir2/$shortfname)
+	fid="${fid:1:-1}"
+	fscrypt lock $vaultdir2 || error "fscrypt lock $vaultdir2 failed"
+	digshort1=$($LFS fid2path $MOUNT $fid)
+	digshort1=$(basename $digshort1)
+	echo mypass | fscrypt unlock $vaultdir2 ||
+		error "fscrypt unlock $vaultdir2 failed"
+	mrename $vaultdir2/$shortfname $vaultdir2/$longfname ||
+		error "mrename $vaultdir2/$shortfname failed"
+	fscrypt lock $vaultdir2 || error "fscrypt lock $vaultdir2 failed"
+	diglong1=$($LFS fid2path $MOUNT $fid)
+	diglong1=$(basename $diglong1)
+
+	# access changelogs
+	echo "changelogs dump"
+	changelog_dump || error "failed to dump changelogs"
+	digshort2=$(changelog_find -type CREAT -target-fid $fid |
+			awk '{print $12}')
+	[[ $digshort1 == $digshort2 ]] ||
+		error "name $digshort2 in CREAT is not $digshort1"
+	digshort2=$(changelog_find -type RENME -source-fid $fid |
+			awk '{print $15}')
+	[[ $digshort1 == $digshort2 ]] ||
+		error "name $digshort2 in RENME is not $digshort1"
+	diglong2=$(changelog_find -type RENME -source-fid $fid |
+			awk '{print $12}')
+	[[ $diglong1 == $diglong2 ]] ||
+		error "name $diglong2 in RENME is not $diglong1"
+}
+run_test 73 "encrypted names in changelogs"
 
 log "cleanup: ======================================================"
 

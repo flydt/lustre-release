@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/obdclass/lprocfs_status.c
  *
  * Author: Hariharan Thantry <thantry@users.sourceforge.net>
  */
@@ -2060,10 +2040,10 @@ static int scale64_rem(u64 mult, u32 div, u64 *base, u32 *remp)
 }
 
 static int __string_to_size(u64 *size, const char *buffer, size_t count,
-			    const char *defunit)
+			    u64 total, const char *defunit)
 {
 	u64 whole, frac, blk_size;
-	u32 frac_div;
+	u32 frac_div, rem;
 	const char *ptr;
 	size_t len, unit_len;
 	int rc;
@@ -2085,6 +2065,29 @@ static int __string_to_size(u64 *size, const char *buffer, size_t count,
 		unit_len = strlen(defunit);
 	} else {
 		unit_len = count - len;
+	}
+
+	if (*ptr == '%') {
+		if (!total)
+			return -EINVAL;
+		if (whole > 100 || (whole == 100 && frac))
+			return -ERANGE;
+
+		/* *size = (total * whole + total * frac / frac_dev) / 100 */
+		rc = scale64_rem(total, 100, &whole, &rem);
+		if (rc)
+			return rc;
+		rc = scale64_rem(total, frac_div, &frac, NULL);
+		if (rc)
+			return rc;
+		frac += rem;
+		do_div(frac, 100);
+
+		*size = whole + frac;
+		if (ptr != defunit)
+			len++;
+
+		return len;
 	}
 
 	rc = string_to_blksize(&blk_size, ptr, unit_len);
@@ -2111,6 +2114,8 @@ static int __string_to_size(u64 *size, const char *buffer, size_t count,
 		return rc;
 
 	*size = whole + frac;
+	if (total && *size > total)
+		return -ERANGE;
 
 	return len;
 }
@@ -2138,7 +2143,7 @@ static int __string_to_size(u64 *size, const char *buffer, size_t count,
  */
 int string_to_size(u64 *size, const char *buffer, size_t count)
 {
-	return __string_to_size(size, buffer, count, NULL);
+	return __string_to_size(size, buffer, count, 0, NULL);
 }
 EXPORT_SYMBOL(string_to_size);
 
@@ -2171,11 +2176,50 @@ int sysfs_memparse(const char *buffer, size_t count, u64 *val,
 	if (!count)
 		RETURN(-EINVAL);
 
-	rc = __string_to_size(val, param, count, defunit);
+	rc = __string_to_size(val, param, count, 0, defunit);
 
 	return rc < 0 ? rc : 0;
 }
 EXPORT_SYMBOL(sysfs_memparse);
+
+/**
+ * sysfs_memparse_total - extend the sys_memparse() function to parse
+ *			  percent value
+ *
+ * @buffer:	kernel pointer to input string
+ * @count:	number of bytes in the input @buffer
+ * @val:	(output) binary value returned to caller
+ * @total:	total size value to compute a percentage
+ * @defunit:	default unit suffix to use if none is provided
+ *
+ * Parses a string into a number. The number stored at @buffer is
+ * potentially suffixed with K, M, G, T, P, E, %. Besides these other
+ * valid suffix units are shown in the __string_to_size() function.
+ * If the string lacks a suffix then the defunit is used. The defunit
+ * should be given as a binary unit (e.g. MiB) as that is the standard
+ * for tunables in Lustre.  If no unit suffix is given (e.g. only "G"
+ * instead of "GB"), then it is assumed to be in binary units ("GiB").
+ *
+ * The function will return -ERANGE if the parsed size exceeds the
+ * @total size (> 100%).
+ *
+ * Returns:	0 on success or -errno on failure.
+ */
+int sysfs_memparse_total(const char *buffer, size_t count, u64 *val,
+			 u64 total, const char *defunit)
+{
+	const char *param = buffer;
+	int rc;
+
+	count = strnlen(buffer, count);
+	if (!count)
+		RETURN(-EINVAL);
+
+	rc = __string_to_size(val, param, count, total, defunit);
+
+	return rc < 0 ? rc : 0;
+}
+EXPORT_SYMBOL(sysfs_memparse_total);
 
 /**
  * Find the string \a name in the input \a buffer, and return a pointer to the
@@ -2392,40 +2436,33 @@ const struct sysfs_ops lustre_sysfs_ops = {
 };
 EXPORT_SYMBOL_GPL(lustre_sysfs_ops);
 
-int lprocfs_obd_max_pages_per_rpc_seq_show(struct seq_file *m, void *data)
+ssize_t max_pages_per_rpc_show(struct kobject *kobj, struct attribute *attr,
+			       char *buf)
 {
-	struct obd_device *obd = data;
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
 	struct client_obd *cli = &obd->u.cli;
+	int rc;
 
 	spin_lock(&cli->cl_loi_list_lock);
-	seq_printf(m, "%d\n", cli->cl_max_pages_per_rpc);
+	rc = scnprintf(buf, PAGE_SIZE, "%u\n", cli->cl_max_pages_per_rpc);
 	spin_unlock(&cli->cl_loi_list_lock);
-	return 0;
+	return rc;
 }
-EXPORT_SYMBOL(lprocfs_obd_max_pages_per_rpc_seq_show);
+EXPORT_SYMBOL(max_pages_per_rpc_show);
 
-ssize_t lprocfs_obd_max_pages_per_rpc_seq_write(struct file *file,
-						const char __user *buffer,
-						size_t count, loff_t *off)
+ssize_t max_pages_per_rpc_store(struct kobject *kobj, struct attribute *attr,
+				const char *buffer, size_t count)
 {
-	struct seq_file *m = file->private_data;
-	struct obd_device *obd = m->private;
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
 	struct client_obd *cli = &obd->u.cli;
 	struct obd_import *imp;
 	struct obd_connect_data *ocd;
 	int chunk_mask, rc;
-	char kernbuf[22];
 	u64 val;
 
-	if (count > sizeof(kernbuf) - 1)
-		return -EINVAL;
-
-	if (copy_from_user(kernbuf, buffer, count))
-		return -EFAULT;
-
-	kernbuf[count] = '\0';
-
-	rc = sysfs_memparse(kernbuf, count, &val, "B");
+	rc = sysfs_memparse(buffer, count, &val, "B");
 	if (rc)
 		return rc;
 
@@ -2451,7 +2488,7 @@ ssize_t lprocfs_obd_max_pages_per_rpc_seq_write(struct file *file,
 
 	return rc ?: count;
 }
-EXPORT_SYMBOL(lprocfs_obd_max_pages_per_rpc_seq_write);
+EXPORT_SYMBOL(max_pages_per_rpc_store);
 
 ssize_t short_io_bytes_show(struct kobject *kobj, struct attribute *attr,
 			    char *buf)
@@ -2501,6 +2538,66 @@ out:
 	return rc;
 }
 EXPORT_SYMBOL(short_io_bytes_store);
+
+const char *const cksum_name[] = {
+	"crc32", "adler", "crc32c", "reserved", "t10ip512", "t10ip4K",
+	"t10crc512", "t10crc4K", NULL
+};
+EXPORT_SYMBOL(cksum_name);
+
+ssize_t checksum_type_show(struct kobject *kobj, struct attribute *attr,
+			   char *buf)
+{
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
+	ssize_t len = 0;
+	int i;
+
+	if (!obd)
+		return 0;
+
+	for (i = 0; cksum_name[i] != NULL; i++) {
+		if ((BIT(i) & obd->u.cli.cl_supp_cksum_types) == 0)
+			continue;
+		if (obd->u.cli.cl_cksum_type == BIT(i))
+			len += scnprintf(buf + len, PAGE_SIZE, "[%s] ",
+					 cksum_name[i]);
+		else
+			len += scnprintf(buf + len, PAGE_SIZE, "%s ",
+					 cksum_name[i]);
+	}
+	len += scnprintf(buf + len, PAGE_SIZE, "\n");
+
+	return len;
+}
+EXPORT_SYMBOL(checksum_type_show);
+
+ssize_t checksum_type_store(struct kobject *kobj, struct attribute *attr,
+			    const char *buffer, size_t count)
+{
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
+	int rc = -EINVAL;
+	int i;
+
+	if (!obd)
+		return 0;
+
+	for (i = 0; cksum_name[i] != NULL; i++) {
+		if (strcasecmp(buffer, cksum_name[i]) == 0) {
+			obd->u.cli.cl_preferred_cksum_type = BIT(i);
+			if (obd->u.cli.cl_supp_cksum_types & BIT(i)) {
+				obd->u.cli.cl_cksum_type = BIT(i);
+				rc = count;
+			} else {
+				rc = -EOPNOTSUPP;
+			}
+			break;
+		}
+	}
+	return rc;
+}
+EXPORT_SYMBOL(checksum_type_store);
 
 int lprocfs_wr_root_squash(const char __user *buffer, unsigned long count,
 			   struct root_squash_info *squash, char *name)

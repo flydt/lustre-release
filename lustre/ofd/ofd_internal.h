@@ -84,7 +84,7 @@ static inline void ofd_counter_incr(struct obd_export *exp, int opcode,
 	if (exp->exp_obd && exp->exp_obd->obd_stats)
 		lprocfs_counter_add(exp->exp_obd->obd_stats, opcode, amount);
 
-	if (exp->exp_obd && obd2obt(exp->exp_obd)->obt_jobstats.ojs_hash &&
+	if (exp->exp_obd && obd2obt(exp->exp_obd)->obt_jobstats.ojs_cntr_num &&
 	    (exp_connect_flags(exp) & OBD_CONNECT_JOBSTATS))
 		lprocfs_job_stats_log(exp->exp_obd, jobid, opcode, amount);
 
@@ -305,6 +305,10 @@ void ofd_access_log_delete(struct ofd_access_log *oal);
 void ofd_access(const struct lu_env *env, struct ofd_device *m,
 		const struct lu_fid *parent_fid, __u64 begin, __u64 end,
 		unsigned int size, unsigned int segment_count, int rw);
+
+/* ofd_oss.c */
+int oss_mod_init(void);
+void oss_mod_exit(void);
 
 /* ofd_dev.c */
 extern struct lu_context_key ofd_thread_key;

@@ -147,6 +147,8 @@ static int lfs_pcc_attach(int argc, char **argv);
 static int lfs_pcc_attach_fid(int argc, char **argv);
 static int lfs_pcc_detach(int argc, char **argv);
 static int lfs_pcc_detach_fid(int argc, char **argv);
+static int lfs_pcc_pin(int argc, char **argv);
+static int lfs_pcc_unpin(int argc, char **argv);
 static int lfs_pcc_state(int argc, char **argv);
 static int lfs_pcc_delete(int argc, char **argv);
 static int lfs_pcc(int argc, char **argv);
@@ -334,6 +336,13 @@ command_t pcc_cmdlist[] = {
 	{ .pc_name = "delete", .pc_func = lfs_pcc_delete,
 	  .pc_help = "Delete the PCC layout component for given files.\n"
 		"usage: lfs pcc delete <FILE> ...\n" },
+	{ .pc_name = "pin", .pc_func = lfs_pcc_pin,
+	  .pc_help = "Pin files to prevent them from being removed from PCC.\n"
+		"usage: lfs pcc pin [--id|-i ID] FILE ...\n"
+		"\t-i: archive ID for PCC\n"},
+	{ .pc_name = "unpin", .pc_func = lfs_pcc_unpin,
+	  .pc_help = "Un-pin files so that they can be removed from PCC.\n"
+		"usage: lfs pcc unpin [--id|-i ID] FILE ...\n"},
 	{ .pc_help = NULL }
 };
 
@@ -585,7 +594,10 @@ command_t cmdlist[] = {
 	 "lfs pcc attach_fid - attach given files into PCC by FID(s)\n"
 	 "lfs pcc state  - display the PCC state for given files\n"
 	 "lfs pcc detach - detach given files from Persistent Client Cache\n"
-	 "lfs pcc detach_fid - detach given files from PCC by FID(s)\n"},
+	 "lfs pcc detach_fid - detach given files from PCC by FID(s)\n"
+	 "lfs pcc delete - delete the PCC layout componenet for given files\n"
+	 "lfs pcc pin - pin give files for PCC\n"
+	 "lfs pcc unpin - unpin given files for PCC\n"},
 	{ 0, 0, 0, NULL }
 };
 
@@ -2432,14 +2444,6 @@ static int mirror_split(const char *fname, __u32 id, const char *pool,
 		}
 	}
 
-	if (last_non_stale_mirror(mirror_id, layout)) {
-		rc = -EUCLEAN;
-		fprintf(stderr,
-			"%s: cannot destroy the last non-stale mirror of file '%s'\n",
-			progname, fname);
-		goto free_layout;
-	}
-
 	if (!victim_file && mflags & MF_DESTROY)
 		/* Allow mirror split even without the key on encrypted files,
 		 * and in this case of a 'split -d', open file with O_DIRECT
@@ -2500,14 +2504,6 @@ again:
 			char file_path[PATH_MAX];
 			unsigned int rnumber;
 			int open_flags;
-
-			if (last_non_stale_mirror(mirror_id, layout)) {
-				rc = -EUCLEAN;
-				fprintf(stderr,
-					"%s: cannot destroy the last non-stale mirror of file '%s'\n",
-					progname, fname);
-				goto close_fd;
-			}
 
 			if (purge) {
 				/* don't use volatile file for mirror destroy */
@@ -3630,6 +3626,7 @@ enum {
 	LFS_LINKS_OPT,
 	LFS_ATTRS_OPT,
 	LFS_XATTRS_MATCH_OPT,
+	LFS_MIGRATE_NOFIX,
 };
 
 #ifndef LCME_USER_MIRROR_FLAGS
@@ -3681,6 +3678,7 @@ static int lfs_setstripe_internal(int argc, char **argv,
 	bool foreign_mode = false;
 	char *xattr = NULL;
 	bool overstriped = false;
+	bool clear_hash_fixed = false;
 	uint32_t type = LU_FOREIGN_TYPE_NONE, flags = 0;
 	char *mode_opt = NULL;
 	mode_t previous_umask = 0;
@@ -3787,6 +3785,7 @@ static int lfs_setstripe_internal(int argc, char **argv,
 	{ .val = 'y',	.name = "yaml",		.has_arg = required_argument },
 	{ .val = 'z',   .name = "ext-size",	.has_arg = required_argument},
 	{ .val = 'z',   .name = "extension-size", .has_arg = required_argument},
+	{ .val = LFS_MIGRATE_NOFIX, .name = "clear-fixed", .has_arg = no_argument},
 	{ .name = NULL } };
 
 	setstripe_args_init(&lsa);
@@ -3951,6 +3950,15 @@ static int lfs_setstripe_internal(int argc, char **argv,
 					progname, argv[0], optarg);
 				goto usage_error;
 			}
+			break;
+		case LFS_MIGRATE_NOFIX:
+			if (!migrate_mode) {
+				fprintf(stderr,
+					"%s %s: --clear-fixed valid only for migrate command\n",
+					progname, argv[0]);
+				goto usage_error;
+			}
+			clear_hash_fixed = true;
 			break;
 		case 'b':
 			if (!migrate_mode) {
@@ -4559,6 +4567,9 @@ create_mirror:
 		if (overstriped)
 			lmu->lum_hash_type |= LMV_HASH_FLAG_OVERSTRIPED;
 
+		if (!clear_hash_fixed)
+			lmu->lum_hash_type |= LMV_HASH_FLAG_FIXED;
+
 		if (lsa.lsa_pool_name)
 			snprintf(lmu->lum_pool_name, sizeof(lmu->lum_pool_name),
 				 "%s", lsa.lsa_pool_name);
@@ -4735,10 +4746,35 @@ create_mirror:
 					progname, fname);
 				goto usage_error;
 			}
-			result = mirror_split(fname, comp_id, lsa.lsa_pool_name,
-					      mirror_flags,
-					      has_m_file ? mirror_list->m_file :
-					      NULL);
+
+			/* If the mirror is the only non-stale mirror,
+			 * do resync before mirror_split().
+			 */
+			result = 0;
+			if (!layout)
+				layout = layout_get_by_name_or_fid(template ?:
+						fname, fname, 0, O_RDONLY);
+			if (last_non_stale_mirror(mirror_id, layout)) {
+				struct ll_ioc_lease *ioc = NULL;
+
+				ioc = calloc(1, sizeof(*ioc) +
+						sizeof(__u32) * IOC_IDS_MAX);
+				if (ioc) {
+					result = lfs_mirror_resync_file(fname,
+							ioc, NULL, 0,
+							stats_interval_sec,
+							bandwidth_bytes_sec);
+					if (result)
+						fprintf(stderr,
+							"Cannot resync file\n");
+					free(ioc);
+				}
+			}
+			if (!result)
+				result = mirror_split(fname, comp_id,
+						lsa.lsa_pool_name, mirror_flags,
+						has_m_file ?
+						mirror_list->m_file : NULL);
 		} else if (layout) {
 			result = lfs_component_create(fname, O_CREAT | O_WRONLY,
 						      mode, layout);
@@ -7490,9 +7526,12 @@ static int lfs_setdirstripe(int argc, char **argv)
 		case 'T':
 			errno = 0;
 			lsa.lsa_stripe_count = strtoul(optarg, &end, 0);
+			/* only allow count -1..-5 for overstriped dirs */
 			if (errno != 0 || *end != '\0' ||
-			    lsa.lsa_stripe_count < LLAPI_OVERSTRIPE_COUNT_MAX ||
-			    lsa.lsa_stripe_count > LOV_MAX_STRIPE_COUNT) {
+			    lsa.lsa_stripe_count <
+				(overstriped ? LMV_OVERSTRIPE_COUNT_MAX :
+					       LLAPI_OVERSTRIPE_COUNT_MIN) ||
+			    lsa.lsa_stripe_count > LMV_MAX_STRIPE_COUNT) {
 				fprintf(stderr,
 					"%s: invalid stripe count '%s'\n",
 					progname, optarg);
@@ -7762,9 +7801,14 @@ static int lfs_setdirstripe(int argc, char **argv)
 	 * initialize stripe parameters, in case param is converted to specific,
 	 * i.e, 'lfs mkdir -i -1 -c N', always allocate space for lsp_tgts.
 	 */
-	param = calloc(1, offsetof(typeof(*param),
-		       lsp_tgts[lsa.lsa_stripe_count != LLAPI_LAYOUT_DEFAULT ?
-				lsa.lsa_stripe_count : lsa.lsa_nr_tgts]));
+	if (lsa.lsa_stripe_count == LLAPI_LAYOUT_DEFAULT ||
+		lsa.lsa_stripe_count <= LLAPI_OVERSTRIPE_COUNT_MIN) {
+		param = calloc(1, offsetof(typeof(*param),
+			       lsp_tgts[lsa.lsa_nr_tgts]));
+	} else {
+		param = calloc(1, offsetof(typeof(*param),
+			       lsp_tgts[lsa.lsa_stripe_count]));
+	}
 	if (!param) {
 		fprintf(stderr,
 			"%s %s: cannot allocate memory for parameters: %s\n",
@@ -7806,7 +7850,6 @@ static int lfs_setdirstripe(int argc, char **argv)
 	}
 	param->lsp_max_inherit = max_inherit;
 	if (default_stripe) {
-
 		if (max_inherit_rr == LAYOUT_INHERIT_UNSET)
 			max_inherit_rr = LMV_INHERIT_RR_DEFAULT;
 		param->lsp_max_inherit_rr = max_inherit_rr;
@@ -12373,7 +12416,7 @@ static inline int lfs_mirror_resync(int argc, char **argv)
 	}
 
 	/* set the lease on the file */
-	ioc = calloc(sizeof(*ioc) + sizeof(__u32) * 4096, 1);
+	ioc = calloc(1, sizeof(*ioc) + sizeof(__u32) * IOC_IDS_MAX);
 	if (!ioc) {
 		fprintf(stderr, "%s: cannot alloc id array for ioc: %s.\n",
 			argv[0], strerror(errno));
@@ -12389,7 +12432,7 @@ static inline int lfs_mirror_resync(int argc, char **argv)
 		/* ignore previous file's error, continue with next file */
 
 		/* reset ioc */
-		memset(ioc, 0, sizeof(*ioc) + sizeof(__u32) * 4096);
+		memset(ioc, 0, sizeof(*ioc) + sizeof(__u32) * IOC_IDS_MAX);
 	}
 
 	free(ioc);
@@ -13161,7 +13204,7 @@ static inline int lfs_mirror_copy(int argc, char **argv)
 		}
 	}
 
-	ioc = calloc(sizeof(*ioc) + sizeof(__u32) * 4096, 1);
+	ioc = calloc(1, sizeof(*ioc) + sizeof(__u32) * IOC_IDS_MAX);
 	if (!ioc) {
 		fprintf(stderr,
 			"%s %s: cannot alloc comp id array for ioc: %s\n",
@@ -14393,6 +14436,148 @@ static int lfs_pcc_delete(int argc, char **argv)
 
 	return rc;
 }
+
+static int lfs_pcc_pin(int argc, char **argv)
+{
+	int rc = 0, c;
+	const char *path;
+	char *end;
+	char fullpath[PATH_MAX];
+	__u32 id = 0;
+	struct option long_opts[] = {
+	{ .val = 'i',	.name = "id",	.has_arg = required_argument },
+	{ .name = NULL } };
+
+	optind = 0;
+	while ((c = getopt_long(argc, argv, "i:",
+				long_opts, NULL)) != -1) {
+		switch (c) {
+		case 'i':
+			errno = 0;
+			id = strtoul(optarg, &end, 0);
+			if (errno != 0 || *end != '\0' ||
+			    id == 0 || id >= UINT32_MAX) {
+				fprintf(stderr,
+					"error: %s: bad attach ID '%s'\n",
+					argv[0], optarg);
+				return CMD_HELP;
+			}
+			break;
+		case '?':
+			return CMD_HELP;
+		default:
+			fprintf(stderr, "%s: option '%s' unrecognized\n",
+				argv[0], argv[optind - 1]);
+			return CMD_HELP;
+		}
+	}
+
+	/* check parameters */
+	if (id == 0) {
+		fprintf(stderr, "%s: must specify -i|--id option\n",
+			argv[0]);
+		return CMD_HELP;
+	}
+	if (argc <= 1) {
+		fprintf(stderr, "%s: must specify one or more file names\n",
+			argv[0]);
+		return CMD_HELP;
+	}
+
+	while (optind < argc) {
+		int rc2;
+
+		path = argv[optind++];
+		if (!realpath(path, fullpath)) {
+			fprintf(stderr, "%s: could not find path '%s': %s\n",
+				argv[0], path, strerror(errno));
+			if (rc == 0)
+				rc = -EINVAL;
+			continue;
+		}
+
+		rc2 = llapi_pcc_pin_file(fullpath, id);
+		if (rc2 < 0) {
+			fprintf(stderr, "%s: cannot pin '%s' for PCC: %s\n",
+				argv[0], path, strerror(-rc2));
+			if (rc == 0)
+				rc = rc2;
+		}
+	}
+
+	return rc;
+}
+
+static int lfs_pcc_unpin(int argc, char **argv)
+{
+	int rc = 0, c;
+	const char *path;
+	char *end;
+	char fullpath[PATH_MAX];
+	__u32 id = 0;
+	struct option long_opts[] = {
+	{ .val = 'i',	.name = "id",	.has_arg = required_argument },
+	{ .name = NULL } };
+
+	optind = 0;
+	while ((c = getopt_long(argc, argv, "i:",
+				long_opts, NULL)) != -1) {
+		switch (c) {
+		case 'i':
+			errno = 0;
+			id = strtoul(optarg, &end, 0);
+			if (errno != 0 || *end != '\0' ||
+			    id == 0 || id > UINT32_MAX) {
+				fprintf(stderr,
+					"error: %s: bad attach ID '%s'\n",
+					argv[0], optarg);
+				return CMD_HELP;
+			}
+			break;
+		case '?':
+			return CMD_HELP;
+		default:
+			fprintf(stderr, "%s: option '%s' unrecognized\n",
+				argv[0], argv[optind - 1]);
+			return CMD_HELP;
+		}
+	}
+	/* check parameters */
+	if (id == 0) {
+		fprintf(stderr, "%s: must specify -i|--id option\n",
+			argv[0]);
+		return CMD_HELP;
+	}
+	if (argc <= 1) {
+		fprintf(stderr, "%s: must specify one or more file names\n",
+			argv[0]);
+		return CMD_HELP;
+	}
+
+	while (optind < argc) {
+		int rc2;
+
+		path = argv[optind++];
+		if (!realpath(path, fullpath)) {
+			fprintf(stderr, "%s: could not find path '%s': %s\n",
+				argv[0], path, strerror(errno));
+			if (rc == 0)
+				rc = -EINVAL;
+			continue;
+		}
+
+		rc2 = llapi_pcc_unpin_file(fullpath, id);
+		if (rc2 < 0) {
+			fprintf(stderr, "%s: cannot unpin '%s' for PCC: %s\n",
+				argv[0], path, strerror(-rc2));
+			if (rc == 0)
+				rc = rc2;
+		}
+	}
+
+	return rc;
+}
+
 
 /**
  * lfs_pcc() - Parse and execute lfs pcc commands.

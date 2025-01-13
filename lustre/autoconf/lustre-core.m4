@@ -1170,13 +1170,15 @@ lm_grant, [
 AC_DEFUN([LC_SRC_NFS_FILLDIR_USE_CTX], [
 	LB2_LINUX_TEST_SRC([filldir_ctx], [
 		#include <linux/fs.h>
-	],[
+
+		int filldir(struct dir_context *ctx, const char* name,
+			    int i, loff_t off, u64 tmp, unsigned temp);
 		int filldir(struct dir_context *ctx, const char* name,
 			    int i, loff_t off, u64 tmp, unsigned temp)
 		{
 			return 0;
 		}
-
+	],[
 		struct dir_context ctx = {
 			.actor = filldir,
 		};
@@ -1246,7 +1248,10 @@ AC_DEFUN([LC_SRC_HAVE_DQUOT_QC_DQBLK], [
 		#include <linux/fs.h>
 		#include <linux/quota.h>
 	],[
-		((struct quotactl_ops *)0)->set_dqblk(NULL, *((struct kqid*)0), (struct qc_dqblk*)0);
+			struct quotactl_ops *ops = NULL;
+			struct kqid kqid = { .type = USRQUOTA };
+			struct qc_dqblk *qc = NULL;
+			ops->set_dqblk(NULL, kqid, qc);
 	],[-Werror])
 ])
 AC_DEFUN([LC_HAVE_DQUOT_QC_DQBLK], [
@@ -4038,13 +4043,15 @@ AC_DEFUN([LC_HAVE_GET_RANDOM_U32_AND_U64], [
 AC_DEFUN([LC_SRC_NFS_FILLDIR_USE_CTX_RETURN_BOOL], [
 	LB2_LINUX_TEST_SRC([filldir_ctx_return_bool], [
 		#include <linux/fs.h>
-	],[
+
+		bool filldir(struct dir_context *ctx, const char* name,
+			     int i, loff_t off, u64 tmp, unsigned temp);
 		bool filldir(struct dir_context *ctx, const char* name,
 			     int i, loff_t off, u64 tmp, unsigned temp)
 		{
 			return 0;
 		}
-
+	],[
 		struct dir_context ctx = {
 			.actor = filldir,
 		};
@@ -5816,8 +5823,6 @@ lustre/ofd/Makefile
 lustre/ofd/autoMakefile
 lustre/osc/Makefile
 lustre/osc/autoMakefile
-lustre/ost/Makefile
-lustre/ost/autoMakefile
 lustre/osd-ldiskfs/Makefile
 lustre/osd-ldiskfs/autoMakefile
 lustre/osd-zfs/Makefile

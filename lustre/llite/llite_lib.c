@@ -678,17 +678,6 @@ retry_connect:
 
 	sbi->ll_dt_exp->exp_connect_data = *data;
 
-	/* Don't change value if it was specified in the config log */
-	if (sbi->ll_ra_info.ra_max_read_ahead_whole_pages == -1) {
-		sbi->ll_ra_info.ra_max_read_ahead_whole_pages =
-			max_t(unsigned long, SBI_DEFAULT_READ_AHEAD_WHOLE_MAX,
-			      (data->ocd_brw_size >> PAGE_SHIFT));
-		if (sbi->ll_ra_info.ra_max_read_ahead_whole_pages >
-		    sbi->ll_ra_info.ra_max_pages_per_file)
-			sbi->ll_ra_info.ra_max_read_ahead_whole_pages =
-				sbi->ll_ra_info.ra_max_pages_per_file;
-	}
-
 	err = client_fid_init(sbi->ll_dt_exp->exp_obd, sbi->ll_dt_exp,
 			      LUSTRE_SEQ_METADATA);
 	if (err) {
@@ -832,6 +821,26 @@ retry_connect:
 
 	OBD_FREE_PTR(data);
 	OBD_FREE_PTR(osfs);
+
+	/* Don't change value if it was specified in the config log */
+	if (sbi->ll_ra_info.ra_max_read_ahead_whole_pages == -1) {
+		u32 max_pages_per_rpc;
+
+		size = sizeof(max_pages_per_rpc);
+		err = obd_get_info(NULL, sbi->ll_dt_exp,
+				   sizeof(KEY_MAX_PAGES_PER_RPC),
+				   KEY_MAX_PAGES_PER_RPC, &size,
+				   &max_pages_per_rpc);
+		if (err)
+			max_pages_per_rpc = 0;
+		sbi->ll_ra_info.ra_max_read_ahead_whole_pages =
+			max_t(u32, SBI_DEFAULT_READ_AHEAD_WHOLE_MAX,
+			      max_pages_per_rpc);
+		if (sbi->ll_ra_info.ra_max_read_ahead_whole_pages >
+		    sbi->ll_ra_info.ra_max_pages_per_file)
+			sbi->ll_ra_info.ra_max_read_ahead_whole_pages =
+				sbi->ll_ra_info.ra_max_pages_per_file;
+	}
 
 	if (sbi->ll_dt_obd) {
 		err = sysfs_create_link(&sbi->ll_kset.kobj,
@@ -2430,7 +2439,7 @@ int ll_setattr_raw(struct dentry *dentry, struct iattr *attr,
 				if (filename_is_volatile(dentry->d_name.name,
 							 dentry->d_name.len,
 							 NULL) &&
-				    llcrypt_require_key(inode) == -ENOKEY) {
+				    ll_require_key(inode) == -ENOKEY) {
 					struct file *ref_file;
 					struct inode *ref_inode;
 					struct ll_inode_info *ref_lli;
@@ -2899,7 +2908,7 @@ int ll_update_inode(struct inode *inode, struct lustre_md *md)
 	 * we will need it in ll_prepare_close().
 	 */
 	if (lli->lli_attr_valid & OBD_MD_FLLAZYSIZE && lli->lli_lazysize &&
-	    llcrypt_require_key(inode) == -ENOKEY)
+	    ll_require_key(inode) == -ENOKEY)
 		lli->lli_attr_valid = body->mbo_valid | OBD_MD_FLLAZYSIZE;
 	else
 		lli->lli_attr_valid = body->mbo_valid;
@@ -3854,6 +3863,7 @@ struct md_op_data *ll_prep_md_op_data(struct md_op_data *op_data,
 				      void *data)
 {
 	struct llcrypt_name fname = { 0 };
+	bool op_data_alloc_inside = true;
 	int rc;
 
 	LASSERT(i1 != NULL);
@@ -3876,6 +3886,8 @@ struct md_op_data *ll_prep_md_op_data(struct md_op_data *op_data,
 
 	if (op_data == NULL)
 		OBD_ALLOC_PTR(op_data);
+	else
+		op_data_alloc_inside = false;
 
 	if (op_data == NULL)
 		return ERR_PTR(-ENOMEM);
@@ -3948,7 +3960,8 @@ struct md_op_data *ll_prep_md_op_data(struct md_op_data *op_data,
 		if (rc) {
 			CERROR("%s: failed to setup filename: rc = %d\n",
 			       ll_i2sbi(i1)->ll_fsname, rc);
-			ll_finish_md_op_data(op_data);
+			if (op_data_alloc_inside)
+				ll_finish_md_op_data(op_data);
 			return ERR_PTR(rc);
 		}
 		if (pfid && !fid_is_zero(pfid)) {

@@ -1096,8 +1096,8 @@ static int dom_has_zero_regions(struct fiemap *fiemap)
 	return begin < (fiemap->fm_start + fiemap->fm_length);
 }
 
-int mdt_dom_fiemap(const struct lu_env *env, struct mdt_device *mdt,
-		   const struct lu_fid *fid, struct fiemap *fiemap)
+static int mdt_dom_fiemap(const struct lu_env *env, struct mdt_device *mdt,
+			  const struct lu_fid *fid, struct fiemap *fiemap)
 {
 	struct mdt_object *mo;
 	int rc;
@@ -1373,7 +1373,7 @@ static int mdt_do_glimpse(const struct lu_env *env, struct ldlm_namespace *ns,
 	policy.l_inodebits.bits = MDS_INODELOCK_DOM;
 	mode = ldlm_lock_match(ns, LDLM_FL_TEST_LOCK,
 			       &res->lr_name, LDLM_IBITS, &policy,
-			       LCK_PW, &lockh);
+			       LCK_PW, 0, &lockh);
 
 	/* There is no PW lock on this object; finished. */
 	if (mode == 0)
@@ -1695,7 +1695,7 @@ bool mdt_dom_client_has_lock(struct mdt_thread_info *info,
 	lm = (open_flags & MDS_FMODE_WRITE) ? LCK_PW : LCK_PR | LCK_PW;
 	mode = ldlm_lock_match(mdt->mdt_namespace, LDLM_FL_BLOCK_GRANTED |
 			       LDLM_FL_TEST_LOCK, res_id, LDLM_IBITS, policy,
-			       lm, &lockh);
+			       lm, 0, &lockh);
 
 	/* There is no other PW lock on this object; finished. */
 	if (mode == 0)

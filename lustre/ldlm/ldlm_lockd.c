@@ -155,7 +155,8 @@ static inline int have_expired_locks(void)
 static int expired_lock_main(void *arg)
 {
 	struct list_head *expired = &expired_lock_list;
-	int do_dump;
+	struct lu_env env;
+	int rc, do_dump;
 
 	ENTRY;
 
@@ -167,7 +168,17 @@ static int expired_lock_main(void *arg)
 				have_expired_locks() ||
 				expired_lock_thread_state == ELT_TERMINATE);
 
+		rc = lu_env_init(&env, LCT_DT_THREAD | LCT_MD_THREAD);
+		if (rc) {
+			CERROR("can't init env: rc=%d\n", rc);
+			schedule_timeout(HZ * 3);
+			continue;
+		}
+		rc = lu_env_add(&env);
+		LASSERT(rc == 0);
+
 		spin_lock_bh(&waiting_locks_spinlock);
+
 		if (expired_lock_dump) {
 			spin_unlock_bh(&waiting_locks_spinlock);
 
@@ -254,6 +265,9 @@ static int expired_lock_main(void *arg)
 			spin_lock_bh(&waiting_locks_spinlock);
 		}
 		spin_unlock_bh(&waiting_locks_spinlock);
+
+		lu_env_remove(&env);
+		lu_env_fini(&env);
 
 		if (do_dump) {
 			CERROR("dump the log upon eviction\n");
@@ -1947,6 +1961,8 @@ void ldlm_handle_bl_callback(struct ldlm_namespace *ns,
 		CDEBUG(D_DLMTRACE,
 		       "Lock %p is referenced, will be cancelled later\n",
 		       lock);
+		if (ns->ns_hp_handler != NULL)
+			ns->ns_hp_handler(lock);
 	}
 
 	LDLM_DEBUG(lock, "client blocking callback handler END");
@@ -2514,7 +2530,7 @@ static int ldlm_callback_handler(struct ptlrpc_request *req)
 
 	switch (lustre_msg_get_opc(req->rq_reqmsg)) {
 	case LDLM_BL_CALLBACK:
-		LDLM_DEBUG(lock, "blocking ast");
+		LDLM_DEBUG(lock, "blocking ast ");
 		req_capsule_extend(&req->rq_pill, &RQF_LDLM_BL_CALLBACK);
 		if (!ldlm_is_cancel_on_block(lock)) {
 			rc = ldlm_callback_reply(req, 0);
@@ -2526,14 +2542,14 @@ static int ldlm_callback_handler(struct ptlrpc_request *req)
 			ldlm_handle_bl_callback(ns, &dlm_req->lock_desc, lock);
 		break;
 	case LDLM_CP_CALLBACK:
-		LDLM_DEBUG(lock, "completion ast");
+		LDLM_DEBUG(lock, "completion ast ");
 		req_capsule_extend(&req->rq_pill, &RQF_LDLM_CP_CALLBACK);
 		rc = ldlm_handle_cp_callback(req, ns, dlm_req, lock);
 		if (!CFS_FAIL_CHECK(OBD_FAIL_LDLM_CANCEL_BL_CB_RACE))
 			ldlm_callback_reply(req, rc);
 		break;
 	case LDLM_GL_CALLBACK:
-		LDLM_DEBUG(lock, "glimpse ast");
+		LDLM_DEBUG(lock, "glimpse ast ");
 		req_capsule_extend(&req->rq_pill, &RQF_LDLM_GL_CALLBACK);
 		ldlm_handle_gl_callback(req, ns, dlm_req, lock);
 		break;

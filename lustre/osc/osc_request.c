@@ -1703,7 +1703,7 @@ retry_encrypt:
 		if (attr.cat_size)
 			oa->o_size = attr.cat_size;
 	} else if (opc == OST_READ && inode && IS_ENCRYPTED(inode) &&
-		   llcrypt_has_encryption_key(inode)) {
+		   ll_has_encryption_key(inode)) {
 		for (i = 0; i < page_count; i++) {
 			struct brw_page *pg = pga[i];
 			u32 nunits = (pg->bp_off & ~PAGE_MASK) + pg->bp_count;
@@ -1734,7 +1734,7 @@ retry_encrypt:
 	for (i = 0; i < page_count; i++) {
 		short_io_size += pga[i]->bp_count;
 		if (!inode || !IS_ENCRYPTED(inode) ||
-		    !llcrypt_has_encryption_key(inode)) {
+		    !ll_has_encryption_key(inode)) {
 			pga[i]->bp_count_diff = 0;
 			pga[i]->bp_off_diff = 0;
 		}
@@ -2366,7 +2366,7 @@ static int osc_brw_fini_request(struct ptlrpc_request *req, int rc)
 	if (inode && IS_ENCRYPTED(inode)) {
 		int idx;
 
-		if (!llcrypt_has_encryption_key(inode)) {
+		if (!ll_has_encryption_key(inode)) {
 			CDEBUG(D_SEC, "no enc key for ino %lu\n", inode->i_ino);
 			GOTO(out, rc);
 		}
@@ -3173,7 +3173,7 @@ int osc_enqueue_base(struct obd_export *exp, struct ldlm_res_id *res_id,
 		match_flags = LDLM_MATCH_GROUP;
 	mode = ldlm_lock_match_with_skip(obd->obd_namespace, search_flags, 0,
 					 res_id, einfo->ei_type, policy, mode,
-					 &lockh, match_flags);
+					 match_flags, &lockh);
 	if (mode) {
 		struct ldlm_lock *matched;
 
@@ -3280,8 +3280,8 @@ int osc_match_base(const struct lu_env *env, struct obd_export *exp,
 
 	/* Next, search for already existing extent locks that will cover us */
 	rc = ldlm_lock_match_with_skip(obd->obd_namespace, lflags, 0,
-					res_id, type, policy, mode, lockh,
-					match_flags);
+					res_id, type, policy, mode,
+					match_flags, lockh);
 	if (rc == 0 || lflags & LDLM_FL_TEST_LOCK)
 		RETURN(rc);
 
@@ -3843,6 +3843,48 @@ static int osc_cancel_weight(struct ldlm_lock *lock)
 	RETURN(0);
 }
 
+static int osc_hp_handler(struct ldlm_lock *lock)
+{
+	struct cl_object *clob = NULL;
+	struct lu_env *env;
+	__u16 refcheck;
+	int rc = 0;
+
+	ENTRY;
+
+	if (lock->l_resource->lr_type != LDLM_EXTENT)
+		RETURN(0);
+
+	env = cl_env_get(&refcheck);
+	if (IS_ERR(env))
+		RETURN(PTR_ERR(env));
+
+	lock_res_and_lock(lock);
+	if (!ldlm_is_granted(lock)) {
+		unlock_res_and_lock(lock);
+		GOTO(out, rc = 0);
+	}
+
+	if (lock->l_ast_data != NULL) {
+		clob = osc2cl(lock->l_ast_data);
+		cl_object_get(clob);
+	}
+	unlock_res_and_lock(lock);
+
+	if (clob != NULL) {
+		struct ldlm_extent *extent = &lock->l_policy_data.l_extent;
+
+		/* HP handling for extents covered by the DLM lock. */
+		rc = osc_ldlm_hp_handle(env, cl2osc(clob),
+					extent->start >> PAGE_SHIFT,
+					extent->end >> PAGE_SHIFT, false);
+		cl_object_put(env, clob);
+	}
+out:
+	cl_env_put(env, &refcheck);
+	RETURN(rc);
+}
+
 static int brw_queue_work(const struct lu_env *env, void *data)
 {
 	struct client_obd *cli = data;
@@ -3940,6 +3982,7 @@ int osc_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 	}
 
 	ns_register_cancel(obd->obd_namespace, osc_cancel_weight);
+	ns_register_hp_handler(obd->obd_namespace, osc_hp_handler);
 
 	spin_lock(&osc_shrink_lock);
 	list_add_tail(&cli->cl_shrink_list, &osc_shrink_list);

@@ -358,9 +358,9 @@ static int ll_readdir(struct file *filp, void *cookie, filldir_t filldir)
 		/* Only needed for striped dir to fill ..see lmv_read_page() */
 		if (i_dir) {
 			struct obd_export *exp = ll_i2mdexp(i_dir);
-			__u64 ibits = MDS_INODELOCK_LOOKUP;
+			enum mds_ibits_locks ibits = MDS_INODELOCK_LOOKUP;
 
-			if (ll_have_md_lock(exp, i_dir, &ibits, LCK_MINMODE))
+			if (ll_have_md_lock(exp, i_dir, &ibits, LCK_MINMODE, 0))
 				pfid = *ll_inode2fid(i_dir);
 		}
 		dput(parent);
@@ -2381,7 +2381,7 @@ out_rmdir:
 			st.st_uid	= body->mbo_uid;
 			st.st_gid	= body->mbo_gid;
 			st.st_rdev	= body->mbo_rdev;
-			if (llcrypt_require_key(inode) == -ENOKEY)
+			if (ll_require_key(inode) == -ENOKEY)
 				st.st_size = round_up(st.st_size,
 						   LUSTRE_ENCRYPTION_UNIT_SIZE);
 			else
@@ -2408,7 +2408,7 @@ out_rmdir:
 			stx.stx_mode = body->mbo_mode;
 			stx.stx_ino = cl_fid_build_ino(&body->mbo_fid1,
 						       api32);
-			if (llcrypt_require_key(inode) == -ENOKEY)
+			if (ll_require_key(inode) == -ENOKEY)
 				stx.stx_size = round_up(stx.stx_size,
 						   LUSTRE_ENCRYPTION_UNIT_SIZE);
 			else

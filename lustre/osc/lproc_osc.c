@@ -164,6 +164,7 @@ LUSTRE_RW_ATTR(max_dirty_mb);
 LUSTRE_ATTR(ost_conn_uuid, 0444, conn_uuid_show, NULL);
 LUSTRE_RO_ATTR(conn_uuid);
 
+LUSTRE_RW_ATTR(pinger_recov);
 LUSTRE_RW_ATTR(ping);
 
 static int osc_cached_mb_seq_show(struct seq_file *m, void *v)
@@ -452,67 +453,7 @@ static ssize_t checksums_store(struct kobject *kobj,
 }
 LUSTRE_RW_ATTR(checksums);
 
-DECLARE_CKSUM_NAME;
-
-static int osc_checksum_type_seq_show(struct seq_file *m, void *v)
-{
-	struct obd_device *obd = m->private;
-	int i;
-
-	if (obd == NULL)
-		return 0;
-
-	for (i = 0; i < ARRAY_SIZE(cksum_name); i++) {
-		if ((BIT(i) & obd->u.cli.cl_supp_cksum_types) == 0)
-			continue;
-		if (obd->u.cli.cl_cksum_type == BIT(i))
-			seq_printf(m, "[%s] ", cksum_name[i]);
-		else
-			seq_printf(m, "%s ", cksum_name[i]);
-	}
-	seq_puts(m, "\n");
-
-	return 0;
-}
-
-static ssize_t osc_checksum_type_seq_write(struct file *file,
-					   const char __user *buffer,
-					   size_t count, loff_t *off)
-{
-	struct seq_file *m = file->private_data;
-	struct obd_device *obd = m->private;
-	char kernbuf[10];
-	int rc = -EINVAL;
-	int i;
-
-	if (obd == NULL)
-		return 0;
-
-	if (count > sizeof(kernbuf) - 1)
-		return -EINVAL;
-	if (copy_from_user(kernbuf, buffer, count))
-		return -EFAULT;
-
-	if (count > 0 && kernbuf[count - 1] == '\n')
-		kernbuf[count - 1] = '\0';
-	else
-		kernbuf[count] = '\0';
-
-	for (i = 0; i < ARRAY_SIZE(cksum_name); i++) {
-		if (strcasecmp(kernbuf, cksum_name[i]) == 0) {
-			obd->u.cli.cl_preferred_cksum_type = BIT(i);
-			if (obd->u.cli.cl_supp_cksum_types & BIT(i)) {
-				obd->u.cli.cl_cksum_type = BIT(i);
-				rc = count;
-			} else {
-				rc = -EOPNOTSUPP;
-			}
-			break;
-		}
-	}
-	return rc;
-}
-LPROC_SEQ_FOPS(osc_checksum_type);
+LUSTRE_RW_ATTR(checksum_type);
 
 static ssize_t resend_count_show(struct kobject *kobj,
 				 struct attribute *attr,
@@ -586,8 +527,7 @@ static ssize_t destroys_in_flight_show(struct kobject *kobj,
 }
 LUSTRE_RO_ATTR(destroys_in_flight);
 
-LPROC_SEQ_FOPS_RW_TYPE(osc, obd_max_pages_per_rpc);
-
+LUSTRE_RW_ATTR(max_pages_per_rpc);
 LUSTRE_RW_ATTR(short_io_bytes);
 
 #ifdef CONFIG_PROC_FS
@@ -733,33 +673,25 @@ LPROC_SEQ_FOPS_RO_TYPE(osc, connect_flags);
 LPROC_SEQ_FOPS_RO_TYPE(osc, server_uuid);
 LPROC_SEQ_FOPS_RO_TYPE(osc, timeouts);
 LPROC_SEQ_FOPS_RO_TYPE(osc, state);
-
 LPROC_SEQ_FOPS_RW_TYPE(osc, import);
-LPROC_SEQ_FOPS_RW_TYPE(osc, pinger_recov);
 
 struct lprocfs_vars lprocfs_osc_obd_vars[] = {
 	{ .name	=	"connect_flags",
 	  .fops	=	&osc_connect_flags_fops		},
 	{ .name	=	"ost_server_uuid",
 	  .fops	=	&osc_server_uuid_fops		},
-	{ .name =	"max_pages_per_rpc",
-	  .fops =	&osc_obd_max_pages_per_rpc_fops	},
 	{ .name	=	"osc_cached_mb",
 	  .fops	=	&osc_cached_mb_fops		},
 	{ .name	=	"osc_unevict_cached_mb",
 	  .fops	=	&osc_unevict_cached_mb_fops	},
 	{ .name =	"cur_grant_bytes",
 	  .fops =	&osc_cur_grant_bytes_fops	},
-	{ .name	=	"checksum_type",
-	  .fops	=	&osc_checksum_type_fops		},
 	{ .name	=	"timeouts",
 	  .fops	=	&osc_timeouts_fops		},
 	{ .name	=	"import",
 	  .fops	=	&osc_import_fops		},
 	{ .name	=	"state",
 	  .fops	=	&osc_state_fops			},
-	{ .name	=	"pinger_recov",
-	  .fops	=	&osc_pinger_recov_fops		},
 	{ .name	=	"unstable_stats",
 	  .fops	=	&osc_unstable_stats_fops	},
 	{ NULL }
@@ -934,6 +866,7 @@ static struct attribute *osc_attrs[] = {
 	&lustre_attr_active.attr,
 	&lustre_attr_enable_page_cache_shrink.attr,
 	&lustre_attr_checksums.attr,
+	&lustre_attr_checksum_type.attr,
 	&lustre_attr_checksum_dump.attr,
 	&lustre_attr_cur_dirty_bytes.attr,
 	&lustre_attr_cur_lost_grant_bytes.attr,
@@ -941,11 +874,13 @@ static struct attribute *osc_attrs[] = {
 	&lustre_attr_destroys_in_flight.attr,
 	&lustre_attr_grant_shrink_interval.attr,
 	&lustre_attr_max_dirty_mb.attr,
+	&lustre_attr_max_pages_per_rpc.attr,
 	&lustre_attr_max_rpcs_in_flight.attr,
 	&lustre_attr_short_io_bytes.attr,
 	&lustre_attr_resend_count.attr,
 	&lustre_attr_ost_conn_uuid.attr,
 	&lustre_attr_conn_uuid.attr,
+	&lustre_attr_pinger_recov.attr,
 	&lustre_attr_ping.attr,
 	&lustre_attr_idle_timeout.attr,
 	&lustre_attr_idle_connect.attr,

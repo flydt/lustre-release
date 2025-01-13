@@ -1938,9 +1938,10 @@ static void lfsck_layout_update_lcm(struct lov_comp_md_v1 *lcm,
 	__u64 end = le64_to_cpu(lcme->lcme_extent.e_end);
 	__u32 gen = version + range;
 	__u32 tmp_gen;
-	int i;
 	__u16 count = le16_to_cpu(lcm->lcm_entry_count);
 	__u16 flags = le16_to_cpu(lcm->lcm_flags);
+	__u16 flr_state = flags & LCM_FL_FLR_MASK;
+	int i;
 
 	if (!gen)
 		gen = 1;
@@ -1949,9 +1950,12 @@ static void lfsck_layout_update_lcm(struct lov_comp_md_v1 *lcm,
 		lcm->lcm_layout_gen = cpu_to_le32(gen);
 
 	if (range)
-		lcm->lcm_flags = cpu_to_le16(LCM_FL_WRITE_PENDING);
-	else if (flags == LCM_FL_NONE && le16_to_cpu(lcm->lcm_mirror_count) > 0)
-		lcm->lcm_flags = cpu_to_le16(LCM_FL_RDONLY);
+		lcm->lcm_flags = cpu_to_le16((flags & ~LCM_FL_FLR_MASK) |
+					     LCM_FL_WRITE_PENDING);
+	else if (flr_state == LCM_FL_NONE &&
+		 le16_to_cpu(lcm->lcm_mirror_count) > 0)
+		lcm->lcm_flags = cpu_to_le16((flags & ~LCM_FL_FLR_MASK) |
+					     LCM_FL_RDONLY);
 
 	for (i = 0; i < count; i++) {
 		tmp = &lcm->lcm_entries[i];
@@ -2612,7 +2616,7 @@ static int lfsck_layout_master_conditional_destroy(const struct lu_env *env,
 	GOTO(put, rc);
 
 put:
-	lfsck_tgt_put(ltd);
+	kref_put(&ltd->ltd_ref, lfsck_tgt_free);
 
 	return rc;
 }
@@ -2785,7 +2789,7 @@ static int lfsck_layout_conflict_create(const struct lu_env *env,
 
 	rc = lfsck_layout_master_conditional_destroy(env, com, cfid2, ost_idx2);
 
-	/* If the conflict OST-obejct is not created for fixing dangling
+	/* If the conflict OST-object is not created for fixing dangling
 	 * referenced MDT-object in former LFSCK check/repair, or it has
 	 * been modified by others, then we cannot destroy it. Re-create
 	 * a new MDT-object for the orphan OST-object.
@@ -5680,7 +5684,7 @@ static int lfsck_layout_scan_stripes(const struct lu_env *env,
 		cobj = lfsck_object_find_by_dev(env, tgt->ltd_tgt, fid);
 		if (IS_ERR(cobj)) {
 			if (lfsck_is_dead_obj(parent)) {
-				lfsck_tgt_put(tgt);
+				kref_put(&tgt->ltd_ref, lfsck_tgt_free);
 
 				GOTO(out, rc = 0);
 			}
@@ -5727,7 +5731,7 @@ static int lfsck_layout_scan_stripes(const struct lu_env *env,
 		if (lad->lad_assistant_status < 0) {
 			spin_unlock(&lad->lad_lock);
 			lfsck_layout_assistant_req_fini(env, &llr->llr_lar);
-			lfsck_tgt_put(tgt);
+			kref_put(&tgt->ltd_ref, lfsck_tgt_free);
 			RETURN(lad->lad_assistant_status);
 		}
 
@@ -5751,7 +5755,7 @@ next:
 			lfsck_object_put(env, cobj);
 
 		if (likely(tgt != NULL))
-			lfsck_tgt_put(tgt);
+			kref_put(&tgt->ltd_ref, lfsck_tgt_free);
 
 		if (rc < 0 && bk->lb_param & LPF_FAILOUT)
 			GOTO(out, rc);

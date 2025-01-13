@@ -736,7 +736,7 @@ static inline void ll_inode_unlock(struct inode *inode)
 #define SBI_DEFAULT_READ_AHEAD_PER_FILE_MAX	MiB_TO_PAGES(256UL)
 
 /* default read-ahead full files smaller than limit on the second read */
-#define SBI_DEFAULT_READ_AHEAD_WHOLE_MAX	MiB_TO_PAGES(2UL)
+#define SBI_DEFAULT_READ_AHEAD_WHOLE_MAX	MiB_TO_PAGES(4UL)
 
 /* default range pages */
 #define SBI_DEFAULT_RA_RANGE_PAGES		MiB_TO_PAGES(1ULL)
@@ -762,6 +762,7 @@ enum ra_stat {
 	RA_STAT_FAILED_FAST_READ,
 	RA_STAT_MMAP_RANGE_READ,
 	RA_STAT_READAHEAD_PAGES,
+	RA_STAT_FORCEREAD_PAGES,
 	_NR_RA_STAT,
 };
 
@@ -1383,7 +1384,9 @@ extern const struct address_space_operations ll_aops;
 extern const struct inode_operations ll_file_inode_operations;
 const struct file_operations *ll_select_file_operations(struct ll_sb_info *sbi);
 extern int ll_have_md_lock(struct obd_export *exp, struct inode *inode,
-			   __u64 *bits, enum ldlm_mode l_req_mode);
+			   enum mds_ibits_locks *bits,
+			   enum ldlm_mode l_req_mode,
+			   enum ldlm_match_flags match_flags);
 extern enum ldlm_mode ll_take_md_lock(struct inode *inode, __u64 bits,
 				      struct lustre_handle *lockh, __u64 flags,
 				      enum ldlm_mode mode);
@@ -1463,7 +1466,7 @@ int ll_ioctl_ahead(struct file *file, struct llapi_lu_ladvise2 *ladvise);
 
 int ll_lov_setstripe_ea_info(struct inode *inode, struct dentry *dentry,
 			     __u64 flags, struct lov_user_md *lum,
-			     int lum_size);
+			     ssize_t lum_size);
 int ll_lov_getstripe_ea_info(struct inode *inode, const char *filename,
 			     struct lov_mds_md **lmm, int *lmm_size,
 			     struct ptlrpc_request **request);
@@ -2148,7 +2151,7 @@ int ll_prepare_lookup(struct inode *dir, struct dentry *de,
 int ll_setup_filename(struct inode *dir, const struct qstr *iname,
 		      int lookup, struct llcrypt_name *fname,
 		      struct lu_fid *fid);
-#ifdef CONFIG_LL_ENCRYPTION
+#ifdef HAVE_LUSTRE_CRYPTO
 const char *ll_get_symlink(struct inode *inode, const void *caddr,
 			   unsigned int max_size,
 			   struct delayed_call *done);

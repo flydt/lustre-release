@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/obdclass/llog.c
  *
  * OST<->MDS recovery logging infrastructure.
  * Invariants in implementation:
@@ -253,6 +233,8 @@ int llog_cancel_arr_rec(const struct lu_env *env, struct llog_handle *loghandle,
 		if (rc < 0)
 			GOTO(out_trans, rc);
 	}
+	if (llh->llh_flags & LLOG_F_IS_CAT)
+		dt_declare_attr_set(env, loghandle->lgh_obj, NULL, th);
 
 	th->th_wait_submit = 1;
 	rc = dt_trans_start_local(env, dt, th);
@@ -311,6 +293,13 @@ int llog_cancel_arr_rec(const struct lu_env *env, struct llog_handle *loghandle,
 			GOTO(out_unlock, rc = 0);
 		}
 		rc = LLOG_DEL_PLAIN;
+	}
+
+	/* update for catalog which doesn't happen very often */
+	if (llh->llh_flags & LLOG_F_IS_CAT) {
+		lgi->lgi_attr.la_valid = LA_MTIME;
+		lgi->lgi_attr.la_mtime = ktime_get_real_seconds();
+		dt_attr_set(env, loghandle->lgh_obj, &lgi->lgi_attr, th);
 	}
 
 out_unlock:
@@ -512,23 +501,37 @@ static int llog_process_thread(void *arg)
 	int saved_index = 0;
 	int last_called_index = 0;
 	bool repeated = false;
+	struct lu_env *env = NULL, _env;
 
 	ENTRY;
 
 	if (llh == NULL)
 		RETURN(-EINVAL);
 
-	lti = lpi->lpi_env == NULL ? NULL : llog_info(lpi->lpi_env);
+	/*
+	 * this can be called as a separate thread processing llog or
+	 * as a part of more functional thread like osp sync thread with
+	 * an existing env
+	 */
+	env = lu_env_find();
+	if (env == NULL) {
+		rc = lu_env_init(&_env, LCT_DT_THREAD | LCT_MD_THREAD);
+		if (rc)
+			RETURN(rc);
+		rc = lu_env_add(&_env);
+		if (unlikely(rc))
+			RETURN(rc);
+		env = &_env;
+	}
+	lti = llog_info(env);
 
 	cur_offset = chunk_size = llh->llh_hdr.lrh_len;
 	/* expect chunk_size to be power of two */
 	LASSERT(is_power_of_2(chunk_size));
 
 	OBD_ALLOC_LARGE(buf, chunk_size);
-	if (buf == NULL) {
-		lpi->lpi_rc = -ENOMEM;
-		RETURN(0);
-	}
+	if (unlikely(buf == NULL))
+		GOTO(out_env, rc = -ENOMEM);
 
 	last_index = llog_max_idx(llh);
 	if (cd) {
@@ -570,7 +573,7 @@ repeat:
 		/* the record index for outdated chunk data */
 		/* it is safe to process buffer until saved lgh_last_idx */
 		lh_last_idx = LLOG_HDR_TAIL(llh)->lrt_index;
-		rc = llog_next_block(lpi->lpi_env, loghandle, &saved_index,
+		rc = llog_next_block(env, loghandle, &saved_index,
 				     index, &cur_offset, buf, chunk_size);
 		if (repeated && rc)
 			CDEBUG(D_OTHER, "cur_offset %llu, chunk_offset %llu,"
@@ -746,7 +749,7 @@ repeat:
 				}
 				/* using lu_env for passing record offset to
 				 * llog_write through various callbacks */
-				rc = lpi->lpi_cb(lpi->lpi_env, loghandle, rec,
+				rc = lpi->lpi_cb(env, loghandle, rec,
 						 lpi->lpi_cbdata);
 				last_called_index = index;
 
@@ -759,7 +762,7 @@ repeat:
 				    rc == LLOG_SKIP_PLAIN) {
 					GOTO(out, rc);
 				} else if (rc == LLOG_DEL_RECORD) {
-					rc = llog_cancel_rec(lpi->lpi_env,
+					rc = llog_cancel_rec(env,
 							     loghandle,
 							     rec->lrh_index);
 					/* Allow parallel cancelling, ENOENT
@@ -818,7 +821,7 @@ out:
 			while (index <= last_index) {
 				if (test_bit_le(index,
 						  LLOG_HDR_BITMAP(llh)) != 0)
-					llog_cancel_rec(lpi->lpi_env, loghandle,
+					llog_cancel_rec(env, loghandle,
 							index);
 				index++;
 			}
@@ -827,6 +830,12 @@ out:
 	}
 
 	OBD_FREE_LARGE(buf, chunk_size);
+out_env:
+	if (env == &_env) {
+		lu_env_remove(&_env);
+		lu_env_fini(&_env);
+	}
+
 	lpi->lpi_rc = rc;
 	return 0;
 }
@@ -834,7 +843,6 @@ out:
 static int llog_process_thread_daemonize(void *arg)
 {
 	struct llog_process_info	*lpi = arg;
-	struct lu_env			 env;
 	int				 rc;
 	struct nsproxy			*new_ns, *curr_ns = current->nsproxy;
 
@@ -855,16 +863,9 @@ static int llog_process_thread_daemonize(void *arg)
 	task_unlock(lpi->lpi_reftask);
 
 	unshare_fs_struct();
-	/* client env has no keys, tags is just 0 */
-	rc = lu_env_init(&env, LCT_LOCAL | LCT_MG_THREAD);
-	if (rc)
-		goto out;
-	lpi->lpi_env = &env;
 
 	rc = llog_process_thread(arg);
 
-	lu_env_fini(&env);
-out:
 	complete(&lpi->lpi_completion);
 	return rc;
 }
@@ -902,7 +903,6 @@ int llog_process_or_fork(const struct lu_env *env,
 
 		/* The new thread can't use parent env,
 		 * init the new one in llog_process_thread_daemonize. */
-		lpi->lpi_env = NULL;
 		init_completion(&lpi->lpi_completion);
 		/* take reference to current, so that
 		 * llog_process_thread_daemonize() can use it to switch to
@@ -918,7 +918,6 @@ int llog_process_or_fork(const struct lu_env *env,
 		}
 		wait_for_completion(&lpi->lpi_completion);
 	} else {
-		lpi->lpi_env = env;
 		llog_process_thread(lpi);
 	}
 	rc = lpi->lpi_rc;
@@ -1254,7 +1253,7 @@ int llog_open_create(const struct lu_env *env, struct llog_ctxt *ctxt,
 	d = lu2dt_dev((*res)->lgh_obj->do_lu.lo_dev);
 
 	if (unlikely(unlikely(d->dd_rdonly)))
-		RETURN(-EROFS);
+		GOTO(out, rc = -EROFS);
 
 	th = dt_trans_create(env, d);
 	if (IS_ERR(th))
@@ -1319,8 +1318,11 @@ int llog_write(const struct lu_env *env, struct llog_handle *loghandle,
 {
 	struct dt_device	*dt;
 	struct thandle		*th;
-	bool			need_cookie;
-	int			rc;
+	struct llog_thread_info *lgi = llog_info(env);
+	bool need_cookie;
+	bool update_attr;
+	unsigned long timestamp;
+	int rc;
 
 	ENTRY;
 
@@ -1341,6 +1343,20 @@ int llog_write(const struct lu_env *env, struct llog_handle *loghandle,
 	if (rc)
 		GOTO(out_trans, rc);
 
+	/*
+	 * update mtime given 1) append mode, no overhead since inode
+	 * size/block needs to be written anyway; 2) update for catalog
+	 * since this doesn't happen very often
+	 */
+	timestamp = ktime_get_real_seconds();
+
+	update_attr = (timestamp != loghandle->lgh_timestamp) &&
+		       (idx == LLOG_NEXT_IDX ||
+		       (loghandle->lgh_hdr &&
+			loghandle->lgh_hdr->llh_flags & LLOG_F_IS_CAT));
+	if (update_attr)
+		dt_declare_attr_set(env, loghandle->lgh_obj, NULL, th);
+
 	th->th_wait_submit = 1;
 	rc = dt_trans_start_local(env, dt, th);
 	if (rc)
@@ -1359,6 +1375,12 @@ int llog_write(const struct lu_env *env, struct llog_handle *loghandle,
 		rc = (rc == 1 ? 0 : rc);
 	} else {
 		rc = llog_write_rec(env, loghandle, rec, NULL, idx, th);
+	}
+	if (rc == 0 && update_attr) {
+		loghandle->lgh_timestamp = timestamp;
+		lgi->lgi_attr.la_valid = LA_MTIME;
+		lgi->lgi_attr.la_mtime = timestamp;
+		dt_attr_set(env, loghandle->lgh_obj, &lgi->lgi_attr, th);
 	}
 
 	up_write(&loghandle->lgh_lock);
@@ -1395,6 +1417,8 @@ int llog_open(const struct lu_env *env, struct llog_ctxt *ctxt,
 	rc = ctxt->loc_logops->lop_open(env, *lgh, logid, name, open_param);
 	llog_restore_resource(old_cred);
 	if (rc) {
+		CDEBUG(D_OTHER, "%s: Failed to open llog %s: rc %d\n",
+		       ctxt->loc_obd->obd_name, name ? name : "", rc);
 		llog_free_handle(*lgh);
 		*lgh = NULL;
 	}

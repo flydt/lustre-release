@@ -42,6 +42,7 @@ always_except LU-6493  42b
 always_except LU-16515 118c 118d
 always_except LU-8411  407
 always_except LU-18032 119i
+always_except LU-17679 851
 
 if $SHARED_KEY; then
 	always_except LU-14181 64e 64f
@@ -92,6 +93,8 @@ proc_regexp="/{proc,sys}/{fs,sys,kernel/debug}/{lustre,lnet}/"
 
 cleanup() {
 	echo -n "cln.."
+	wait_update_facet client "pgrep ll_sa" "" 35 ||
+		error "ll_sa thread is still running"
 	pgrep ll_sa > /dev/null && { echo "There are ll_sa thread not exit!"; exit 20; }
 	cleanupall ${FORCE} $* || { echo "FAILed to clean up"; exit 20; }
 }
@@ -1880,11 +1883,12 @@ reset_enospc() {
 	local delay
 	local ready
 	local get_prealloc
+	local osts
 
-	local list=$(comma_list $(osts_nodes))
-	[ "$ostidx" ] && list=$(facet_host ost$((ostidx + 1)))
+	[[ -n "$ostidx" ]] && osts=$(facet_host ost$((ostidx + 1))) ||
+		osts=$(osts_nodes)
 
-	do_nodes $list lctl set_param fail_loc=0
+	do_nodes $osts lctl set_param fail_loc=0
 	wait_delete_completed	# initiate all OST_DESTROYs from MDS to OST
 	delay=$(do_facet $SINGLEMDS lctl get_param -n lov.*.qos_maxage |
 		awk '{print $1 * 2;exit;}')
@@ -2242,114 +2246,6 @@ test_27y() {
 	return 0
 }
 run_test 27y "create files while OST0 is degraded and the rest inactive"
-
-check_seq_oid()
-{
-	log "check file $1"
-
-	lmm_count=$($LFS getstripe -c $1)
-	lmm_seq=$($LFS getstripe -v $1 | awk '/lmm_seq/ { print $2 }')
-	lmm_oid=$($LFS getstripe -v $1 | awk '/lmm_object_id/ { print $2 }')
-
-	local old_ifs="$IFS"
-	IFS=$'[:]'
-	fid=($($LFS path2fid $1))
-	IFS="$old_ifs"
-
-	log "FID seq ${fid[1]}, oid ${fid[2]} ver ${fid[3]}"
-	log "LOV seq $lmm_seq, oid $lmm_oid, count: $lmm_count"
-
-	# compare lmm_seq and lu_fid->f_seq
-	[ $lmm_seq = ${fid[1]} ] || { error "SEQ mismatch"; return 1; }
-	# compare lmm_object_id and lu_fid->oid
-	[ $lmm_oid = ${fid[2]} ] || { error "OID mismatch"; return 2; }
-
-	# check the trusted.fid attribute of the OST objects of the file
-	local have_obdidx=false
-	local stripe_nr=0
-	$LFS getstripe $1 | while read obdidx oid hex seq; do
-		# skip lines up to and including "obdidx"
-		[ -z "$obdidx" ] && break
-		[ "$obdidx" = "obdidx" ] && have_obdidx=true && continue
-		$have_obdidx || continue
-
-		local ost=$((obdidx + 1))
-		local dev=$(ostdevname $ost)
-		local oid_hex
-
-		log "want: stripe:$stripe_nr ost:$obdidx oid:$oid/$hex seq:$seq"
-
-		seq=$(echo $seq | sed -e "s/^0x//g")
-		if [ $seq == 0 ] || [ $(facet_fstype ost$ost) == zfs ]; then
-			oid_hex=$(echo $oid)
-		else
-			oid_hex=$(echo $hex | sed -e "s/^0x//g")
-		fi
-		local obj_file="O/$seq/d$((oid %32))/$oid_hex"
-
-		local ff=""
-		#
-		# Don't unmount/remount the OSTs if we don't need to do that.
-		# LU-2577 changes filter_fid to be smaller, so debugfs needs
-		# update too, until that use mount/ll_decode_filter_fid/mount.
-		# Re-enable when debugfs will understand new filter_fid.
-		#
-		if [ $(facet_fstype ost$ost) == ldiskfs ]; then
-			ff=$(do_facet ost$ost "$DEBUGFS -c -R 'stat $obj_file' \
-				$dev 2>/dev/null" | grep "parent=")
-		fi
-		if [ -z "$ff" ]; then
-			stop ost$ost
-			mount_fstype ost$ost
-			ff=$(do_facet ost$ost $LL_DECODE_FILTER_FID \
-				$(facet_mntpt ost$ost)/$obj_file)
-			unmount_fstype ost$ost
-			start ost$ost $dev $OST_MOUNT_OPTS
-			clients_up
-		fi
-
-		[ -z "$ff" ] && error "$obj_file: no filter_fid info"
-
-		echo "$ff" | sed -e 's#.*objid=#got: objid=#'
-
-		# /mnt/O/0/d23/23: objid=23 seq=0 parent=[0x200000400:0x1e:0x1]
-		# fid: objid=23 seq=0 parent=[0x200000400:0x1e:0x0] stripe=1
-		#
-		# fid: parent=[0x200000400:0x1e:0x0] stripe=1 stripe_count=2 \
-		#	stripe_size=1048576 component_id=1 component_start=0 \
-		#	component_end=33554432
-		local ff_parent=$(sed -e 's/.*parent=.//' <<<$ff)
-		local ff_pseq=$(cut -d: -f1 <<<$ff_parent)
-		local ff_poid=$(cut -d: -f2 <<<$ff_parent)
-		local ff_pstripe
-		if grep -q 'stripe=' <<<$ff; then
-			ff_pstripe=$(sed -e 's/.*stripe=//' -e 's/ .*//' <<<$ff)
-		else
-			# $LL_DECODE_FILTER_FID does not print "stripe="; look
-			# into f_ver in this case.  See comment on ff_parent.
-			ff_pstripe=$(cut -d: -f3 <<<$ff_parent | sed -e 's/]//')
-		fi
-
-		# compare lmm_seq and filter_fid->ff_parent.f_seq
-		[ $ff_pseq = $lmm_seq ] ||
-			error "FF parent SEQ $ff_pseq != $lmm_seq"
-		# compare lmm_object_id and filter_fid->ff_parent.f_oid
-		[ $ff_poid = $lmm_oid ] ||
-			error "FF parent OID $ff_poid != $lmm_oid"
-		(($ff_pstripe == $stripe_nr)) ||
-			error "FF stripe $ff_pstripe != $stripe_nr"
-
-		stripe_nr=$((stripe_nr + 1))
-		[ $CLIENT_VERSION -lt $(version_code 2.9.55) ] &&
-			continue
-		if grep -q 'stripe_count=' <<<$ff; then
-			local ff_scnt=$(sed -e 's/.*stripe_count=//' \
-					    -e 's/ .*//' <<<$ff)
-			[ $lmm_count = $ff_scnt ] ||
-				error "FF stripe count $lmm_count != $ff_scnt"
-		fi
-	done
-}
 
 test_27z() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
@@ -5469,17 +5365,9 @@ test_39r() {
 	echo "client atime: $atime_cli"
 
 	local ostdev=$(ostdevname 1)
-	local fid=($($LFS getstripe $DIR/$tfile | grep 0x))
-	local seq=${fid[3]#0x}
-	local oid=${fid[1]}
-	local oid_hex
-
-	if [ $seq == 0 ]; then
-		oid_hex=${fid[1]}
-	else
-		oid_hex=${fid[2]#0x}
-	fi
-	local objpath="O/$seq/d$(($oid % 32))/$oid_hex"
+	local fids=($($LFS getstripe $DIR/$tfile | grep 0x))
+	local fid="${fids[3]}:${fids[2]}:0"
+	local objpath=$(ost_fid2_objpath ost1 $fid)
 	local cmd="debugfs -c -R \\\"stat $objpath\\\" $ostdev"
 
 	# allow atime update to be written to device
@@ -9974,7 +9862,7 @@ test_60a() {
 
 		case $fstype in
 			ldiskfs )
-				obj_file=$mntpt/O/$seq/d$((oid%32))/$oid ;;
+				obj_file=$mntpt/$(ost_fid2_objpath mgs $fid) ;;
 			zfs )
 				obj_file=$mntpt/oi.$(($((16#$seq))&127))/$fid ;;
 		esac
@@ -11940,19 +11828,18 @@ test_77o() {
 
 	# print OST checksum_type
 	echo "$ofd.$FSNAME-*.checksum_type:"
-	do_nodes $(comma_list $(osts_nodes)) \
-		$LCTL get_param -n $ofd.$FSNAME-*.checksum_type
+	do_nodes $(osts_nodes) "$LCTL get_param -n $ofd.$FSNAME-*.checksum_type"
 
 	# print MDT checksum_type
 	echo "$mdt.$FSNAME-*.checksum_type:"
 	do_nodes $(comma_list $(mdts_nodes)) \
 		$LCTL get_param -n $mdt.$FSNAME-*.checksum_type
 
-	local o_count=$(do_nodes $(comma_list $(osts_nodes)) \
+	local o_count=$(do_nodes $(osts_nodes) \
 		   $LCTL get_param -n $ofd.$FSNAME-*.checksum_type | wc -l)
 
 	(( $o_count == $OSTCOUNT )) ||
-		error "found $o_count checksums, not \$MDSCOUNT=$OSTCOUNT"
+		error "found $o_count checksums, not \$OSTCOUNT=$OSTCOUNT"
 
 	local m_count=$(do_nodes $(comma_list $(mdts_nodes)) \
 		   $LCTL get_param -n $mdt.$FSNAME-*.checksum_type | wc -l)
@@ -12062,10 +11949,10 @@ test_80() { # bug 10718
 		fi
 
 		if [ "$save" != "never" ]; then
-			local hosts=$(comma_list $(osts_nodes))
+			local osts=$(osts_nodes)
 
-			do_nodes $hosts $LCTL set_param $soc=never
-			stack_trap "do_nodes $hosts $LCTL set_param $soc=$save"
+			do_nodes $osts $LCTL set_param $soc=never
+			stack_trap "do_nodes $osts $LCTL set_param $soc=$save"
 		fi
 	fi
 
@@ -12226,9 +12113,9 @@ setup_test101bc() {
 
 	local FILE_SIZE_MB=$((FILE_LENGTH / ssize))
 
-	local list=$(comma_list $(osts_nodes))
-	set_osd_param $list '' read_cache_enable 0
-	set_osd_param $list '' writethrough_cache_enable 0
+	local osts=$(osts_nodes)
+	set_osd_param $osts '' read_cache_enable 0
+	set_osd_param $osts '' writethrough_cache_enable 0
 
 	trap cleanup_test101bc EXIT
 	# prepare the read-ahead file
@@ -12244,9 +12131,9 @@ cleanup_test101bc() {
 	rm -rf $DIR/$tdir
 	rm -f $DIR/$tfile
 
-	local list=$(comma_list $(osts_nodes))
-	set_osd_param $list '' read_cache_enable 1
-	set_osd_param $list '' writethrough_cache_enable 1
+	local osts=$(osts_nodes)
+	set_osd_param $osts '' read_cache_enable 1
+	set_osd_param $osts '' writethrough_cache_enable 1
 }
 
 ra_check_101() {
@@ -12477,7 +12364,7 @@ test_101g_brw_size_test() {
 			return 2
 	done
 
-	stack_trap "rm -f $file" EXIT
+	stack_trap "rm -f $file; wait_delete_completed" EXIT
 	$LCTL set_param -n osc.*.rpc_stats=0
 
 	# 10 RPCs should be enough for the test
@@ -12504,8 +12391,7 @@ test_101g() {
 	remote_ost_nodsh && skip "remote OST with nodsh"
 
 	local rpcs
-	local osts=$(get_facets OST)
-	local list=$(comma_list $(osts_nodes))
+	local facets=$(get_facets OST)
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
 	local brw_size="obdfilter.*.brw_size"
 
@@ -12513,19 +12399,15 @@ test_101g() {
 
 	local orig_mb=$(do_facet ost1 $LCTL get_param -n $brw_size | head -n 1)
 
-	if { [ $OST1_VERSION -ge $(version_code 2.8.52) ] ||
-		{ [ $OST1_VERSION -ge $(version_code 2.7.17) ] &&
-		  [ $OST1_VERSION -lt $(version_code 2.7.50) ]; }; } &&
-	   { [ $CLIENT_VERSION -ge $(version_code 2.8.52) ] ||
-		{ [ $CLIENT_VERSION -ge $(version_code 2.7.17) ] &&
-		  [ $CLIENT_VERSION -lt $(version_code 2.7.50) ]; }; }; then
+	if (( $OST1_VERSION >= $(version_code 2.8.52) )); then
+		local osts=$(osts_nodes)
 
-		[ $OST1_VERSION -ge $(version_code 2.9.52) ] &&
-			suffix="M"
+		(( $OST1_VERSION < $(version_code 2.9.52) )) || suffix="M"
 
-		if [[ $orig_mb -lt 16 ]]; then
-			save_lustre_params $osts "$brw_size" > $p
-			do_nodes $list $LCTL set_param -n $brw_size=16$suffix ||
+		if (( $orig_mb < 16 )); then
+			save_lustre_params $facets "$brw_size" > $p
+			stack_trap "rm -f $p"
+			do_nodes $osts $LCTL set_param -n $brw_size=16$suffix ||
 				error "set 16MB RPC size failed"
 
 			echo "remount client to enable new RPC size"
@@ -12539,12 +12421,10 @@ test_101g() {
 
 	test_101g_brw_size_test 4 || error "4MB RPC test failed"
 
-	if [[ $orig_mb -lt 16 ]]; then
+	if (( $orig_mb < 16 )); then
 		restore_lustre_params < $p
 		remount_client $MOUNT || error "remount_client restore failed"
 	fi
-
-	rm -f $p $DIR/$tfile
 }
 run_test 101g "Big bulk(4/16 MiB) readahead"
 
@@ -14086,14 +13966,15 @@ test_118b()
 {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 	remote_ost_nodsh && skip "remote OST with nodsh"
+	local osts=$(osts_nodes)
 
 	reset_async
 
 	#define OBD_FAIL_SRV_ENOENT 0x217
-	set_nodes_failloc "$(osts_nodes)" 0x217
+	set_nodes_failloc $osts 0x217
 	$MULTIOP $DIR/$tfile oO_CREAT:O_RDWR:O_SYNC:w4096c
 	RC=$?
-	set_nodes_failloc "$(osts_nodes)" 0
+	set_nodes_failloc $osts 0
         DIRTY=$(lctl get_param -n llite.*.dump_page_cache | grep -c dirty)
         WRITEBACK=$(lctl get_param -n llite.*.dump_page_cache |
                     grep -c writeback)
@@ -14127,11 +14008,12 @@ test_118c()
 	[ "$SLOW" = "no" ] && [ -n "$OLD_RESENDCOUNT" ] &&
 				set_resend_count $OLD_RESENDCOUNT
 	remote_ost_nodsh && skip "remote OST with nodsh"
+	local osts=$(osts_nodes)
 
 	reset_async
 
 	#define OBD_FAIL_OST_EROFS               0x216
-	set_nodes_failloc "$(osts_nodes)" 0x216
+	set_nodes_failloc $osts 0x216
 
 	# multiop should block due to fsync until pages are written
 	$MULTIOP $DIR/$tfile oO_CREAT:O_RDWR:O_SYNC:w4096c &
@@ -14148,7 +14030,7 @@ test_118c()
 		error "No page in writeback, writeback=$WRITEBACK"
 	fi
 
-	set_nodes_failloc "$(osts_nodes)" 0
+	set_nodes_failloc $osts 0
         wait $MULTIPID
 	RC=$?
 	if [[ $RC -ne 0 ]]; then
@@ -14175,11 +14057,12 @@ test_118d()
 {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 	remote_ost_nodsh && skip "remote OST with nodsh"
+	local osts=$(osts_nodes)
 
 	reset_async
 
 	#define OBD_FAIL_OST_BRW_PAUSE_BULK
-	set_nodes_failloc "$(osts_nodes)" 0x214
+	set_nodes_failloc $osts 0x214
 	# multiop should block due to fsync until pages are written
 	$MULTIOP $DIR/$tfile oO_CREAT:O_RDWR:O_SYNC:w4096c &
 	MULTIPID=$!
@@ -14196,7 +14079,7 @@ test_118d()
 	fi
 
         wait $MULTIPID || error "Multiop fsync failed, rc=$?"
-	set_nodes_failloc "$(osts_nodes)" 0
+	set_nodes_failloc $osts 0
 
         DIRTY=$(lctl get_param -n llite.*.dump_page_cache | grep -c dirty)
         WRITEBACK=$(lctl get_param -n llite.*.dump_page_cache |
@@ -14288,16 +14171,17 @@ run_test 118g "Don't stay in wait if we got local -ENOMEM  =========="
 test_118h() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 	remote_ost_nodsh && skip "remote OST with nodsh"
+	local osts=$(osts_nodes)
 
 	reset_async
 
 	#define OBD_FAIL_OST_BRW_WRITE_BULK      0x20e
-        set_nodes_failloc "$(osts_nodes)" 0x20e
+        set_nodes_failloc $osts 0x20e
 	# Should simulate ENOMEM error which is recoverable and should be handled by timeout
         $MULTIOP $DIR/$tfile oO_CREAT:O_RDWR:O_SYNC:w4096c
         RC=$?
 
-        set_nodes_failloc "$(osts_nodes)" 0
+        set_nodes_failloc $osts 0
 	if [[ $RC -eq 0 ]]; then
 		error "Must return error due to dropped pages, rc=$RC"
 	fi
@@ -14326,17 +14210,18 @@ run_test 118h "Verify timeout in handling recoverables errors  =========="
 test_118i() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 	remote_ost_nodsh && skip "remote OST with nodsh"
+	local osts=$(osts_nodes)
 
 	reset_async
 
 	#define OBD_FAIL_OST_BRW_WRITE_BULK      0x20e
-        set_nodes_failloc "$(osts_nodes)" 0x20e
+        set_nodes_failloc $osts 0x20e
 
 	# Should simulate ENOMEM error which is recoverable and should be handled by timeout
         $MULTIOP $DIR/$tfile oO_CREAT:O_RDWR:O_SYNC:w4096c &
 	PID=$!
 	sleep 5
-	set_nodes_failloc "$(osts_nodes)" 0
+	set_nodes_failloc $osts 0
 
 	wait $PID
         RC=$?
@@ -14367,16 +14252,17 @@ run_test 118i "Fix error before timeout in recoverable error  =========="
 test_118j() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 	remote_ost_nodsh && skip "remote OST with nodsh"
+	local osts=$(osts_nodes)
 
 	reset_async
 
 	#define OBD_FAIL_OST_BRW_WRITE_BULK2     0x220
-        set_nodes_failloc "$(osts_nodes)" 0x220
+        set_nodes_failloc $osts 0x220
 
 	# return -EIO from OST
         $MULTIOP $DIR/$tfile oO_CREAT:O_RDWR:O_SYNC:w4096c
         RC=$?
-        set_nodes_failloc "$(osts_nodes)" 0x0
+        set_nodes_failloc $osts 0x0
 	if [[ $RC -eq 0 ]]; then
 		error "Must return error due to dropped pages, rc=$RC"
 	fi
@@ -14404,9 +14290,10 @@ test_118k()
 {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 	remote_ost_nodsh && skip "remote OSTs with nodsh"
+	local osts=$(osts_nodes)
 
 	#define OBD_FAIL_OST_BRW_WRITE_BULK      0x20e
-	set_nodes_failloc "$(osts_nodes)" 0x20e
+	set_nodes_failloc $osts 0x20e
 	test_mkdir $DIR/$tdir
 
 	for ((i=0;i<10;i++)); do
@@ -14418,7 +14305,7 @@ test_118k()
 		wait $SLEEPPID
 	done
 
-	set_nodes_failloc "$(osts_nodes)" 0
+	set_nodes_failloc $osts 0
 	rm -rf $DIR/$tdir
 }
 run_test 118k "bio alloc -ENOMEM and IO TERM handling ========="
@@ -14452,6 +14339,7 @@ test_118n()
 
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 	remote_ost_nodsh && skip "remote OSTs with nodsh"
+	local osts=$(osts_nodes)
 
 	# Sleep to avoid a cached response.
 	#define OBD_STATFS_CACHE_SECONDS 1
@@ -14459,16 +14347,16 @@ test_118n()
 
 	# Inject a 10 second delay in the OST_STATFS handler.
 	#define OBD_FAIL_OST_STATFS_DELAY 0x242
-	set_nodes_failloc "$(osts_nodes)" 0x242
+	set_nodes_failloc $osts 0x242
 
 	begin=$SECONDS
 	stat --file-system $MOUNT > /dev/null
 	end=$SECONDS
 
-	set_nodes_failloc "$(osts_nodes)" 0
+	set_nodes_failloc $osts 0
 
 	if ((end - begin > 20)); then
-	    error "statfs took $((end - begin)) seconds, expected 10"
+		error "statfs took $((end - begin)) seconds, expected 10"
 	fi
 }
 run_test 118n "statfs() sends OST_STATFS requests in parallel"
@@ -17962,7 +17850,7 @@ run_test 150h "Verify extend fallocate updates the file size"
 
 #LU-2902 roc_hit was not able to read all values from lproc
 function roc_hit_init() {
-	local list=$(comma_list $(osts_nodes))
+	local osts=${1:-$(osts_nodes)}
 	local dir=$DIR/$tdir-check
 	local file=$dir/$tfile
 	local BEFORE
@@ -17971,18 +17859,18 @@ function roc_hit_init() {
 
 	test_mkdir $dir
 	#use setstripe to do a write to every ost
-	for i in $(seq 0 $((OSTCOUNT-1))); do
+	for ((i=0; i < OSTCOUNT; i++)); do
 		$LFS setstripe -c 1 -i $i $dir || error "$LFS setstripe $file failed"
 		dd if=/dev/urandom of=$file bs=4k count=4 2>&1 > /dev/null
 		idx=$(printf %04x $i)
-		BEFORE=$(get_osd_param $list *OST*$idx stats |
+		BEFORE=$(get_osd_param $osts *OST$idx stats |
 			awk '$1 == "cache_access" {sum += $7}
 				END { printf("%0.0f", sum) }')
 
 		cancel_lru_locks osc
 		cat $file >/dev/null
 
-		AFTER=$(get_osd_param $list *OST*$idx stats |
+		AFTER=$(get_osd_param $osts *OST$idx stats |
 			awk '$1 == "cache_access" {sum += $7}
 				END { printf("%0.0f", sum) }')
 
@@ -17998,20 +17886,23 @@ function roc_hit_init() {
 }
 
 function roc_hit() {
-	local list=$(comma_list $(osts_nodes))
-	echo $(get_osd_param $list '' stats |
+	local osts=${1:-$(osts_nodes)}
+
+	echo $(get_osd_param $osts '' stats |
 		awk '$1 == "cache_hit" {sum += $7}
 			END { printf("%0.0f", sum) }')
 }
 
 function set_cache() {
+	local osts=$1
+	local type=$2
+	local param=$3
 	local on=1
 
-	if [ "$2" == "off" ]; then
+	if [ "$param" == "off" ]; then
 		on=0;
 	fi
-	local list=$(comma_list $(osts_nodes))
-	set_osd_param $list '' $1_cache_enable $on
+	set_osd_param $osts '' ${type}_cache_enable $on
 
 	cancel_lru_locks osc
 }
@@ -18023,62 +17914,62 @@ test_151() {
 		skip "LU-13081: no interop testing for OSS cache"
 
 	local CPAGES=3
-	local list=$(comma_list $(osts_nodes))
+	local osts=$(osts_nodes)
 
 	# check whether obdfilter is cache capable at all
-	if ! get_osd_param $list '' read_cache_enable >/dev/null; then
+	if ! get_osd_param $osts '' read_cache_enable >/dev/null; then
 		skip "not cache-capable obdfilter"
 	fi
 
 	# check cache is enabled on all obdfilters
-	if get_osd_param $list '' read_cache_enable | grep 0; then
+	if get_osd_param $osts '' read_cache_enable | grep 0; then
 		skip "oss cache is disabled"
 	fi
 
-	set_osd_param $list '' writethrough_cache_enable 1
+	set_osd_param $osts '' writethrough_cache_enable 1
 
 	# check write cache is enabled on all obdfilters
-	if get_osd_param $list '' writethrough_cache_enable | grep 0; then
+	if get_osd_param $osts '' writethrough_cache_enable | grep 0; then
 		skip "oss write cache is NOT enabled"
 	fi
 
-	roc_hit_init
+	roc_hit_init $osts
 
 	#define OBD_FAIL_OBD_NO_LRU  0x609
-	do_nodes $list $LCTL set_param fail_loc=0x609
+	do_nodes $osts $LCTL set_param fail_loc=0x609
 
 	# pages should be in the case right after write
 	dd if=/dev/urandom of=$DIR/$tfile bs=4k count=$CPAGES ||
 		error "dd failed"
 
-	local BEFORE=$(roc_hit)
+	local BEFORE=$(roc_hit $osts)
 	cancel_lru_locks osc
 	cat $DIR/$tfile >/dev/null
-	local AFTER=$(roc_hit)
+	local AFTER=$(roc_hit $osts)
 
-	do_nodes $list $LCTL set_param fail_loc=0
+	do_nodes $osts $LCTL set_param fail_loc=0
 
 	if ! let "AFTER - BEFORE == CPAGES"; then
 		error "NOT IN CACHE: before: $BEFORE, after: $AFTER"
 	fi
 
-        cancel_lru_locks osc
+	cancel_lru_locks osc
 	# invalidates OST cache
-	do_nodes $list "echo 1 > /proc/sys/vm/drop_caches"
-	set_osd_param $list '' read_cache_enable 0
-        cat $DIR/$tfile >/dev/null
+	do_nodes $osts "echo 1 > /proc/sys/vm/drop_caches"
+	set_osd_param $osts '' read_cache_enable 0
+	cat $DIR/$tfile >/dev/null
 
-        # now data shouldn't be found in the cache
-	BEFORE=$(roc_hit)
-        cancel_lru_locks osc
-        cat $DIR/$tfile >/dev/null
-	AFTER=$(roc_hit)
-        if let "AFTER - BEFORE != 0"; then
-                error "IN CACHE: before: $BEFORE, after: $AFTER"
-        fi
+	# now data shouldn't be found in the cache
+	BEFORE=$(roc_hit $osts)
+	cancel_lru_locks osc
+	cat $DIR/$tfile >/dev/null
+	AFTER=$(roc_hit $osts)
+	if let "AFTER - BEFORE != 0"; then
+		error "IN CACHE: before: $BEFORE, after: $AFTER"
+	fi
 
-	set_osd_param $list '' read_cache_enable 1
-        rm -f $DIR/$tfile
+	set_osd_param $osts '' read_cache_enable 1
+	rm -f $DIR/$tfile
 }
 run_test 151 "test cache on oss and controls ==============================="
 
@@ -18664,11 +18555,12 @@ test_155a() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
+	local osts=$(osts_nodes)
 
 	save_writethrough $p
 
-	set_cache read on
-	set_cache writethrough on
+	set_cache $osts read on
+	set_cache $osts writethrough on
 	test_155_small_load
 	restore_lustre_params < $p
 	rm -f $p
@@ -18679,11 +18571,12 @@ test_155b() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
+	local osts=$(osts_nodes)
 
 	save_writethrough $p
 
-	set_cache read on
-	set_cache writethrough off
+	set_cache $osts read on
+	set_cache $osts writethrough off
 	test_155_small_load
 	restore_lustre_params < $p
 	rm -f $p
@@ -18694,11 +18587,12 @@ test_155c() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
+	local osts=$(osts_nodes)
 
 	save_writethrough $p
 
-	set_cache read off
-	set_cache writethrough on
+	set_cache $osts read off
+	set_cache $osts writethrough on
 	test_155_small_load
 	restore_lustre_params < $p
 	rm -f $p
@@ -18709,11 +18603,12 @@ test_155d() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
+	local osts=$(osts_nodes)
 
 	save_writethrough $p
 
-	set_cache read off
-	set_cache writethrough off
+	set_cache $osts read off
+	set_cache $osts writethrough off
 	test_155_small_load
 	restore_lustre_params < $p
 	rm -f $p
@@ -18724,11 +18619,12 @@ test_155e() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
+	local osts=$(osts_nodes)
 
 	save_writethrough $p
 
-	set_cache read on
-	set_cache writethrough on
+	set_cache $osts read on
+	set_cache $osts writethrough on
 	test_155_big_load
 	restore_lustre_params < $p
 	rm -f $p
@@ -18739,11 +18635,12 @@ test_155f() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
+	local osts=$(osts_nodes)
 
 	save_writethrough $p
 
-	set_cache read on
-	set_cache writethrough off
+	set_cache $osts read on
+	set_cache $osts writethrough off
 	test_155_big_load
 	restore_lustre_params < $p
 	rm -f $p
@@ -18754,11 +18651,12 @@ test_155g() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
+	local osts=$(osts_nodes)
 
 	save_writethrough $p
 
-	set_cache read off
-	set_cache writethrough on
+	set_cache $osts read off
+	set_cache $osts writethrough on
 	test_155_big_load
 	restore_lustre_params < $p
 	rm -f $p
@@ -18769,11 +18667,12 @@ test_155h() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
+	local osts=$(osts_nodes)
 
 	save_writethrough $p
 
-	set_cache read off
-	set_cache writethrough off
+	set_cache $osts read off
+	set_cache $osts writethrough off
 	test_155_big_load
 	restore_lustre_params < $p
 	rm -f $p
@@ -18795,21 +18694,22 @@ test_156() {
 	local AFTER
 	local file="$DIR/$tfile"
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
+	local osts=$(osts_nodes)
 
 	save_writethrough $p
-	roc_hit_init
+	roc_hit_init $osts
 
 	log "Turn on read and write cache"
-	set_cache read on
-	set_cache writethrough on
+	set_cache $osts read on
+	set_cache $osts writethrough on
 
 	log "Write data and read it back."
 	log "Read should be satisfied from the cache."
 	dd if=/dev/urandom of=$file bs=4k count=$CPAGES || error "dd failed"
-	BEFORE=$(roc_hit)
+	BEFORE=$(roc_hit $osts)
 	cancel_lru_locks osc
 	cat $file >/dev/null
-	AFTER=$(roc_hit)
+	AFTER=$(roc_hit $osts)
 	if ! let "AFTER - BEFORE == CPAGES"; then
 		error "NOT IN CACHE (2): before: $BEFORE, after: $AFTER"
 	else
@@ -18820,7 +18720,7 @@ test_156() {
 	BEFORE=$AFTER
 	cancel_lru_locks osc
 	cat $file >/dev/null
-	AFTER=$(roc_hit)
+	AFTER=$(roc_hit $osts)
 	if ! let "AFTER - BEFORE == CPAGES"; then
 		error "NOT IN CACHE (3): before: $BEFORE, after: $AFTER"
 	else
@@ -18828,14 +18728,14 @@ test_156() {
 	fi
 
 	log "Turn off the read cache and turn on the write cache"
-	set_cache read off
-	set_cache writethrough on
+	set_cache $osts read off
+	set_cache $osts writethrough on
 
 	log "Read again; it should be satisfied from the cache."
-	BEFORE=$(roc_hit)
+	BEFORE=$(roc_hit $osts)
 	cancel_lru_locks osc
 	cat $file >/dev/null
-	AFTER=$(roc_hit)
+	AFTER=$(roc_hit $osts)
 	if ! let "AFTER - BEFORE == CPAGES"; then
 		error "NOT IN CACHE (4): before: $BEFORE, after: $AFTER"
 	else
@@ -18848,7 +18748,7 @@ test_156() {
 		BEFORE=$AFTER
 		cancel_lru_locks osc
 		cat $file >/dev/null
-		AFTER=$(roc_hit)
+		AFTER=$(roc_hit $osts)
 		if ! let "AFTER - BEFORE == 0"; then
 			error "IN CACHE (5): before: $BEFORE, after: $AFTER"
 		else
@@ -18859,10 +18759,10 @@ test_156() {
 	log "Write data and read it back."
 	log "Read should be satisfied from the cache."
 	dd if=/dev/urandom of=$file bs=4k count=$CPAGES || error "dd failed"
-	BEFORE=$(roc_hit)
+	BEFORE=$(roc_hit $osts)
 	cancel_lru_locks osc
 	cat $file >/dev/null
-	AFTER=$(roc_hit)
+	AFTER=$(roc_hit $osts)
 	if ! let "AFTER - BEFORE == CPAGES"; then
 		error "NOT IN CACHE (6): before: $BEFORE, after: $AFTER"
 	else
@@ -18875,7 +18775,7 @@ test_156() {
 		BEFORE=$AFTER
 		cancel_lru_locks osc
 		cat $file >/dev/null
-		AFTER=$(roc_hit)
+		AFTER=$(roc_hit $osts)
 		if ! let "AFTER - BEFORE == 0"; then
 			error "IN CACHE (7): before: $BEFORE, after: $AFTER"
 		else
@@ -18884,17 +18784,17 @@ test_156() {
 	fi
 
 	log "Turn off read and write cache"
-	set_cache read off
-	set_cache writethrough off
+	set_cache $osts read off
+	set_cache $osts writethrough off
 
 	log "Write data and read it back"
 	log "It should not be satisfied from the cache."
 	rm -f $file
 	dd if=/dev/urandom of=$file bs=4k count=$CPAGES || error "dd failed"
 	cancel_lru_locks osc
-	BEFORE=$(roc_hit)
+	BEFORE=$(roc_hit $osts)
 	cat $file >/dev/null
-	AFTER=$(roc_hit)
+	AFTER=$(roc_hit $osts)
 	if ! let "AFTER - BEFORE == 0"; then
 		error_ignore bz20762 "IN CACHE (8):before:$BEFORE,after:$AFTER"
 	else
@@ -18902,17 +18802,17 @@ test_156() {
 	fi
 
 	log "Turn on the read cache and turn off the write cache"
-	set_cache read on
-	set_cache writethrough off
+	set_cache $osts read on
+	set_cache $osts writethrough off
 
 	log "Write data and read it back"
 	log "It should not be satisfied from the cache."
 	rm -f $file
 	dd if=/dev/urandom of=$file bs=4k count=$CPAGES || error "dd failed"
-	BEFORE=$(roc_hit)
+	BEFORE=$(roc_hit $osts)
 	cancel_lru_locks osc
 	cat $file >/dev/null
-	AFTER=$(roc_hit)
+	AFTER=$(roc_hit $osts)
 	if ! let "AFTER - BEFORE == 0"; then
 		error_ignore bz20762 "IN CACHE (9):before:$BEFORE,after:$AFTER"
 	else
@@ -18920,10 +18820,10 @@ test_156() {
 	fi
 
 	log "Read again; it should be satisfied from the cache."
-	BEFORE=$(roc_hit)
+	BEFORE=$(roc_hit $osts)
 	cancel_lru_locks osc
 	cat $file >/dev/null
-	AFTER=$(roc_hit)
+	AFTER=$(roc_hit $osts)
 	if ! let "AFTER - BEFORE == CPAGES"; then
 		error "NOT IN CACHE (1): before: $BEFORE, after: $AFTER"
 	else
@@ -22215,6 +22115,59 @@ test_205k(){
 }
 run_test 205k "Verify '?' operator on job stats"
 
+test_205l() {
+	[[ $PARALLEL != "yes" ]] || skip "skip parallel run"
+	remote_mds_nodsh && skip "remote MDS with nodsh"
+	[[ "$($LCTL get_param -n mdc.*.connect_flags)" =~ jobstats ]] ||
+		skip "Server doesn't support jobstats"
+	[[ "$JOBID_VAR" != "disable" ]] || skip_env "jobstats is disabled"
+
+	local jobid_save=$($LCTL get_param jobid_var jobid_name)
+	stack_trap "$LCTL set_param $jobid_save"
+	local tmpdir=$(mktemp -d /tmp/jobstat-XXXXXX)
+	local jobs=$tmpdir/jobs.txt
+	local mv_save=${tmpdir}/local_mv
+	local mv_job
+	local n=1
+	local limit=500
+	[[ $SLOW == "no" ]] || limit=500000
+
+	do_facet mds1 $LCTL set_param jobid_var=procname_uid jobid_name='%e.%u'
+	cp -a /etc/hosts $DIR/hosts
+	cp $(which mv) ${mv_save}
+	do_facet mds1 $LCTL set_param mdt.*.job_cleanup_interval=5
+	sleep 5
+	do_facet mds1 $LCTL set_param mdt.*.job_stats=clear
+	do_facet mds1 $LCTL set_param mdt.*.job_cleanup_interval=0
+	sleep 5
+	# Add a series of easily identifyable jobs
+	for ((n = 0; n < limit; n++)); do
+		mv_job=${tmpdir}/mv.$(printf %08d $n)
+		mv ${mv_save} ${mv_job}
+		${mv_job} $DIR/hosts $DIR/hosts.$(printf %08d $n)
+		${mv_job} $DIR/hosts.$(printf %08d $n) $DIR/hosts
+		mv ${mv_job} ${mv_save}
+	done
+	# Duplicates indicate restart issues
+	do_facet mds1 \
+		"$LCTL get_param mdt.*.job_stats | grep job_id: | cut -d. -f2" \
+		> ${jobs}
+	local dupes=$(grep -v -e "^${RUNAS_ID}\$" -e '^0$' ${jobs} | sort |
+		      uniq -d | wc -l)
+	(( ${dupes} == 0 )) ||
+		error "seq_write wrote ${dupes} duplicate entries."
+	# Unexpected jobs indicate cleanup issues
+	local njobs=$(grep -v -e "^${RUNAS_ID}\$" -e '^0$' ${jobs} | wc -l)
+	(( ${njobs} == ${limit} )) ||
+		error "seq_write wrote ${njobs} jobs expected ${limit}."
+	do_facet mds1 $LCTL set_param mdt.*.job_cleanup_interval=5
+	sleep 5
+	do_facet mds1 $LCTL set_param mdt.*.job_stats=clear
+	# On success the scrach files are not interesting
+	rm -fr ${tmpdir}
+}
+run_test 205l "Verify job stats can scale"
+
 # LU-1480, LU-1773 and LU-1657
 test_206() {
 	mkdir -p $DIR/$tdir
@@ -22362,36 +22315,6 @@ test_210() {
 	wait $pid || error "multiop failed"
 }
 run_test 210 "lfs getstripe does not break leases"
-
-function test_211() {
-	local PID
-	local id
-	local rc
-
-	stack_trap "rm -f $DIR/$tfile" EXIT
-	dd if=/dev/zero of=$DIR/$tfile bs=$PAGE_SIZE count=10 oflag=direct ||
-		error "can't create file"
-	$LFS mirror extend -N $DIR/$tfile ||
-		error "can't create a replica"
-	dd if=/dev/zero of=$DIR/$tfile bs=$PAGE_SIZE count=1 oflag=direct
-	$LFS getstripe $DIR/$tfile
-	stale=$($LFS getstripe $DIR/$tfile | grep stale | wc -l)
-	(( $stale != 1 )) && error "expected 1 stale, found $stale"
-
-	$MULTIOP $DIR/$tfile OeW_E+eUc &
-	PID=$!
-	sleep 0.3
-
-	id=$($LFS getstripe $DIR/$tfile |
-		awk '/lcme_mirror_id:/{id=$2}/lcme_flags.*init$/{print id}')
-	$LFS mirror split -d --mirror-id $id $DIR/$tfile &&
-		error "removed last in-sync replica?"
-
-	kill -USR1 $PID
-	wait $PID
-	(( $? == 0 )) || error "failed split broke the lease"
-}
-run_test 211 "failed mirror split doesn't break write lease"
 
 test_212() {
 	size=`date +%s`
@@ -22566,9 +22489,10 @@ test_216() { # bug 20317
 	save_lustre_params $facets \
 		"ldlm.namespaces.filter-*.contention_seconds" >> $p
 	clear_stats osc.*.osc_stats
+	local osts=$(osts_nodes)
 
 	# agressive lockless i/o settings
-	do_nodes $(comma_list $(osts_nodes)) \
+	do_nodes $osts \
 		"lctl set_param -n ldlm.namespaces.*.max_nolock_bytes=2000000 \
 			ldlm.namespaces.filter-*.contended_locks=0 \
 			ldlm.namespaces.filter-*.contention_seconds=60"
@@ -22578,7 +22502,7 @@ test_216() { # bug 20317
 	$CHECKSTAT -s 40960 $DIR/$tfile
 
 	# disable lockless i/o
-	do_nodes $(comma_list $(osts_nodes)) \
+	do_nodes $osts \
 		"lctl set_param -n ldlm.namespaces.filter-*.max_nolock_bytes=0 \
 			ldlm.namespaces.filter-*.contended_locks=32 \
 			ldlm.namespaces.filter-*.contention_seconds=0"
@@ -22838,8 +22762,10 @@ test_224c() { # LU-6441
 	remote_mds_nodsh && skip "remote MDS with nodsh"
 
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
+	local osts=$(osts_nodes)
+
 	save_writethrough $p
-	set_cache writethrough on
+	set_cache $osts writethrough on
 
 	local pages_per_rpc=$($LCTL get_param osc.*.max_pages_per_rpc)
 	local at_max=$($LCTL get_param -n at_max)
@@ -25507,6 +25433,7 @@ ladvise_willread_performance()
 	local average_origin=0
 	local average_cache=0
 	local average_ladvise=0
+	local osts=$(osts_nodes)
 
 	# Hybrid IO switches to DIO, which invalidates much of the caching
 	# So disable it for this test
@@ -25517,7 +25444,7 @@ ladvise_willread_performance()
 	for ((i = 1; i <= $repeat; i++)); do
 		echo "Iter $i/$repeat: reading without willread hint"
 		cancel_lru_locks osc
-		drop_file_oss_cache $DIR/$tfile $(comma_list $(osts_nodes))
+		drop_file_oss_cache $DIR/$tfile $osts
 		local speed_origin=$(random_read_iops $DIR/$tfile $size)
 		echo "Iter $i/$repeat: uncached speed: $speed_origin"
 		average_origin=$(bc <<<"$average_origin + $speed_origin")
@@ -25528,7 +25455,7 @@ ladvise_willread_performance()
 		average_cache=$(bc <<<"$average_cache + $speed_cache")
 
 		cancel_lru_locks osc
-		drop_file_oss_cache $DIR/$tfile $(comma_list $(osts_nodes))
+		drop_file_oss_cache $DIR/$tfile $osts
 		$LFS ladvise -a willread $DIR/$tfile || error "ladvise failed"
 		local speed_ladvise=$(random_read_iops $DIR/$tfile $size)
 		echo "Iter $i/$repeat: ladvise speed: $speed_ladvise"
@@ -25618,11 +25545,11 @@ test_255a() {
 
 	echo "Synchronous ladvise should wait"
 	local delay=8
-#define OBD_FAIL_OST_LADVISE_PAUSE	 0x237
-	do_nodes $(comma_list $(osts_nodes)) \
-		$LCTL set_param fail_val=$delay fail_loc=0x237
-	stack_trap "do_nodes $(comma_list $(osts_nodes)) \
-		$LCTL set_param fail_loc=0"
+	local osts=$(osts_nodes)
+
+	#define OBD_FAIL_OST_LADVISE_PAUSE	 0x237
+	do_nodes $osts $LCTL set_param fail_val=$delay fail_loc=0x237
+	stack_trap "do_nodes $osts $LCTL set_param fail_loc=0"
 
 	local start_ts=$SECONDS
 	lfs ladvise -a willread $DIR/$tfile ||
@@ -26984,9 +26911,7 @@ test_275() {
 		skip "Need OST version >= 2.10.57"
 
 	local file=$DIR/$tfile
-	local oss
-
-	oss=$(comma_list $(osts_nodes))
+	local osts=$(osts_nodes)
 
 	dd if=/dev/urandom of=$file bs=1M count=2 ||
 		error "failed to create a file"
@@ -27004,7 +26929,7 @@ test_275() {
 	sleep 1
 
 #define OBD_FAIL_LDLM_PROLONG_PAUSE      0x32b
-	do_nodes $oss $LCTL set_param fail_loc=0x8000032b
+	do_nodes $osts $LCTL set_param fail_loc=0x8000032b
 	#IO takes another lock, but matches the PENDING one
 	#and places it to the IO RPC
 	dd if=$file of=/dev/null bs=1M count=1 iflag=direct ||
@@ -27926,7 +27851,13 @@ test_300t() {
 	mkdir $dir2
 	stripe_count=$($LFS getdirstripe -c $dir2)
 
-	(( $stripe_count == $max_count )) || error "wrong stripe count"
+	if (( $MDSCOUNT == 2 &&
+	      $MDS1_VERSION >= $(version_code 2.16.0) )); then
+		(( $stripe_count == 0 )) || error "(0) wrong stripe count"
+	else
+		(( $stripe_count == $max_count )) ||
+			error "(1) wrong stripe count"
+	fi
 }
 run_test 300t "test max_mdt_stripecount"
 
@@ -28294,6 +28225,30 @@ test_300ui() {
 		true
 }
 run_test 300ui "overstripe is not supported on one MDT system"
+
+test_300uj() {
+	(( MDSCOUNT > 1 )) || skip "needs >= 2 MDTs"
+	(( MDS1_VERSION >= $(version_code 2.16.0) )) ||
+		skip "need MDS >= 2.16.0 for llog timestamps"
+
+	local setcount=-2
+	local expected_count=$((MDSCOUNT * 2))
+
+	mkdir $DIR/$tdir
+	$LFS mkdir -C $setcount $DIR/$tdir/${tdir}.0 ||
+		error "(0) failed overstriped dir creation with -C -N test"
+	local getstripe_count=$($LFS getdirstripe -c $DIR/$tdir/${tdir}.0)
+	(( getstripe_count == expected_count )) ||
+		error "(1) incorrect stripe count for -C -N overstriped dir"
+	rm -f $DIR/$tdir/${tdir}.0
+
+	# limit testing
+	setcount=-6
+	$LFS setdirstripe -C $setcount $DIR/$tdir/${tdir}.1 2>&1 |
+		grep "invalid stripe count" ||
+		error "(0) failed overstriped dir creation limit test"
+}
+run_test 300uj "overstriped dir with -C -N sanity test"
 
 (( max_stripes_per_mdt == 0 )) ||
 	do_nodes $mdts $LCTL set_param -n \
@@ -33882,6 +33837,35 @@ test_852() {
 }
 run_test 852 "mkdir using intent lock for striped directory"
 
+test_853() {
+	local file=$DIR/$tfile
+	local size=$((PAGE_SIZE * 2))
+
+	dd if=/dev/zero of=$file bs=1M count=100 ||
+		error "failed to write $file"
+	cancel_lru_locks $OSC
+	$LCTL set_param llite.*.read_ahead_stats=clear
+	$MULTIOP $file or1048576c || error "failed to read $file"
+	$LCTL get_param llite.*.read_ahead_stats
+
+	cancel_lru_locks $OSC
+	$LCTL set_param llite.*.read_ahead_stats=clear
+	$MULTIOP $file oir1048576z1048576r${size}c ||
+		error "failed to read $file"
+	$LCTL get_param llite.*.read_ahead_stats
+
+	local ranum=$($LCTL get_param -n llite.*.read_ahead_stats |
+		      get_named_value 'readahead.pages' | calc_sum)
+
+	(( ranum == 0 )) || error "should not trigger readahead"
+
+	local rndnum=$($LCTL get_param -n llite.*.read_ahead_stats |
+		       get_named_value 'forceread.pages' | calc_sum)
+
+	(( rndnum == 2 )) || error "force random read: $rndnum, expected 2"
+}
+run_test 853 "Verify that random fadvise works as expected"
+
 #
 # tests that do cleanup/setup should be run at the end
 #
@@ -34109,6 +34093,61 @@ test_907() {
 	rm $DIR/$tfile || error "rm failed"
 }
 run_test 907 "write rpc error during unlink"
+
+test_908a() {
+	(( MDS1_VERSION >= $(version_code 2.16.0) )) ||
+		skip "need MDS >= 2.16.0 for llog timestamps"
+	[[ "$mds1_FSTYPE" == ldiskfs ]] || skip "ldiskfs only test"
+
+	local dev=$(mdsdevname 1)
+	local cmd="debugfs -c -R \\\"stat CONFIGS/params\\\" $dev"
+
+	# ctime_mds value is in hex
+	local base_time=`date -d "24 hours ago" +%s`
+	local ctime_mds=$(do_facet mds1 "$cmd" |&
+			  awk -F'[: ]' '/ctime:/ { print $4 }')
+	ctime_mds=$((ctime_mds))
+	echo "ctime_mds=$ctime_mds, base_time=$base_time"
+	(( "$ctime_mds" > "$base_time" )) ||
+		error "invalid ctime $ctime_mds <= $base_time"
+}
+run_test 908a "llog created with valid ctime"
+
+test_908b() {
+	(( MDS1_VERSION >= $(version_code 2.16.0) )) ||
+		skip "need MDS >= 2.16.0 for llog timestamps"
+	[[ "$mds1_FSTYPE" == ldiskfs ]] || skip "ldiskfs only test"
+
+	local dev=$(mdsdevname 1)
+
+	changelog_register || error "cannot register changelog user"
+	# set changelog_mask to ALL
+	changelog_chmask "ALL"
+	changelog_clear
+
+	for ((i=0; i<100; i++)); do
+		echo "$i" > $DIR/$tfile${i}
+		rm $DIR/$tfile${i}
+	done
+	sleep 5
+
+	changelog_deregister || error "changelog_deregister failed"
+
+	local cmd="debugfs -c -R \\\"stat changelog_catalog\\\" $dev"
+
+	# ctime_mdt value is in hex
+	local ctime_mds=$(do_facet mds1 "$cmd" |&
+			  awk -F'[: ]' '/ctime:/ { print $4 }')
+	ctime_mds=$((ctime_mds))
+	local mtime_mds=$(do_facet mds1 "$cmd" |&
+			  awk -F'[: ]' '/mtime:/ { print $4 }')
+	mtime_mds=$((mtime_mds))
+
+	echo "ctime_mds=$ctime_mds, mtime_mds=$mtime_mds"
+	(( "$mtime_mds" > "$ctime_mds" )) ||
+		error "invalid mtime $mtime_mds <= $ctime_mds"
+}
+run_test 908b "changelog stores valid mtime"
 
 complete_test $SECONDS
 [ -f $EXT2_DEV ] && rm $EXT2_DEV || true

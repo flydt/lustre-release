@@ -1073,8 +1073,7 @@ test_21() {
 
 	# for zfs - sync OST dataset so that du below will return
 	# accurate results
-	[ "$FSTYPE" = "zfs" ] &&
-		do_nodes $(comma_list $(osts_nodes)) "$ZPOOL sync"
+	[[ "$FSTYPE" != "zfs" ]] || do_nodes $(osts_nodes) "$ZPOOL sync"
 
 	local blocks=$(du -kc $tf $tf2 | awk '/total/{print $1}')
 
@@ -1742,8 +1741,7 @@ test_37()
 	# verify mirror copy, write to this mirrored file will invalidate
 	# the other two mirrors
 	echo "Verifying mirror copy .."
-
-	local osts=$(comma_list $(osts_nodes))
+	local osts=$(osts_nodes)
 
 	$LFS mirror copy -i ${mirror_array[0]} -o-1 $tf ||
 		error "mirror copy error"
@@ -2213,17 +2211,7 @@ test_44a() {
 	# write data in [0, 3M)
 	dd if=/dev/urandom of=$tf bs=1M count=3 conv=notrunc ||
 		error "writing $tf failed"
-
 	verify_flr_state $tf "wp"
-
-	# disallow destroying the last non-stale mirror
-	! $LFS mirror delete --mirror-id 1 $tf > /dev/null 2>&1 ||
-		error "destroying mirror 1 should fail"
-
-	# synchronize all mirrors of the file
-	$LFS mirror resync $tf || error "mirror resync $tf failed"
-
-	verify_flr_state $tf "ro"
 
 	# split mirror 1
 	$LFS mirror split --mirror-id 1 -f $tf1 $tf ||
@@ -2248,14 +2236,9 @@ test_44a() {
 	$LFS setstripe --comp-set -I 0x30008 --comp-flags=stale $tf ||
 		error "setting stale flag on component 0x30008 failed"
 
-	# disallow destroying the last non-stale mirror
-	! $LFS mirror split --mirror-id 4 -d $tf > /dev/null 2>&1 ||
-		error "destroying mirror 4 should fail"
-
-	$LFS mirror resync $tf || error "resynchronizing $tf failed"
-
-	$LFS mirror split --mirror-id 3 -d $tf ||
-		error "destroying mirror 3 failed"
+	# allow destroying the last non-stale mirror
+	$LFS mirror split --mirror-id 4 -d $tf > /dev/null 2>&1 ||
+		error "destroying mirror 4 failed"
 	verify_mirror_count $tf 1
 
 	# verify splitted file contains the same content as the orig file does
@@ -2301,16 +2284,17 @@ test_44b() {
 
 	$LFS getstripe $tf
 
-	# split the updated mirror, should fail
-	echo "split mirror_id ${mirror_ids[$i]} id ${ids[$i]}, should fail"
-	$LFS mirror split --mirror-id=${mirror_ids[$i]} $tf &> /dev/null &&
-		error "split --mirror-id=${mirror_ids[$i]} $tf should fail"
+	# split the updated mirror
+	echo "split mirror_id ${mirror_ids[$i]} id ${ids[$i]}"
+	$LFS mirror split --mirror-id=${mirror_ids[$i]} $tf &> /dev/null ||
+		error "split --mirror-id=${mirror_ids[$i]} $tf should succeed"
 
 	i=$(( 1 - i ))
 	# split the stale mirror
+	$LFS getstripe $tf
 	echo "split mirror_id ${mirror_ids[$i]} id ${ids[$i]}"
-	$LFS mirror split --mirror-id=${mirror_ids[$i]} -d $tf ||
-		error "mirror split --mirror-id=${mirror_ids[$i]} $tf failed"
+	$LFS mirror split --mirror-id=${mirror_ids[$i]} -d $tf &&
+		error "Should fail due to only one mirror now"
 
 	echo "make sure there's no stale comp in the file"
 	# make sure there's no stale comp in the file
@@ -3366,6 +3350,56 @@ test_70a() {
 }
 run_test 70a "flr mode fsx test"
 
+test_71() {
+	remote_ost_nodsh && skip "remote OST with nodsh"
+	[[ "$ost1_FSTYPE" == "ldiskfs" ]] || skip "ldiskfs only test"
+
+	local tf=$DIR/$tdir/$tfile
+
+	test_mkdir $DIR/$tdir
+	$LFS setstripe -c1 -i1 $tf|| error "setstripe $tf failed"
+	$LFS mirror extend -N -c1 -i0 $tf || error "mirror extend $tf failed"
+
+	local id=$($LFS getstripe -I $tf)
+	local ost=$($LFS getstripe -v -I$id $tf | awk '/l_ost_idx/ {print $5}')
+	local fid=$($LFS getstripe -v -I$id $tf | awk '/l_fid/ {print $7}')
+	local pfid=$($LFS getstripe -v -I$id $tf | awk '/lmm_fid/ {print $2}')
+
+	ost=$(echo $ost | sed -e "s/,$//g")
+	ost=$((ost + 1))
+
+	local dev=$(ostdevname $ost)
+	local obj_file=$(ost_fid2_objpath ost$ost $fid)
+
+	ff=$(do_facet ost$ost "$DEBUGFS -c -R 'stat $obj_file' $dev \
+			2>/dev/null" | grep "parent=")
+	if [ -z "$ff" ]; then
+		stop ost$ost
+		mount_fstype ost$ost
+		ff=$(do_facet ost$ost $LL_DECODE_FILTER_FID \
+				$(facet_mntpt ost$ost)/$obj_file)
+		unmount_fstype ost$ost
+		start ost$ost $dev $OST_MOUNT_OPTS
+		clients_up
+	fi
+
+	local pseq=$(echo $ff | awk -F '[:= ]' '/parent/ { print $4 }')
+	local poid=$(echo $ff | awk -F '[:= ]' '/parent/ { print $5 }')
+	local pver=$(echo $ff | awk -F '[:= ]' '/parent/ { print $6 }')
+	local parent="$pseq:$poid:$pver"
+
+	log " ** lfs fid2path $MOUNT $parent"
+	$LFS fid2path $MOUNT "$parent" || {
+		$LFS getstripe $tf
+		error "cannot find parent $parent of OST object $fid"
+	}
+	[ "$parent" == "$pfid" ] || {
+		$LFS getstripe $tf
+		error "parent $parent of OST object $fid is not $pfid"
+	}
+}
+run_test 71 "check mirror extend parent fid"
+
 write_file_200() {
 	local tf=$1
 
@@ -4307,7 +4341,7 @@ function check_ost_used() {
 
 test_208a() {
 	local tf=$DIR/$tfile
-	local osts=$(comma_list $(osts_nodes))
+	local osts=$(osts_nodes)
 
 	(( $OSTCOUNT >= 4 )) || skip "needs >= 4 OSTs"
 	(( $MDS1_VERSION >= $(version_code 2.14.55) )) ||
@@ -4350,7 +4384,7 @@ run_test 208a "mirror selection to prefer non-rotational devices for reads"
 
 test_208b() {
 	local tf=$DIR/$tfile
-	local osts=$(comma_list $(osts_nodes))
+	local osts=$(osts_nodes)
 
 	(( $OSTCOUNT >= 4 )) || skip "needs >= 4 OSTs"
 	(( $MDS1_VERSION >= $(version_code 2.14.55) )) ||
@@ -4397,7 +4431,7 @@ test_209a() {
 	local tf=$DIR/$tfile
 	local tmpfile="$TMP/$TESTSUITE-$TESTNAME-multiop.output"
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
-	local osts=$(comma_list $(osts_nodes))
+	local osts=$(osts_nodes)
 
 	stack_trap "rm -f $tmpfile"
 
@@ -4506,16 +4540,9 @@ test_210b() {
 	dd if=/dev/zero of=$tf bs=1M count=1 || error "can't dd"
 
 	local ostdev=$(ostdevname 1)
-	local fid=($($LFS getstripe $DIR/$tfile | grep 0x))
-	local seq=${fid[3]#0x}
-	local oid=${fid[1]}
-	local oid_hex
-	if [ $seq == 0 ]; then
-		oid_hex=${fid[1]}
-	else
-		oid_hex=${fid[2]#0x}
-	fi
-	local objpath="O/$seq/d$(($oid % 32))/$oid_hex"
+	local fids=($($LFS getstripe $DIR/$tfile | grep 0x))
+	local fid="${fids[3]}:${fids[2]}:0"
+	local objpath=$(ost_fid2_objpath ost1 $fid)
 	local cmd="$DEBUGFS -c -R \\\"stat $objpath\\\" $ostdev"
 
 	local ino=$(do_facet ost1 $cmd | grep Inode:)
@@ -4549,8 +4576,6 @@ test_211() {
 	echo "size after second write"
 	ls -la $tf
 	md5_1=$(md5sum $tf) || error "error getting first md5sum of '$tf'"
-
-	$LFS mirror resync $tf || error "error resync-ing '$tf'"
 
 	$LFS mirror delete --mirror-id=1 $tf ||
 		error "error deleting mirror 1 of '$tf'"

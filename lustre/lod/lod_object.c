@@ -1955,7 +1955,7 @@ out:
  * Allocate a striping on a predefined set of MDTs.
  *
  * Allocates new striping using the MDT index range provided by the data from
- * the lum_obejcts contained in the lmv_user_md passed to this method if
+ * the lum_objects contained in the lmv_user_md passed to this method if
  * \a is_specific is true; or allocates new layout starting from MDT index in
  * lo->ldo_dir_stripe_offset. The exact order of MDTs is not important and
  * varies depending on MDT status. The number of stripes needed and stripe
@@ -2632,6 +2632,7 @@ lod_obj_stripe_replace_parent_fid_cb(const struct lu_env *env,
 	ff->ff_layout.ol_comp_id = comp->llc_id;
 	ff->ff_layout.ol_comp_start = comp->llc_extent.e_start;
 	ff->ff_layout.ol_comp_end = comp->llc_extent.e_end;
+	ff->ff_layout_version = lo->ldo_layout_gen;
 	filter_fid_cpu_to_le(ff, ff, sizeof(*ff));
 
 	if (data->locd_declare)
@@ -3370,7 +3371,6 @@ static int lod_declare_layout_merge(const struct lu_env *env,
 				    struct thandle *th)
 {
 	struct lod_thread_info *info = lod_env_info(env);
-	struct lu_attr *layout_attr = &info->lti_layout_attr;
 	struct lu_buf *buf = &info->lti_buf;
 	struct lod_object *lo = lod_dt_obj(dt);
 	struct lov_comp_md_v1 *lcm;
@@ -3508,7 +3508,9 @@ static int lod_declare_layout_merge(const struct lu_env *env,
 	lcm->lcm_entry_count = cpu_to_le16(cur_entry_count + merge_entry_count);
 	lcm->lcm_mirror_count = cpu_to_le16(mirror_count);
 	if ((le16_to_cpu(lcm->lcm_flags) & LCM_FL_FLR_MASK) == LCM_FL_NONE)
-		lcm->lcm_flags = cpu_to_le32(LCM_FL_RDONLY);
+		lcm->lcm_flags = cpu_to_le16((le16_to_cpu(lcm->lcm_flags) &
+					      ~LCM_FL_FLR_MASK) |
+					     LCM_FL_RDONLY);
 
 	rc = lod_striping_reload(env, lo, buf, 0);
 	if (rc)
@@ -3516,20 +3518,6 @@ static int lod_declare_layout_merge(const struct lu_env *env,
 
 	lod_obj_inc_layout_gen(lo);
 	lcm->lcm_layout_gen = cpu_to_le32(lo->ldo_layout_gen);
-
-	/* transfer layout version to OST objects. */
-	if (lo->ldo_mirror_count > 1) {
-		struct lod_obj_stripe_cb_data data = { {0} };
-
-		layout_attr->la_valid = LA_LAYOUT_VERSION;
-		layout_attr->la_layout_version = 0;
-		data.locd_attr = layout_attr;
-		data.locd_declare = true;
-		data.locd_stripe_cb = lod_obj_stripe_attr_set_cb;
-		rc = lod_obj_for_each_stripe(env, lo, th, &data);
-		if (rc)
-			GOTO(out, rc);
-	}
 
 	rc = lod_sub_declare_xattr_set(env, dt_object_child(dt), buf,
 				       XATTR_NAME_LOV, LU_XATTR_REPLACE, th);
@@ -3546,8 +3534,6 @@ static int lod_declare_layout_split(const struct lu_env *env,
 		struct dt_object *dt, const struct lu_buf *mbuf,
 		struct thandle *th)
 {
-	struct lod_thread_info *info = lod_env_info(env);
-	struct lu_attr *layout_attr = &info->lti_layout_attr;
 	struct lod_object *lo = lod_dt_obj(dt);
 	struct lov_comp_md_v1 *lcm = mbuf->lb_buf;
 	int rc;
@@ -3560,20 +3546,6 @@ static int lod_declare_layout_split(const struct lu_env *env,
 	lod_obj_inc_layout_gen(lo);
 	/* fix on-disk layout gen */
 	lcm->lcm_layout_gen = cpu_to_le32(lo->ldo_layout_gen);
-
-	/* transfer layout version to OST objects. */
-	if (lo->ldo_mirror_count > 1) {
-		struct lod_obj_stripe_cb_data data = { {0} };
-
-		layout_attr->la_valid = LA_LAYOUT_VERSION;
-		layout_attr->la_layout_version = 0;
-		data.locd_attr = layout_attr;
-		data.locd_declare = true;
-		data.locd_stripe_cb = lod_obj_stripe_attr_set_cb;
-		rc = lod_obj_for_each_stripe(env, lo, th, &data);
-		if (rc)
-			RETURN(rc);
-	}
 
 	rc = lod_sub_declare_xattr_set(env, dt_object_child(dt), mbuf,
 				       XATTR_NAME_LOV, LU_XATTR_REPLACE, th);
@@ -5086,9 +5058,7 @@ static int lod_xattr_set(const struct lu_env *env,
 {
 	struct lod_thread_info *info = lod_env_info(env);
 	struct dt_object *next = dt_object_child(dt);
-	struct lu_attr *layout_attr = &info->lti_layout_attr;
 	struct lod_object *lo = lod_dt_obj(dt);
-	struct lod_obj_stripe_cb_data data = { {0} };
 	int rc = 0;
 
 	ENTRY;
@@ -5152,21 +5122,6 @@ static int lod_xattr_set(const struct lu_env *env,
 			rc = lod_striping_reload(env, lo, buf, LVF_ALL_STALE);
 			if (rc)
 				RETURN(rc);
-
-			if (lo->ldo_mirror_count > 1 &&
-			    layout_attr->la_valid & LA_LAYOUT_VERSION) {
-				/* mirror split */
-				layout_attr->la_layout_version =
-						lo->ldo_layout_gen;
-				data.locd_attr = layout_attr;
-				data.locd_declare = false;
-				data.locd_stripe_cb =
-						lod_obj_stripe_attr_set_cb;
-				rc = lod_obj_for_each_stripe(env, lo, th,
-							     &data);
-				if (rc)
-					RETURN(rc);
-			}
 		} else if (fl & LU_XATTR_PURGE) {
 			rc = lod_layout_purge(env, dt, buf, th);
 		} else if (dt_object_remote(dt)) {
@@ -5200,21 +5155,6 @@ static int lod_xattr_set(const struct lu_env *env,
 			rc = lod_striped_create(env, dt, NULL, NULL, th);
 			if (rc)
 				RETURN(rc);
-
-			if (fl & LU_XATTR_MERGE && lo->ldo_mirror_count > 1 &&
-			    layout_attr->la_valid & LA_LAYOUT_VERSION) {
-				/* mirror merge exec phase */
-				layout_attr->la_layout_version =
-						lo->ldo_layout_gen;
-				data.locd_attr = layout_attr;
-				data.locd_declare = false;
-				data.locd_stripe_cb =
-						lod_obj_stripe_attr_set_cb;
-				rc = lod_obj_for_each_stripe(env, lo, th,
-							     &data);
-				if (rc)
-					RETURN(rc);
-			}
 		}
 		RETURN(rc);
 	} else if (strcmp(name, XATTR_NAME_FID) == 0) {
@@ -5805,7 +5745,8 @@ static void lod_ah_init(const struct lu_env *env,
 
 	if (S_ISDIR(child_mode)) {
 		const struct lmv_user_md_v1 *lum1 = ah->dah_eadata;
-		int max_stripe_count;
+		int max_stripe_count = 0;
+		int mdt_count = d->lod_remote_mdt_count + 1;
 
 		/* other default values are 0 */
 		lc->ldo_dir_stripe_offset = LMV_OFFSET_DEFAULT;
@@ -5907,17 +5848,25 @@ static void lod_ah_init(const struct lu_env *env,
 			}
 		}
 
-		/* shrink the stripe count to max_mdt_stripecount if it is -1
-		 * and max_mdt_stripecount is not 0
+		/*
+		 * 1. overstriped case(< 0), adjust stripe count given
+		 * overstriped factor by mdt_countmdt_count;
+		 *   1.1 use lod_max_mdt_stripecount as max_stripe_count;
+		 * 2. overstriped case(> 0), multiply max_stripe_count by
+		 * max_stripes_per_mdt;
 		 */
-		if (lc->ldo_dir_stripe_count == (__u16)(-1) &&
-		    d->lod_max_mdt_stripecount)
-			lc->ldo_dir_stripe_count = d->lod_max_mdt_stripecount;
-
-		max_stripe_count = d->lod_remote_mdt_count + 1;
-		if (lc->ldo_dir_hash_type & LMV_HASH_FLAG_OVERSTRIPED)
+		max_stripe_count = mdt_count;
+		if ((__s16)lc->ldo_dir_stripe_count >=
+				LMV_OVERSTRIPE_COUNT_MAX &&
+		    (__s16)lc->ldo_dir_stripe_count <=
+				LMV_OVERSTRIPE_COUNT_MIN) {
+			lc->ldo_dir_stripe_count = mdt_count *
+				-(__s16)lc->ldo_dir_stripe_count;
+			max_stripe_count = d->lod_max_mdt_stripecount ?:
+				mdt_count * d->lod_max_stripes_per_mdt;
+		} else if (lc->ldo_dir_hash_type & LMV_HASH_FLAG_OVERSTRIPED) {
 			max_stripe_count *= d->lod_max_stripes_per_mdt;
-
+		}
 		/* shrink the stripe_count to max stripe count */
 		if (lc->ldo_dir_stripe_count > max_stripe_count &&
 		    !CFS_FAIL_CHECK(OBD_FAIL_LARGE_STRIPE)) {

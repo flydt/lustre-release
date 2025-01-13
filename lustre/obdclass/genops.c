@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 1999, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/obdclass/genops.c
  *
  * These are the only exported functions, they provide some generic
  * infrastructure for managing object devices
@@ -110,7 +90,8 @@ SERVER_ONLY struct obd_type *class_get_type(const char *name)
 		const char *modname = name;
 
 #ifdef HAVE_SERVER_SUPPORT
-		if (strcmp(modname, "obdfilter") == 0)
+		if (strcmp(modname, "obdfilter") == 0 ||
+		    strcmp(modname, LUSTRE_OSS_NAME) == 0)
 			modname = "ofd";
 
 		if (strcmp(modname, LUSTRE_LWP_NAME) == 0)
@@ -1605,6 +1586,8 @@ int obd_export_evict_by_nid(struct obd_device *obd, const char *nid)
 	struct lnet_nid nid_key;
 	struct obd_export *doomed_exp;
 	int exports_evicted = 0;
+	struct lu_env *env = NULL, _env;
+	int rc;
 
 	libcfs_strnid(&nid_key, nid);
 
@@ -1617,6 +1600,17 @@ int obd_export_evict_by_nid(struct obd_device *obd, const char *nid)
 		return exports_evicted;
 	}
 	spin_unlock(&obd->obd_dev_lock);
+
+	/* can be called via procfs and from ptlrpc */
+	env = lu_env_find();
+	if (env == NULL) {
+		rc = lu_env_init(&_env, LCT_DT_THREAD | LCT_MD_THREAD);
+		if (rc)
+			return rc;
+		rc = lu_env_add(&_env);
+		LASSERT(rc == 0);
+		env = &_env;
+	}
 
 	doomed_exp = NULL;
 	while (obd_nid_export_for_each(obd, &nid_key,
@@ -1636,6 +1630,11 @@ int obd_export_evict_by_nid(struct obd_device *obd, const char *nid)
 		doomed_exp = NULL;
 	}
 
+	if (env == &_env) {
+		lu_env_remove(&_env);
+		lu_env_fini(&_env);
+	}
+
 	if (!exports_evicted)
 		CDEBUG(D_HA,
 		       "%s: can't disconnect NID '%s': no exports found\n",
@@ -1649,6 +1648,8 @@ int obd_export_evict_by_uuid(struct obd_device *obd, const char *uuid)
 	struct obd_export *doomed_exp = NULL;
 	struct obd_uuid doomed_uuid;
 	int exports_evicted = 0;
+	struct lu_env env;
+	int rc;
 
 	spin_lock(&obd->obd_dev_lock);
 	if (obd->obd_stopping) {
@@ -1663,7 +1664,14 @@ int obd_export_evict_by_uuid(struct obd_device *obd, const char *uuid)
 		return exports_evicted;
 	}
 
+	rc = lu_env_init(&env, LCT_DT_THREAD | LCT_MD_THREAD);
+	if (rc)
+		return rc;
+	rc = lu_env_add(&env);
+	LASSERT(rc == 0);
+
 	doomed_exp = obd_uuid_lookup(obd, &doomed_uuid);
+
 	if (doomed_exp == NULL) {
 		CERROR("%s: can't disconnect %s: no exports found\n",
 		       obd->obd_name, uuid);
@@ -1675,6 +1683,9 @@ int obd_export_evict_by_uuid(struct obd_device *obd, const char *uuid)
 		obd_uuid_del(obd, doomed_exp);
 		exports_evicted++;
 	}
+
+	lu_env_remove(&env);
+	lu_env_fini(&env);
 
 	return exports_evicted;
 }

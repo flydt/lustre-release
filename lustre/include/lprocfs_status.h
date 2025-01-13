@@ -422,18 +422,31 @@ struct obd_device;
 #define JOBSTATS_NODELOCAL		"nodelocal"
 #define JOBSTATS_SESSION		"session"
 
+enum ojb_info_flags {
+	OJS_CLEANING,		/* job cleaning is in operation */
+	OJS_HEADER,		/* seq_show() header */
+	OJS_ACTIVE_JOBS,	/* set while ojs_jobs > 0 */
+	OJS_FINI,		/* set at _fini */
+};
+
 typedef void (*cntr_init_callback)(struct lprocfs_stats *stats,
 				   unsigned int offset,
 				   enum lprocfs_counter_config cntr_umask);
 struct obd_job_stats {
-	struct cfs_hash	       *ojs_hash;	/* hash of jobids */
-	struct list_head	ojs_list;	/* list of job_stat structs */
-	spinlock_t		ojs_lock;	/* protect ojs_list/js_list */
+	struct rb_root		ojs_idtree;	/* root sorted on js_jobid */
+	struct rb_root		ojs_postree;	/* unique id (temporal) root */
+	atomic64_t		ojs_next_pos;	/* generate next unique id */
+	struct rw_semaphore	ojs_rwsem;	/* rbtree locking */
+	struct list_head	ojs_lru;	/* least recently used */
+	struct llist_head	ojs_deleted;	/* zero-ref to be purged */
+	unsigned long		ojs_flags;	/* see: ojb_info_flags */
+	atomic_t		ojs_readers;	/* active readers */
+	spinlock_t		ojs_lock;	/* protect ojs_lru/js_lru */
 	ktime_t			ojs_cleanup_interval;/* 1/2 expiry seconds */
 	ktime_t			ojs_cleanup_last;/* previous cleanup time */
 	cntr_init_callback	ojs_cntr_init_fn;/* lprocfs_stats initializer */
 	unsigned short		ojs_cntr_num;	/* number of stats in struct */
-	bool			ojs_cleaning;	/* currently expiring stats */
+	atomic64_t		ojs_jobs;	/* number of jobs */
 };
 
 #ifdef CONFIG_PROC_FS
@@ -621,13 +634,14 @@ lprocfs_import_seq_write(struct file *file, const char __user *buffer,
 {
 	return ldebugfs_import_seq_write(file, buffer, count, off);
 }
-
-extern int lprocfs_pinger_recov_seq_show(struct seq_file *m, void *data);
-extern ssize_t
-lprocfs_pinger_recov_seq_write(struct file *file, const char __user *buffer,
-			       size_t count, loff_t *off);
+ssize_t pinger_recov_show(struct kobject *kobj, struct attribute *attr,
+			  char *buf);
+ssize_t pinger_recov_store(struct kobject *kobj, struct attribute *attr,
+			   const char *buffer, size_t count);
 
 int string_to_size(u64 *size, const char *buffer, size_t count);
+int sysfs_memparse_total(const char *buffer, size_t count, u64 *val,
+			 u64 total, const char *defunit);
 int sysfs_memparse(const char *buffer, size_t count, u64 *val,
 		    const char *defunit);
 char *lprocfs_find_named_value(const char *buffer, const char *name,
@@ -671,6 +685,10 @@ int lprocfs_checksum_dump_seq_show(struct seq_file *m, void *data);
 ssize_t
 lprocfs_checksum_dump_seq_write(struct file *file, const char __user *buffer,
 				size_t count, loff_t *off);
+ssize_t checksum_type_show(struct kobject *kobj, struct attribute *attr,
+			   char *buf);
+ssize_t checksum_type_store(struct kobject *kobj, struct attribute *attr,
+			    const char *buffer, size_t count);
 
 extern int lprocfs_single_release(struct inode *i, struct file *f);
 extern int lprocfs_seq_release(struct inode *i, struct file *f);
@@ -907,10 +925,10 @@ ssize_t instance_show(struct kobject *kobj, struct attribute *attr,
 		      char *buf);
 #endif
 /* lproc_status.c */
-int lprocfs_obd_max_pages_per_rpc_seq_show(struct seq_file *m, void *data);
-ssize_t lprocfs_obd_max_pages_per_rpc_seq_write(struct file *file,
-						const char __user *buffer,
-						size_t count, loff_t *off);
+ssize_t max_pages_per_rpc_show(struct kobject *kobj, struct attribute *attr,
+			       char *buf);
+ssize_t max_pages_per_rpc_store(struct kobject *kobj, struct attribute *attr,
+				const char *buffer, size_t count);
 ssize_t short_io_bytes_show(struct kobject *kobj, struct attribute *attr,
 			    char *buf);
 ssize_t short_io_bytes_store(struct kobject *kobj, struct attribute *attr,
@@ -1154,19 +1172,6 @@ ldebugfs_import_seq_write(struct file *file, const char __user *buffer,
 static inline ssize_t
 lprocfs_import_seq_write(struct file *file, const char __user *buffer,
 			 size_t count, loff_t *off)
-{
-	return 0;
-}
-
-static inline int
-lprocfs_pinger_recov_seq_show(struct seq_file *m, void *data)
-{
-	return 0;
-}
-
-static inline ssize_t
-lprocfs_pinger_recov_seq_write(struct file *file, const char __user *buffer,
-			       size_t count, loff_t *off)
 {
 	return 0;
 }

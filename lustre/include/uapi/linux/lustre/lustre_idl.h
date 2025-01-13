@@ -845,6 +845,7 @@ struct ptlrpc_body_v2 {
  */
 #define OBD_CONNECT2_UNALIGNED_DIO	0x400000000ULL /* unaligned DIO */
 #define OBD_CONNECT2_CONN_POLICY	0x800000000ULL /* server-side connection policy */
+#define OBD_CONNECT2_SPARSE            0x1000000000ULL /* sparse LNet read */
 #define OBD_CONNECT2_MIRROR_ID_FIX     0x2000000000ULL /* rr_mirror_id move */
 #define OBD_CONNECT2_UPDATE_LAYOUT     0x4000000000ULL /* update compressibility */
 /* XXX README XXX README XXX README XXX README XXX README XXX README XXX
@@ -1242,6 +1243,7 @@ struct lov_mds_md_v1 {            /* LOV EA mds/wire data (little-endian) */
 #define XATTR_NAME_DUMMY	"trusted.dummy"
 #define XATTR_NAME_PROJID	"trusted.projid"
 #define XATTR_NAME_DATAVER	"trusted.dataver"
+#define XATTR_NAME_PIN		"trusted.pin"
 
 #define LL_XATTR_NAME_ENCRYPTION_CONTEXT_OLD XATTR_SECURITY_PREFIX"c"
 #define LL_XATTR_NAME_ENCRYPTION_CONTEXT XATTR_ENCRYPTION_PREFIX"c"
@@ -3794,14 +3796,14 @@ struct llog_update_record {
  * of search easily
  */
 enum nodemap_id_type {
-	NODEMAP_UID,
-	NODEMAP_GID,
-	NODEMAP_PROJID,
+	NODEMAP_UID		= 0,
+	NODEMAP_GID		= 1,
+	NODEMAP_PROJID		= 2,
 };
 
 enum nodemap_tree_type {
-	NODEMAP_FS_TO_CLIENT,
-	NODEMAP_CLIENT_TO_FS,
+	NODEMAP_FS_TO_CLIENT	= 0,
+	NODEMAP_CLIENT_TO_FS	= 1,
 };
 
 enum nodemap_mapping_modes {

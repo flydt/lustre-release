@@ -52,6 +52,7 @@
 #include <lustre_export.h>
 /* struct obd_device */
 #include <obd.h>
+#include <obd_cksum.h>
 #include <obd_class.h>
 #include <lustre_mds.h>
 #include <lprocfs_status.h>
@@ -1279,8 +1280,6 @@ LUSTRE_RW_ATTR(max_mod_rpcs_in_flight);
 /*
  * mdt_checksum_type(server) proc handling
  */
-DECLARE_CKSUM_NAME;
-
 static int mdt_checksum_type_seq_show(struct seq_file *m, void *data)
 {
 	struct obd_device *obd = m->private;
@@ -1297,7 +1296,7 @@ static int mdt_checksum_type_seq_show(struct seq_file *m, void *data)
 				     lut->lut_cksum_types_supported,
 				     lut->lut_dt_conf.ddp_t10_cksum_type);
 
-	for (i = 0; i < ARRAY_SIZE(cksum_name); i++) {
+	for (i = 0; cksum_name[i] != NULL; i++) {
 		if ((BIT(i) & lut->lut_cksum_types_supported) == 0)
 			continue;
 
@@ -1580,7 +1579,7 @@ void mdt_counter_incr(struct ptlrpc_request *req, int opcode, long amount)
 	if (exp->exp_nid_stats && exp->exp_nid_stats->nid_stats != NULL)
 		lprocfs_counter_add(exp->exp_nid_stats->nid_stats, opcode,
 				    amount);
-	if (exp->exp_obd && obd2obt(exp->exp_obd)->obt_jobstats.ojs_hash &&
+	if (exp->exp_obd && obd2obt(exp->exp_obd)->obt_jobstats.ojs_cntr_num &&
 	    (exp_connect_flags(exp) & OBD_CONNECT_JOBSTATS))
 		lprocfs_job_stats_log(exp->exp_obd,
 				      lustre_msg_get_jobid(req->rq_reqmsg),
