@@ -19,6 +19,7 @@
 #include <lprocfs_status.h>
 #include <lustre_osc.h>
 #include <cl_object.h>
+
 #include "mdc_internal.h"
 
 static ssize_t active_show(struct kobject *kobj, struct attribute *attr,
@@ -135,41 +136,35 @@ LUSTRE_RW_ATTR(max_mod_rpcs_in_flight);
 
 LUSTRE_RW_ATTR(max_pages_per_rpc);
 
-static int mdc_max_dirty_mb_seq_show(struct seq_file *m, void *v)
+static ssize_t max_dirty_mb_show(struct kobject *kobj,
+				 struct attribute *attr,
+				 char *buf)
 {
-	struct obd_device *obd = m->private;
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
 	struct client_obd *cli = &obd->u.cli;
 
-	seq_printf(m, "%lu\n", PAGES_TO_MiB(cli->cl_dirty_max_pages));
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%lu\n",
+			 PAGES_TO_MiB(cli->cl_dirty_max_pages));
 }
 
-static ssize_t mdc_max_dirty_mb_seq_write(struct file *file,
-					  const char __user *buffer,
-					  size_t count, loff_t *off)
+static ssize_t max_dirty_mb_store(struct kobject *kobj,
+				  struct attribute *attr,
+				  const char *buffer,
+				  size_t count)
 {
-	struct seq_file *sfl = file->private_data;
-	struct obd_device *obd = sfl->private;
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
 	struct client_obd *cli = &obd->u.cli;
-	char kernbuf[22] = "";
 	u64 pages_number;
 	int rc;
 
-	if (count >= sizeof(kernbuf))
-		return -EINVAL;
-
-	if (copy_from_user(kernbuf, buffer, count))
-		return -EFAULT;
-	kernbuf[count] = 0;
-
-	rc = sysfs_memparse(kernbuf, count, &pages_number, "MiB");
-	if (rc < 0)
+	rc = sysfs_memparse(buffer, count, &pages_number, "MiB");
+	if (rc)
 		return rc;
 
-	/* MB -> pages */
 	pages_number = round_up(pages_number, 1024 * 1024) >> PAGE_SHIFT;
-	if (pages_number <= 0 ||
-	    pages_number >= MiB_TO_PAGES(OSC_MAX_DIRTY_MB_MAX) ||
+	if (pages_number >= MiB_TO_PAGES(OSC_MAX_DIRTY_MB_MAX) ||
 	    pages_number > cfs_totalram_pages() / 4) /* 1/4 of RAM */
 		return -ERANGE;
 
@@ -180,7 +175,7 @@ static ssize_t mdc_max_dirty_mb_seq_write(struct file *file,
 
 	return count;
 }
-LPROC_SEQ_FOPS(mdc_max_dirty_mb);
+LUSTRE_RW_ATTR(max_dirty_mb);
 
 static ssize_t checksums_show(struct kobject *kobj,
 			      struct attribute *attr, char *buf)
@@ -306,7 +301,7 @@ mdc_cached_mb_seq_write(struct file *file, const char __user *buffer,
 
 	return count;
 }
-LPROC_SEQ_FOPS(mdc_cached_mb);
+LDEBUGFS_SEQ_FOPS(mdc_cached_mb);
 
 static ssize_t dom_min_repsize_show(struct kobject *kobj,
 				    struct attribute *attr, char *buf)
@@ -380,7 +375,7 @@ static int mdc_unstable_stats_seq_show(struct seq_file *m, void *v)
 		   "unstable_mb:              %10d\n", pages, mb);
 	return 0;
 }
-LPROC_SEQ_FOPS_RO(mdc_unstable_stats);
+LDEBUGFS_SEQ_FOPS_RO(mdc_unstable_stats);
 
 static ssize_t mdc_rpc_stats_seq_write(struct file *file,
 				       const char __user *buf,
@@ -495,7 +490,7 @@ static int mdc_rpc_stats_seq_show(struct seq_file *seq, void *v)
 
 	return 0;
 }
-LPROC_SEQ_FOPS(mdc_rpc_stats);
+LDEBUGFS_SEQ_FOPS(mdc_rpc_stats);
 
 static ssize_t mdc_batch_stats_seq_write(struct file *file,
 					 const char __user *buf,
@@ -537,7 +532,7 @@ static int mdc_batch_stats_seq_show(struct seq_file *seq, void *v)
 
 	return 0;
 }
-LPROC_SEQ_FOPS(mdc_batch_stats);
+LDEBUGFS_SEQ_FOPS(mdc_batch_stats);
 
 static int mdc_stats_seq_show(struct seq_file *seq, void *v)
 {
@@ -566,21 +561,19 @@ static ssize_t mdc_stats_seq_write(struct file *file,
 
 	return len;
 }
-LPROC_SEQ_FOPS(mdc_stats);
+LDEBUGFS_SEQ_FOPS(mdc_stats);
 
-LPROC_SEQ_FOPS_RO_TYPE(mdc, connect_flags);
-LPROC_SEQ_FOPS_RO_TYPE(mdc, server_uuid);
-LPROC_SEQ_FOPS_RO_TYPE(mdc, timeouts);
-LPROC_SEQ_FOPS_RO_TYPE(mdc, state);
-LPROC_SEQ_FOPS_RW_TYPE(mdc, import);
+LDEBUGFS_SEQ_FOPS_RO_TYPE(mdc, connect_flags);
+LDEBUGFS_SEQ_FOPS_RO_TYPE(mdc, server_uuid);
+LDEBUGFS_SEQ_FOPS_RO_TYPE(mdc, timeouts);
+LDEBUGFS_SEQ_FOPS_RO_TYPE(mdc, state);
+LDEBUGFS_SEQ_FOPS_RW_TYPE(mdc, import);
 
-struct lprocfs_vars lprocfs_mdc_obd_vars[] = {
+struct ldebugfs_vars ldebugfs_mdc_obd_vars[] = {
 	{ .name	=	"connect_flags",
 	  .fops	=	&mdc_connect_flags_fops	},
 	{ .name	=	"mds_server_uuid",
 	  .fops	=	&mdc_server_uuid_fops	},
-	{ .name =	"max_dirty_mb",
-	  .fops =	&mdc_max_dirty_mb_fops		},
 	{ .name	=	"mdc_cached_mb",
 	  .fops	=	&mdc_cached_mb_fops		},
 	{ .name	=	"timeouts",
@@ -715,6 +708,7 @@ static struct attribute *mdc_attrs[] = {
 	&lustre_attr_max_rpcs_in_flight.attr,
 	&lustre_attr_max_mod_rpcs_in_flight.attr,
 	&lustre_attr_max_pages_per_rpc.attr,
+	&lustre_attr_max_dirty_mb.attr,
 	&lustre_attr_mds_conn_uuid.attr,
 	&lustre_attr_conn_uuid.attr,
 	&lustre_attr_pinger_recov.attr,
@@ -739,7 +733,7 @@ int mdc_tunables_init(struct obd_device *obd)
 	int rc;
 
 	obd->obd_ktype.default_groups = KOBJ_ATTR_GROUPS(mdc);
-	obd->obd_vars = lprocfs_mdc_obd_vars;
+	obd->obd_debugfs_vars = ldebugfs_mdc_obd_vars;
 
 	rc = lprocfs_obd_setup(obd, false);
 	if (rc)

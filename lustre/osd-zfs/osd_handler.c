@@ -742,10 +742,14 @@ static void *osd_key_init(const struct lu_context *ctx,
 	struct osd_thread_info *info;
 
 	OBD_ALLOC_PTR(info);
-	if (info != NULL)
-		info->oti_env = container_of(ctx, struct lu_env, le_ctx);
-	else
-		info = ERR_PTR(-ENOMEM);
+	if (!info)
+		return ERR_PTR(-ENOMEM);
+
+	info->oti_env = container_of(ctx, struct lu_env, le_ctx);
+#ifdef ZAP_MAXNAMELEN_NEW
+	info->oti_za.za_name_len = MAXNAMELEN;
+	info->oti_za2.za_name_len = MAXNAMELEN;
+#endif
 	return info;
 }
 
@@ -1098,8 +1102,12 @@ static int osd_mount(const struct lu_env *env,
 	opts = lustre_cfg_string(cfg, 3);
 
 	o->od_index_backup_stop = 0;
+
 	o->od_index = -1; /* -1 means index is invalid */
 	rc = server_name2index(o->od_svname, &o->od_index, NULL);
+	if (rc == LDD_F_SV_TYPE_OST)
+		o->od_is_ost = 1;
+
 	str = strstr(str, ":");
 	if (str) {
 		unsigned long flags;
@@ -1117,9 +1125,6 @@ static int osd_mount(const struct lu_env *env,
 		if (test_bit(LMD_FLG_NOSCRUB, &flags))
 			interval = AS_NEVER;
 	}
-
-	if (server_name_is_ost(o->od_svname))
-		o->od_is_ost = 1;
 
 	rc = osd_objset_open(o);
 	if (rc)

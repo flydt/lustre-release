@@ -164,6 +164,10 @@ void obd_pool_put_objects(void *buf, unsigned int order);
 int obd_pool_get_free_objects(unsigned int order);
 int pool_is_at_full_capacity(int order);
 
+/* cfs_hash.c */
+int cfs_hash_init(void);
+void cfs_hash_fini(void);
+
 int encrypt_page_pools_seq_show(struct seq_file *m, void *v);
 int page_pools_seq_show(struct seq_file *m, void *v);
 
@@ -194,7 +198,7 @@ char *lustre_cfg_string(struct lustre_cfg *lcfg, u32 index);
 struct lustre_cfg *lustre_cfg_rename(struct lustre_cfg *cfg,
 				     const char *new_name);
 void print_lustre_cfg(struct lustre_cfg *lcfg);
-int class_process_config(struct lustre_cfg *lcfg);
+int class_process_config(struct lustre_cfg *lcfg, struct kobject *kobj);
 ssize_t class_set_global(const char *param);
 ssize_t class_modify_config(struct lustre_cfg *lcfg, const char *prefix,
 			    struct kobject *kobj);
@@ -232,6 +236,7 @@ int class_add_conn(struct obd_device *obd, struct lustre_cfg *lcfg);
 /* Passed as data param to class_config_parse_llog */
 struct config_llog_instance {
 	unsigned long		 cfg_instance;
+	struct kobject		*cfg_kobj;
 	struct super_block	*cfg_sb;
 	struct obd_uuid		 cfg_uuid;
 	llog_cb_t		 cfg_callback;
@@ -401,6 +406,12 @@ void class_import_put(struct obd_import *);
 struct obd_import *class_new_import(struct obd_device *obd);
 void class_destroy_import(struct obd_import *exp);
 
+int obd_export_timed_init(struct obd_export *exp, void **data);
+void obd_export_timed_fini(struct obd_export *exp, void **data);
+void obd_export_timed_add(struct obd_export *exp, void **data);
+void obd_export_timed_del(struct obd_export *exp);
+struct obd_export *obd_export_timed_get(struct obd_device *obd, bool last);
+
 #ifdef HAVE_SERVER_SUPPORT
 struct obd_type *class_search_type(const char *name);
 struct obd_type *class_get_type(const char *name);
@@ -461,49 +472,26 @@ static inline int obd_check_dev(struct obd_device *obd)
 		CERROR("NULL device\n");
 		return -ENODEV;
 	}
+
+	if (!test_bit(OBDF_SET_UP, (obd)->obd_flags) ||
+	    (obd)->obd_stopping) {
+		CERROR("Device %d not setup\n",
+		       (obd)->obd_minor);
+		return -ENODEV;
+	}
+
 	return 0;
-}
-
-/* ensure obd_setup and !obd_stopping */
-#define OBD_CHECK_DEV_ACTIVE(obd)				\
-do {								\
-	rc = obd_check_dev(obd);				\
-	if (rc)							\
-		return rc;					\
-								\
-	if (!test_bit(OBDF_SET_UP, (obd)->obd_flags) ||	       	\
-	    (obd)->obd_stopping) {				\
-		CERROR("Device %d not setup\n",			\
-		       (obd)->obd_minor);			\
-		RETURN(-ENODEV);				\
-	}							\
-} while (0)
-
-
-static inline int lprocfs_nid_ldlm_stats_init(struct nid_stat* tmp)
-{
-	/* Always add in ldlm_stats */
-	tmp->nid_ldlm_stats =
-		lprocfs_stats_alloc(LDLM_LAST_OPC - LDLM_FIRST_OPC,
-				    LPROCFS_STATS_FLAG_NOPERCPU);
-	if (tmp->nid_ldlm_stats == NULL)
-		return -ENOMEM;
-
-	lprocfs_init_ldlm_stats(tmp->nid_ldlm_stats);
-
-	return lprocfs_stats_register(tmp->nid_proc, "ldlm_stats",
-				      tmp->nid_ldlm_stats);
 }
 
 static inline int exp_check_ops(struct obd_export *exp)
 {
-	if (exp == NULL) {
-		RETURN(-ENODEV);
-	}
-	if (exp->exp_obd == NULL || !exp->exp_obd->obd_type) {
-		RETURN(-EOPNOTSUPP);
-	}
-	RETURN(0);
+	if (!exp)
+		return -ENODEV;
+
+	if (!exp->exp_obd || !exp->exp_obd->obd_type)
+		return -EOPNOTSUPP;
+
+	return 0;
 }
 
 static inline int obd_get_info(const struct lu_env *env, struct obd_export *exp,
@@ -626,9 +614,9 @@ static inline int obd_setup(struct obd_device *obd, struct lustre_cfg *cfg)
 
 static inline int obd_precleanup(struct obd_device *obd)
 {
-	int rc;
 	struct lu_device_type *ldt = obd->obd_type->typ_lu;
 	struct lu_device *d = obd->obd_lu_dev;
+	int rc = -ENOMEM;
 
 	ENTRY;
 
@@ -636,15 +624,14 @@ static inline int obd_precleanup(struct obd_device *obd)
 		struct lu_env *env = lu_env_find();
 		struct lu_env _env;
 
-		if (!env) {
+		if (!env && lu_env_init(&_env, ldt->ldt_ctx_tags) == 0) {
 			env = &_env;
-			rc = lu_env_init(env, ldt->ldt_ctx_tags);
-			LASSERT(rc == 0);
-			lu_env_add(env);
+			rc = lu_env_add(env);
 		}
 		ldt->ldt_ops->ldto_device_fini(env, d);
 		if (env == &_env) {
-			lu_env_remove(env);
+			if (rc == 0)
+				lu_env_remove(env);
 			lu_env_fini(env);
 		}
 	}
@@ -828,7 +815,10 @@ static inline int obd_add_conn(struct obd_import *imp, struct obd_uuid *uuid,
 
 	ENTRY;
 
-	OBD_CHECK_DEV_ACTIVE(obd);
+	rc = obd_check_dev(obd);
+	if (rc)
+		RETURN(rc);
+
 	if (!obd->obd_type || !obd->obd_type->typ_dt_ops->o_add_conn) {
 		CERROR("%s: no %s operation\n", obd->obd_name, __func__);
 		RETURN(-EOPNOTSUPP);
@@ -845,7 +835,10 @@ static inline int obd_del_conn(struct obd_import *imp, struct obd_uuid *uuid)
 
 	ENTRY;
 
-	OBD_CHECK_DEV_ACTIVE(obd);
+	rc = obd_check_dev(obd);
+	if (rc)
+		RETURN(rc);
+
 	if (!obd->obd_type || !obd->obd_type->typ_dt_ops->o_del_conn) {
 		CERROR("%s: no %s operation\n", obd->obd_name, __func__);
 		RETURN(-EOPNOTSUPP);
@@ -885,7 +878,10 @@ static inline int obd_connect(const struct lu_env *env,
 
 	ENTRY;
 
-	OBD_CHECK_DEV_ACTIVE(obd);
+	rc = obd_check_dev(obd);
+	if (rc)
+		RETURN(rc);
+
 	if (!obd->obd_type || !obd->obd_type->typ_dt_ops->o_connect) {
 		CERROR("%s: no %s operation\n", obd->obd_name, __func__);
 		RETURN(-EOPNOTSUPP);
@@ -911,7 +907,10 @@ static inline int obd_reconnect(const struct lu_env *env,
 
 	ENTRY;
 
-	OBD_CHECK_DEV_ACTIVE(obd);
+	rc = obd_check_dev(obd);
+	if (rc)
+		RETURN(rc);
+
 	if (!obd->obd_type || !obd->obd_type->typ_dt_ops->o_reconnect)
 		RETURN(0);
 
@@ -1097,7 +1096,10 @@ static inline int obd_statfs(const struct lu_env *env, struct obd_export *exp,
 		RETURN(-EINVAL);
 
 	obd = exp->exp_obd;
-	OBD_CHECK_DEV_ACTIVE(obd);
+
+	rc = obd_check_dev(obd);
+	if (rc)
+		RETURN(rc);
 
 	if (unlikely(!obd->obd_type || !obd->obd_type->typ_dt_ops->o_statfs)) {
 		CERROR("%s: no %s operation\n", obd->obd_name, __func__);
@@ -1237,15 +1239,15 @@ static inline void obd_import_event(struct obd_device *obd,
 				    struct obd_import *imp,
 				    enum obd_import_event event)
 {
-	ENTRY;
-	if (!obd) {
-		CERROR("NULL device\n");
-		EXIT;
-		return;
-	}
+	int rc;
 
-	if (test_bit(OBDF_SET_UP, obd->obd_flags) &&
-	    obd->obd_type->typ_dt_ops->o_import_event)
+	ENTRY;
+
+	rc = obd_check_dev(obd);
+	if (rc)
+		RETURN_EXIT;
+
+	if (obd->obd_type->typ_dt_ops->o_import_event)
 		obd->obd_type->typ_dt_ops->o_import_event(obd, imp, event);
 
 	EXIT;
@@ -1263,14 +1265,9 @@ static inline int obd_notify(struct obd_device *obd,
 	if (rc)
 		return rc;
 
-	if (!test_bit(OBDF_SET_UP, obd->obd_flags)) {
-		CDEBUG(D_HA, "obd %s not set up\n", obd->obd_name);
-		RETURN(-EINVAL);
-	}
-
 	if (!obd->obd_type->typ_dt_ops->o_notify) {
 		CDEBUG(D_HA, "obd %s has no notify handler\n", obd->obd_name);
-		RETURN(-ENOSYS);
+		RETURN(-EOPNOTSUPP);
 	}
 
 	rc = obd->obd_type->typ_dt_ops->o_notify(obd, watched, ev);
@@ -1331,7 +1328,7 @@ static inline int obd_quota_iter(struct obd_export *exp,
 	int rc = 0;
 
 	do {
-		oqctl->qc_iter_list = (__u64)list;
+		oqctl->qc_iter_list = (uintptr_t)list;
 		rc = obd_quotactl(exp, oqctl);
 		if (rc)
 			break;
@@ -1378,7 +1375,7 @@ static inline int obd_register_observer(struct obd_device *obd,
 
 	rc = obd_check_dev(obd);
 	if (rc)
-		return rc;
+		RETURN(rc);
 
 	down_write(&obd->obd_observer_link_sem);
 	if (obd->obd_observer && observer) {
@@ -1734,7 +1731,7 @@ static inline int md_merge_attr(struct obd_export *exp,
 static inline int md_setxattr(struct obd_export *exp, const struct lu_fid *fid,
 			      u64 obd_md_valid, const char *name,
 			      const void *value, size_t value_size,
-			      unsigned int xattr_flags, u32 suppgid,
+			      unsigned int xattr_flags, u32 suppgid, u32 projid,
 			      struct ptlrpc_request **req)
 {
 	int rc;
@@ -1751,13 +1748,14 @@ static inline int md_setxattr(struct obd_export *exp, const struct lu_fid *fid,
 							      name, value,
 							      value_size,
 							      xattr_flags,
-							      suppgid,
+							      suppgid, projid,
 							      req);
 }
 
 static inline int md_getxattr(struct obd_export *exp, const struct lu_fid *fid,
 			      u64 obd_md_valid, const char *name,
-			      size_t buf_size, struct ptlrpc_request **req)
+			      size_t buf_size, u32 projid,
+			      struct ptlrpc_request **req)
 {
 	int rc;
 
@@ -1771,7 +1769,7 @@ static inline int md_getxattr(struct obd_export *exp, const struct lu_fid *fid,
 	return exp->exp_obd->obd_type->typ_md_ops->m_getxattr(exp, fid,
 							      obd_md_valid,
 							      name, buf_size,
-							      req);
+							      projid, req);
 }
 
 static inline int md_set_open_replay_data(struct obd_export *exp,
@@ -1803,7 +1801,7 @@ static inline int md_clear_open_replay_data(struct obd_export *exp,
 
 static inline int md_set_lock_data(struct obd_export *exp,
 				   const struct lustre_handle *lockh,
-				   void *data, __u64 *bits)
+				   void *data, enum mds_ibits_locks *bits)
 {
 	int rc;
 
@@ -1886,7 +1884,8 @@ static inline int md_intent_getattr_async(struct obd_export *exp,
 
 static inline int md_revalidate_lock(struct obd_export *exp,
 				     struct lookup_intent *it,
-				     struct lu_fid *fid, __u64 *bits)
+				     struct lu_fid *fid,
+				     enum mds_ibits_locks *bits)
 {
 	int rc;
 

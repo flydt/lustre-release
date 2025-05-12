@@ -124,24 +124,6 @@ error_dbench()
 	error $err_str
 }
 
-# obtain and cache Kerberos ticket-granting ticket
-refresh_krb5_tgt() {
-	local myRUNAS_UID=$1
-	local myRUNAS_GID=$2
-	shift 2
-	local myRUNAS=$@
-	if [ -z "$myRUNAS" ]; then
-		error_exit "myRUNAS command must be specified for refresh_krb5_tgt"
-	fi
-
-	CLIENTS=${CLIENTS:-$HOSTNAME}
-	do_nodes $CLIENTS "set -x
-if ! $myRUNAS krb5_login.sh; then
-    echo "Failed to refresh Krb5 TGT for UID/GID $myRUNAS_UID/$myRUNAS_GID."
-    exit 1
-fi"
-}
-
 restore_krb5_cred() {
 	local keys=$(keyctl show | awk '$6 ~ "^lgssc:" {print $1}')
 
@@ -320,6 +302,7 @@ test_5() {
 	local file2=$DIR/$tdir/$tfile-2
 	local file3=$DIR/$tdir/$tfile-3
 	local wait_time=$((TIMEOUT + TIMEOUT / 2))
+	local mdts=$(mdts_nodes)
 
 	mkdir $DIR/$tdir || error "mkdir $DIR/$tdir failed"
 	chmod 0777 $DIR/$tdir || error "chmod $DIR/$tdir failed"
@@ -332,9 +315,9 @@ test_5() {
 	$RUNAS $LFS flushctx $MOUNT || error "can't flush context (1)"
 
 	# stop lsvcgssd
-	send_sigint $(comma_list $(mdts_nodes)) $LSVCGSSD
+	send_sigint $mdts $LSVCGSSD
 	sleep 5
-	check_gss_daemon_nodes $(comma_list $(mdts_nodes)) $LSVCGSSD &&
+	check_gss_daemon_nodes $mdts $LSVCGSSD &&
 		error "$LSVCGSSD still running (1)"
 
 	# daemon should restart automatically, at least on newer servers
@@ -353,16 +336,16 @@ test_5() {
 	fi
 
 	# stop lsvcgssd
-	send_sigint $(comma_list $(mdts_nodes)) $LSVCGSSD
+	send_sigint $mdts $LSVCGSSD
 	sleep 5
-	check_gss_daemon_nodes $(comma_list $(mdts_nodes)) $LSVCGSSD &&
+	check_gss_daemon_nodes $mdts $LSVCGSSD &&
 		error "$LSVCGSSD still running (2)"
 
 	# restart lsvcgssd, expect touch succeed
 	echo "restart $LSVCGSSD and recovering"
-	start_gss_daemons $(comma_list $(mdts_nodes)) $LSVCGSSD "-vvv"
+	start_gss_daemons $mdts $LSVCGSSD "-vvv"
 	sleep 5
-	check_gss_daemon_nodes $(comma_list $(mdts_nodes)) $LSVCGSSD
+	check_gss_daemon_nodes $mdts $LSVCGSSD
 	$RUNAS touch $file3 || error "should not fail now"
 	[ -f $file3 ] || error "$file3 not found"
 }
@@ -545,6 +528,61 @@ test_10() {
 	[[ $count == 0 ]] || error "remaining $count keys for user"
 }
 run_test 10 "Support revoked session keyring"
+
+exit_11() {
+	zconf_umount $HOSTNAME $MOUNT
+
+	zconf_mount $HOSTNAME $MOUNT
+	if [ "$MOUNT_2" ]; then
+		zconf_mount $HOSTNAME $MOUNT2
+	fi
+
+	restore_krb5_cred
+}
+
+test_11() {
+	local count
+
+	$LFS mkdir -i 0 -c $MDSCOUNT $DIR/$tdir ||
+		error "mkdir $DIR/$tdir failed"
+	chmod 0777 $DIR/$tdir || error "chmod $DIR/$tdir failed"
+	$RUNAS ls -ld $DIR/$tdir || error "ls -ld $DIR/$tdir failed"
+	$RUNAS grep lgssc /proc/keys
+	$RUNAS klist
+
+	# get rid of gss context and credentials for user
+	$RUNAS $LFS flushctx -k -r $MOUNT || error "can't flush context (1)"
+	$RUNAS grep lgssc /proc/keys
+	$RUNAS klist
+
+	stack_trap exit_11 EXIT
+	zconf_umount $HOSTNAME $MOUNT || error "umount $MOUNT failed"
+	if [ "$MOUNT_2" ]; then
+		zconf_umount $HOSTNAME $MOUNT2 ||
+			error "umount $MOUNT2 failed"
+	fi
+	kdestroy
+	klist
+
+	# we want KCM ccache
+	cp /etc/krb5.conf /etc/krb5.conf.bkp
+	stack_trap "/bin/mv /etc/krb5.conf.bkp /etc/krb5.conf" EXIT
+	sed -i '1i default_ccache_name = KCM:' /etc/krb5.conf
+	sed -i '1i [libdefaults]' /etc/krb5.conf
+	zconf_mount $HOSTNAME $MOUNT || error "remount $MOUNT failed"
+	klist
+
+	$RUNAS touch $DIR/$tdir/$tfile && error "write $tfile should fail"
+	restore_krb5_cred
+	$RUNAS klist
+	$RUNAS touch $DIR/$tdir/$tfile || error "write $tfile failed"
+	$RUNAS klist
+	$RUNAS klist | grep -q lustre_mds || error "mds ticket not present"
+
+	$RUNAS $LFS flushctx -k -r $MOUNT || error "can't flush context (2)"
+	kdestroy
+}
+run_test 11 "KCM ccache"
 
 #
 # following tests will manipulate flavors and may end with any flavor set,

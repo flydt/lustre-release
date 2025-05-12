@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -201,7 +183,8 @@ static int ll_xattr_set_common(const struct xattr_handler *handler,
 		GOTO(out, rc = -ENOMEM);
 
 	rc = md_setxattr(sbi->ll_md_exp, ll_inode2fid(inode), valid, fullname,
-			 pv, size, flags, ll_i2suppgid(inode), &req);
+			 pv, size, flags, ll_i2suppgid(inode),
+			 ll_i2projid(inode), &req);
 	kfree(fullname);
 	if (rc) {
 		if (rc == -EOPNOTSUPP && handler->flags == XATTR_USER_T) {
@@ -474,7 +457,8 @@ int ll_xattr_list(struct inode *inode, const char *name, int type, void *buffer,
 
 	if (sbi->ll_xattr_cache_enabled && type != XATTR_ACL_ACCESS_T &&
 	    (type != XATTR_SECURITY_T || !ll_xattr_is_seclabel(name)) &&
-	    (type != XATTR_TRUSTED_T || strcmp(name, XATTR_NAME_SOM))) {
+	    (type != XATTR_TRUSTED_T || strcmp(name, XATTR_NAME_SOM)) &&
+	    (type != XATTR_LUSTRE_T || strcmp(name, XATTR_LUSTRE_PIN))) {
 		rc = ll_xattr_cache_get(inode, name, buffer, size, valid);
 		if (rc == -EAGAIN)
 			goto getxattr_nocache;
@@ -496,7 +480,7 @@ int ll_xattr_list(struct inode *inode, const char *name, int type, void *buffer,
 	} else {
 getxattr_nocache:
 		rc = md_getxattr(sbi->ll_md_exp, ll_inode2fid(inode), valid,
-				 name, size, &req);
+				 name, size, ll_i2projid(inode), &req);
 		if (rc < 0)
 			GOTO(out_xattr, rc);
 

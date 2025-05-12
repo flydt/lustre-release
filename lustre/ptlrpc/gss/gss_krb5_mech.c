@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: BSD-3-Clause
+
 /*
  * Modifications for Lustre
  *
@@ -9,43 +11,17 @@
  */
 
 /*
- *  linux/net/sunrpc/gss_krb5_mech.c
- *  linux/net/sunrpc/gss_krb5_crypto.c
- *  linux/net/sunrpc/gss_krb5_seal.c
- *  linux/net/sunrpc/gss_krb5_seqnum.c
- *  linux/net/sunrpc/gss_krb5_unseal.c
+ * linux/net/sunrpc/gss_krb5_mech.c
+ * linux/net/sunrpc/gss_krb5_crypto.c
+ * linux/net/sunrpc/gss_krb5_seal.c
+ * linux/net/sunrpc/gss_krb5_seqnum.c
+ * linux/net/sunrpc/gss_krb5_unseal.c
  *
- *  Copyright (c) 2001 The Regents of the University of Michigan.
- *  All rights reserved.
+ * Copyright (c) 2001 The Regents of the University of Michigan.
+ * All rights reserved.
  *
- *  Andy Adamson <andros@umich.edu>
- *  J. Bruce Fields <bfields@umich.edu>
- *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
- *
- *  1. Redistributions of source code must retain the above copyright
- *     notice, this list of conditions and the following disclaimer.
- *  2. Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *  3. Neither the name of the University nor the names of its
- *     contributors may be used to endorse or promote products derived
- *     from this software without specific prior written permission.
- *
- *  THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED
- *  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- *  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- *  DISCLAIMED. IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
- *  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- *  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- *  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
- *  BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- *  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- *  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- *  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
+ * Andy Adamson <andros@umich.edu>
+ * J. Bruce Fields <bfields@umich.edu>
  */
 
 #define DEBUG_SUBSYSTEM S_SEC
@@ -493,8 +469,7 @@ __s32 krb5_make_checksum(__u32 enctype,
 	}
 
 out_free_hash:
-	if (req)
-		cfs_crypto_hash_final(req, cksum->data, &cksum->len);
+	cfs_crypto_hash_final(req, cksum->data, &cksum->len);
 out_no_hash:
 	return rc ? GSS_S_FAILURE : GSS_S_COMPLETE;
 }
@@ -967,22 +942,26 @@ __u32 gss_wrap_kerberos(struct gss_ctx *gctx,
 			int msg_buflen,
 			rawobj_t *token)
 {
-	struct krb5_ctx     *kctx = gctx->internal_ctx_id;
+	struct krb5_ctx *kctx = gctx->internal_ctx_id;
 	struct krb5_enctype *ke = &enctypes[kctx->kc_enctype];
-	struct krb5_header  *khdr;
-	int                  blocksize;
-	rawobj_t             cksum = RAWOBJ_EMPTY;
-	rawobj_t             data_desc[3], cipher;
-	__u8                 conf[GSS_MAX_CIPHER_BLOCK];
-	__u8                 local_iv[16] = {0};
+	struct krb5_header *khdr;
+	int blocksize;
+	rawobj_t cksum = RAWOBJ_EMPTY;
+	rawobj_t data_desc[3], cipher;
+	__u8 local_iv[16] = {0};
+	__u8 *conf = NULL;
 	u32 major;
-	int                  rc = 0;
+	int rc = 0;
 
 	LASSERT(ke);
 	LASSERT(ke->ke_conf_size <= GSS_MAX_CIPHER_BLOCK);
 	LASSERT(kctx->kc_keye.kb_tfm == NULL ||
 		ke->ke_conf_size >=
 		crypto_sync_skcipher_blocksize(kctx->kc_keye.kb_tfm));
+
+	OBD_ALLOC(conf, GSS_MAX_CIPHER_BLOCK);
+	if (!conf)
+		return GSS_S_FAILURE;
 
 	/*
 	 * final token format:
@@ -1008,7 +987,7 @@ __u32 gss_wrap_kerberos(struct gss_ctx *gctx,
 
 	/* padding the message */
 	if (gss_add_padding(msg, msg_buflen, blocksize))
-		return GSS_S_FAILURE;
+		GOTO(out_free_conf, major = GSS_S_FAILURE);
 
 	/*
 	 * clear text layout for checksum:
@@ -1064,6 +1043,8 @@ __u32 gss_wrap_kerberos(struct gss_ctx *gctx,
 	major = GSS_S_COMPLETE;
 out_free_cksum:
 	rawobj_free(&cksum);
+out_free_conf:
+	OBD_FREE(conf, GSS_MAX_CIPHER_BLOCK);
 	return major;
 }
 

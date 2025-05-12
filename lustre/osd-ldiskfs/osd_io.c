@@ -421,6 +421,13 @@ static int osd_do_bio(struct osd_device *osd, struct inode *inode,
 			nblocks = 1;
 
 			if (blocks[block_idx + i] == 0) {  /* hole */
+				struct niobuf_local *lnb =
+					iobuf->dr_lnbs[page_idx];
+				CDEBUG(D_INODE,
+				       "hole at page_idx %d, block_idx %d, at offset %llu\n",
+				       page_idx, block_idx,
+				       lnb->lnb_file_offset);
+				lnb->lnb_hole = 1;
 				LASSERTF(iobuf->dr_rw == 0,
 					 "page_idx %u, block_idx %u, i %u,"
 					 "start_blocks: %llu, count: %llu, npages: %d\n",
@@ -537,6 +544,7 @@ static int osd_map_remote_to_local(loff_t offset, ssize_t len, int *nrpages,
 		lnb->lnb_guard_rpc = 0;
 		lnb->lnb_guard_disk = 0;
 		lnb->lnb_locked = 0;
+		lnb->lnb_hole = 0;
 
 		LASSERTF(plen <= len, "plen %u, len %lld\n", plen,
 			 (long long) len);
@@ -695,8 +703,8 @@ static int osd_bufs_put(const struct lu_env *env, struct dt_object *dt,
  * \param pos		byte offset of IO start
  * \param len		number of bytes of IO
  * \param lnb		array of extents undergoing IO
+ * \param maxlnb	max pages could be loaded
  * \param rw		read or write operation, and other flags
- * \param capa		capabilities
  *
  * \retval pages	(zero or more) loaded successfully
  * \retval -ENOMEM	on memory/page allocation error
@@ -1470,7 +1478,7 @@ static int osd_write_commit(const struct lu_env *env, struct dt_object *dt,
 		LASSERT(!PageWriteback(lnb[i].lnb_page));
 
 		/*
-		 * Since write and truncate are serialized by oo_sem, even
+		 * Since write and truncate are serialized by dd_sem, even
 		 * partial-page truncate should not leave dirty pages in the
 		 * page cache.
 		 */
@@ -2100,10 +2108,16 @@ static int osd_declare_fallocate(const struct lu_env *env,
 	ENTRY;
 
 	/*
-	 * mode == 0 (which is standard prealloc) and PUNCH is supported
+	 * mode == 0 (which is standard prealloc) and PUNCH/ZERO is supported
 	 * Rest of mode options is not supported yet.
 	 */
-	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
+	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE |
+		     FALLOC_FL_ZERO_RANGE))
+		RETURN(-EOPNOTSUPP);
+
+	/* TODO: should fix this for DoM/Indirect in another patch */
+	if ((mode & FALLOC_FL_ZERO_RANGE) &&
+	    !ldiskfs_test_inode_flag(inode, LDISKFS_INODE_EXTENTS))
 		RETURN(-EOPNOTSUPP);
 
 	/* disable fallocate completely */
@@ -2284,9 +2298,9 @@ out:
 	RETURN(rc);
 }
 
-static int osd_fallocate_punch(const struct lu_env *env, struct dt_object *dt,
-			       __u64 start, __u64 end, int mode,
-			       struct thandle *th)
+static int osd_fallocate_advance(const struct lu_env *env, struct dt_object *dt,
+				  __u64 start, __u64 end, int mode,
+				  struct thandle *th)
 {
 	struct osd_object *obj = osd_dt_obj(dt);
 	struct inode *inode = obj->oo_inode;
@@ -2311,11 +2325,11 @@ static int osd_fallocate_punch(const struct lu_env *env, struct dt_object *dt,
 			continue;
 		LASSERT(al->tl_shared == 0);
 		found = 1;
-		/* do actual punch in osd_trans_stop() */
+		/* do actual punch/zero in osd_trans_stop() */
 		al->tl_start = start;
 		al->tl_end = end;
 		al->tl_mode = mode;
-		al->tl_punch = true;
+		al->tl_fallocate = true;
 		break;
 	}
 
@@ -2329,9 +2343,9 @@ static int osd_fallocate(const struct lu_env *env, struct dt_object *dt,
 
 	ENTRY;
 
-	if (mode & FALLOC_FL_PUNCH_HOLE) {
-		/* punch */
-		rc = osd_fallocate_punch(env, dt, start, end, mode, th);
+	if (mode & (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE)) {
+		/* punch/zero-range */
+		rc = osd_fallocate_advance(env, dt, start, end, mode, th);
 	} else {
 		/* standard preallocate */
 		rc = osd_fallocate_preallocate(env, dt, start, end, mode, th);
@@ -2747,8 +2761,9 @@ void osd_execute_truncate(struct osd_object *obj)
 	osd_partial_page_flush(d, inode, size);
 }
 
-static int osd_execute_punch(const struct lu_env *env, struct osd_object *obj,
-			     loff_t start, loff_t end, int mode)
+static int osd_execute_fallocate(const struct lu_env *env,
+				  struct osd_object *obj, loff_t start,
+				  loff_t end, int mode)
 {
 	struct osd_device *d = osd_obj2dev(obj);
 	struct inode *inode = obj->oo_inode;
@@ -2781,9 +2796,10 @@ int osd_process_truncates(const struct lu_env *env, struct list_head *list)
 			continue;
 		if (al->tl_truncate)
 			osd_execute_truncate(al->tl_obj);
-		else if (al->tl_punch)
-			rc = osd_execute_punch(env, al->tl_obj, al->tl_start,
-					       al->tl_end, al->tl_mode);
+		else if (al->tl_fallocate)
+			rc = osd_execute_fallocate(env, al->tl_obj,
+						   al->tl_start, al->tl_end,
+						   al->tl_mode);
 	}
 
 	return rc;

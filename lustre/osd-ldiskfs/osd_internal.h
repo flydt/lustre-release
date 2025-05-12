@@ -119,7 +119,6 @@ struct osd_object {
 	 */
 	struct htree_lock_head *oo_hl_head;
 	struct rw_semaphore	oo_ext_idx_sem;
-	struct rw_semaphore	oo_sem;
 	struct osd_directory	*oo_dir;
 	/** protects inode attributes. */
 	spinlock_t		oo_guard;
@@ -137,8 +136,6 @@ struct osd_object {
 	/* the i_flags in LMA */
 	__u32                   oo_lma_flags;
 	atomic_t		oo_dirent_count;
-
-        const struct lu_env    *oo_owner;
 
 	struct list_head	oo_xattr_list;
 	struct lu_object_header *oo_header;
@@ -401,7 +398,7 @@ struct osd_access_lock {
 	int			 tl_mode;
 	bool			 tl_shared;
 	bool			 tl_truncate;
-	bool			 tl_punch;
+	bool			 tl_fallocate;
 };
 
 struct osd_thandle {
@@ -520,7 +517,7 @@ struct osd_it_ea_dirent {
 struct osd_it_ea {
 	struct osd_object	*oie_obj;
 	/** used in ldiskfs iterator, to stored file pointer */
-	struct file		*oie_file;
+	struct file		oie_file;
 	/** how many entries have been read-cached from storage */
 	int			oie_rd_dirent;
 	/** current entry is being iterated by caller */
@@ -529,6 +526,7 @@ struct osd_it_ea {
 	struct osd_it_ea_dirent *oie_dirent;
 	/** buffer to hold entries, size == OSD_IT_EA_BUFSIZE */
 	void			*oie_buf;
+	struct dentry		oie_dentry;
 };
 
 /**
@@ -713,8 +711,6 @@ struct osd_thread_info {
 	/* inc by osd_trans_create and dec by osd_trans_stop */
 	int				oti_ins_cache_depth;
 
-	int				oti_r_locks;
-	int				oti_w_locks;
 	int				oti_txns;
 	/** used in osd_fid_set() to put xattr */
 	struct lu_buf			oti_buf;

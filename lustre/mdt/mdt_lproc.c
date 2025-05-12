@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/mdt/mdt_lproc.c
  *
  * Author: Lai Siyao <lsy@clusterfs.com>
  * Author: Fan Yong <fanyong@clusterfs.com>
@@ -831,6 +811,8 @@ static ssize_t name##_show(struct kobject *kobj, struct attribute *attr,\
 	struct obd_device *obd = container_of(kobj, struct obd_device,	\
 					      obd_kset.kobj);		\
 	struct mdt_device *mdt = mdt_dev(obd->obd_lu_dev);		\
+	if (IS_ERR_OR_NULL(mdt))					\
+		return -ENOENT;						\
 	return scnprintf(buf, PAGE_SIZE, "%u\n", mdt->mdt_##name);	\
 }									\
 static ssize_t name##_store(struct kobject *kobj, struct attribute *attr,\
@@ -841,6 +823,8 @@ static ssize_t name##_store(struct kobject *kobj, struct attribute *attr,\
 	struct mdt_device *mdt = mdt_dev(obd->obd_lu_dev);		\
 	bool val;							\
 	int rc;								\
+	if (IS_ERR_OR_NULL(mdt))					\
+		return -ENOENT;						\
 	rc = kstrtobool(buffer, &val);					\
 	if (rc)								\
 		return rc;						\
@@ -866,6 +850,37 @@ MDT_BOOL_RW_ATTR(migrate_hsm_allowed);
 MDT_BOOL_RW_ATTR(enable_strict_som);
 MDT_BOOL_RW_ATTR(enable_dmv_implicit_inherit);
 MDT_BOOL_RW_ATTR(enable_dmv_xattr);
+
+static ssize_t enable_pin_gid_show(struct kobject *kobj,
+				   struct attribute *attr, char *buf)
+{
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
+	struct mdt_device *mdt = mdt_dev(obd->obd_lu_dev);
+
+	if (mdt->mdt_enable_pin_gid == ~0U)
+		return scnprintf(buf, PAGE_SIZE, "-1\n");
+	return scnprintf(buf, PAGE_SIZE, "%u\n", mdt->mdt_enable_pin_gid);
+}
+
+static ssize_t enable_pin_gid_store(struct kobject *kobj,
+				    struct attribute *attr,
+				    const char *buffer, size_t count)
+{
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
+	struct mdt_device *mdt = mdt_dev(obd->obd_lu_dev);
+	int val;
+	int rc;
+
+	rc = kstrtoint(buffer, 0, &val);
+	if (rc)
+		return rc;
+
+	mdt->mdt_enable_pin_gid = val;
+	return count;
+}
+LUSTRE_RW_ATTR(enable_pin_gid);
 
 /**
  * Show if the MDT is in no create mode.
@@ -1400,12 +1415,14 @@ LPROC_SEQ_FOPS_RO(mdt_checksum_type);
 LPROC_SEQ_FOPS_RO_TYPE(mdt, hash);
 LPROC_SEQ_FOPS_WR_ONLY(mdt, mds_evict_client);
 LPROC_SEQ_FOPS_RW_TYPE(mdt, checksum_dump);
+LPROC_SEQ_FOPS_RO_TYPE(mdt, recovery_status);
+/* belongs to export directory */
+LDEBUGFS_SEQ_FOPS_RW_TYPE(mdt, nid_stats_clear);
+
 LUSTRE_RW_ATTR(job_cleanup_interval);
 LUSTRE_RW_ATTR(job_xattr);
-LPROC_SEQ_FOPS_RW_TYPE(mdt, nid_stats_clear);
 LUSTRE_RW_ATTR(hsm_control);
 
-LPROC_SEQ_FOPS_RO_TYPE(mdt, recovery_status);
 LUSTRE_RW_ATTR(recovery_time_hard);
 LUSTRE_RW_ATTR(recovery_time_soft);
 LUSTRE_RW_ATTR(ir_factor);
@@ -1452,6 +1469,7 @@ static struct attribute *mdt_attrs[] = {
 	&lustre_attr_evict_tgt_nids.attr,
 	&lustre_attr_enable_cap_mask.attr,
 	&lustre_attr_enable_chprojid_gid.attr,
+	&lustre_attr_enable_pin_gid.attr,
 	&lustre_attr_enable_dir_migration.attr,
 	&lustre_attr_enable_dir_restripe.attr,
 	&lustre_attr_enable_dir_auto_split.attr,
@@ -1527,7 +1545,7 @@ static struct ldebugfs_vars ldebugfs_mdt_gss_vars[] = {
 };
 
 static int
-lprocfs_mdt_print_open_files(struct obd_export *exp, void *v)
+ldebugfs_mdt_print_open_files(struct obd_export *exp, void *v)
 {
 	struct seq_file		*seq = v;
 
@@ -1546,25 +1564,25 @@ lprocfs_mdt_print_open_files(struct obd_export *exp, void *v)
 	return 0;
 }
 
-static int lprocfs_mdt_open_files_seq_show(struct seq_file *seq, void *v)
+static int ldebugfs_mdt_open_files_seq_show(struct seq_file *seq, void *v)
 {
 	struct nid_stat *stats = seq->private;
 
 	return obd_nid_export_for_each(stats->nid_obd, &stats->nid,
-				       lprocfs_mdt_print_open_files, seq);
+				       ldebugfs_mdt_print_open_files, seq);
 }
 
-int lprocfs_mdt_open_files_seq_open(struct inode *inode, struct file *file)
+int ldebugfs_mdt_open_files_seq_open(struct inode *inode, struct file *file)
 {
 	struct seq_file		*seq;
 	int			rc;
 
-	rc = single_open(file, &lprocfs_mdt_open_files_seq_show, NULL);
+	rc = single_open(file, &ldebugfs_mdt_open_files_seq_show, NULL);
 	if (rc != 0)
 		return rc;
 
 	seq = file->private_data;
-	seq->private = pde_data(inode);
+	seq->private = inode->i_private;
 
 	return 0;
 }
@@ -1673,15 +1691,19 @@ int mdt_tunables_init(struct mdt_device *mdt, const char *name)
 
 	obd->obd_debugfs_gss_dir = debugfs_create_dir("gss",
 						      obd->obd_debugfs_entry);
-	if (obd->obd_debugfs_gss_dir)
-		ldebugfs_add_vars(obd->obd_debugfs_gss_dir,
-				  ldebugfs_mdt_gss_vars, obd);
+	if (IS_ERR(obd->obd_debugfs_gss_dir))
+		obd->obd_debugfs_gss_dir = NULL;
 
-	obd->obd_proc_exports_entry = proc_mkdir("exports",
-						 obd->obd_proc_entry);
-	if (obd->obd_proc_exports_entry)
-		lprocfs_add_simple(obd->obd_proc_exports_entry, "clear",
-				   obd, &mdt_nid_stats_clear_fops);
+	ldebugfs_add_vars(obd->obd_debugfs_gss_dir,
+			  ldebugfs_mdt_gss_vars, obd);
+
+	obd->obd_debugfs_exports = debugfs_create_dir("exports",
+						      obd->obd_debugfs_entry);
+	if (IS_ERR(obd->obd_debugfs_exports))
+		obd->obd_debugfs_exports = NULL;
+
+	debugfs_create_file("clear", 0644, obd->obd_debugfs_exports,
+			    obd, &mdt_nid_stats_clear_fops);
 
 	rc = lprocfs_alloc_md_stats(obd, ARRAY_SIZE(mdt_stats));
 	if (rc)
@@ -1704,11 +1726,6 @@ int mdt_tunables_init(struct mdt_device *mdt, const char *name)
 void mdt_tunables_fini(struct mdt_device *mdt)
 {
 	struct obd_device *obd = mdt2obd_dev(mdt);
-
-	if (obd->obd_proc_exports_entry != NULL) {
-		lprocfs_remove_proc_entry("clear", obd->obd_proc_exports_entry);
-		obd->obd_proc_exports_entry = NULL;
-	}
 
 	lprocfs_free_per_client_stats(obd);
 	/* hsm_cdt_tunables is disabled earlier than this to avoid

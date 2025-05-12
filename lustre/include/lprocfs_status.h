@@ -180,7 +180,7 @@ enum lprocfs_fields_flags {
 
 struct lprocfs_stats {
 	/* source for the stats */
-	char				*ls_source;
+	char				ls_source[MAX_OBD_NAME * 4];
 	/* index in Xarray */
 	unsigned int			ls_index;
 	/* # of counters */
@@ -515,7 +515,6 @@ extern void lprocfs_stats_free(struct lprocfs_stats **stats);
 extern void lprocfs_init_ldlm_stats(struct lprocfs_stats *ldlm_stats);
 struct lprocfs_stats *ldebugfs_stats_alloc(int num, char *name,
 					   struct dentry *entry,
-					   struct kobject *kobj,
 					   enum lprocfs_stats_flags flags);
 extern int ldebugfs_alloc_obd_stats(struct obd_device *obd,
 				    unsigned int num_stats);
@@ -551,8 +550,8 @@ lprocfs_add_symlink(const char *name, struct proc_dir_entry *parent,
 extern void lprocfs_free_per_client_stats(struct obd_device *obd);
 #ifdef HAVE_SERVER_SUPPORT
 extern ssize_t
-lprocfs_nid_stats_clear_seq_write(struct file *file, const char __user *buffer,
-					size_t count, loff_t *off);
+ldebugfs_nid_stats_clear_seq_write(struct file *file, const char __user *buffer,
+				   size_t count, loff_t *off);
 extern int lprocfs_nid_stats_clear_seq_show(struct seq_file *file, void *data);
 #endif
 extern int lprocfs_stats_register(struct proc_dir_entry *root, const char *name,
@@ -591,7 +590,6 @@ extern void lprocfs_stats_header(struct seq_file *seq, ktime_t now,
 extern unsigned int obd_enable_stats_header;
 
 /* Generic callbacks */
-extern int lprocfs_uuid_seq_show(struct seq_file *m, void *data);
 extern int lprocfs_server_uuid_seq_show(struct seq_file *m, void *data);
 ssize_t conn_uuid_show(struct kobject *kobj, struct attribute *attr, char *buf);
 extern int lprocfs_import_seq_show(struct seq_file *m, void *data);
@@ -701,6 +699,36 @@ extern int lprocfs_seq_release(struct inode *i, struct file *f);
  * to get out of the statement.
  */
 
+/*
+ * The macro uses a for loop that executes a block of code maximum once.
+ * It allows for local variable declarations.
+ *
+ * Initialization: Lock Acquisition and Import Retrieval:
+ * --------------
+ *  for (down_read_nested(&(__obd)->u.cli.cl_sem, __nest),
+ *             __imp = (__obd)->u.cli.cl_import,
+ *             __rc = __imp ? 0 : -ENODEV;
+ * It acquires a read lock,
+ * retrieves the import pointer and stores it in __imp,
+ * sets the return code __rc
+ *	to 0 (success) if __imp is not NULL, or
+ *	to _ENODEV (failure) if __imp is NULL
+ *
+ * Condition: Conditional Lock Release:
+ * ---------
+ *  __imp ? 1 : (up_read(&(__obd)->u.cli.cl_sem), 0);
+ *
+ * If __imp is not NULL, it evaluates to 1, and nothing happens.
+ * This means the lock is kept as long as a valid import was obtained.
+ * If __imp is NULL, then it releases the read lock and evaluates to 0.
+ *
+ * Update: Nulling the Import Pointer
+ * ------
+ *  __imp = NULL)
+ *
+ * sets __imp to NULL. This will break out of the for loop, releasing the
+ * semaphore in the condition.
+ */
 #define with_imp_locked_nested(__obd, __imp, __rc, __nest)		\
 	for (down_read_nested(&(__obd)->u.cli.cl_sem, __nest),		\
 	     __imp = (__obd)->u.cli.cl_import,				\
@@ -939,6 +967,7 @@ int lprocfs_wr_root_squash(const char __user *buffer, unsigned long count,
 			   struct root_squash_info *squash, char *name);
 int lprocfs_wr_nosquash_nids(const char __user *buffer, unsigned long count,
 			     struct root_squash_info *squash, char *name);
+ssize_t lprocfs_statfs_state(char *buf, size_t buflen, __u32 state);
 
 #else /* !CONFIG_PROC_FS */
 
@@ -1027,20 +1056,6 @@ static inline void lprocfs_free_per_client_stats(struct obd_device *obd)
 }
 
 #ifdef HAVE_SERVER_SUPPORT
-static inline
-ssize_t lprocfs_nid_stats_seq_write(struct file *file,
-				    const char __user *buffer,
-				    size_t count, loff_t *off)
-{
-	return 0;
-}
-
-static inline int lprocfs_nid_stats_clear_seq_show(struct seq_file *m,
-						   void *data)
-{
-	return 0;
-}
-
 static inline int lprocfs_exp_setup(struct obd_export *exp,
 				    struct lnet_nid *peer_nid)
 {
@@ -1094,11 +1109,6 @@ static inline int lprocfs_obd_setup(struct obd_device *obd, bool uuid_only)
 }
 
 static inline int lprocfs_obd_cleanup(struct obd_device *obd)
-{
-	return 0;
-}
-
-static inline int lprocfs_uuid_seq_show(struct seq_file *m, void *data)
 {
 	return 0;
 }
@@ -1172,43 +1182,6 @@ ldebugfs_import_seq_write(struct file *file, const char __user *buffer,
 static inline ssize_t
 lprocfs_import_seq_write(struct file *file, const char __user *buffer,
 			 size_t count, loff_t *off)
-{
-	return 0;
-}
-
-/* Statfs helpers */
-static inline
-int lprocfs_blksize_seq_show(struct seq_file *m, void *data)
-{
-	return 0;
-}
-
-static inline
-int lprocfs_kbytestotal_seq_show(struct seq_file *m, void *data)
-{
-	return 0;
-}
-
-static inline
-int lprocfs_kbytesfree_seq_show(struct seq_file *m, void *data)
-{
-	return 0;
-}
-
-static inline
-int lprocfs_kbytesavail_seq_show(struct seq_file *m, void *data)
-{
-	return 0;
-}
-
-static inline
-int lprocfs_filestotal_seq_show(struct seq_file *m, void *data)
-{
-	return 0;
-}
-
-static inline
-int lprocfs_filesfree_seq_show(struct seq_file *m, void *data)
 {
 	return 0;
 }

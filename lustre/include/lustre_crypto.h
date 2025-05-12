@@ -43,9 +43,8 @@
 #else
 	int llcrypt_d_revalidate(struct dentry *dentry, unsigned int flags);
 #endif
-#define llcrypt_require_key(inode)	\
-	fscrypt_require_key(inode)
-#define llcrypt_has_encryption_key(inode) fscrypt_has_encryption_key(inode)
+#define llcrypt_has_encryption_key(inode)				\
+	fscrypt_has_encryption_key(inode)
 #define llcrypt_encrypt_pagecache_blocks(page, len, offs, gfp_flags)	\
 	fscrypt_encrypt_pagecache_blocks(page, len, offs, gfp_flags)
 #define llcrypt_decrypt_pagecache_blocks(page, len, offs)	\
@@ -173,7 +172,6 @@ static inline bool llcrypt_is_nokey_name(const struct dentry *dentry)
 struct ll_sb_info;
 int ll_set_encflags(struct inode *inode, void *encctx, __u32 encctxlen,
 		    bool preload);
-void llcrypt_free_ctx(void *encctx, __u32 size);
 bool ll_sb_has_test_dummy_encryption(struct super_block *sb);
 bool ll_sbi_has_encrypt(struct ll_sb_info *sbi);
 void ll_sbi_set_encrypt(struct ll_sb_info *sbi, bool set);
@@ -255,8 +253,6 @@ static inline int critical_decode(const u8 *src, int len, char *dst)
  */
 #define S_PCCCOPY S_DIRSYNC
 #define IS_PCCCOPY(inode)	((inode)->i_flags & S_PCCCOPY)
-#define ll_require_key(inode)	\
-	(IS_PCCCOPY(inode) ? -ENOKEY : llcrypt_require_key(inode))
 #define ll_has_encryption_key(inode)	\
 	(IS_PCCCOPY(inode) ? false : llcrypt_has_encryption_key(inode))
 

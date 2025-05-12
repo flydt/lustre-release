@@ -121,7 +121,6 @@ struct lustre_sb_info {
 	struct ll_sb_info        *lsi_llsbi;   /* add'l client sbi info */
 	struct dt_device	 *lsi_dt_dev;  /* dt device to access disk fs*/
 	struct kref		  lsi_mounts;  /* references to the srv_mnt */
-	struct kobject		 *lsi_kobj;
 	char			  lsi_svname[MTI_NAME_MAXLEN];
 	/* lsi_osd_obdname format = 'lsi->ls_svname'-osd */
 	char			  lsi_osd_obdname[MTI_NAME_MAXLEN + 4];
@@ -369,7 +368,6 @@ void server_calc_timeout(struct lustre_sb_info *lsi, struct obd_device *obd);
 int server_name2svname(const char *label, char *svname, const char **endptr,
 		       size_t svsize);
 
-int server_name_is_ost(const char *svname);
 int target_name2index(const char *svname, u32 *idx, const char **endptr);
 
 int lustre_put_lsi(struct super_block *sb);
@@ -378,7 +376,6 @@ int lustre_start_simple(char *obdname, char *type, char *uuid,
 int lustre_stop_mgc(struct super_block *sb);
 #endif /* HAVE_SERVER_SUPPORT */
 int server_name2fsname(const char *svname, char *fsname, const char **endptr);
-void obdname2fsname(const char *tgt, char *fsname, size_t fslen);
 
 int lustre_start_mgc(struct super_block *sb);
 int lustre_common_put_super(struct super_block *sb);

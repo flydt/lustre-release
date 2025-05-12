@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -40,6 +22,9 @@
 #include "ptlrpc_internal.h"
 
 static struct rhashtable conn_hash;
+
+/* per-cpu PM QoS management */
+struct cpu_latency_qos *cpus_latency_qos;
 
 /*
  * struct lnet_process_id may contain unassigned bytes which might not
@@ -74,6 +59,41 @@ static const struct rhashtable_params conn_hash_params = {
 	.hashfn		= lnet_process_id_hash,
 	.obj_cmpfn	= lnet_process_id_cmp,
 };
+
+static void cpu_latency_work(struct work_struct *work)
+{
+	struct cpu_latency_qos *latency_qos;
+	struct dev_pm_qos_request *pm_qos_req_done = NULL;
+	int cpu;
+
+	latency_qos = container_of(work, struct cpu_latency_qos,
+				   delayed_work.work);
+	cpu = (latency_qos - cpus_latency_qos) / sizeof(struct cpu_latency_qos);
+	mutex_lock(&latency_qos->lock);
+	if (time_after64(jiffies_64, latency_qos->deadline)) {
+		CDEBUG(D_INFO, "work item of %p (cpu %d) has reached its deadline %llu, at %llu\n",
+		       latency_qos, cpu, latency_qos->deadline, jiffies_64);
+		pm_qos_req_done = latency_qos->pm_qos_req;
+		latency_qos->pm_qos_req = NULL;
+	} else {
+		/* XXX Is this expected to happen?
+		 * anyway, reschedule for the remaining time
+		 */
+		cancel_delayed_work(&latency_qos->delayed_work);
+		schedule_delayed_work(&latency_qos->delayed_work,
+				      (unsigned long)(latency_qos->deadline -
+				       jiffies_64));
+		CDEBUG(D_INFO, "work item of %p (cpu %d) has not reached its deadline %llu, at %llu\n",
+		       latency_qos, cpu, latency_qos->deadline, jiffies_64);
+	}
+	mutex_unlock(&latency_qos->lock);
+
+	/* must be done outside atomic section */
+	if (pm_qos_req_done != NULL) {
+		dev_pm_qos_remove_request(pm_qos_req_done);
+		OBD_FREE_PTR(pm_qos_req_done);
+	}
+}
 
 struct ptlrpc_connection *
 ptlrpc_connection_get(struct lnet_processid *peer_orig, struct lnet_nid *self,
@@ -164,10 +184,50 @@ conn_exit(void *vconn, void *data)
 
 int ptlrpc_connection_init(void)
 {
+	int cpu;
+
+	OBD_ALLOC_PTR_ARRAY(cpus_latency_qos, nr_cpu_ids);
+	if (!cpus_latency_qos) {
+		CWARN("Failed to allocate PM-QoS management structs\n");
+	} else {
+		for (cpu = 0; cpu < nr_cpu_ids; cpu++) {
+			struct cpu_latency_qos *cpu_latency_qos =
+				&cpus_latency_qos[cpu];
+
+			INIT_DELAYED_WORK(&cpu_latency_qos->delayed_work,
+					  cpu_latency_work);
+			mutex_init(&cpu_latency_qos->lock);
+			cpu_latency_qos->max_time =
+				DEFAULT_CPU_LATENCY_TIMEOUT_US;
+		}
+	}
+
 	return rhashtable_init(&conn_hash, &conn_hash_params);
+}
+
+static void ptlrpc_latency_req_fini(struct cpu_latency_qos *lq, int cpu)
+{
+	mutex_lock(&lq->lock);
+	if (lq->pm_qos_req != NULL) {
+		if (dev_pm_qos_request_active(lq->pm_qos_req))
+			dev_pm_qos_remove_request(lq->pm_qos_req);
+		cancel_delayed_work(&lq->delayed_work);
+		CDEBUG(D_INFO, "remove PM QoS request %p and associated work" \
+		       " item, still active for this cpu %d\n", lq, cpu);
+		OBD_FREE_PTR(lq->pm_qos_req);
+	}
+	mutex_unlock(&lq->lock);
 }
 
 void ptlrpc_connection_fini(void)
 {
+	int cpu;
+
+	if (cpus_latency_qos != NULL) {
+		for (cpu = 0; cpu < nr_cpu_ids; cpu++)
+			ptlrpc_latency_req_fini(&cpus_latency_qos[cpu], cpu);
+		OBD_FREE_PTR_ARRAY(cpus_latency_qos, nr_cpu_ids);
+	}
+
 	rhashtable_free_and_destroy(&conn_hash, conn_exit, NULL);
 }

@@ -2,31 +2,48 @@
 .SH NAME
 lfs-quota \- display quota limits and status for users, groups, or projects.
 .SH SYNOPSIS
-.BR "lfs quota " [ -q "] [" -v "] [" -h "] [" -o
-.IR OBD_UUID | \fB-i
-.IR MDT_IDX | \fB-I
-.IR OST_IDX "] [" \fB-u
-.IR USER | \fB-g
-.IR GROUP | \fB-p
-.IR PROJID "] [" \fB--pool
-.IR OST_POOL_NAME "] [" MOUNT_POINT " ...]"
-
-.br
-.BR "lfs quota " [ -hq "] {" -U | -G | -P }
+.SY "lfs quota"
+.RB [ -q | --quiet ]
+.RB [ -v | --verbose ]
+.RB [ -h | --human-readable ]
+.RB [ -o | --ost
+.IR OBD_UUID | OST_IDX
+.RB "| " -m | --mdt
+.IR MDT_IDX ]
+.RB [ -u | --user
+.IR USER " |"
+.BI -g | --group GROUP
+.BR "| " -p | --projid
+.IR PROJID ]
+.RB [ --pool
+.IR OST_POOL_NAME ]
+.RB [ --delimiter
+.IR DELIMITER ]
+.EX
+.RB [ --blocks | --busage | --space ]
+.RB [ --block-softlimit | --bsoftlimit ]
+.RB [ --block-hardlimit | --bhardlimit ]
+.RB [ --block-grace | --bgrace | --btime ]
+.RB [ --filesystem | --mount-point ]
+.RB [ --inodes | --iusage ]
+.RB [ --inode-softlimit | --isoftlimit ]
+.RB [ --inode-hardlimit | --ihardlimit ]
+.RB [ --inode-grace | --igrace | --itime ]
+.EE
 .RI [ MOUNT_POINT " ...]"
-.br
-
-.br
-.BR "lfs quota " -t " {" -u | -g | -p }
+.SY "lfs quota"
+.BR [ -hq ]
+.RB { -U | --default-usr | -G | --default-grp | -P | --default-prj }
 .RI [ MOUNT_POINT " ...]"
-.br
-
-.br
-.BR "lfs quota " -a " {" -u | -g | -p }
+.SY "lfs quota"
+.B -t | --times
+.RB { -u | -g | -p }
 .RI [ MOUNT_POINT " ...]"
-.br
-
-.TP
+.SY "lfs quota"
+.B -a | --all
+.RB { -u | -g | -p }
+.RI [ MOUNT_POINT " ...]"
+.YS
 .SH DESCRIPTION
 .PP
 .TP
@@ -44,6 +61,12 @@ If user, group, and project are omitted, quotas for the
 current uid/gid/projid are shown.
 If no MOUNT_POINT is specified, quotas for all Lustre mountpoints will be shown.
 .TP
+.BR -d ", " --delimiter = \fIDELIMITER
+Use the string
+.I DELIMITER
+as the column delimiter. This allows for easier parsing of the output, and could
+be used to put the output into CVS format for a spreadsheet.
+.TP
 .BR -h | --human-readable
 This will change the formatting of
 block storage and time values. Without this option block storage values
@@ -54,8 +77,62 @@ which specify units of 2^10, 2^20, 2^30, 2^40, 2^50 and 2^60 bytes,
 respectively.  Time values will use the "XXwXXdXXhXXmXXs" format, which
 specifies weeks, days, hours, minutes, seconds.
 .TP
+.BR --blocks | --busage | --space | --kbytes
+Print only the
+.BR kbytes / usage
+column representing the block space usage.
+If other column options are specified, all specified columns will be printed.
+.TP
+.BR --block-softlimit | --bsoftlimit
+Print only the
+.B bquota
+column representing the block soft-limit.
+If other column options are specified, all specified columns will be printed.
+.TP
+.BR --block-hardlimit | --bhardlimit
+Print only the
+.B blimit
+column representing the block hard-limit.
+If other column options are specified, all specified columns will be printed.
+.TP
+.BR --blocks-grace | --bgrace | --btime
+Print only the
+.B bgrace
+column representing the block grace time.
+If other column options are specified, all specified columns will be printed.
+.TP
+.BR --filesystem | --mount-point
+Print only the
+.B filesystem
+column representing either the mount point or device name.
+If other column options are specified, all specified columns will be printed.
+.TP
 .BR -g | --group " {" \fIGROUP | \fIGID }
 Display quota information for group name \fIGROUP\fR or numeric \fIGID\fR.
+.TP
+.BR --inodes | --iusage | --files
+Print only the
+.B files
+column representing the number of inodes used.
+If other column options are specified, all specified columns will be printed.
+.TP
+.BR --inode-softlimit | --isoftlimit
+Print only the
+.B iquota
+column representing the inode soft-limit.
+If other column options are specified, all specified columns will be printed.
+.TP
+.BR --inode-hardlimit | --ihardlimit
+Print only the
+.B ilimit
+column representing the inode hard-limit.
+If other column options are specified, all specified columns will be printed.
+.TP
+.BR --ilocks-grace | --igrace | --itime
+Print only the
+.B igrace
+column representing the inode grace time.
+If other column options are specified, all specified columns will be printed.
 .TP
 .BR -m | --mdt " " \fIMDT_IDX
 Display quota information for MDT \fIMDT_IDX\fR.
@@ -66,12 +143,12 @@ Display quota information for OST \fIOST_IDX\fR.
 .BR --pool " " \fIPOOL_NAME
 Display quota information for OST pool \fIPOOL_NAME\fR.
 .TP
-.BR -p | --projid " " \fIPROJID
-Display quota information for project \fIPROJID\fR.
-.TP
 .BR -q | --quiet
 Display only the line containing the data.
 The line saying what the data is, and the column headers will not be printed.
+.TP
+.BR -g | --group " {" \fIGROUP | \fIGID }
+Display quota information for group name \fIGROUP\fR or numeric \fIGID\fR.
 .TP
 .BR -u | --user " {" \fIUSER \fR| \fIUID \fR}
 Display quota information for user name
@@ -81,6 +158,9 @@ or numeric
 Can be used without specifying the mount point to get quota information
 from all filesystems for the specified
 .IR USER | UID .
+.TP
+.BR -p | --projid " " \fIPROJID
+Display quota information for project \fIPROJID\fR.
 .TP
 .BR -v | --verbose
 Display per-MDT and per-OST statistics in addition
@@ -137,7 +217,26 @@ from the OST pool
 .B $ lfs quota -t -g --pool flash_pool /mnt/lustre
 Display grace times for group quotas for the OST pool
 .BR flash_pool .
-.TP
+.EX
+.B $ lfs quota --filesystem --blocks --inodes
+Disk quotas for usr root (uid 0):
+      Filesystem   kbytes   files
+     /mnt/lustre     5236     308
+    /mnt/lustre2     5236     308
+Disk quotas for grp root (gid 0):
+      Filesystem   kbytes   files
+     /mnt/lustre     5236     308
+    /mnt/lustre2     5236     308
+.EE
+.EX
+.B $ lfs quota --delimiter="," /mnt/lustre
+Disk quotas for usr root (uid 0):
+      Filesystem, kbytes, bquota, blimit, bgrace,  files, iquota, ilimit, igrace
+     /mnt/lustre,   4360,      0,      0,      -,    265,      0,      0,      -
+Disk quotas for grp root (gid 0):
+      Filesystem, kbytes, bquota, blimit, bgrace,  files, iquota, ilimit, igrace
+     /mnt/lustre,   4360,      0,      0,      -,    265,      0,      0,      -
+.EE
 .SH SEE ALSO
 .BR lfs (1),
 .BR lfs-setquota(1)

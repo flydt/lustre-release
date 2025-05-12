@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -91,6 +73,7 @@ void ptlrpc_set_mbits(struct ptlrpc_request *req);
 void ptlrpc_assign_next_xid_nolock(struct ptlrpc_request *req);
 __u64 ptlrpc_known_replied_xid(struct obd_import *imp);
 void ptlrpc_add_unreplied(struct ptlrpc_request *req);
+void ptlrpc_reqset_free(struct kref *kerf);
 
 /* events.c */
 int ptlrpc_init_portals(void);
@@ -113,17 +96,12 @@ int ptlrpc_sysfs_register_service(struct kset *parent,
 void ptlrpc_sysfs_unregister_service(struct ptlrpc_service *svc);
 
 void ptlrpc_ldebugfs_register_service(struct dentry *debugfs_entry,
+				      char *param,
 				      struct ptlrpc_service *svc);
-#ifdef CONFIG_PROC_FS
 void ptlrpc_lprocfs_unregister_service(struct ptlrpc_service *svc);
 void ptlrpc_lprocfs_rpc_sent(struct ptlrpc_request *req, long amount);
 void ptlrpc_lprocfs_do_request_stat (struct ptlrpc_request *req,
                                      long q_usec, long work_usec);
-#else
-#define ptlrpc_lprocfs_unregister_service(params...) do{}while(0)
-#define ptlrpc_lprocfs_rpc_sent(params...) do{}while(0)
-#define ptlrpc_lprocfs_do_request_stat(params...) do{}while(0)
-#endif /* CONFIG_PROC_FS */
 
 /* NRS */
 
@@ -279,7 +257,6 @@ int ptlrpc_stop_pinger(void);
 void ptlrpc_pinger_sending_on_import(struct obd_import *imp);
 void ptlrpc_pinger_commit_expected(struct obd_import *imp);
 void ptlrpc_pinger_wake_up(void);
-void ptlrpc_ping_import_soon(struct obd_import *imp);
 int ping_evictor_wake(struct obd_export *exp);
 
 /* sec_null.c */
@@ -289,6 +266,10 @@ void sptlrpc_null_fini(void);
 /* sec_plain.c */
 int  sptlrpc_plain_init(void);
 void sptlrpc_plain_fini(void);
+
+/* lproc_ptlrpc.c */
+int  ptlrpc_lproc_init(void);
+void ptlrpc_lproc_fini(void);
 
 /* sec_lproc.c */
 int  sptlrpc_lproc_init(void);
@@ -327,12 +308,6 @@ void tgt_mod_exit(void);
 int nodemap_mod_init(void);
 void nodemap_mod_exit(void);
 #endif /* HAVE_SERVER_SUPPORT */
-
-static inline void ptlrpc_reqset_put(struct ptlrpc_request_set *set)
-{
-	if (atomic_dec_and_test(&set->set_refcount))
-		OBD_FREE_PTR(set);
-}
 
 /** initialise ptlrpc common fields */
 static inline void ptlrpc_req_comm_init(struct ptlrpc_request *req)

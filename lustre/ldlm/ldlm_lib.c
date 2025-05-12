@@ -60,9 +60,10 @@ static int import_set_conn(struct obd_import *imp, struct obd_uuid *uuid,
 		       libcfs_net2str(refnet));
 
 	ptlrpc_conn = ptlrpc_uuid_to_connection(uuid, refnet);
-	if (!ptlrpc_conn) {
-		CDEBUG(D_HA, "can't find connection %s\n", uuid->uuid);
-		RETURN(-ENOENT);
+	if (IS_ERR(ptlrpc_conn)) {
+		CDEBUG(D_HA, "can't find connection %s: rc=%ld\n",
+		       uuid->uuid, PTR_ERR(ptlrpc_conn));
+		RETURN(PTR_ERR(ptlrpc_conn));
 	}
 
 	if (create) {
@@ -132,7 +133,7 @@ int client_import_dyn_add_conn(struct obd_import *imp, struct obd_uuid *uuid,
 	int rc;
 
 	ptlrpc_conn = ptlrpc_uuid_to_connection(uuid, LNET_NID_NET(prim_nid));
-	if (!ptlrpc_conn) {
+	if (IS_ERR(ptlrpc_conn)) {
 		const char *str_uuid = obd_uuid2str(uuid);
 
 		rc = class_add_uuid(str_uuid, prim_nid);
@@ -566,7 +567,7 @@ err:
 }
 EXPORT_SYMBOL(client_obd_setup);
 
-int client_obd_cleanup(struct obd_device *obd)
+void client_obd_cleanup(struct obd_device *obd)
 {
 	struct client_obd *cli = &obd->u.cli;
 
@@ -584,7 +585,7 @@ int client_obd_cleanup(struct obd_device *obd)
 		 BITS_TO_LONGS(OBD_MAX_RIF_MAX) * sizeof(long));
 	cli->cl_mod_tag_bitmap = NULL;
 
-	RETURN(0);
+	EXIT;
 }
 EXPORT_SYMBOL(client_obd_cleanup);
 
@@ -849,8 +850,9 @@ static int target_handle_reconnect(struct lustre_handle *conn,
 	int rc = 0;
 
 	ENTRY;
-	hdl = &exp->exp_imp_reverse->imp_remote_handle;
-	if (!exp->exp_connection || !lustre_handle_is_used(hdl)) {
+
+	if (!exp->exp_connection ||
+	    !lustre_handle_is_used(&exp->exp_imp_reverse->imp_remote_handle)) {
 		conn->cookie = exp->exp_handle.h_cookie;
 		CDEBUG(D_HA,
 		       "connect export for UUID '%s' at %p, cookie %#llx\n",
@@ -859,6 +861,7 @@ static int target_handle_reconnect(struct lustre_handle *conn,
 	}
 
 	target = exp->exp_obd;
+	hdl = &exp->exp_imp_reverse->imp_remote_handle;
 
 	/* Might be a re-connect after a partition. */
 	if (memcmp(&conn->cookie, &hdl->cookie, sizeof(conn->cookie))) {
@@ -977,6 +980,7 @@ int rev_import_init(struct obd_export *export)
 {
 	struct obd_device *obd = export->exp_obd;
 	struct obd_import *revimp;
+	int rc = 0;
 
 	LASSERT(export->exp_imp_reverse == NULL);
 
@@ -994,7 +998,22 @@ int rev_import_init(struct obd_export *export)
 	spin_unlock(&export->exp_lock);
 	class_import_put(revimp);
 
-	return 0;
+	if (export->exp_timed) {
+		void *data;
+
+		rc = obd_export_timed_init(export, &data);
+		if (rc == 0) {
+			spin_lock(&obd->obd_dev_lock);
+			/* At the beginning, there is no AT stats yet, use
+			 * previous approach for the ping evictor timeout */
+			export->exp_deadline =
+				PING_EVICT_TIMEOUT + ktime_get_real_seconds();
+			obd_export_timed_add(export, &data);
+			spin_unlock(&obd->obd_dev_lock);
+			obd_export_timed_fini(export, &data);
+		}
+	}
+	return rc;
 }
 EXPORT_SYMBOL(rev_import_init);
 
@@ -1430,8 +1449,16 @@ dont_check_exports:
 		rc = obd_reconnect(req->rq_svc_thread->t_env,
 				   export, target, &cluuid, data,
 				   &req->rq_peer.nid);
-		if (rc == 0)
+		if (rc == 0) {
 			reconnected = true;
+			/*
+			 * In case of recovery,
+			 * tgt_clients_data_init() created the export,
+			 * exp_imp_reverse is still needed.
+			 */
+			if (export->exp_imp_reverse == NULL)
+				rc = rev_import_init(export);
+		}
 	}
 	if (rc)
 		GOTO(out, rc);
@@ -1479,6 +1506,10 @@ dont_check_exports:
 			 * for each connect called disconnect
 			 * should be called to cleanup stuff
 			 */
+			spin_lock(&target->obd_dev_lock);
+			obd_export_timed_del(export);
+			spin_unlock(&target->obd_dev_lock);
+
 			class_export_get(export);
 			obd_disconnect(export);
 		}
@@ -2409,29 +2440,8 @@ static void handle_recovery_req(struct ptlrpc_thread *thread,
 		 * Add request @timeout to the recovery time so next request from
 		 * this client may come in recovery time
 		 */
-		if (!obd_at_off(obd)) {
-			struct ptlrpc_service_part *svcpt;
-			timeout_t est_timeout;
-
-			svcpt = req->rq_rqbd->rqbd_svcpt;
-			/*
-			 * If the server sent early reply for this request,
-			 * the client will recalculate the timeout according to
-			 * current server estimate service time, so we will
-			 * use the maxium timeout here for waiting the client
-			 * sending the next req
-			 */
-			est_timeout = obd_at_get(obd, &svcpt->scp_at_estimate);
-			timeout = max_t(timeout_t, at_est2timeout(est_timeout),
-					lustre_msg_get_timeout(req->rq_reqmsg));
-			/*
-			 * Add 2 net_latency, one for balance rq_deadline
-			 * (see ptl_send_rpc), one for resend the req to server,
-			 * Note: client will pack net_latency in replay req
-			 * (see ptlrpc_replay_req)
-			 */
-			timeout += 2 * lustre_msg_get_service_timeout(req->rq_reqmsg);
-		}
+		if (!obd_at_off(obd))
+			timeout = ptlrpc_export_prolong_timeout(req, true);
 		extend_recovery_timer(class_exp2obd(req->rq_export), timeout,
 				      true);
 	}
@@ -2822,7 +2832,7 @@ static int target_recovery_thread(void *arg)
 		 * so we need refresh the last_request_time, to avoid the
 		 * export is being evicted
 		 */
-		ptlrpc_update_export_timer(req->rq_export, 0);
+		ptlrpc_update_export_timer(req);
 	}
 
 	/*
@@ -3348,7 +3358,7 @@ void target_send_reply(struct ptlrpc_request *req, int rc, int fail_id)
 		 */
 		rs->rs_sent = 1;
 		rs->rs_unlinked = 1;
-		ptlrpc_rs_addref(rs);
+		kref_get(&rs->rs_refcount);
 	}
 
 	spin_lock(&rs->rs_lock);
@@ -3421,41 +3431,6 @@ int ldlm_error2errno(enum ldlm_error error)
 	return result;
 }
 EXPORT_SYMBOL(ldlm_error2errno);
-
-/**
- * Dual to ldlm_error2errno(): maps errno values back to enum ldlm_error.
- */
-enum ldlm_error ldlm_errno2error(int err_no)
-{
-	int error;
-
-	switch (err_no) {
-	case 0:
-		error = ELDLM_OK;
-		break;
-	case -ESTALE:
-		error = ELDLM_LOCK_CHANGED;
-		break;
-	case -ENAVAIL:
-		error = ELDLM_LOCK_ABORTED;
-		break;
-	case -ESRCH:
-		error = ELDLM_LOCK_REPLACED;
-		break;
-	case -ENOENT:
-		error = ELDLM_NO_LOCK_DATA;
-		break;
-	case -EEXIST:
-		error = ELDLM_NAMESPACE_EXISTS;
-		break;
-	case -EBADF:
-		error = ELDLM_BAD_NAMESPACE;
-		break;
-	default:
-		error = err_no;
-	}
-	return error;
-}
 
 #if LUSTRE_TRACKS_LOCK_EXP_REFS
 void ldlm_dump_export_locks(struct obd_export *exp)

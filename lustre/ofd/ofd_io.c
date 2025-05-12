@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/ofd/ofd_io.c
  *
  * This file provides functions to handle IO requests from clients and
  * also LFSCK routines to check parent file identifier (PFID) consistency.
@@ -407,7 +387,7 @@ int ofd_verify_ff(const struct lu_env *env, struct ofd_object *fo,
 	if (fo->ofo_pfid_checking)
 		RETURN(-EINPROGRESS);
 
-	rc = ofd_object_ff_load(env, fo);
+	rc = ofd_object_ff_load(env, fo, false);
 	if (rc == -ENODATA)
 		RETURN(0);
 
@@ -440,12 +420,15 @@ int ofd_verify_layout_version(const struct lu_env *env,
 			      struct ofd_object *fo, const struct obdo *oa)
 {
 	int rc;
+	bool force = false;
+
 	ENTRY;
 
 	if (unlikely(CFS_FAIL_CHECK(OBD_FAIL_OST_SKIP_LV_CHECK)))
 		GOTO(out, rc = 0);
 
-	rc = ofd_object_ff_load(env, fo);
+again:
+	rc = ofd_object_ff_load(env, fo, force);
 	if (rc < 0) {
 		if (rc == -ENODATA)
 			rc = 0;
@@ -457,14 +440,24 @@ int ofd_verify_layout_version(const struct lu_env *env,
 	 * that on the disk.
 	 */
 	if (ofd_layout_version_less(oa->o_layout_version,
-				    fo->ofo_ff.ff_layout_version))
+				    fo->ofo_ff.ff_layout_version)) {
+		/* the object's filter_fid could be changed via
+		 * out_xattr_set(),  and the ofd_object::ofo_ff is out of date.
+		 */
+		if (!force) {
+			force = true;
+			GOTO(again, rc);
+		}
 		GOTO(out, rc = -ESTALE);
+	}
 
 out:
-	CDEBUG(D_INODE, DFID " verify layout version: %u vs. %u/%u: rc = %d\n",
+	CDEBUG(D_INODE,
+	       "%s:"DFID" verify layout version: %#x/%#x -> %#x, rc: %d\n",
+	       ofd_name(ofd_obj2dev(fo)),
 	       PFID(lu_object_fid(&fo->ofo_obj.do_lu)),
-	       oa->o_layout_version, fo->ofo_ff.ff_layout_version,
-	       fo->ofo_ff.ff_range, rc);
+	       fo->ofo_ff.ff_layout_version, fo->ofo_ff.ff_range,
+	       oa->o_layout_version, rc);
 	RETURN(rc);
 
 }
@@ -1081,8 +1074,6 @@ ofd_write_attr_set(const struct lu_env *env, struct ofd_device *ofd,
 	    (OBD_MD_FLFID | OBD_MD_FLOSTLAYOUT | OBD_MD_LAYOUT_VERSION)))
 		/* no attributes to set */
 		GOTO(out_unlock, rc = 0);
-
-
 
 	/* set uid/gid/projid */
 	if (la->la_valid) {

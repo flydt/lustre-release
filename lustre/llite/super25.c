@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2016, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -111,11 +93,21 @@ const struct super_operations lustre_super_operations = {
 };
 
 /**
+ * lustre_fill_super() - set up the superblock with lustre info
+ *
+ * @sb: setup superblock struct with lustre info
+ * @lmd2_data: data Mount options provided during mount
+ * (e.g. -o flock,abort_recov)
+ * @silent:
+ *
  * This is the entry point for the mount call into Lustre.
  * This is called when a client is mounted, and this is
  * where we start setting things up.
  *
- * @lmd2data data Mount options (e.g. -o flock,abort_recov)
+ * Returns:
+ * * %0  Success
+ * * <0 Error
+ *
  */
 static int lustre_fill_super(struct super_block *sb, void *lmd2_data,
 			     int silent)
@@ -212,8 +204,7 @@ static void lustre_kill_super(struct super_block *sb)
 	kill_anon_super(sb);
 }
 
-/** Register the "lustre" fs type
- */
+/* Register the "lustre" fs type */
 static struct file_system_type lustre_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "lustre",

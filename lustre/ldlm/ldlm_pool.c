@@ -803,10 +803,10 @@ static int ldlm_pool_debugfs_init(struct ldlm_pool *pl)
 	struct ldlm_namespace *ns = ldlm_pl2ns(pl);
 	struct dentry *debugfs_ns_parent;
 	struct ldebugfs_vars pool_vars[2];
+	char param[MAX_OBD_NAME * 4];
 	int rc = 0;
 
 	ENTRY;
-
 	debugfs_ns_parent = ns->ns_debugfs_entry;
 	if (IS_ERR_OR_NULL(debugfs_ns_parent)) {
 		CERROR("%s: debugfs entry is not initialized\n",
@@ -820,10 +820,11 @@ static int ldlm_pool_debugfs_init(struct ldlm_pool *pl)
 	ldlm_add_var(&pool_vars[0], pl->pl_debugfs_entry, "state", pl,
 		     &lprocfs_pool_state_fops);
 
+	scnprintf(param, sizeof(param), "ldlm.namespaces.%s.pool.stats",
+		  ldlm_ns_name(ns));
 	pl->pl_stats = ldebugfs_stats_alloc(LDLM_POOL_LAST_STAT -
-					    LDLM_POOL_FIRST_STAT, "stats",
-					    pl->pl_debugfs_entry,
-					    &pl->pl_kobj, 0);
+					    LDLM_POOL_FIRST_STAT, param,
+					    pl->pl_debugfs_entry, 0);
 	if (!pl->pl_stats)
 		GOTO(out, rc = -ENOMEM);
 
@@ -1009,33 +1010,6 @@ __u64 ldlm_pool_get_slv(struct ldlm_pool *pl)
 
 	spin_lock(&pl->pl_lock);
 	slv = pl->pl_server_lock_volume;
-	spin_unlock(&pl->pl_lock);
-	return slv;
-}
-
-/**
- * Sets passed \a slv to \a pl.
- *
- * \pre ->pl_lock is not locked.
- */
-void ldlm_pool_set_slv(struct ldlm_pool *pl, __u64 slv)
-{
-	spin_lock(&pl->pl_lock);
-	pl->pl_server_lock_volume = slv;
-	spin_unlock(&pl->pl_lock);
-}
-
-/**
- * Returns current \a pl CLV.
- *
- * \pre ->pl_lock is not locked.
- */
-__u64 ldlm_pool_get_clv(struct ldlm_pool *pl)
-{
-	__u64 slv;
-
-	spin_lock(&pl->pl_lock);
-	slv = pl->pl_client_lock_volume;
 	spin_unlock(&pl->pl_lock);
 	return slv;
 }
@@ -1314,7 +1288,7 @@ static time64_t ldlm_pools_recalc_delay(enum ldlm_side side)
 		 * skip ns which is being freed, and we don't want to increase
 		 * its refcount again, not even temporarily. bz21519 & LU-499.
 		 */
-		if (ns->ns_stopping) {
+		if (test_bit(LDLM_NS_STOPPING, ns->ns_flags)) {
 			skip = 1;
 		} else {
 			skip = 0;
@@ -1513,15 +1487,6 @@ void ldlm_pool_del(struct ldlm_pool *pl, struct ldlm_lock *lock)
 }
 
 __u64 ldlm_pool_get_slv(struct ldlm_pool *pl)
-{
-	return 1;
-}
-
-void ldlm_pool_set_slv(struct ldlm_pool *pl, __u64 slv)
-{
-}
-
-__u64 ldlm_pool_get_clv(struct ldlm_pool *pl)
 {
 	return 1;
 }

@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2010, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/obdecho/echo.c
  *
  * Author: Peter Braam <braam@clusterfs.com>
  * Author: Andreas Dilger <adilger@clusterfs.com>
@@ -460,13 +440,6 @@ commitrw_cleanup:
 	return rc;
 }
 
-LPROC_SEQ_FOPS_RO_TYPE(echo, uuid);
-static struct lprocfs_vars lprocfs_echo_obd_vars[] = {
-	{ .name =       "uuid",
-	  .fops =       &echo_uuid_fops         },
-	{ NULL }
-};
-
 const struct obd_ops echo_obd_ops = {
 	.o_owner           = THIS_MODULE,
 	.o_connect         = echo_connect,
@@ -776,7 +749,6 @@ static int echo_srv_init0(const struct lu_env *env,
 		RETURN(rc);
 	}
 
-	obd->obd_vars = lprocfs_echo_obd_vars;
 	if (!lprocfs_obd_setup(obd, true) &&
 	    ldebugfs_alloc_obd_stats(obd, LPROC_ECHO_LAST) == 0) {
 		lprocfs_counter_init(obd->obd_stats, LPROC_ECHO_READ_BYTES,

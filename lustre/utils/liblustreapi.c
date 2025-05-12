@@ -490,37 +490,22 @@ int llapi_chomp_string(char *buf)
 }
 
 /*
- * Wrapper to grab parameter settings for lov.*-clilov-*.* values
+ * Wrapper to grab parameter settings for {lov,lmv}.*-clilov-*.* values
  */
-static int get_param_lov(const char *path, const char *param,
-			 char *buf, size_t buf_size)
+static int get_param_tgt(const char *path, enum tgt_type type,
+			 const char *param, char *buf, size_t buf_size)
 {
+	const char *typestr = type == LOV_TYPE ? "lov" : "lmv";
 	struct obd_uuid uuid;
 	int rc;
 
-	rc = llapi_file_get_lov_uuid(path, &uuid);
+	rc = llapi_file_get_type_uuid(path, type, &uuid);
 	if (rc != 0)
 		return rc;
 
-	return get_lustre_param_value("lov", uuid.uuid, FILTER_BY_EXACT, param,
-				      buf, buf_size);
-}
-
-/*
- * Wrapper to grab parameter settings for lmv.*-clilov-*.* values
- */
-static int get_param_lmv(const char *path, const char *param,
-			 char *buf, size_t buf_size)
-{
-	struct obd_uuid uuid;
-	int rc;
-
-	rc = llapi_file_get_lmv_uuid(path, &uuid);
-	if (rc != 0)
-		return rc;
-
-	return get_lustre_param_value("lmv", uuid.uuid, FILTER_BY_EXACT, param,
-			       buf, buf_size);
+	rc = get_lustre_param_value(typestr, uuid.uuid, FILTER_BY_EXACT, param,
+				    buf, buf_size);
+	return rc;
 }
 
 static int get_mds_md_size(const char *path)
@@ -544,7 +529,7 @@ static int get_mds_md_size(const char *path)
 
 int llapi_get_agent_uuid(char *path, char *buf, size_t bufsize)
 {
-	return get_param_lmv(path, "uuid", buf, bufsize);
+	return get_param_tgt(path, LMV_TYPE, "uuid", buf, bufsize);
 }
 
 /**
@@ -1963,7 +1948,7 @@ retry_getfileinfo:
  */
 int llapi_get_lmm_from_path(const char *path, struct lov_user_md_v1 **lmmbuf)
 {
-	size_t lmmlen;
+	ssize_t lmmlen;
 	int p = -1;
 	int rc = 0;
 
@@ -1972,14 +1957,23 @@ int llapi_get_lmm_from_path(const char *path, struct lov_user_md_v1 **lmmbuf)
 		return -EINVAL;
 
 	p = open_parent(path);
-
-	*lmmbuf = calloc(1, lmmlen);
-	if (*lmmbuf == NULL)
+	if (p < 0)
 		return -errno;
 
+	*lmmbuf = calloc(1, lmmlen);
+	if (*lmmbuf == NULL) {
+		rc = -errno;
+		goto out_close;
+	}
+
 	rc = get_lmd_info_fd(path, p, 0, *lmmbuf, lmmlen, GET_LMD_STRIPE);
-	if (p != -1)
-		close(p);
+	if (rc < 0) {
+		free(*lmmbuf);
+		*lmmbuf = NULL;
+	}
+out_close:
+	close(p);
+
 	return rc;
 }
 
@@ -2259,10 +2253,52 @@ int llapi_file_get_lmv_uuid(const char *path, struct obd_uuid *lov_uuid)
 	return rc;
 }
 
-enum tgt_type {
-	LOV_TYPE = 1,
-	LMV_TYPE
-};
+int llapi_file_fget_type_uuid(int fd, enum tgt_type type, struct obd_uuid *uuid)
+{
+	unsigned int cmd = 0;
+	int rc;
+
+	if (type == LOV_TYPE)
+		cmd = OBD_IOC_GETDTNAME;
+	else if (type == LMV_TYPE)
+		cmd = OBD_IOC_GETMDNAME;
+	else if (type == CLI_TYPE)
+		cmd = OBD_IOC_GETUUID;
+
+	rc = llapi_ioctl(fd, cmd, uuid);
+	if (rc) {
+		rc = -errno;
+		llapi_error(LLAPI_MSG_ERROR, rc, "cannot get uuid");
+	}
+
+	return rc;
+}
+
+int llapi_file_get_type_uuid(const char *path, enum tgt_type type,
+			struct obd_uuid *uuid)
+{
+	int fd, rc;
+
+	/* do not follow faked symlinks */
+	fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW);
+	if (fd < 0) {
+		/* real symlink should have failed with ELOOP so retry without
+		 * O_NOFOLLOW just in case
+		 */
+		fd = open(path, O_RDONLY | O_NONBLOCK);
+		if (fd < 0) {
+			rc = -errno;
+			llapi_error(LLAPI_MSG_ERROR, rc, "cannot open '%s'",
+				    path);
+			return rc;
+		}
+	}
+
+	rc = llapi_file_fget_type_uuid(fd, type, uuid);
+
+	close(fd);
+	return rc;
+}
 
 /*
  * If uuidp is NULL, return the number of available obd uuids.
@@ -2280,10 +2316,7 @@ static int llapi_get_target_uuids(int fd, struct obd_uuid *uuidp, int *indices,
 	FILE *fp;
 
 	/* Get the lov name */
-	if (type == LOV_TYPE)
-		rc = llapi_file_fget_lov_uuid(fd, &name);
-	else
-		rc = llapi_file_fget_lmv_uuid(fd, &name);
+	rc = llapi_file_fget_type_uuid(fd, type, &name);
 	if (rc != 0)
 		return rc;
 
@@ -2391,15 +2424,13 @@ static int setup_obd_uuid(int fd, char *dname, struct find_param *param)
 	char format[32];
 	int rc = 0;
 	FILE *fp;
+	enum tgt_type type = param->fp_get_lmv ? LMV_TYPE : LOV_TYPE;
 
 	if (param->fp_got_uuids)
 		return rc;
 
 	/* Get the lov/lmv name */
-	if (param->fp_get_lmv)
-		rc = llapi_file_fget_lmv_uuid(fd, &obd_uuid);
-	else
-		rc = llapi_file_fget_lov_uuid(fd, &obd_uuid);
+	rc = llapi_file_fget_type_uuid(fd, type, &obd_uuid);
 	if (rc) {
 		if (rc != -ENOTTY) {
 			llapi_error(LLAPI_MSG_ERROR, rc,
@@ -2476,17 +2507,14 @@ static int setup_indexes(int d, char *path, struct obd_uuid *obduuids,
 			 int num_obds, int **obdindexes, int *obdindex,
 			 enum tgt_type type)
 {
-	int ret, obdcount, maxidx, obd_valid = 0, obdnum;
+	int ret, obdcount, obd_valid = 0, obdnum;
 	int *indices = NULL;
 	struct obd_uuid *uuids = NULL;
 	int *indexes;
 	char buf[16];
 	long i;
 
-	if (type == LOV_TYPE)
-		ret = get_param_lov(path, "numobd", buf, sizeof(buf));
-	else
-		ret = get_param_lmv(path, "numobd", buf, sizeof(buf));
+	ret = get_param_tgt(path, type, "numobd", buf, sizeof(buf));
 	if (ret != 0)
 		return ret;
 
@@ -2499,7 +2527,6 @@ static int setup_indexes(int d, char *path, struct obd_uuid *obduuids,
 		ret = -ENOMEM;
 		goto out_uuids;
 	}
-	maxidx = obdcount;
 
 retry_get_uuids:
 	ret = llapi_get_target_uuids(d, uuids, indices, &obdcount, type);
@@ -2532,14 +2559,16 @@ retry_get_uuids:
 	}
 
 	for (obdnum = 0; obdnum < num_obds; obdnum++) {
+		int maxidx = LOV_V1_INSANE_STRIPE_COUNT;
 		char *end = NULL;
 
 		/* The user may have specified a simple index */
 		i = strtol(obduuids[obdnum].uuid, &end, 0);
-		if (end && *end == '\0' && i < maxidx) {
+		if (end && *end == '\0' && i < LOV_V1_INSANE_STRIPE_COUNT) {
 			indexes[obdnum] = i;
 			obd_valid++;
 		} else {
+			maxidx = obdcount;
 			for (i = 0; i < obdcount; i++) {
 				if (llapi_uuid_match(uuids[i].uuid,
 						     obduuids[obdnum].uuid)) {
@@ -5498,6 +5527,56 @@ static int snprintf_access_mode(char *buffer, size_t size, __u16 mode)
 	return snprintf(buffer, size, "%s", access_string);
 }
 
+static int parse_format_width(char **seq, size_t buf_size, int *width,
+			      char *padding)
+{
+	bool negative_width = false;
+	char *end = NULL;
+	int parsed = 0;
+
+	*padding = ' ';
+	*width = 0;
+
+	/* GNU find supports formats such as "%----10s" */
+	while (**seq == '-') {
+		(*seq)++;
+		parsed++;
+		negative_width = true;
+	}
+
+	/* GNU find and printf only do 0 padding on the left (width > 0)
+	 * %-010m <=> %-10m.
+	 */
+	if (**seq == '0' && !negative_width)
+		*padding = '0';
+
+	errno = 0;
+	*width = strtol(*seq, &end, 10);
+	if (errno != 0)
+		return -errno;
+	if (*width >= buf_size)
+		*width = buf_size - 1;
+
+	/* increase the number of processed characters */
+	parsed += end - *seq;
+	*seq = end;
+	if (negative_width)
+		*width = -*width;
+
+	/* GNU find only does 0 padding for %S, %d and %m. */
+	switch (**seq) {
+	case 'S':
+	case 'd':
+	case 'm':
+		break;
+	default:
+		*padding = ' ';
+		break;
+	}
+
+	return parsed;
+}
+
 /*
  * Interpret format specifiers beginning with '%'.
  *
@@ -5518,11 +5597,18 @@ static int printf_format_directive(char *seq, char *buffer, size_t size,
 				   int *wrote, struct find_param *param,
 				   char *path, __u32 projid, int d)
 {
-	__u16 mode = param->fp_lmd->lmd_stx.stx_mode;
 	uint64_t blocks = param->fp_lmd->lmd_stx.stx_blocks;
+	__u16 mode = param->fp_lmd->lmd_stx.stx_mode;
+	char padding;
+	int width_rc;
 	int rc = 1;  /* most specifiers are single character */
+	int width;
 
 	*wrote = 0;
+
+	width_rc = parse_format_width(&seq, size, &width, &padding);
+	if (width_rc < 0)
+		return 0;
 
 	switch (*seq) {
 	case 'a': case 'A':
@@ -5556,7 +5642,7 @@ static int printf_format_directive(char *seq, char *buffer, size_t size,
 	}
 	case 'G':	/* GID of owner */
 		*wrote = snprintf(buffer, size, "%u",
-				   param->fp_lmd->lmd_stx.stx_gid);
+				  param->fp_lmd->lmd_stx.stx_gid);
 		break;
 	case 'i':	/* inode number */
 		*wrote = snprintf(buffer, size, "%llu",
@@ -5570,7 +5656,7 @@ static int printf_format_directive(char *seq, char *buffer, size_t size,
 					  path, projid, d);
 		break;
 	case 'm':	/* file mode in octal */
-		*wrote = snprintf(buffer, size, "%#o", (mode & (~S_IFMT)));
+		*wrote = snprintf(buffer, size, "%o", (mode & (~S_IFMT)));
 		break;
 	case 'M':	/* file access mode */
 		*wrote = snprintf_access_mode(buffer, size, mode);
@@ -5638,11 +5724,31 @@ static int printf_format_directive(char *seq, char *buffer, size_t size,
 		break;
 	}
 
+	if (rc == 0)
+		/* if parsing failed, return 0 to avoid skipping width_rc */
+		return 0;
+
+	if (width > 0 && width > *wrote) {
+		/* left padding */
+		int shift = width - *wrote;
+
+		/* '\0' is added by caller if necessary */
+		memmove(buffer + shift, buffer, *wrote);
+		memset(buffer, padding, shift);
+		*wrote += shift;
+	} else if (width < 0 && -width > *wrote) {
+		/* right padding */
+		int shift = -width - *wrote;
+
+		memset(buffer + *wrote, padding, shift);
+		*wrote += shift;
+	}
+
 	if (*wrote >= size)
 		/* output of snprintf was truncated */
 		*wrote = size - 1;
 
-	return rc;
+	return width_rc + rc;
 }
 
 /*
@@ -5678,9 +5784,10 @@ static void printf_format_string(struct find_param *param, char *path,
 			rc = printf_format_directive(fmt_char + 1, buff,
 						  buff_size, &written, param,
 						  path, projid, d);
-		} else if (*fmt_char == '\\')
+		} else if (*fmt_char == '\\') {
 			rc = printf_format_escape(fmt_char + 1, buff,
 						  buff_size, &written);
+		}
 
 		if (rc > 0) {
 			/* Either a '\' escape or '%' format was processed.
@@ -5689,6 +5796,8 @@ static void printf_format_string(struct find_param *param, char *path,
 			fmt_char += (rc + 1);
 			buff += written;
 			buff_size -= written;
+		} else if (rc < 0) {
+			return;
 		} else {
 			/* Regular char or invalid escape/format.
 			 * Either way, copy current character.
@@ -6616,7 +6725,19 @@ static int validate_printf_fmt(char *c)
 		return 0;
 	}
 
+	/* GNU find supports formats such as "%----10s" */
+	while (curr == '-')
+		curr = *(++c);
+
+	if (isdigit(curr)) {
+		/* skip width format specifier */
+		while (isdigit(*c))
+			c++;
+	}
+
+	curr = *c;
 	next = *(c + 1);
+
 	if ((next == '\0') || (next == '%') || (next == '\\'))
 		/* Treat as single char format directive */
 		goto check_single;

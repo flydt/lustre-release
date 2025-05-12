@@ -1,35 +1,17 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
+ *
+ * Implementation of client-side PortalRPC interfaces
  */
-
-/** Implementation of client-side PortalRPC interfaces */
 
 #define DEBUG_SUBSYSTEM S_RPC
 
@@ -139,7 +121,7 @@ struct ptlrpc_connection *ptlrpc_uuid_to_connection(struct obd_uuid *uuid,
 	err = ptlrpc_uuid_to_peer(uuid, &peer, &self, refnet);
 	if (err != 0) {
 		CNETERR("cannot find peer %s!\n", uuid->uuid);
-		return NULL;
+		return ERR_PTR(err);
 	}
 
 	c = ptlrpc_connection_get(&peer, &self, uuid);
@@ -150,7 +132,7 @@ struct ptlrpc_connection *ptlrpc_uuid_to_connection(struct obd_uuid *uuid,
 
 	CDEBUG(D_INFO, "%s -> %p\n", uuid->uuid, c);
 
-	return c;
+	return c ? c : ERR_PTR(-ENOENT);
 }
 
 /**
@@ -1095,7 +1077,7 @@ struct ptlrpc_request_set *ptlrpc_prep_set(void)
 	OBD_CPT_ALLOC(set, cfs_cpt_tab, cpt, sizeof(*set));
 	if (!set)
 		RETURN(NULL);
-	atomic_set(&set->set_refcount, 1);
+	kref_init(&set->set_refcount);
 	INIT_LIST_HEAD(&set->set_requests);
 	init_waitqueue_head(&set->set_waitq);
 	atomic_set(&set->set_new_count, 0);
@@ -1186,7 +1168,7 @@ void ptlrpc_set_destroy(struct ptlrpc_request_set *set)
 
 	LASSERT(atomic_read(&set->set_remaining) == 0);
 
-	ptlrpc_reqset_put(set);
+	kref_put(&set->set_refcount, ptlrpc_reqset_free);
 	EXIT;
 }
 EXPORT_SYMBOL(ptlrpc_set_destroy);
@@ -3056,12 +3038,6 @@ out:
 	EXIT;
 }
 
-void ptlrpc_cleanup_client(struct obd_import *imp)
-{
-	ENTRY;
-	EXIT;
-}
-
 /**
  * Schedule previously sent request for resend.
  * For bulk requests we assign new xid (to avoid problems with
@@ -3745,3 +3721,18 @@ int ptlrpcd_queue_work(void *handler)
 	return 0;
 }
 EXPORT_SYMBOL(ptlrpcd_queue_work);
+
+/**
+ * ptlrpc_reqset_free() - Release memory allocated for ptlrpc_request_set
+ * @kref: kref when dropped below 1
+ *
+ * Used as a kref release callback, when the last user of ptlrpc_request_set
+ * is released.
+ */
+void ptlrpc_reqset_free(struct kref *kref)
+{
+	struct ptlrpc_request_set *set = container_of(kref,
+						      struct ptlrpc_request_set,
+						      set_refcount);
+	OBD_FREE_PTR(set);
+}

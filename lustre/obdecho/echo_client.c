@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -1840,6 +1822,9 @@ static void echo_ucred_init(struct lu_env *env)
 	ucred->uc_rbac_chlg_ops = 1;
 	ucred->uc_rbac_fscrypt_admin = 1;
 	ucred->uc_rbac_server_upcall = 1;
+	ucred->uc_rbac_ignore_root_prjquota = 1;
+	ucred->uc_rbac_hsm_ops = 1;
+	ucred->uc_rbac_local_admin = 1;
 }
 
 static void echo_ucred_fini(struct lu_env *env)
@@ -2295,7 +2280,9 @@ echo_client_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 	if (IS_ERR(env))
 		RETURN(PTR_ERR(env));
 
-	lu_env_add(env);
+	rc = lu_env_add(env);
+	if (rc)
+		GOTO(out_put, rc);
 
 #ifdef HAVE_SERVER_SUPPORT
 	if (cmd == OBD_IOC_ECHO_MD || cmd == OBD_IOC_ECHO_ALLOC_SEQ)
@@ -2425,6 +2412,7 @@ echo_client_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 	EXIT;
 out:
 	lu_env_remove(env);
+out_put:
 	cl_env_put(env, &refcheck);
 
 	return rc;
@@ -2490,13 +2478,6 @@ static int echo_client_setup(const struct lu_env *env,
 	ocd->ocd_group = FID_SEQ_ECHO;
 
 	rc = obd_connect(env, &ec->ec_exp, tgt, &echo_uuid, ocd, NULL);
-	if (rc == 0) {
-		/* Turn off pinger because it connects to tgt obd directly. */
-		spin_lock(&tgt->obd_dev_lock);
-		list_del_init(&ec->ec_exp->exp_obd_chain_timed);
-		spin_unlock(&tgt->obd_dev_lock);
-	}
-
 	OBD_FREE(ocd, sizeof(*ocd));
 
 	if (rc != 0) {
@@ -2599,7 +2580,7 @@ static int __init obdecho_init(void)
 	if (rc != 0)
 		goto failed_0;
 
-	rc = class_register_type(&echo_obd_ops, NULL, true,
+	rc = class_register_type(&echo_obd_ops, NULL, false,
 				 LUSTRE_ECHO_NAME, &echo_srv_type);
 	if (rc != 0)
 		goto failed_1;

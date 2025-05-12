@@ -82,7 +82,7 @@ static inline int osc_lock_invariant(struct osc_lock *ols)
 	 * ast.
 	 */
 	if (! ergo(olock != NULL && ols->ols_state < OLS_CANCELLED,
-		   !ldlm_is_destroyed(olock)))
+		   !(olock->l_flags & LDLM_FL_DESTROYED)))
 		return 0;
 
 	if (! ergo(ols->ols_state == OLS_GRANTED,
@@ -135,7 +135,8 @@ void osc_lock_lvb_update(const struct lu_env *env,
 	struct cl_object *obj = osc2cl(osc);
 	struct lov_oinfo *oinfo = osc->oo_oinfo;
 	struct cl_attr *attr = &osc_env_info(env)->oti_attr;
-	unsigned valid, setkms = 0;
+	unsigned int setkms = 0;
+	enum cl_attr_valid valid;
 
 	ENTRY;
 
@@ -224,11 +225,11 @@ static void osc_lock_granted(const struct lu_env *env, struct osc_lock *oscl,
 		descr->cld_gid   = ext->gid;
 
 		/* no lvb update for matched lock */
-		if (!ldlm_is_lvb_cached(dlmlock)) {
+		if (!(dlmlock->l_flags & LDLM_FL_LVB_CACHED)) {
 			LASSERT(oscl->ols_flags & LDLM_FL_LVB_READY);
 			LASSERT(osc == dlmlock->l_ast_data);
 			osc_lock_lvb_update(env, osc, dlmlock, NULL);
-			ldlm_set_lvb_cached(dlmlock);
+			(dlmlock->l_flags |= LDLM_FL_LVB_CACHED);
 		}
 		LINVRNT(osc_lock_invariant(oscl));
 	}
@@ -392,7 +393,7 @@ static int osc_dlm_blocking_ast0(const struct lu_env *env,
 		RETURN(0);
 	}
 
-	discard = ldlm_is_discard_data(dlmlock);
+	discard = (dlmlock->l_flags & LDLM_FL_DISCARD_DATA);
 	if (dlmlock->l_granted_mode & (LCK_PW | LCK_GROUP))
 		mode = CLM_WRITE;
 
@@ -646,7 +647,7 @@ static unsigned long osc_lock_weight(const struct lu_env *env,
 				     struct osc_object *oscobj,
 				     loff_t start, loff_t end)
 {
-	struct cl_io *io = osc_env_thread_io(env);
+	struct cl_io *io = osc_env_new_io(env);
 	struct cl_object *obj = cl_object_top(&oscobj->oo_cl);
 	pgoff_t page_index;
 	int result;
@@ -940,7 +941,8 @@ static int osc_lock_enqueue(const struct lu_env *env,
 	osc_enqueue_upcall_f		upcall   = osc_lock_upcall;
 	void				*cookie  = oscl;
 	bool				async    = false;
-	int				result;
+	__u32 projid;
+	int result;
 
         ENTRY;
 
@@ -1010,11 +1012,13 @@ enqueue_base:
 		upcall = osc_lock_upcall_speculative;
 		cookie = osc;
 	}
+
+	cl_req_projid_set(env, osc2cl(osc), &projid);
 	result = osc_enqueue_base(exp, resname, &oscl->ols_flags,
 				  policy, &oscl->ols_lvb,
 				  upcall, cookie,
 				  &oscl->ols_einfo, PTLRPCD_SET, async,
-				  oscl->ols_speculative);
+				  oscl->ols_speculative, projid);
 	if (result == 0) {
 		if (osc_lock_is_lockless(oscl)) {
 			oio->oi_lockless = 1;

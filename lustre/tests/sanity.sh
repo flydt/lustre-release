@@ -376,6 +376,21 @@ test_6h() { # bug 7331
 }
 run_test 6h "$RUNAS chown RUNAS_ID.0 .../$tfile (should return error)"
 
+test_6i() {
+        (( MDS1_VERSION >= $(version_code 2.16.51) )) ||
+		skip "Need MDS version at least 2.16.51"
+	(( $RUNAS_ID != $UID )) || skip_env "RUNAS_ID = UID = $UID"
+
+        touch $DIR/$tfile
+        chmod 444 $DIR/$tfile
+        chown $RUNAS_ID $DIR/$tfile || error "initial chown failed"
+        $RUNAS -u $RUNAS_ID -g $RUNAS_ID chgrp $RUNAS_ID $DIR/$tfile ||
+		error "chgrp $RUNAS_ID $file failed"
+        $CHECKSTAT -t file -u \#$RUNAS_ID -g \#$RUNAS_ID $DIR/$tfile ||
+                error "$tfile should be owned by GID $RUNAS_ID"
+}
+run_test 6i "touch+chmod+chgrp $tfile; chgrp read-only file should succeed"
+
 test_7a() {
 	test_mkdir $DIR/$tdir
 	$MCREATE $DIR/$tdir/$tfile
@@ -801,8 +816,8 @@ test_17p() {
 	# kernel, we need to stat the target dir to cache it first
 	if [[ "$CLIENT_OS_ID_LIKE" =~ "rhel" ]]; then
 		if (( $CLIENT_OS_VERSION_CODE >= $(version_code 9.0) &&
-		      $CLIENT_OS_VERSION_CODE <= $(version_code 9.4) )); then
-			echo "stat $DIR/$tdir to cache it in el9.0-9.4"
+		      $CLIENT_OS_VERSION_CODE <= $(version_code 9.5) )); then
+			echo "stat $DIR/$tdir to cache it in el9.0-9.5"
 			stat $DIR/$tdir
 		fi
 	fi
@@ -1161,6 +1176,7 @@ test_24t() {
 run_test 24t "mkdir .../R16a/b/c; rename .../R16a/b/c .../R16a ="
 
 test_24u() { # bug12192
+	stack_trap "rm -f $DIR/$tfile"
 	$MULTIOP $DIR/$tfile C2w$((2048 * 1024))c || error "multiop failed"
 	$CHECKSTAT -s $((2048 * 1024)) $DIR/$tfile || error "wrong file size"
 }
@@ -1240,6 +1256,7 @@ run_test 24v "list large directory (test hash collision, b=17560)"
 
 test_24w() { # bug21506
         SZ1=234852
+	stack_trap "rm -f $DIR/$tfile"
         dd if=/dev/zero of=$DIR/$tfile bs=1M count=1 seek=4096 || return 1
         dd if=/dev/zero bs=$SZ1 count=1 >> $DIR/$tfile || return 2
         dd if=$DIR/$tfile of=$DIR/${tfile}_left bs=1M skip=4097 || return 3
@@ -1464,6 +1481,9 @@ run_test 24F "hash order vs readdir (LU-11330)"
 
 test_24G () {
 	[ $MDSCOUNT -lt 2 ] && skip "needs >= 2 MDTs"
+
+	(( $MDS1_VERSION >= $(version_code v2_13_56-59-g9adc02c016d2) )) ||
+		skip "Need MDS >= v2_13_56-59-g9adc02c016d2 for symlink migration"
 
 	local ino1
 	local ino2
@@ -2555,7 +2575,6 @@ run_test 27Cj "overstriping with -C for max values in multiple of targets"
 
 test_27D() {
 	[ $OSTCOUNT -lt 2 ] && skip_env "needs >= 2 OSTs"
-	[ -n "$FILESET" ] && skip "SKIP due to FILESET set"
 	remote_mds_nodsh && skip "remote MDS with nodsh"
 
 	local POOL=${POOL:-testpool}
@@ -2664,9 +2683,8 @@ test_27F() { # LU-5346/LU-7975
 run_test 27F "Client resend delayed layout creation with non-zero size"
 
 test_27G() { #LU-10629
-	[ $MDS1_VERSION -lt $(version_code 2.11.51) ] &&
+	(( $MDS1_VERSION < $(version_code 2.11.51) )) &&
 		skip "Need MDS version at least 2.11.51"
-	[ -n "$FILESET" ] && skip "SKIP due to FILESET set"
 	remote_mds_nodsh && skip "remote MDS with nodsh"
 	local POOL=${POOL:-testpool}
 	local ostrange="0 0 1"
@@ -3103,6 +3121,9 @@ test_27M() {
 
 	# Clean up DOM layout
 	$LFS setstripe -d $DIR/$tdir
+
+	# rest of tests don't work with FILESET
+	[ -n "$FILESET" ] && exit
 
 	save_layout_restore_at_exit $MOUNT
 	# Now test that append striping works when layout is from root
@@ -5128,6 +5149,7 @@ test_39j() {
 	start_full_debug_logging
 	touch $DIR1/$tfile
 	sleep 1
+	stack_trap "rm -f $DIR1/$tfile"
 
 	#define OBD_FAIL_OSC_DELAY_SETTIME	 0x412
 	lctl set_param fail_loc=0x80000412
@@ -5160,6 +5182,7 @@ test_39k() {
 
 	touch $DIR1/$tfile
 	sleep 1
+	stack_trap "rm -f $DIR1/$tfile"
 
 	multiop_bg_pause $DIR1/$tfile oO_RDWR:w2097152_c || error "multiop failed"
 	local multipid=$!
@@ -5458,6 +5481,7 @@ run_test 39s "relatime is supported"
 
 test_39u() {
 	touch $DIR/$tfile
+	stack_trap "rm -f $DIR/$tfile"
 	sleep 2
 	dd if=/dev/zero of=$DIR/$tfile bs=1M count=1 conv=notrunc ||
 		error "dd failed"
@@ -5939,6 +5963,7 @@ test_44f() {
 	[ "$FSTYPE" != "zfs" ] ||
 		skip "ORI-366/LU-1941: FIEMAP unimplemented on ZFS"
 
+	stack_trap "rm -f $DIR/$tfile-*"
 	local i
 	# required space: NUMFILES_44f * 20Mb
 	local NUMFILES_44f=${NUMFILES_44f:-50}
@@ -6231,7 +6256,7 @@ test_51b() {
 
 	# create files
 	createmany -d $dir/d $nrdirs || {
-		unlinkmany $dir/d $nrdirs
+		unlinkmany -d $dir/d $nrdirs
 		error "failed to create $nrdirs subdirs in MDT$mdtidx:$dir"
 	}
 
@@ -6267,6 +6292,39 @@ test_51b() {
 	cleanup_print_lfs_df
 }
 run_test 51b "exceed 64k subdirectory nlink limit on create, verify unlink"
+
+test_51c() {
+	(( MDSCOUNT > 1 )) || skip "needs >= 2 MDTs"
+	local dir=$DIR/$tdir-c2
+	local nrdirs=$((65536 * 2 + 2000))
+	local mdtidx
+
+	trap cleanup_print_lfs_df EXIT
+
+	$LFS mkdir -c 2 -H fnv_1a_64 $dir
+	while read mtdidx rest; do
+		local mdtname=$FSNAME-MDT$(printf "%04x" $mdtidx)
+		local numfree=$(lctl get_param -n mdc.$mdtname*.filesfree)
+		local blkfree=$(lctl get_param -n mdc.$mdtname*.kbytesavail)
+
+		(( numfree < nrdirs / 2 || blkfree / $(fs_inode_ksize) < nrdirs / 2 )) &&
+			skip "not enough inodes or blocks for mdt$mdtidx"
+	done < <( $LFS getdirstripe $dir | awk '{ if ($2 ~ /\[0x.*:0x.*:0x.*\]/) {  print $1; } }' )
+
+	createmany -d $dir/d $nrdirs ||
+		error "failed to create $nrdirs subdirs in $dir"
+	# nlink for the striped dir should be either 1
+	# (ldiskfs, nlink is overflowed at least in one stripe)
+	# or $ndirs + 2
+	local nlinks=$(stat -c %h $dir)
+	(( nlinks == 1 || nlinks == nrdirs + 2 )) ||
+		error "Wrong nlink count of $nlinks"
+
+	unlinkmany -d $dir/d $nrdirs || error "Removal of the subdirs failed"
+	rmdir $dir || error "rmdir failed"
+	cleanup_print_lfs_df
+}
+run_test 51c "exceed 64k subdirectory count per dir stripe, verify nlink count"
 
 test_51d_sub() {
 	local stripecount=$1
@@ -6829,49 +6887,102 @@ test_56c() {
 
 	local ost_idx=0
 	local ost_name=$(ostname_from_index $ost_idx)
-	local old_status=$(ost_dev_status $ost_idx)
+	local old_status=$(ost_dev_status $ost_idx $MOUNT -v)
+	local inst=$(lfs getname -i $DIR)
+	local state="osc.$ost_name-osc-$inst.statfs_state"
+	local old_state=$($LCTL get_param -n $state)
 	local p="$TMP/$TESTSUITE-$TESTNAME.parameters"
 
-	[[ -z "$old_status" ]] ||
+	[[ "$old_status" == "$old_state" ]] ||
+		error "old status '$old_status' != state '$old_state'"
+
+	[[ -z "$old_status" || "$old_status" == "f" ]] ||
 		skip_env "OST $ost_name is in $old_status status"
 
-	do_facet ost1 $LCTL set_param -n obdfilter.$ost_name.degraded=1
-	[[ $OST1_VERSION -lt $(version_code 2.12.55) ]] || do_facet ost1 \
-		$LCTL set_param -n obdfilter.$ost_name.no_precreate=1
-	if [[ $OST1_VERSION -ge $(version_code 2.12.57) ]]; then
-		save_lustre_params ost1 osd-*.$ost_name.nonrotational > $p
-		do_facet ost1 $LCTL set_param -n osd-*.$ost_name.nonrotational=1
+	local degraded="obdfilter.$ost_name.degraded"
+	save_lustre_params ost1 $degraded > $p
+	do_facet ost1 $LCTL set_param -n $degraded=1
+	stack_trap "restore_lustre_params < $p; rm -f $p"
+
+	if (( $OST1_VERSION >= $(version_code 2.12.55) )); then
+		local no_precreate="obdfilter.$ost_name.no_precreate"
+
+		save_lustre_params ost1 $no_precreate >> $p
+		do_facet ost1 $LCTL set_param -n $no_precreate=1
+	fi
+	if (( $OST1_VERSION >= $(version_code 2.12.57) )) &&
+	   [[ ! "$old_status" =~ "f" ]]; then
+	   	local nonrotational="osd-*.$ost_name.nonrotational"
+
+		save_lustre_params ost1 $nonrotational >> $p
+		do_facet ost1 $LCTL set_param -n $nonrotational=1
 	fi
 
-	[[ $($LFS df -v $MOUNT |& grep -c "inactive device") -eq 0 ]] ||
+	[[ ! $($LFS df -v $MOUNT 2>&1) =~ "inactive device" ]] ||
 		error "$LFS df -v showing inactive devices"
 	sleep_maxage
+
+	$LFS df -v $MOUNT
+	$LCTL get_param *.*.statfs_state
 
 	local new_status=$(ost_dev_status $ost_idx $MOUNT -v)
 
 	[[ "$new_status" =~ "D" ]] ||
 		error "$ost_name status is '$new_status', missing 'D'"
-	if [[ $OST1_VERSION -ge $(version_code 2.12.55) ]]; then
-		[[ "$new_status" =~ "N" ]] ||
-			error "$ost_name status is '$new_status', missing 'N'"
+	if (( $OST1_VERSION >= $(version_code 2.12.55) )) &&
+	   [[ ! "$new_status" =~ "N" ]]; then
+		error "$ost_name status is '$new_status', missing 'N'"
 	fi
-	if [[ $OST1_VERSION -ge $(version_code 2.12.57) ]]; then
-		[[ "$new_status" =~ "f" ]] ||
-			error "$ost_name status is '$new_status', missing 'f'"
+	if (( $OST1_VERSION >= $(version_code 2.12.57) )) &&
+	   [[ ! "$new_status" =~ "f" ]]; then
+		error "$ost_name status is '$new_status', missing 'f'"
 	fi
 
-	do_facet ost1 $LCTL set_param -n obdfilter.$ost_name.degraded=0
-	[[ $OST1_VERSION -lt $(version_code 2.12.55) ]] || do_facet ost1 \
-		$LCTL set_param -n obdfilter.$ost_name.no_precreate=0
-	[[ -z "$p" ]] && restore_lustre_params < $p || true
-	sleep_maxage
+	wait_update_facet client "$LCTL get_param -n $state" "$new_status" ||
+		error "new state != new_status '$new_status'"
 
-	new_status=$(ost_dev_status $ost_idx)
-	[[ ! "$new_status" =~ "D" && ! "$new_status" =~ "N" ]] ||
-		error "$ost_name status is '$new_status', has 'D' and/or 'N'"
-	# can't check 'f' as devices may actually be on flash
+	restore_lustre_params < $p
+
+	wait_update_facet client \
+		"$LFS df -v | awk '/$ost_name/ { print \\\$7 }'" "$old_status" ||
+	{
+		new_status=$(ost_dev_status $ost_idx)
+
+		error "new_status '$new_status' != old_status '$old_status'"
+	}
+
+	wait_update_facet client "$LCTL get_param -n $state" "$old_state" ||
+	{
+		local new_state=$($LCTL get_param -n $state)
+
+		error "restored state '$new_state' != old_state '$old_state'"
+	}
 }
 run_test 56c "check 'lfs df' showing device status"
+
+test_56ca() {
+	remote_ost_nodsh && skip "remote OST with nodsh"
+	(( $OST1_VERSION >= $(version_code 2.16.53) )) ||
+		skip "Need OST1 >= 2.16.53 for this test"
+
+	local o_idx=0 # Target OST which will be set to readonly
+	local ost_name=$(ostname_from_index $o_idx)
+
+	# Force set OST0 as readonly
+	do_facet ost${o_idx} $LCTL set_param -n obdfilter.$ost_name.readonly=1
+
+	sleep_maxage # Give time for sync
+
+	local new_status=$(ost_dev_status $o_idx $MOUNT -v) # Get new stats
+
+	# revert to the normal state and wait for propagation
+	do_facet ost${o_idx} $LCTL set_param -n obdfilter.$ost_name.readonly=0
+	sleep_maxage
+
+	[[ "$new_status" =~ "R" ]] ||
+		error "$ost_name status is '$new_status', missing 'R'"
+}
+run_test 56ca "'lfs df -v' correctly reports 'R' flag when OST set as Readonly"
 
 test_56d() {
 	local mdts=$($LFS df -v $MOUNT | grep -c MDT)
@@ -7333,12 +7444,21 @@ test_56oe() {
 	for ((val = 1; val <= 10; val++)); do
 		touch $dir/$tfile-a.$val $dir/$tfile-m.$val
 		touch $dir/$tfile-c.$val
+		echo -n "$tfile-c.$val	@ctime (Epoch):"
+		stat -c "%Z" $dir/$tfile-c.$val
 		touch --date="$val $unit ago" -a $dir/$tfile-a.$val
 		touch --date="$val $unit ago" -m $dir/$tfile-m.$val
 		(( val % 5 != 2 )) || sleep 10
 	done
 
-	cmd="$LFS find $dir -ctime -19s -ctime +9s"
+	local now=$(date +%s)
+	local lower_bound=$(( now - $(stat -c "%Z" $dir/$tfile-c.8) + 2 ))
+	local upper_bound=$(( now - $(stat -c "%Z" $dir/$tfile-c.2) - 2 ))
+
+	(( now == $(date +%s))) ||
+		skip "System is too slow for accurate results"
+
+	cmd="$LFS find $dir -ctime -${upper_bound}s -ctime +${lower_bound}s"
 	nums=$($cmd | grep -c c.*)
 
 	(( nums == expected )) ||
@@ -7574,7 +7694,7 @@ test_56rb() {
 	mdt_idx=$($LFS getdirstripe -i $dir)
 	dd if=/dev/zero of=$dir/$tfile bs=1M count=1
 
-	stack_trap "rm -f $tmp" EXIT
+	stack_trap "rm -f $tmp $dir/$tfile" EXIT
 	$LFS find --size +100K --ost 0 $dir |& tee $tmp
 	! grep -q obd_uuid $tmp ||
 		error "failed to find --size +100K --ost 0 $dir"
@@ -7637,6 +7757,91 @@ test_56rd() {
 	(( found == 2 )) || error "unable to list all files"
 }
 run_test 56rd "check lfs find --printf special files"
+
+test_56re()
+{
+	local dir=$DIR/$tdir
+	local file=$dir/a
+	local test_cases=(
+		"|%5s|" "|%05s|" "|%0s|" "|%-5s|" "|%-0s|"
+		"|%5G|" "|%05G|" "|%0G|" "|%-5G|" "|%-0G|"
+		"|%25i|" "|%025i|" "|%0i|" "|%-25i|" "|%-0i|"
+		"|%5k|" "|%05k|" "|%0k|" "|%-5k|" "|%-0k|"
+		"|%5y|" "|%05y|" "|%0y|" "|%-5y|" "|%-0y|"
+		"|%5m|" "|%05m|" "|%0m|" "|%-5m|" "|%-0m|" "|%-05m|"
+		"|%----5s|" "|%----00005s|" "|%00005s|"
+		"|%020|" "|%20|" "|%-20|" "|%-020|" "|%---020|" "|%---20|"
+	)
+
+	test_mkdir "$dir"
+	touch "$file"
+	truncate -s 37 "$file"
+
+	for format in ${test_cases[@]}; do
+		local expected=$(find "$dir" -type f -printf "$format\n")
+		local output=$($LFS find "$dir" -type f -printf "$format\n")
+
+		[[ $output == $expected ]] ||
+			error "Unexpected output to \"$format\", expected '$expected' got '$output'"
+	done
+}
+run_test 56re "check lfs find -printf width format specifiers are consistant with regular find"
+
+test_56rf()
+{
+	local dir=$DIR/$tdir
+	local file=$dir/a
+	local test_cases
+	local poolname=testpool56rf
+	local stripe_count
+	local fid
+
+	test_mkdir "$dir"
+	pool_add $poolname || error "Could not create pool '$poolname'"
+
+	lfs setstripe -c 2 -S 4M -p $poolname "$file"
+	stripe_count=$(lfs getstripe -c "$file")
+	fid=$($LFS path2fid "$file" | sed 's/\[\(.*\)\]/\1/')
+	len=$((${#fid} + 5))
+
+	test_cases=(
+		"|%${len}LF|" "|     $fid|"
+		"|%0${len}LF|" "|     $fid|"
+		"|%0LF|" "|$fid|"
+		"|%-${len}LF|" "|$fid     |"
+		"|%-0LF|" "|$fid|"
+
+		"|%14Lp|" "|  $poolname|"
+		"|%014Lp|" "|  $poolname|"
+		"|%0Lp|" "|$poolname|"
+		"|%-14Lp|" "|$poolname  |"
+		"|%-0Lp|" "|$poolname|"
+		"|%07Lp|" "|$poolname|"
+		"|%-7Lp|" "|$poolname|"
+
+		"|%4Lc|" "|   $stripe_count|"
+		"|%04Lc|" "|   $stripe_count|"
+		"|%0Lc|" "|$stripe_count|"
+		"|%-4Lc|" "|$stripe_count   |"
+		"|%-0Lc|" "|$stripe_count|"
+
+		"|%10LS|" "|   4194304|"
+		"|%010LS|" "|   4194304|"
+		"|%0LS|" "|4194304|"
+		"|%-10LS|" "|4194304   |"
+		"|%-0LS|" "|4194304|"
+	)
+
+	for (( i = 0; i < ${#test_cases[@]}; i += 2 )); do
+		local format=${test_cases[i]}
+		local expected=${test_cases[i + 1]}
+		local output=$($LFS find "$dir" -type f -printf "$format\n")
+
+		[[ $output == $expected ]] ||
+			error "Unexpected output to \"$format\", expected '$expected' got '$output'"
+	done
+}
+run_test 56rf "check lfs find -printf width format specifiers for lustre specific formats"
 
 test_56s() { # LU-611 #LU-9369
 	[[ $OSTCOUNT -lt 2 ]] && skip_env "need at least 2 OSTs"
@@ -7871,7 +8076,7 @@ test_56wa() {
 	(( OSTCOUNT <= 1 )) || expected=$((OSTCOUNT - 1))
 
 	# lfs_migrate file
-	local cmd="$LFS_MIGRATE -y -c $expected $dir/file1"
+	local cmd="$LFS_MIGRATE -y -v -c $expected $dir/file1"
 
 	echo "$cmd"
 	eval $cmd || error "$cmd failed"
@@ -7904,7 +8109,7 @@ test_56wa() {
 	fi
 
 	# lfs_migrate dir
-	cmd="$LFS_MIGRATE -y -c $expected $dir/dir1"
+	cmd="$LFS_MIGRATE -y -v -c $expected $dir/dir1"
 	echo "$cmd"
 	eval $cmd || error "$cmd failed"
 
@@ -7914,7 +8119,7 @@ test_56wa() {
 
 	# lfs_migrate works with lfs find
 	cmd="$LFS find -stripe_count $OSTCOUNT -type f $dir |
-	     $LFS_MIGRATE -y -c $expected"
+	     $LFS_MIGRATE -y -v -c $expected"
 	echo "$cmd"
 	eval $cmd || error "$cmd failed"
 
@@ -8223,8 +8428,38 @@ test_56x() {
 }
 run_test 56x "lfs migration support"
 
+test_56xB() {
+	local td=$DIR/$tdir
+	local tf1=$td/${tfile}_1
+	local tf2=$td/${tfile}_2
+	local tf3=$td/${tfile}_3
+	local flist=/tmp/flist.$$
+
+	(( $OSTCOUNT >= 2 )) || skip "needs >= 2 OSTs"
+
+	test_mkdir $td
+	dd if=/dev/urandom of=$tf1 bs=1K count=1 || error "failed to create $tf1"
+	dd if=/dev/urandom of=$tf2 bs=1K count=1 || error "failed to create $tf2"
+	dd if=/dev/urandom of=$tf3 bs=1K count=1 || error "failed to create $tf3"
+
+	stack_trap "rm -f $flist"
+
+	$LFS find $td -type f > $flist || error "failed to generate list file"
+	$LFS migrate -o 0 --files-from=$flist ||
+		error "failed to run lfs migrate with --files-from"
+
+	$LFS find $td -type f -print0 | $LFS migrate -o 1 --null ||
+		error "failed to run lfs migrate from pipe"
+
+	$LFS find $td -type f -print0 > $flist ||
+		error "failed to generate 0-ending list file"
+	$LFS migrate -o 0 -0 --files-from=$flist ||
+		error "failed to run lfs migrate with -0 --files-from"
+}
+run_test 56xB "lfs migrate with -0, --null, --files-from arguments"
+
 test_56xa() {
-	[[ $OSTCOUNT -lt 2 ]] && skip_env "needs >= 2 OSTs"
+	(( $OSTCOUNT >= 2 )) || skip_env "needs >= 2 OSTs"
 	check_swap_layouts_support
 
 	local dir=$DIR/$tdir/$testnum
@@ -8247,6 +8482,30 @@ test_56xa() {
 	rm -f $file1
 }
 run_test 56xa "lfs migration --block support"
+
+test_56xab() {
+	local pid
+	local dir=$DIR/$tdir/$testnum
+	local file1=$dir/$tfile
+
+	(( $OSTCOUNT >= 2 )) || skip_env "needs >= 2 OSTs"
+	check_swap_layouts_support
+
+	test_mkdir -p $dir
+	$LFS setstripe -c 2 $file1
+
+	dd if=/dev/urandom of=$file1 bs=1 oflag=sync & pid=$!
+	kill -0 $pid ||
+		error "failed to start dd to write to $file1 continously"
+	stack_trap "kill $pid"
+	sleep 1
+
+	$LFS migrate --block -c 1 $file1 || error "migrate failed rc = $?"
+
+	ls -l $file1
+	$LFS getstripe $file1
+}
+run_test 56xab "lfs migration --block on changing file"
 
 check_migrate_links() {
 	[[ "$1" == "--rsync" ]] && local opts="--rsync -y" && shift
@@ -9985,6 +10244,9 @@ test_60f() {
 run_test 60f "change debug_path works"
 
 test_60g() {
+	(( $MDS1_VERSION >= $(version_code v2_12_57-61-g02b5a407081c) )) ||
+		skip "Need MDS >= v2_12_57-61-g02b5a407081c for statahead fix"
+
 	local pid
 	local i
 
@@ -10422,6 +10684,7 @@ test_64f() {
 	$LFS setstripe -c 1 -i 0 $DIR/$tfile || error "lfs setstripe failed"
 	dd if=/dev/zero of=$DIR/$tfile bs=$write_bytes count=1 oflag=direct ||
 		error "error writing to $DIR/$tfile"
+	stack_trap "rm -f $DIR/$tfile"
 
 	check_grants $osc_tgt $((init_grants - grants + chunk)) \
 		"direct io with grant allocation"
@@ -10526,7 +10789,7 @@ test_64h() {
 
 	save_lustre_params client "osc.*OST0000*.grant_shrink" > $p
 	save_lustre_params client "osc.*OST0000*.grant_shrink_interval" >> $p
-	stack_trap "restore_lustre_params < $p; rm -f $save" EXIT
+	stack_trap "restore_lustre_params < $p; rm -f $p" EXIT
 	$LCTL set_param osc.*OST0000*.grant_shrink=1
 	$LCTL set_param osc.*OST0000*.grant_shrink_interval=10
 
@@ -11143,7 +11406,7 @@ test_66() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 
 	local COUNT=${COUNT:-8}
-	dd if=/dev/zero of=$DIR/f66 bs=1k count=$COUNT
+	dd if=/dev/urandom of=$DIR/f66 bs=1k count=$COUNT
 	sync; sync_all_data; sync; sync_all_data
 	cancel_lru_locks osc
 	local BLOCKS=$(ls -s --block-size=1k $DIR/f66 | awk '{ print $1 }')
@@ -11902,36 +12165,44 @@ test_78() { # bug 10901
 run_test 78 "handle large O_DIRECT writes correctly ============"
 
 test_79() { # bug 12743
-	[ $PARALLEL == "yes" ] && skip "skip parallel run"
+	[[ $PARALLEL != "yes" ]] || skip "skip parallel run"
 
 	wait_delete_completed
 
-	BKTOTAL=$(calc_osc_kbytes kbytestotal)
-	BKFREE=$(calc_osc_kbytes kbytesfree)
-	BKAVAIL=$(calc_osc_kbytes kbytesavail)
+	local bktotal=$(calc_osc_kbytes kbytestotal)
+	local bkfree=$(calc_osc_kbytes kbytesfree)
+	local bkavail=$(calc_osc_kbytes kbytesavail)
+	local string=($(df -P $MOUNT | tail -n 1))
+	local dftotal=${string[1]}
+	local dfused=${string[2]}
+	local dfavail=${string[3]}
+	local dffree=$(($dftotal - $dfused))
+	local allowance=$((64 * $OSTCOUNT))
 
-        STRING=`df -P $MOUNT | tail -n 1 | awk '{print $2","$3","$4}'`
-        DFTOTAL=`echo $STRING | cut -d, -f1`
-        DFUSED=`echo $STRING  | cut -d, -f2`
-        DFAVAIL=`echo $STRING | cut -d, -f3`
-        DFFREE=$(($DFTOTAL - $DFUSED))
+	$LFS df $MOUNT
+	echo ${string[*]}
 
-        ALLOWANCE=$((64 * $OSTCOUNT))
+	(( dftotal >= bktotal - allowance && dftotal <= bktotal + allowance)) ||
+		error "df total($dftotal) mismatch OST total($bktotal)"
+	(( dffree >= bkfree - allowance && dffree <= bkfree + allowance )) ||
+		error "df free($dffree) mismatch OST free($bkfree)"
+	(( dfavail >= bkavail - allowance && dfavail <= bkavail + allowance)) ||
+		error "df avail($dfavail) mismatch OST avail($bkavail)"
 
-        if [ $DFTOTAL -lt $(($BKTOTAL - $ALLOWANCE)) ] ||
-           [ $DFTOTAL -gt $(($BKTOTAL + $ALLOWANCE)) ] ; then
-                error "df total($DFTOTAL) mismatch OST total($BKTOTAL)"
-        fi
-        if [ $DFFREE -lt $(($BKFREE - $ALLOWANCE)) ] ||
-           [ $DFFREE -gt $(($BKFREE + $ALLOWANCE)) ] ; then
-                error "df free($DFFREE) mismatch OST free($BKFREE)"
-        fi
-        if [ $DFAVAIL -lt $(($BKAVAIL - $ALLOWANCE)) ] ||
-           [ $DFAVAIL -gt $(($BKAVAIL + $ALLOWANCE)) ] ; then
-                error "df avail($DFAVAIL) mismatch OST avail($BKAVAIL)"
-        fi
+	$LCTL get_param *.$FSNAME-*.{maxbytes,namelen_max}
+	(( $MDS1_VERSION < $(version_code 2.16.52-70) )) ||
+		do_nodes $(mdts_nodes) \
+			$LCTL get_param *.$FSNAME-*.{maxbytes,namelen_max}
+	(( $OST1_VERSION < $(version_code 2.16.52-70) )) ||
+		do_nodes $(osts_nodes) \
+			$LCTL get_param *.$FSNAME-*.{maxbytes,namelen_max}
+	local dfnamelen=$(stat -f -c %l $MOUNT)
+	local lnamelen=($($LCTL get_param -n llite.$FSNAME-*.namelen_max))
+
+	(( $dfnamelen == $lnamelen )) ||
+		error "df namelen($dfnamelen) != llite namelen($lnamelen)"
 }
-run_test 79 "df report consistency check ======================="
+run_test 79 "df report consistency check"
 
 test_80() { # bug 10718
 	remote_ost_nodsh && skip "remote OST with nodsh"
@@ -12067,7 +12338,7 @@ function get_named_value()
 }
 
 test_101a() {
-	[ $PARALLEL == "yes" ] && skip "skip parallel run"
+	[[ $PARALLEL != "yes" ]] || skip "skip parallel run"
 
 	local s
 	local discard
@@ -12098,8 +12369,8 @@ test_101a() {
 
 	# Discard is generally zero, but sometimes a few random reads line up
 	# and trigger larger readahead, which is wasted & leads to discards.
-	if [[ $(($discard)) -gt $nreads ]]; then
-		error "too many ($discard) discarded pages"
+	if (( $discard > $nreads )); then
+		error "too many discarded pages ($discard > $nreads)"
 	fi
 	rm -f $DIR/$tfile || true
 }
@@ -13712,6 +13983,50 @@ test_105g() {
 }
 run_test 105g "ldlm_lock_debug stack test"
 
+test_105h() {
+	local info
+	touch $DIR/$tfile
+
+	stack_trap "rm $DIR/$tfile" EXIT
+	# enqueue 2 non-overlap locks
+	info=$(echo -e "W20,40\nR100,200\nT0" | flocks_test 6 $DIR/$tfile)
+	[ x$info == 'xW20,40;R100,200.' ] || error "flock error1-$info"
+	# enqueue overlap locks
+	info=$(echo -e "W20,400\nR100,2000\nR10,1000\nW500,1000\nT0" | flocks_test 6 $DIR/$tfile)
+	[ x$info == 'xR10,490;W500,1000;R1500,600.' ] || error "flock error2-$info"
+	# split a lock
+	info=$(echo -e "W2000,1000\nR2200, 200\nT0" |flocks_test 6 $DIR/$tfile)
+	[ x$info == 'xW2000,200;R2200,200;W2400,600.' ] || error "flock error3-$info"
+	# merge 2 locks
+	info=$(echo -e "R200,1000\nR9000,200\nW100,10000\nT0" | flocks_test 6 $DIR/$tfile)
+	[ x$info == 'xW100,10000.' ] || error "flock error4-$info"
+	# adjoining locks
+	info=$(echo -e "R200,100\nR300, 200\nR500,100\nT0" | flocks_test 6 $DIR/$tfile)
+	[ x$info == 'xR200,400.' ] || error "flock error5-$info"
+	# adjoining locks with diff mode
+	info=$(echo -e "R200,100\nW300, 200\nR500,100\nT0" | flocks_test 6 $DIR/$tfile)
+	[ x$info == 'xR200,100;W300,200;R500,100.' ] || error "flock error6-$info"
+	# split & merge
+	info=$(echo -e "R200,1000\nW300, 200\nR100,200\nR300,200\nT0" | flocks_test 6 $DIR/$tfile)
+	[ x$info == 'xR100,1100.' ] || error "flock error7-$info"
+}
+run_test 105h "Flock functional verify"
+
+test_105i() {
+	local tmpfile=$TMP/tmpf.$$
+	touch $DIR/$tfile
+
+	stack_trap "rm $tmpfile $DIR/$tfile" EXIT
+	# enqueue 2 non-overlap locks
+	>$tmpfile
+	echo -e "R20,200\nP5\nW10,1000" | flocks_test 6 $DIR/$tfile 2>>$tmpfile &
+	echo -e "R20,200\nP5\nW10,1000" | flocks_test 6 $DIR/$tfile 2>>$tmpfile &
+	wait
+	# Check for EDEADLK
+	grep 'cannot set lock(35)' $tmpfile
+}
+run_test 105i "Flock deadlock verify"
+
 test_106() { #bug 10921
 	test_mkdir $DIR/$tdir
 	$DIR/$tdir && error "exec $DIR/$tdir succeeded"
@@ -14986,6 +15301,12 @@ test_120a() {
 	# asynchronous object destroy at MDT could cause bl ast to client
 	cancel_lru_locks osc
 
+	local old=$($LCTL get_param -n llite.*.dir_read_on_open)
+
+	# statahead_agl may cause extra glimpse which confuses results. LU-13017
+	$LCTL set_param -n llite.*.dir_read_on_open=0
+	stack_trap "$LCTL set_param -n llite.*.dir_read_on_open=$old" EXIT
+
 	stat $DIR/$tdir > /dev/null
 	can1=$(do_facet mds1 \
 	       "$LCTL get_param -n ldlm.services.ldlm_canceld.stats" |
@@ -15495,6 +15816,7 @@ test_123d() {
 	$LFS setdirstripe -D -c $MDSCOUNT $DIR/$tdir ||
 		error "setdirstripe $DIR/$tdir failed"
 	createmany -d $DIR/$tdir/$tfile $num || error "createmany $num failed"
+	stack_trap "unlinkmany -d $DIR/$tdir/$tfile $num"
 	remount_client $MOUNT
 	$LCTL get_param llite.*.statahead_max
 	$LCTL set_param llite.*.statahead_stats=0 ||
@@ -15965,6 +16287,7 @@ test_124b() {
 	fi
 
 	lru_resize_disable mdc
+	stack_trap "lru_resize_enable mdc" EXIT
 	test_mkdir -p $DIR/$tdir/disable_lru_resize
 
         createmany -o $DIR/$tdir/disable_lru_resize/f $NR
@@ -16131,7 +16454,7 @@ test_127a() { # bug 15521
 
 	$LFS setstripe -i 0 -c 1 $DIR/$tfile || error "setstripe failed"
 	echo "stats before reset"
-	stack_trap "rm -f $tmpfile"
+	stack_trap "rm -f $DIR/$tfile $tmpfile"
 	local now=$(date +%s)
 
 	$LCTL get_param osc.*.stats | tee $tmpfile
@@ -16725,6 +17048,7 @@ test_130h() {
 	$LFS setstripe -o 0,1 -S 1M $DIR/$tfile
 	$LFS getstripe $DIR/$tfile
 	dd if=/dev/zero of=$DIR/$tfile bs=1M count=2
+	stack_trap "rm -f $DIR/$tfile"
 	$LCTL set_param ldlm.namespaces.*-OST0000-osc-*.lru_size=clear
 	sleep 1
 	local before=$(date +%s)
@@ -17427,14 +17751,17 @@ test_136() {
 	ost_set_temp_seq_width_all $DATA_SEQ_MAX_WIDTH
 
 	# fill already existed 2 plain llogs each 64767 wrapping whole catalog,
-	# drop server memory periodically to avoid OOM during testing
+	# drop server memory periodically only on ZFS to avoid OOM during test
 	local items=1000
 	for ((created = 0; created < 64767 * 5 / 2; created += items)); do
 		echo "$(date +%s): create $created-$((created + items - 1))"
-		createmany -o -u $DIR/$tdir/$tfile- $items
-		wait_delete_completed
-		do_facet mds1 "echo 1 > /proc/sys/vm/drop_caches"
+		createmany -o -u $DIR/$tdir/$tfile- $created $items
+		if [[ "$mds1_FSTYPE" == "zfs" ]]; then
+			wait_delete_completed
+			do_facet mds1 "echo 1 > /proc/sys/vm/drop_caches"
+		fi
 	done
+	[[ "$FSTYPE" == "zfs" ]] || wait_delete_completed
 
 	createmany -o $DIR/$tdir/$tfile_ 10
 	sleep 25
@@ -17847,6 +18174,104 @@ test_150h() {
 		error "size after fallocate() is $size, expected 16384"
 }
 run_test 150h "Verify extend fallocate updates the file size"
+
+test_150ia() {
+	(( $MDS1_VERSION >= $(version_code 2.16.50) )) ||
+		skip "need MDS1 version >= 2.16.50 for falloc zero-range"
+
+	if [[ "$ost1_FSTYPE" = "zfs" || "$mds1_FSTYPE" = "zfs" ]]; then
+		skip "zero-range mode is not implemented on OSD ZFS"
+	fi
+
+	check_set_fallocate_or_skip
+	stack_trap "rm -f $DIR/$tfile; wait_delete_completed"
+
+	echo "Verify fallocate(zero): range within the file"
+	yes 'A' | dd of=$DIR/$tfile bs=$PAGE_SIZE count=8 ||
+		error "dd failed for bs 4096 and count 8"
+
+	# zero range page aligned
+	local offset=$((2 * PAGE_SIZE))
+	local length=$((4 * PAGE_SIZE))
+	out=$(fallocate -z --offset $offset -l $length $DIR/$tfile 2>&1) ||
+		skip_eopnotsupp "$out|falloc(zero): off $offset, len $length"
+
+	# precomputed md5sum
+	local expect="f6b2adb9a352ee2b9d1f54a629e7998c"
+	cksum=($(md5sum $DIR/$tfile))
+	[[ "${cksum[0]}" == "$expect" ]] ||
+		error "unexpected MD5SUM after zero: ${cksum[0]}"
+
+	# zero range partial page
+	local offset=2000
+	local length=1000
+	out=$(fallocate -z --offset $offset -l $length $DIR/$tfile 2>&1) ||
+		skip_eopnotsupp "$out|falloc(zero): off $offset, len $length"
+
+	expect="19912462c2a304a225df656b80844ba5"
+	cksum=($(md5sum $DIR/$tfile))
+	[[ "${cksum[0]}" == "$expect" ]] ||
+		error "unexpected MD5SUM after zero(partial): ${cksum[0]}"
+}
+run_test 150ia "Verify fallocate zero-range ZERO functionality"
+
+test_150ib() {
+	(( $MDS1_VERSION >= $(version_code 2.16.50) )) ||
+		skip "need MDS1 version >= 2.16.50 for falloc zero-range"
+
+	if [[ "$ost1_FSTYPE" = "zfs" || "$mds1_FSTYPE" = "zfs" ]]; then
+		skip "zero-range mode is not implemented on OSD ZFS"
+	fi
+
+	check_set_fallocate_or_skip
+	stack_trap "rm -f $DIR/$tfile; wait_delete_completed"
+
+	local blocks_after_punch=$((4 * PAGE_SIZE / 512))
+	local blocks_after_zero_fill=$((8 * PAGE_SIZE / 512))
+	local blocks_after_extend=$((16 * PAGE_SIZE / 512))
+	local expect_len=$((8 * PAGE_SIZE))
+
+	# file size [0, 32K)
+	echo "Verify fallocate(zero): range within the file"
+	yes 'A' | dd of=$DIR/$tfile bs=$PAGE_SIZE count=8 ||
+		error "dd failed for bs 4096 and count 8"
+
+	# punch across [8K,24K)
+	local offset=$((2 * PAGE_SIZE))
+	local length=$((4 * PAGE_SIZE))
+	out=$(fallocate -p --offset $offset -l $length $DIR/$tfile 2>&1) ||
+		skip_eopnotsupp "$out|falloc(zero): off $offset, len $length"
+
+	# Verify punch worked as expected
+	blocks=$(stat -c '%b' $DIR/$tfile)
+	(( blocks == blocks_after_punch )) ||
+		error "punch failed:$blocks!=$blocks_after_punch"
+
+	# zero prealloc fill the hole just punched
+	out=$(fallocate -z --offset $offset -l $length $DIR/$tfile 2>&1) ||
+		skip_eopnotsupp "$out|falloc(zero): off $offset, len $length"
+
+	# Verify zero prealloc worked.
+	blocks=$(stat -c '%b' $DIR/$tfile)
+	(( blocks == blocks_after_zero_fill )) ||
+		error "zero prealloc failed:$blocks!=$blocks_after_zero_fill"
+
+	# zero prealloc with KEEP_SIZE on
+	offset=$((8 * PAGE_SIZE))
+	length=$((8 * PAGE_SIZE))
+	out=$(fallocate -z -n --offset $offset -l $length $DIR/$tfile 2>&1) ||
+		skip_eopnotsupp "$out|falloc(zero): off $offset, len $length"
+
+	# block allocate, size remains
+	blocks=$(stat -c '%b' $DIR/$tfile)
+	(( blocks == blocks_after_extend )) ||
+		error "extend failed:$blocks!=$blocks_after_extend"
+
+	lsz=$(stat -c '%s' $DIR/$tfile)
+	(( lsz == expect_len)) ||
+		error "zero extend failed(len):$lsz!=$expect_len"
+}
+run_test 150ib "Verify fallocate zero-range PREALLOC functionality"
 
 #LU-2902 roc_hit was not able to read all values from lproc
 function roc_hit_init() {
@@ -18344,8 +18769,6 @@ test_154ea()
 run_test 154ea ".lustre is not returned by readdir (2)"
 
 test_154f() {
-	[ -n "$FILESET" ] && skip "SKIP due to FILESET set"
-
 	# create parent directory on a single MDT to avoid cross-MDT hardlinks
 	mkdir_on_mdt0 $DIR/$tdir
 	# test dirs inherit from its stripe
@@ -18388,8 +18811,11 @@ test_154f() {
 		error "$FID3/f not returned in parent list"
 
 	# 5) test it on root directory
-	[ -z "$($LFS path2fid --parents $MOUNT 2>/dev/null)" ] ||
-		error "$MOUNT should not have parents"
+	[ -z "$FILESET" ] && {
+		# LU_ROOT_FID is wrong for fileset
+		[ -z "$($LFS path2fid --parents $MOUNT 2>/dev/null)" ] ||
+			error "$MOUNT should not have parents"
+	}
 
 	# enable xattr caching and check that linkea is correctly updated
 	local save="$TMP/$TESTSUITE-$TESTNAME.parameters"
@@ -19017,9 +19443,15 @@ test_160d() {
 	changelog_register || error "changelog_register failed"
 
 	mkdir -p $DIR/$tdir/migrate_dir
+
+	local src_mdt=$($LFS getdirstripe -m $DIR/$tdir/migrate_dir)
+	local tgt_mdt=1
+
+	[[ "$src_mdt" == "$tgt_mdt" ]] && tgt_mdt=0
+
 	changelog_clear 0 || error "changelog_clear failed"
 
-	$LFS migrate -m 1 $DIR/$tdir/migrate_dir || error "migrate fails"
+	$LFS migrate -m $tgt_mdt $DIR/$tdir/migrate_dir || error "migrate fails"
 	changelog_dump | tail -n 5
 	local migrates=$(changelog_dump | grep -c "MIGRT")
 	[ $migrates -eq 1 ] || error "MIGRATE changelog count $migrates != 1"
@@ -19070,7 +19502,7 @@ test_160f() {
 	[[ $MDS1_VERSION -ge $(version_code 2.10.56) ]] ||
 		skip "Need MDS version at least 2.10.56"
 
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 
 	# Create a user
 	changelog_register || error "first changelog_register failed"
@@ -19086,17 +19518,18 @@ test_160f() {
 	# use all_char because created files should be evenly distributed
 	test_mkdir -c $MDSCOUNT -H all_char $DIR/$tdir ||
 		error "test_mkdir $tdir failed"
-	log "$(date +%s): creating first files"
-	for ((i = 0; i < MDSCOUNT * 2; i++)); do
-		$LFS mkdir -i $((i%MDSCOUNT)) $DIR/$tdir/d$i.$((i/MDSCOUNT)) ||
-			error "create $DIR/$tdir/d$i.$((i/MDSCOUNT)) failed"
+	log "$(date +%s): creating first dirs"
+	for ((idx = 0; idx < MDSCOUNT * 2; idx++)); do
+		local d=$DIR/$tdir/d$idx.$((idx/MDSCOUNT))
+		$LFS mkdir -i $((idx%MDSCOUNT)) $d ||
+			error "create $d on MDT$idx failed"
 	done
 
 	# check changelogs have been generated
 	local start=$SECONDS
 	local idle_time=$((MDSCOUNT * 5 + 5))
 	local nbcl=$(changelog_dump | wc -l)
-	[[ $nbcl -eq 0 ]] && error "no changelogs found"
+	(( $nbcl != 0 )) || error "no changelogs found"
 
 	for param in "changelog_max_idle_time=$idle_time" \
 		     "changelog_gc=1" \
@@ -19120,7 +19553,7 @@ test_160f() {
 	#define OBD_FAIL_CAT_FREE_RECORDS	0x1313
 	do_nodes $mdts "$LCTL set_param fail_loc=0x1313 fail_val=3"
 
-	for i in $(seq $MDSCOUNT); do
+	for ((i = 1; i <= $MDSCOUNT; i++)); do
 		cl_users=(${CL_USERS[mds$i]})
 		cl_user1[mds$i]="${cl_users[0]}"
 		cl_user2[mds$i]="${cl_users[1]}"
@@ -19157,16 +19590,18 @@ test_160f() {
 
 	# Generate one more changelog to trigger GC at fail_loc for cl_user2.
 	# cl_user1 should be OK because it recently processed records.
-	echo "$(date +%s): creating $((MDSCOUNT * 2)) files"
-	for ((i = 0; i < MDSCOUNT * 2; i++)); do
-		$LFS mkdir -i $((i%MDSCOUNT)) $DIR/$tdir/d$i.$((i/MDSCOUNT+2))||
-			error "create $DIR/$tdir/d$i.$((i/MDSCOUNT+2)) failed"
+	echo "$(date +%s): creating $((MDSCOUNT * 2)) dirs"
+	for ((idx = 0; idx < MDSCOUNT * 2; idx++)); do
+		local d=$DIR/$tdir/d$idx.$((idx/MDSCOUNT+2))
+
+		$LFS mkdir -i $((idx%MDSCOUNT)) $d ||
+			error "create dir $d on MDT$idx failed"
 	done
 
 	# ensure gc thread is done
-	for i in $(mdts_nodes); do
-		wait_update $i "ps -e -o comm= | grep chlg_gc_thread" "" 20 ||
-			error "$i: GC-thread not done"
+	for mds in ${mdts//,/ }; do
+		wait_update $mds "ps -e -o comm= | grep chlg_gc_thread" "" 20 ||
+			error "$mds: GC-thread not done"
 	done
 
 	local first_rec
@@ -19197,7 +19632,7 @@ test_160g() {
 	[[ $MDS1_VERSION -ge $(version_code 2.14.55) ]] ||
 		skip "Need MDS version at least 2.14.55"
 
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 
 	# Create a user
 	changelog_register || error "first changelog_register failed"
@@ -19213,9 +19648,9 @@ test_160g() {
 	# use all_char because created files should be evenly distributed
 	test_mkdir -c $MDSCOUNT -H all_char $DIR/$tdir ||
 		error "test_mkdir $tdir failed"
-	for ((i = 0; i < MDSCOUNT; i++)); do
-		$LFS mkdir -i $i $DIR/$tdir/d$i.1 $DIR/$tdir/d$i.2 ||
-			error "create $DIR/$tdir/d$i.1 failed"
+	for ((idx = 0; idx < MDSCOUNT; idx++)); do
+		$LFS mkdir -i $idx $DIR/$tdir/d$idx.1 $DIR/$tdir/d$idx.2 ||
+			error "create $DIR/$tdir/d$idx.1 failed"
 	done
 
 	# check changelogs have been generated
@@ -19236,7 +19671,7 @@ test_160g() {
 	done
 
 	local start=$SECONDS
-	for i in $(seq $MDSCOUNT); do
+	for ((i=1; i <= $MDSCOUNT; i++)); do
 		cl_users=(${CL_USERS[mds$i]})
 		cl_user1[mds$i]="${cl_users[0]}"
 		cl_user2[mds$i]="${cl_users[1]}"
@@ -19271,15 +19706,15 @@ test_160g() {
 	(( sleep2 > 0 )) && echo "sleep $sleep2 for interval" && sleep $sleep2
 	# Generate one more changelog to trigger GC at fail_loc for cl_user2.
 	# cl_user1 should be OK because it recently processed records.
-	for ((i = 0; i < MDSCOUNT; i++)); do
-		$LFS mkdir -i $i $DIR/$tdir/d$i.3 ||
-			error "create $DIR/$tdir/d$i.3 failed"
+	for ((idx = 0; idx < MDSCOUNT; idx++)); do
+		$LFS mkdir -i $idx $DIR/$tdir/d$idx.3 ||
+			error "create $DIR/$tdir/d$idx.3 failed"
 	done
 
 	# ensure gc thread is done
-	for i in $(mdts_nodes); do
-		wait_update $i "ps -e -o comm= | grep chlg_gc_thread" "" 20 ||
-			error "$i: GC-thread not done"
+	for mds in ${mdts//,/ }; do
+		wait_update $mds "ps -e -o comm= | grep chlg_gc_thread" "" 20 ||
+			error "$mds: GC-thread not done"
 	done
 
 	local first_rec
@@ -19307,10 +19742,10 @@ run_test 160g "changelog garbage collect on idle records"
 
 test_160h() {
 	remote_mds_nodsh && skip "remote MDS with nodsh" && return
-	[[ $MDS1_VERSION -ge $(version_code 2.10.56) ]] ||
+	(( $MDS1_VERSION >= $(version_code 2.10.56) )) ||
 		skip "Need MDS version at least 2.10.56"
 
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 
 	# Create a user
 	changelog_register || error "first changelog_register failed"
@@ -19326,9 +19761,9 @@ test_160h() {
 	# use all_char because created files should be evenly distributed
 	test_mkdir -c $MDSCOUNT -H all_char $DIR/$tdir ||
 		error "test_mkdir $tdir failed"
-	for ((i = 0; i < MDSCOUNT; i++)); do
-		$LFS mkdir -i $i $DIR/$tdir/d$i.1 $DIR/$tdir/d$i.2 ||
-			error "create $DIR/$tdir/d$i.1 failed"
+	for ((idx = 0; idx < MDSCOUNT; idx++)); do
+		$LFS mkdir -i $idx $DIR/$tdir/d$idx.1 $DIR/$tdir/d$idx.2 ||
+			error "create $DIR/$tdir/d$idx.1 failed"
 	done
 
 	# check changelogs have been generated
@@ -19349,7 +19784,7 @@ test_160h() {
 	# force cl_user2 to be idle (1st part)
 	sleep 9
 
-	for i in $(seq $MDSCOUNT); do
+	for ((i=1; i <= $MDSCOUNT; i++)); do
 		cl_users=(${CL_USERS[mds$i]})
 		cl_user1[mds$i]="${cl_users[0]}"
 		cl_user2[mds$i]="${cl_users[1]}"
@@ -19395,15 +19830,15 @@ test_160h() {
 	# stop MDT to stop GC-thread, should be done in back-ground as it will
 	# block waiting for the thread to be released and exit
 	declare -A stop_pids
-	for i in $(seq $MDSCOUNT); do
+	for ((i=1; i <= $MDSCOUNT; i++)); do
 		stop mds$i &
 		stop_pids[mds$i]=$!
 	done
 
-	for i in $(mdts_nodes); do
+	for mds in ${mdts//,/ }; do
 		local facet
 		local nb=0
-		local facets=$(facets_up_on_host $i)
+		local facets=$(facets_up_on_host $mds)
 
 		for facet in ${facets//,/ }; do
 			if [[ $facet == mds* ]]; then
@@ -19412,25 +19847,25 @@ test_160h() {
 		done
 		# ensure each MDS's gc threads are still present and all in "R"
 		# state (OBD_FAIL_FORCE_GC_THREAD effect!)
-		[[ $(do_node $i pgrep chlg_gc_thread | wc -l) -eq $nb ]] ||
-			error "$i: expected $nb GC-thread"
-		wait_update $i \
+		[[ $(do_node $mds pgrep chlg_gc_thread | wc -l) -eq $nb ]] ||
+			error "$mds: expected $nb GC-thread"
+		wait_update $mds \
 			"ps -C chlg_gc_thread -o state --no-headers | uniq" \
 			"R" 20 ||
-			error "$i: GC-thread not found in R-state"
+			error "$mds: GC-thread not found in R-state"
 		# check umounts of each MDT on MDS have reached kthread_stop()
-		[[ $(do_node $i pgrep umount | wc -l) -eq $nb ]] ||
-			error "$i: expected $nb umount"
-		wait_update $i \
+		[[ $(do_node $mds pgrep umount | wc -l) -eq $nb ]] ||
+			error "$mds: expected $nb umount"
+		wait_update $mds \
 			"ps -C umount -o state --no-headers | uniq" "D" 20 ||
-			error "$i: umount not found in D-state"
+			error "$mds: umount not found in D-state"
 	done
 
 	# release all GC-threads
 	do_nodes $mdts $LCTL set_param fail_loc=0
 
 	# wait for MDT stop to complete
-	for i in $(seq $MDSCOUNT); do
+	for ((i=1; i <= $MDSCOUNT; i++)); do
 		wait ${stop_pids[mds$i]} || error "mds$i: stop failed"
 	done
 
@@ -19439,13 +19874,13 @@ test_160h() {
 	# via ldiskfs/zfs and llog_reader...
 
 	# re-start/mount MDTs
-	for i in $(seq $MDSCOUNT); do
+	for ((i=1; i <= $MDSCOUNT; i++)); do
 		start mds$i $(mdsdevname $i) $MDS_MOUNT_OPTS ||
 			error "Fail to start mds$i"
 	done
 
 	local first_rec
-	for i in $(seq $MDSCOUNT); do
+	for ((i=1; i <= $MDSCOUNT; i++)); do
 		# check cl_user1 still registered
 		changelog_users mds$i | grep -q "${cl_user1[mds$i]}" ||
 			error "mds$i: User ${cl_user1[mds$i]} not registered"
@@ -19470,8 +19905,7 @@ run_test 160h "changelog gc thread stop upon umount, orphan records delete " \
 	      "during mount"
 
 test_160i() {
-
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 
 	changelog_register || error "first changelog_register failed"
 
@@ -19509,7 +19943,7 @@ test_160i() {
 	local i
 	local last_rec
 	declare -A LAST_REC
-	for i in $(seq $MDSCOUNT); do
+	for ((i=1; i <= $MDSCOUNT; i++)); do
 		if changelog_users mds$i | grep "^cl"; then
 			# make sure new records are added with one user present
 			LAST_REC[mds$i]=$(changelog_users $SINGLEMDS |
@@ -19523,7 +19957,7 @@ test_160i() {
 	createmany -m $DIR/$tdir/${tfile}bis $((MDSCOUNT * 2)) ||
 		error "create $DIR/$tdir/${tfile}bis failed"
 
-	for i in $(seq $MDSCOUNT); do
+	for ((i=1; i <= $MDSCOUNT; i++)); do
 		last_rec=$(changelog_users $SINGLEMDS |
 			   awk '/^current.index:/ { print $NF }')
 		echo "verify changelogs are on: $last_rec != ${LAST_REC[mds$i]}"
@@ -19893,7 +20327,7 @@ test_160s() {
 	(( $MDS1_VERSION >= $(version_code 2.14.55) )) ||
 		skip "Need MDS version at least 2.14.55"
 
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 
 	#define OBD_FAIL_TIME_IN_CHLOG_USER     0x1314
 	do_nodes $mdts $LCTL set_param fail_loc=0x1314 \
@@ -19909,9 +20343,9 @@ test_160s() {
 	# use all_char because created files should be evenly distributed
 	test_mkdir -c $MDSCOUNT -H all_char $DIR/$tdir ||
 		error "test_mkdir $tdir failed"
-	for ((i = 0; i < MDSCOUNT; i++)); do
-		$LFS mkdir -i $i $DIR/$tdir/d$i.1 $DIR/$tdir/d$i.2 ||
-			error "create $DIR/$tdir/d$i.1 failed"
+	for ((idx = 0; idx < MDSCOUNT; idx++)); do
+		$LFS mkdir -i $idx $DIR/$tdir/d$idx.1 $DIR/$tdir/d$idx.2 ||
+			error "create $DIR/$tdir/d$idx.1 on MDT$idx failed"
 	done
 
 	# check changelogs have been generated
@@ -19933,7 +20367,7 @@ test_160s() {
 	done
 
 	local start=$SECONDS
-	for i in $(seq $MDSCOUNT); do
+	for ((i=1; i <= $MDSCOUNT; i++)); do
 		cl_users=(${CL_USERS[mds$i]})
 		cl_user1[mds$i]="${cl_users[0]}"
 
@@ -19955,14 +20389,14 @@ test_160s() {
 	done
 
 	# ensure gc thread is done
-	for node in $(mdts_nodes); do
-		wait_update $node "pgrep chlg_gc_thread" "" 20 ||
-			error "$node: GC-thread not done"
+	for mds in ${mdts//,/ }; do
+		wait_update $mds "pgrep chlg_gc_thread" "" 20 ||
+			error "$mds: GC-thread not done"
 	done
 
 	do_nodes $mdts $LCTL set_param fail_loc=0
 
-	for (( i = 1; i <= MDSCOUNT; i++ )); do
+	for ((i = 1; i <= MDSCOUNT; i++)); do
 		# check cl_user1 is purged
 		changelog_users mds$i | grep -q "${cl_user1[mds$i]}" &&
 			error "mds$i: User ${cl_user1[mds$i]} is registered"
@@ -19989,6 +20423,7 @@ test_160t() {
 	# create default overstripe to maximize changelog size
 	$LFS setstripe  -C 8 $DIR/$tdir || error "setstripe failed"
 	createmany -o $DIR/$tdir/u1_ 2000 || error "createmany for user1 failed"
+	stack_trap "unlinkmany $DIR/$tdir/u1_ 2000"
 	llog_size1=$(do_facet mds1 $LCTL get_param -n mdd.$MDT0.changelog_size)
 
 	# user2 consumes less records so less space
@@ -20247,12 +20682,28 @@ test_161c() {
 		error "flag $flags is not 0x0"
 	fi
 	echo "unlink a file having nlink > 1, changelog record flags '$flags'"
+
+	(( MDS1_VERSION >= $(version_code v2_16_53-39) )) ||
+		{ echo "CLF_UNLINK_LAST is not set with open file (LU-18860)";
+		return 0; }
+
+	# unlink a file open having nlink = 1 (changelog flag 0x1)
+	local pid
+	touch $DIR/$tdir/open_161c
+	tail -f $DIR/$tdir/open_161c & pid=$!
+	sleep 0.2
+	unlink $DIR/$tdir/open_161c
+	kill $pid
+	changelog_dump | grep UNLNK | tail -n 5
+	flags=$(changelog_dump | awk '/UNLNK/ {f=$5} END {print f}')
+	changelog_clear 0 || error "changelog_clear failed"
+	[[ "$flags" == "0x1" ]] || error "flag $flags is not 0x1"
+	echo "unlink a open file having nlink = 1, changelog record has flags of $flags"
 }
 run_test 161c "check CL_RENME[UNLINK] changelog record flags"
 
 test_161d() {
 	remote_mds_nodsh && skip "remote MDS with nodsh"
-	[ -n "$FILESET" ] && skip "Not functional for FILESET set"
 
 	local pid
 	local fid
@@ -20282,7 +20733,7 @@ test_161d() {
 	local tempfile="$(mktemp --tmpdir $tfile.XXXXXX)"
 	stack_trap "rm -f $tempfile"
 	fid=$(changelog_extract_field "CREAT" "$tfile" "t=")
-	cat $MOUNT/.lustre/fid/$fid 2>/dev/null >$tempfile || error "cat failed"
+	$MULTIOP $MOUNT/.lustre/fid/$fid orp16384c >$tempfile || error "read failed"
 	# some delay may occur during ChangeLog publishing and file read just
 	# above, that could allow file write to happen finally
 	[[ -s $tempfile ]] && echo "file should be empty"
@@ -20391,6 +20842,7 @@ test_162c() {
 
 	test_mkdir $DIR/$lpath
 	test_mkdir $DIR/$rpath
+	stack_trap "rm -rf $DIR/$lpath $DIR/$rpath"
 
 	for ((i = 0; i <= 101; i++)); do
 		lpath="$lpath/$i"
@@ -20761,6 +21213,38 @@ test_165f() {
 }
 run_test 165f "ofd_access_log_reader --exit-on-close works"
 
+test_165g() {
+	local count
+	local trace=$TMP/${tfile}.trace
+	local ofd_keepalive=$(do_facet ost1 ofd_access_log_reader --help |
+				grep keepalive)
+
+	[[ -n "$ofd_keepalive" ]] || skip "ALR keepalive message unsupported"
+
+	setup_165
+	do_facet ost1 timeout 60 ofd_access_log_reader \
+		--keepalive=3 --batch-interval=4 --debug=- > "${trace}" &
+	sleep 40
+	stop ost1
+
+	do_facet ost1 killall -TERM ofd_access_log_reader
+	wait
+	rc=$?
+
+	if ((rc != 0)); then
+		error "ofd_access_log_reader exited with rc = '${rc}'"
+	fi
+
+	count=$(grep -c "send keepalive" ${trace})
+
+	# Normal duration 40 seconds / 4 secs interval = 10 times or so.
+	# But sometimes the duration may be unpredictably long
+	(( count >= 7 )) || error "keepalive msg received $count. Expected >= 7"
+
+	echo "keepalive msg received $count"
+}
+run_test 165g "ofd_access_log_reader --keepalive works"
+
 test_169() {
 	# do directio so as not to populate the page cache
 	log "creating a 10 Mb file"
@@ -20780,7 +21264,7 @@ test_169() {
 }
 run_test 169 "parallel read and truncate should not deadlock"
 
-test_170() {
+test_170a() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 
 	$LCTL clear	# bug 18514
@@ -20833,7 +21317,67 @@ test_170() {
         fi
         true
 }
-run_test 170 "test lctl df to handle corrupted log ====================="
+run_test 170a "test lctl df to handle corrupted log"
+
+test_170b() {
+	# enable filename encoding on one client, ost and mdt respectively
+	declare -a old_fl
+	local param="enable_fname_encoding"
+	local nodes_list=$HOSTNAME
+	local log=$TMP/sanity.$testnum
+	local i=0
+
+	(( $MDS1_VERSION >= $(version_code 2.16.52) )) &&
+		nodes_list="$nodes_list,$(facet_active_host mds1)"
+	(( $OST1_VERSION >= $(version_code 2.16.52) )) &&
+		nodes_list="$nodes_list,$(facet_active_host ost1)"
+
+	old_fl=($(do_nodes $nodes_list $LCTL get_param -n $param))
+
+	# Test with filename encoding on
+	set_params_nodes $nodes_list "$param=on"
+	for node in ${nodes_list//,/ }; do
+		stack_trap "set_params_nodes $node "$param=${old_fl[$i]}""
+		i=$((i+1))
+	done
+	do_nodes $nodes_list "$LCTL get_param -n $param" | grep 0 &&
+		error "Failed to enable filename encoding on all the nodes"
+
+	# Start full debug to collect the logs
+	start_full_debug_logging $nodes_list
+	do_nodes $nodes_list "$LCTL clear"
+
+	# Do some operations on $tfile
+	touch $DIR/$tfile || error "Failed to touch $tfile"
+	cp $DIR/$tfile $DIR/$testnum.cp || error "Failed to cp $tfile"
+	ln -s $DIR/$tfile $DIR/$testnum.ln || error "Failed to ln -s $tfile"
+	$LFS migrate -c $OSTCOUNT $DIR/$tfile ||
+		error "Failed to migrate $tfile"
+	$LFS mirror extend -N $DIR/$tfile ||
+		error "Failed to extend mirrored $tfile"
+	mv $DIR/$tfile $DIR/$testnum.mv || error "Failed to mv $tfile"
+	rm -f $DIR/$tfile $DIR/$testnum.* || error "Failed to rm $tfile"
+
+	# Do some operations on $tdir
+	mkdir -p $DIR/$tdir || error "Failed to mkdir $tdir"
+	cp -r $DIR/$tdir $DIR/$testnum.cp || error "Failed to cp $tdir"
+	ln -s $DIR/$tdir $DIR/$testnum.ln || error "Failed to ln -s $tdir"
+	$LFS migrate -d -m 0 -c $MDSCOUNT $DIR/$tdir ||
+		error "Failed to migrate $tdir"
+	mv $DIR/$tdir $DIR/$testnum.mv || error "Failed to mv $tdir"
+	rm -rf $DIR/$tdir $DIR/$testnum.* || error "Failed to rm $tdir"
+
+	# Stop the full debug
+	do_nodes $nodes_list "$LCTL dk > $log"
+	stack_trap "do_nodes $nodes_list rm -f $log"
+	stop_full_debug_logging
+
+	# Verify if $tfile and $tdir names are encoded in the logs
+	do_nodes $nodes_list "grep -E '$tfile|$tdir' $log" &&
+		error "Still found '$tfile' and '$tdir' in the logs"
+	return 0
+}
+run_test 170b "check filename encoding"
 
 test_171() { # bug20592
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
@@ -21345,7 +21889,6 @@ test_185() { # LU-2441
 	local mtime1=$(stat -c "%Y" $DIR/$tdir)
 	local fid=$($MULTIOP $DIR/$tdir VFw4096c) ||
 		error "cannot create/write a volatile file"
-	[ "$FILESET" == "" ] &&
 	$CHECKSTAT -t file $MOUNT/.lustre/fid/$fid 2>/dev/null &&
 		error "FID is still valid after close"
 
@@ -21360,10 +21903,8 @@ test_185() { # LU-2441
 	# is unfortunately eaten by multiop_bg_pause
 	local n=$((${fidv[1]} + 1))
 	local next_fid="${fidv[0]}:$(printf "0x%x" $n):${fidv[2]}"
-	if [ "$FILESET" == "" ]; then
-		$CHECKSTAT -t file $MOUNT/.lustre/fid/$next_fid ||
-			error "FID is missing before close"
-	fi
+	$CHECKSTAT -t file $MOUNT/.lustre/fid/$next_fid ||
+		error "FID is missing before close"
 	kill -USR1 $multi_pid
 	# 1 second delay, so if mtime change we will see it
 	sleep 1
@@ -21394,8 +21935,9 @@ function create_check_volatile() {
 
 test_185a(){
 	# LU-12516 - volatile creation via .lustre
-	[[ $MDS1_VERSION -ge $(version_code 2.12.55) ]] ||
-		skip "Need MDS version at least 2.3.55"
+	(( $MDS1_VERSION >= $(version_code 2.12.55) )) ||
+		skip "Need MDS version at least 2.12.55"
+	[ -n "$FILESET" ] && skip "SKIP due to FILESET set"
 
 	create_check_volatile 0
 	[ $MDSCOUNT -lt 2 ] && return 0
@@ -21447,10 +21989,9 @@ run_test 187b "Test data version change on volatile file"
 test_200() {
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 	remote_mgs_nodsh && skip "remote MGS with nodsh"
-	[ -n "$FILESET" ] && skip "SKIP due to FILESET set"
 
 	local POOL=${POOL:-cea1}
-	local POOL_ROOT=${POOL_ROOT:-$DIR/d200.pools}
+	local POOL_ROOT=${POOL_ROOT:-$DIR/$tdir}
 	local POOL_DIR_NAME=${POOL_DIR_NAME:-dir_tst}
 	# Pool OST targets
 	local first_ost=0
@@ -22010,7 +22551,7 @@ test_205h() {
 	local subdir=$DIR/dir
 	local val
 
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 	local mds_saved=$(do_facet mds1 $LCTL get_param -n mdt.$FSNAME-MDT0000.job_xattr)
 	local client_saved=$($LCTL get_param -n jobid_var)
 
@@ -22056,7 +22597,7 @@ test_205i() {
 	(( $MDS1_VERSION >= $(version_code 2.15.57.7) )) ||
 		skip "Need MDS >= v2_15_57-7-g23a2db28dc for jobid xattr"
 
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 	local mds_saved=$(do_facet mds1 $LCTL get_param -n mdt.$FSNAME-MDT0000.job_xattr)
 
 	stack_trap "do_nodes $mdts $LCTL set_param mdt.*.job_xattr=$mds_saved" EXIT
@@ -22521,9 +23062,10 @@ run_test 216 "check lockless direct write updates file size and kms correctly"
 test_217() { # bug 22430
 	[ $PARALLEL == "yes" ] && skip "skip parallel run"
 
+	local nodes=$(nodes_list)
 	local node
 
-	for node in $(nodes_list); do
+	for node in ${nodes//,/ }; do
 		local nid=$(host_nids_address $node $NETTYPE)
 		local node_ip=$(do_node $node getent ahostsv4 $node |
 				awk '{ print $1; exit; }')
@@ -22716,6 +23258,7 @@ test_224a() { # LU-1039, MRP-303
 	#define OBD_FAIL_PTLRPC_CLIENT_BULK_CB   0x508
 	$LCTL set_param fail_loc=0x508
 	dd if=/dev/zero of=$DIR/$tfile bs=1M count=1 conv=fsync
+	stack_trap "rm -f $DIR/$tfile"
 	$LCTL set_param fail_loc=0
 	df $DIR
 }
@@ -22731,6 +23274,7 @@ test_224bd_sub() { # LU-1039, MRP-303
 	$LFS setstripe -c 1 -i 0 $DIR/$tfile
 
 	dd if=$TMP/$tfile of=$DIR/$tfile bs=1M count=1
+	stack_trap "rm -f $DIR/$tfile"
 	cancel_lru_locks osc
 	set_checksums 0
 	stack_trap "set_checksums $ORIG_CSUM" EXIT
@@ -22940,9 +23484,9 @@ test_226c () {
 	$LFS setdirstripe -c -1 -i 1 $DIR/$tdir ||
 		error "create remote directory failed"
 	mkdir -p $submnt || error "create $submnt failed"
-	$MOUNT_CMD $MGSNID:/$FSNAME/$tdir $submnt ||
+	FILESET="$FILESET/$tdir" mount_client $submnt ||
 		error "mount $submnt failed"
-	stack_trap "umount $submnt" EXIT
+	stack_trap "umount $submnt;rm -rf $submit" EXIT
 
 	cp $srcfile $dstfile
 	fid=$($LFS path2fid $dstfile)
@@ -23531,6 +24075,53 @@ test_230c() {
 			error "$file is not on MDT${MDTIDX}"
 	done
 
+	if (($MDS1_VERSION >= $(version_code 2.16.50) )); then
+		echo "Migrate a dir with an open file"
+		touch $migrate_dir/foo
+		local foo_fid=$($LFS path2fid $migrate_dir/foo)
+		$MULTIOP $migrate_dir/foo o_c &
+		local bg_pid=$!
+		sleep 1
+
+		$LFS migrate -m 0 $migrate_dir || {
+			kill -USR1 $bg_pid
+			error "migrate a dir with an open file fails"
+		}
+
+		kill -USR1 $bg_pid
+		wait $bg_pid || error "multiop fails"
+
+		local foo_fid_new=$($LFS path2fid $migrate_dir/foo)
+		[[ "$foo_fid" == "$foo_fid_new" ]] ||
+			error "migrate should skip an open file $foo_fid != $foo_fid_new"
+
+		for file in $(find $migrate_dir); do
+			[[ $file == "$migrate_dir/foo" ]] && continue
+			mdt_index=$($LFS getstripe -m $file)
+			[[ "$mdt_index" == "0" ]] ||
+				error "$file is not on MDT0"
+		done
+
+		# repeating the migrate should leave the dir's FID the same
+		# and update only the skipped file's FID
+		local old_dir_fid=$($LFS path2fid $migrate_dir)
+		local old_file_fid=$($LFS path2fid $migrate_dir/file)
+
+		$LFS migrate -m 0 $migrate_dir || error "Repeating migrate fails"
+
+		local new_dir_fid=$($LFS path2fid $migrate_dir)
+		local new_file_fid=$($LFS path2fid $migrate_dir/file)
+
+		foo_fid_new=$($LFS path2fid $migrate_dir/foo)
+
+		[[ "$foo_fid_old" != "$foo_fid_new" ]] ||
+			error "Expecting the skipped file to be migrated, but its FID is the same"
+		[[ "$old_dir_fid" != "$new_fid_dir" ]] ||
+			error "The top-level dir has been migrated after repeating the same migrate cmd"
+		[[ "$old_file_fid" == "$new_file_fid" ]] ||
+			error "The migrated file has been migrated again"
+	fi
+
 	rm -rf $DIR/$tdir || error "rm dir failed after migration"
 }
 run_test 230c "check directory accessiblity if migration failed"
@@ -23901,7 +24492,7 @@ test_230o() {
 	[ $MDS1_VERSION -ge $(version_code 2.13.52) ] ||
 		skip "Need MDS version at least 2.13.52"
 
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 	local timeout=100
 	local restripe_status
 	local delta
@@ -23946,7 +24537,7 @@ test_230p() {
 	(( MDS1_VERSION >= $(version_code 2.13.52) )) ||
 		skip "Need MDS version at least 2.13.52"
 
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 	local timeout=100
 	local restripe_status
 	local delta
@@ -23968,7 +24559,7 @@ test_230p() {
 	createmany -d $DIR/$tdir/d 100 ||
 		error "create dirs under remote dir failed"
 
-	for c in $(seq $((MDSCOUNT - 1)) -1 1); do
+	for ((c = $MDSCOUNT - 1; c >= 1; c--)); do
 		local mdt_hash="crush"
 
 		do_nodes $mdts "$LCTL set_param mdt.*.md_stats=clear >/dev/null"
@@ -23989,6 +24580,16 @@ test_230p() {
 		(( delta < 200 / c + 4 )) ||
 			error "$delta files migrated >= $((200 / c + 4))"
 	done
+
+	# and restripe to -c 2
+	echo Splitting the dir back to 2 stripes.
+        $LFS setdirstripe -c 2 $DIR/$tdir || {
+		$LFS getdirstripe $DIR/$tdir
+                error "split $tdir to 2 stripes failed"
+	}
+        wait_update $HOSTNAME \
+                "$LFS getdirstripe -H $DIR/$tdir" "crush" $timeout ||
+                error "dir split not finished"
 }
 run_test 230p "dir merge"
 
@@ -23997,7 +24598,7 @@ test_230q() {
 	(( MDS1_VERSION >= $(version_code 2.13.52) )) ||
 		skip "Need MDS version at least 2.13.52"
 
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 	local saved_threshold=$(do_facet mds1 \
 			$LCTL get_param -n mdt.*-MDT0000.dir_split_count)
 	local saved_delta=$(do_facet mds1 \
@@ -24105,7 +24706,7 @@ test_230s() {
 	(( $MDS1_VERSION >= $(version_code 2.14.52) )) ||
 		skip "Need MDS version at least 2.14.52"
 
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 	local restripe_status=$(do_facet mds1 $LCTL get_param -n \
 				mdt.*MDT0000.enable_dir_restripe)
 
@@ -24912,7 +25513,7 @@ test_subdir_mount_lock()
 	mkdir -p $submount || error "mkdir $submount failed"
 	stack_trap "rmdir $submount"
 
-	FILESET="$fileset/$testdir" mount_client $submount ||
+	FILESET="$FILESET/$testdir" mount_client $submount ||
 		error "mount $FILESET failed"
 	stack_trap "umount $submount"
 
@@ -26334,6 +26935,7 @@ test_270j() {
 	mkdir -p $DIR/$tdir
 
 	$LFS setstripe -E 1M -L mdt -E -1 -c1 $dom
+	stack_trap "rm -f $dom"
 
 	odv=$($LFS data_version $dom)
 	chmod 666 $dom
@@ -26466,14 +27068,15 @@ get_mdc_stats() {
 }
 
 test_271c() {
-	[ $MDS1_VERSION -lt $(version_code 2.10.55) ] &&
-		skip "Need MDS version at least 2.10.55"
+	(( $MDS1_VERSION >= $(version_code v2_10_55_0-74-g2f09984f3f) )) ||
+		skip "Need MDS >= 2.10.55.74 for combined DoM lock bits"
 
 	local dom=$DIR/$tdir/dom
 
 	mkdir -p $DIR/$tdir
 
-	$LFS setstripe -E 1024K -L mdt $DIR/$tdir
+	$LFS setstripe -E 1024K -L mdt $DIR/$tdir ||
+		error "unable to set DoM layout on $DIR/$tdir"
 
 	local mdtidx=$($LFS getstripe -m $DIR/$tdir)
 	local facet=mds$((mdtidx + 1))
@@ -26759,6 +27362,7 @@ test_272d() {
 	local dom=$DIR/$tdir/$tfile
 	mkdir -p $DIR/$tdir
 	$LFS setstripe -E 1M -L mdt -E -1 -c1 $dom
+	stack_trap "rm -f $dom"
 
 	local mdtidx=$($LFS getstripe -m $dom)
 	local mdtname=MDT$(printf %04x $mdtidx)
@@ -26804,6 +27408,7 @@ test_272e() {
 	local dom=$DIR/$tdir/$tfile
 	mkdir -p $DIR/$tdir
 	$LFS setstripe -c 2 $dom
+	stack_trap "rm -f $dom"
 
 	dd if=/dev/urandom of=$dom bs=2M count=1 oflag=direct ||
 		error "failed to write data into $dom"
@@ -26836,6 +27441,7 @@ test_272f() {
 	local dom=$DIR/$tdir/$tfile
 	mkdir -p $DIR/$tdir
 	$LFS setstripe -c 2 $dom
+	stack_trap "rm -f $dom"
 
 	dd if=/dev/urandom of=$dom bs=2M count=1 oflag=direct ||
 		error "failed to write data into $dom"
@@ -26964,6 +27570,7 @@ test_277() {
 	[ $cached_mb -eq 1 ] || error "expected mb 1 got $cached_mb"
 	dd if=/dev/zero of=$DIR/$tfile bs=1M count=1 \
 		oflag=direct conv=notrunc
+	stack_trap "rm -f $DIR/$tfile"
 	cached_mb=$($LCTL get_param llite.*.max_cached_mb |
 		    awk '/^used_mb/ { print $2 }')
 	[ $cached_mb -eq 0 ] || error "expected mb 0 got $cached_mb"
@@ -29525,6 +30132,41 @@ test_401aa() {
 }
 run_test 401aa "Verify that 'lctl list_param -p' lists the correct path names"
 
+test_401ab() {
+	$LCTL list_param -pr "*" | while read path; do
+		[[ -r $path ]] || error "'$path' not readable"
+	done
+
+	$LCTL list_param -pLr "*" | while read path; do
+		[[ -r $path ]] || error "'$path' not readable (--no-links)"
+	done
+}
+run_test 401ab "Check that 'lctl list_param -r' lists only readable params"
+
+test_401ac() {
+	$LCTL list_param -pw "*" | while read path; do
+		[[ -w $path ]] || error "'$path' not writable"
+	done
+
+	$LCTL list_param -pLw "*" | while read path; do
+		[[ -w $path ]] || error "'$path' not writable (--no-links)"
+	done
+}
+run_test 401ac "Check that 'lctl list_param -w' lists only writable params"
+
+test_401ad() {
+	$LCTL list_param -prw "*" | while read path; do
+		[[ -r $path && -w $path ]] ||
+			error "'$path' not readable and writable"
+	done
+
+	$LCTL list_param -pLrw "*" | while read path; do
+		[[ -r $path && -w $path ]] ||
+			error "'$path' not readable and writable (--no-links)"
+	done
+}
+run_test 401ad "Check that 'lctl list_param -wr' is conjunctive"
+
 test_401b() {
 	# jobid_var may not allow arbitrary values, so use jobid_name
 	# if available
@@ -29672,6 +30314,139 @@ test_401f() {
 	done
 }
 run_test 401f "check 'lctl list_param' doesn't follow symlinks with --no-links"
+
+test_401ga() {
+	local paramdir=/etc/lustre
+	local fsnamefile=$paramdir/mount.$FSNAME.params
+	local clientfile=$paramdir/mount.client.params
+
+	local param1="osc.$FSNAME-OST0000-*.max_dirty_mb"
+	local param2="at_max"
+
+	local value1_new value2_new
+	local value1_old=$($LCTL get_param -n $param1)
+	local value2_old=$($LCTL get_param -n $param2)
+
+	local value1_client=$(( value1_old - 1 ))
+	local value1_fsname=$(( value1_old - 3 ))
+	local value2_client=$(( value2_old - 10 ))
+	local value2_fsname=$(( value2_old - 13 ))
+
+	stack_trap "$LCTL set_param $param1=$value1_old"
+	stack_trap "$LCTL set_param $param2=$value2_old"
+
+	if [[ -e $fsnamefile ]]; then
+		mv $fsnamefile $fsnamefile.$TESTNAME
+		stack_trap "mv $fsnamefile.$TESTNAME $fsnamefile"
+	else
+		stack_trap "rm -f $fsnamefile"
+	fi
+
+	if [[ -e $clientfile ]]; then
+		mv $clientfile $clientfile.$TESTNAME
+		stack_trap "mv $clientfile.$TESTNAME $clientfile"
+	else
+		stack_trap "rm -f $clientfile"
+	fi
+
+	# do not allow bad params to be set
+	$LCTL set_param --client $TESTNAME=$TESTNAME &&
+		error "set $TESTNAME as param in $clientfile" || true
+
+	# set garbage val to be overwritten
+	$LCTL set_param --client $param1=$TESTNAME ||
+		error "failed to set $param1 in $clientfile"
+
+	$LCTL set_param --client $param1=$value1_client ||
+		error "failed to overwrite $param1 in $clientfile"
+
+	# nothing should be changed
+	$LCTL set_param --client $param1=$value1_client ||
+		error "error setting duplicate param $param1 in $clientfile"
+
+	$LCTL set_param --client=$FSNAME $param1=$value1_fsname ||
+		error "failed to set $param1 in $fsnamefile"
+
+	$LCTL set_param --client=$FSNAME $param2=$value2_fsname &&
+		error "set $param2 in $fsnamefile without containing $FSNAME" ||
+		true
+
+	$LCTL set_param --client $TESTNAME= $param2=$value2_client || true
+	grep -q "$param2=$value2_client" $clientfile ||
+		error "set_param -C did not continue after error"
+
+	remount_client $MOUNT
+
+	value1_new=$($LCTL get_param -n $param1)
+	value2_new=$($LCTL get_param -n $param2)
+
+	[[ "$value1_new" == "$value1_client" ]] &&
+		error "$param1 not $value1_fsname, got client param $value1_new"
+	[[ "$value1_new" == "$value1_fsname" ]] ||
+		error "$param1 not $FSNAME param $value1_fsname, got $value1_new"
+	[[ "$value2_new" == "$value2_client" ]] ||
+		error "$param2 not client param $value2_client, got $value2_new"
+}
+run_test 401ga "check 'set_param -C' sets params upon mount"
+
+test_401gb() {
+	local paramdir=/etc/lustre
+	local fsnamefile=$paramdir/mount.$FSNAME.params
+	local clientfile=$paramdir/mount.client.params
+
+	local param1="osc.$FSNAME-OST0000-*.max_dirty_mb"
+	local param2="at_max"
+
+	local value1_new value2_new
+	local value1_old=$($LCTL get_param -n $param1)
+	local value2_old=$($LCTL get_param -n $param2)
+
+	local value1_client=$(( value1_old - 1 ))
+	local value1_fsname=$(( value1_old - 3 ))
+	local value2_client=$(( value2_old - 10 ))
+
+	stack_trap "$LCTL set_param $param1=$value1_old"
+	stack_trap "$LCTL set_param $param2=$value2_old"
+
+	if [[ -e $fsnamefile ]]; then
+		mv $fsnamefile $fsnamefile.$TESTNAME
+		stack_trap "mv $fsnamefile.$TESTNAME $fsnamefile"
+	else
+		stack_trap "rm $fsnamefile"
+	fi
+
+	if [[ -e $clientfile ]]; then
+		mv $clientfile $clientfile.$TESTNAME
+		stack_trap "mv $clientfile.$TESTNAME $clientfile"
+	else
+		stack_trap "rm $clientfile"
+	fi
+
+	$LCTL set_param --client $param1=$value1_client $param2=$value2_client
+	$LCTL set_param --client=$FSNAME $param1=$value1_fsname
+
+	$LCTL set_param -d --client $TESTNAME=$TESTNAME ||
+		error "error deleting bad param $TESTNAME from $clientfile"
+
+	$LCTL set_param -d --client $param2 ||
+		error "error deleting $param2 from $clientfile"
+
+	$LCTL set_param -d --client=$FSNAME $param1 $param2 ||
+		error "error deleting $param1 and $param2 from $fsnamefile"
+
+	remount_client $MOUNT
+
+	value1_new=$($LCTL get_param -n $param1)
+	value2_new=$($LCTL get_param -n $param2)
+
+	[[ "$value1_new" == "$value1_fsname" ]] &&
+		error "$param1 not $value1_client, got $FSNAME param $value1_new"
+	[[ "$value1_new" == "$value1_client" ]] ||
+		error "$param1 not client param $value1_client, got $value1_new"
+	[[ "$value2_new" == "$value2_old" ]] ||
+		error "$param2 not $value2_old, got $value2_new"
+}
+run_test 401gb "check 'set_param -d -C' removes client params"
 
 test_402() {
 	[[ $MDS1_VERSION -ge $(version_code 2.7.66) ]] ||
@@ -30196,7 +30971,7 @@ generate_uneven_mdts() {
 	if check_fallocate_supported mds$((min_index + 1)); then
 		cmd="fallocate -l 128K "
 	else
-		cmd="dd if=/dev/zero bs=128K count=1 of="
+		cmd="$DD bs=128K count=1 of="
 	fi
 
 	echo "using cmd $cmd"
@@ -30579,6 +31354,8 @@ test_413d() {
 	(( MDS1_VERSION >= $(version_code 2.14.51) )) ||
 		skip "Need server version at least 2.14.51"
 
+	[ -n "$FILESET" ] && skip "Not functional for FILESET set"
+
 	local lmv_qos_threshold_rr
 
 	lmv_qos_threshold_rr=$($LCTL get_param -n lmv.*.qos_threshold_rr |
@@ -30695,6 +31472,12 @@ run_test 413f "lfs getdirstripe -D list ROOT default LMV if it's not set on dir"
 test_413g() {
 	(( MDSCOUNT >= 2 )) || skip "We need at least 2 MDTs for this test"
 
+	local FILESET_orig=$FILESET
+	if [ -n "$FILESET" ];then
+		cleanup_mount $MOUNT
+		FILESET="" mount_client $MOUNT
+	fi
+
 	mkdir -p $DIR/$tdir/l2/l3/l4 || error "mkdir $tdir/l1/l2/l3 failed"
 	getfattr -d -m trusted.dmv --absolute-names $DIR > $TMP/dmv.ea ||
 		error "dump $DIR default LMV failed"
@@ -30703,15 +31486,15 @@ test_413g() {
 	$LFS setdirstripe -D -i -1 -c 1 -X 3 --max-inherit-rr 3 $DIR ||
 		error "set $DIR default LMV failed"
 
-	FILESET="$FILESET/$tdir/l2/l3/l4" mount_client $MOUNT2 ||
-		error "mount $MOUNT2 failed"
-	stack_trap "umount_client $MOUNT2"
-
 	local saved_DIR=$DIR
-
 	export DIR=$MOUNT2
-
-	stack_trap "export DIR=$saved_DIR"
+	FILESET="/$tdir/l2/l3/l4" mount_client $MOUNT2 ||
+		error "mount $MOUNT2 failed"
+	if [ -n "$FILESET_orig" ]; then
+		stack_trap "umount_client $MOUNT2; export DIR=$saved_DIR;export FILESET=$FILESET_orig; mount_client $MOUNT"
+	else
+		stack_trap "umount_client $MOUNT2; export DIR=$saved_DIR"
+	fi
 
 	# first check filesystem-wide default LMV inheritance
 	test_fs_dmv_inherit || error "incorrect fs default LMV inheritance"
@@ -30722,6 +31505,12 @@ test_413g() {
 	local count=$($LFS getstripe -m $DIR/s* | sort -u | wc -l)
 
 	(( $count == $MDSCOUNT )) || error "dirs are spread to $count MDTs"
+
+	if [ -n "$FILESET_orig" ];then
+		cleanup_mount $MOUNT
+		FILESET=$FILESET_orig
+		mount_client $MOUNT
+	fi
 }
 run_test 413g "enforce ROOT default LMV on subdir mount"
 
@@ -31437,11 +32226,10 @@ test_421h() {
 	echo File $DIR/$tdir/fileD FID $fidD
 
 	# mount another client mount point with subdirectory mount
-	export FILESET=/$tdir/subdir
 	mount_other=${MOUNT}_other
-	mount_client $mount_other ${MOUNT_OPTS}
+	FILESET="$FILESET/$tdir/subdir" mount_client $mount_other ${MOUNT_OPTS}
 	mount_ret=$?
-	export FILESET=""
+	FILESET=""
 	(( mount_ret == 0 )) || error "mount $mount_other failed"
 
 	echo Removing FIDs:
@@ -31450,6 +32238,7 @@ test_421h() {
 	rmfid_ret=$?
 
 	umount_client $mount_other || error "umount $mount_other failed"
+	rm -rf $mount_other
 
 	(( rmfid_ret != 0 )) || error "rmfid should have failed"
 
@@ -32378,7 +33167,7 @@ post_801() {
 }
 
 barrier_stat() {
-	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+	if (( $MDS1_VERSION >= $(version_code 2.16.50) )); then
 		barrier_stat="barrier stat"
 	else
 		barrier_stat="barrier_stat"
@@ -32545,7 +33334,7 @@ run_test 801b "modification will be blocked by write barrier"
 
 test_801c() {
 	[[ $MDSCOUNT -lt 2 ]] && skip_env "needs >= 2 MDTs"
-	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+	if (( $MDS1_VERSION >= $(version_code 2.16.50) )); then
 		barrier_freeze="barrier freeze"
 		barrier_thaw="barrier thaw"
 		barrier_rescan="barrier rescan"
@@ -33523,6 +34312,7 @@ test_818() {
 run_test 818 "unlink with failed llog"
 
 test_819a() {
+	stack_trap "rm -f $DIR/$tfile"
 	dd if=/dev/zero of=$DIR/$tfile bs=1M count=1
 	cancel_lru_locks osc
 	#define OBD_FAIL_OST_2BIG_NIOBUF		0x248
@@ -33533,6 +34323,7 @@ test_819a() {
 run_test 819a "too big niobuf in read"
 
 test_819b() {
+	stack_trap "rm -f $DIR/$tfile"
 	#define OBD_FAIL_OST_2BIG_NIOBUF		0x248
 	do_facet $SINGLEMDS lctl set_param fail_loc=0x80000248
 	dd if=/dev/zero of=$DIR/$tfile bs=1M count=1

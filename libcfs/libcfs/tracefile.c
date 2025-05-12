@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * libcfs/libcfs/tracefile.c
  *
  * Author: Zach Brown <zab@clusterfs.com>
  * Author: Phil Schwan <phil@clusterfs.com>
@@ -329,10 +309,11 @@ static void cfs_vprint_to_console(struct ptldebug_header *hdr,
 				  struct va_format *vaf, const char *file,
 				  const char *fn)
 {
-	char *prefix = "Lustre";
+	int subsys = hdr->ph_subsys;
 	int mask = hdr->ph_mask;
+	char *prefix = "Lustre";
 
-	if (hdr->ph_subsys == S_LND || hdr->ph_subsys == S_LNET)
+	if (subsys == S_LND || subsys == S_LNET)
 		prefix = "LNet";
 
 	if (mask & D_CONSOLE) {
@@ -342,7 +323,8 @@ static void cfs_vprint_to_console(struct ptldebug_header *hdr,
 			pr_err("%sError: %pV", prefix, vaf);
 		else if (mask & D_WARNING)
 			pr_warn("%s: %pV", prefix, vaf);
-		else if (mask & libcfs_printk)
+		else if (mask & libcfs_printk ||
+			 subsys & libcfs_subsystem_printk)
 			pr_info("%s: %pV", prefix, vaf);
 	} else {
 		if (mask & D_EMERG)
@@ -357,8 +339,11 @@ static void cfs_vprint_to_console(struct ptldebug_header *hdr,
 			pr_warn("%s: %d:%d:(%s:%d:%s()) %pV", prefix,
 				hdr->ph_pid, hdr->ph_extern_pid, file,
 				hdr->ph_line_num, fn, vaf);
-		else if (mask & (D_CONSOLE | libcfs_printk))
-			pr_info("%s: %pV", prefix, vaf);
+		else if (mask & libcfs_printk ||
+			 subsys & libcfs_subsystem_printk)
+			pr_info("%s: %d:%d:(%s:%d:%s()) %pV", prefix,
+				hdr->ph_pid, hdr->ph_extern_pid, file,
+				hdr->ph_line_num, fn, vaf);
 	}
 }
 
@@ -676,7 +661,8 @@ void libcfs_debug_msg(struct libcfs_debug_msg_data *msgdata,
 	__LASSERT(tage->used <= PAGE_SIZE);
 
 console:
-	if ((header.ph_mask & libcfs_printk) == 0) {
+	if ((header.ph_mask & libcfs_printk) == 0 &&
+	    (header.ph_subsys & libcfs_subsystem_printk) == 0) {
 		/* no console output requested */
 		if (tcd != NULL)
 			cfs_trace_put_tcd(tcd);
@@ -1033,6 +1019,8 @@ int cfs_trace_dump_debug_buffer_usrstr(void __user *usr_str, int usr_str_nob)
 	char *path;
 	int rc;
 
+	if (usr_str_nob > PATH_MAX)
+		return -E2BIG;
 	str = memdup_user_nul(usr_str, usr_str_nob);
 	if (IS_ERR(str))
 		return PTR_ERR(str);
@@ -1091,6 +1079,8 @@ int cfs_trace_daemon_command_usrstr(void __user *usr_str, int usr_str_nob)
 	char *str;
 	int   rc;
 
+	if (usr_str_nob > USHRT_MAX)
+		return -E2BIG;
 	str = memdup_user_nul(usr_str, usr_str_nob);
 	if (IS_ERR(str))
 		return PTR_ERR(str);

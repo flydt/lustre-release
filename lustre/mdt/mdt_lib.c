@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/mdt/mdt_lib.c
  *
  * Lustre Metadata Target (mdt) request unpacking helper.
  *
@@ -205,6 +185,10 @@ static void ucred_set_rbac_roles(struct mdt_thread_info *info,
 	uc->uc_rbac_chlg_ops = !!(rbac & NODEMAP_RBAC_CHLG_OPS);
 	uc->uc_rbac_fscrypt_admin = !!(rbac & NODEMAP_RBAC_FSCRYPT_ADMIN);
 	uc->uc_rbac_server_upcall = !!(rbac & NODEMAP_RBAC_SERVER_UPCALL);
+	uc->uc_rbac_ignore_root_prjquota =
+		!!(rbac & NODEMAP_RBAC_IGN_ROOT_PRJQUOTA);
+	uc->uc_rbac_hsm_ops = !!(rbac & NODEMAP_RBAC_HSM_OPS);
+	uc->uc_rbac_local_admin = !!(rbac & NODEMAP_RBAC_LOCAL_ADMIN);
 }
 
 static int new_init_ucred(struct mdt_thread_info *info, ucred_init_type_t type,
@@ -275,7 +259,10 @@ static int new_init_ucred(struct mdt_thread_info *info, ucred_init_type_t type,
 		GOTO(out_nodemap, rc = -EACCES);
 	}
 
-	if (nodemap && ucred->uc_o_uid == nodemap->nm_squash_uid &&
+	if (nodemap &&
+	    ucred->uc_o_uid == nodemap_map_id(nodemap, NODEMAP_UID,
+					      NODEMAP_CLIENT_TO_FS,
+					      nodemap->nm_squash_uid) &&
 	    nodemap->nmf_deny_unknown)
 		/* deny access before we get identity ref */
 		GOTO(out, rc = -EACCES);
@@ -366,7 +353,7 @@ static int new_init_ucred(struct mdt_thread_info *info, ucred_init_type_t type,
 
 	mdt_root_squash(info, &peernid);
 
-	if (ucred->uc_fsuid) {
+	if (!is_local_root(ucred->uc_fsuid, nodemap)) {
 		if (!cap_issubset(ucred->uc_cap, mdt->mdt_enable_cap_mask))
 			CDEBUG(D_SEC, "%s: drop capabilities %llx for NID %s\n",
 			       mdt_obd_name(mdt),
@@ -545,8 +532,11 @@ static int old_init_ucred_common(struct mdt_thread_info *info,
 	struct mdt_device *mdt = info->mti_mdt;
 	struct md_identity *identity = NULL;
 
-	if (nodemap && uc->uc_o_uid == nodemap->nm_squash_uid
-	    && nodemap->nmf_deny_unknown)
+	if (nodemap &&
+	    uc->uc_o_uid == nodemap_map_id(nodemap, NODEMAP_UID,
+					   NODEMAP_CLIENT_TO_FS,
+					   nodemap->nm_squash_uid) &&
+	    nodemap->nmf_deny_unknown)
 		/* deny access before we get identity ref */
 		RETURN(-EACCES);
 
@@ -582,7 +572,7 @@ static int old_init_ucred_common(struct mdt_thread_info *info,
 	mdt_root_squash(info,
 			&mdt_info_req(info)->rq_peer.nid);
 
-	if (uc->uc_fsuid) {
+	if (!is_local_root(uc->uc_fsuid, nodemap)) {
 		if (!cap_issubset(uc->uc_cap, mdt->mdt_enable_cap_mask))
 			CDEBUG(D_SEC, "%s: drop capabilities %llx for NID %s\n",
 			       mdt_obd_name(mdt),

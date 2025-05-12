@@ -580,8 +580,11 @@ int osd_declare_qid(const struct lu_env *env, struct osd_thandle *oh,
 			RETURN(rc);
 		}
 
-		if (qi->lqi_id.qid_uid == 0) {
-			/* root ID should be always present in the quota file */
+		if (qi->lqi_id.qid_uid == 0 && qi->lqi_space > 0) {
+			/* root ID should be always present in the quota file,
+			 * also only "target" uid (where we add space) is
+			 * guaranteed, the source one can change after the
+			 * declaration */
 			crd = 1;
 		} else {
 			/* can't rely on the current state as it can change
@@ -685,6 +688,7 @@ int osd_declare_inode_qid(const struct lu_env *env, qid_t uid, qid_t gid,
 
 	/* and now project quota */
 	qi->lqi_id.qid_projid = projid;
+	qi->lqi_ignore_root_proj_quota = th->th_ignore_root_proj_quota;
 	qi->lqi_type = PRJQUOTA;
 	rcp = osd_declare_qid(env, oh, qi, obj, true, local_flags);
 

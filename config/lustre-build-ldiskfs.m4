@@ -23,12 +23,19 @@ esac
 AS_IF([test -z "$LDISKFS_SERIES"], [
 AS_IF([test x$RHEL_KERNEL = xyes], [
 	case $RHEL_RELEASE_NO in
-	94)     LDISKFS_SERIES="5.14-rhel9.4.series"    ;;
+	95)     LDISKFS_SERIES="5.14-rhel9.5.series"    ;;
+	94)     LDISKFS_SERIES="5.14-rhel9.4.series"
+		AS_VERSION_COMPARE([$RHEL_RELEASE_STR],[427.42.1],
+			[LDISKFS_SERIES="5.14-rhel9.4-427.13.series"],[],[])
+		;;
 	93)     LDISKFS_SERIES="5.14-rhel9.3.series"    ;;
 	92)     LDISKFS_SERIES="5.14-rhel9.2.series"    ;;
 	91)     LDISKFS_SERIES="5.14-rhel9.1.series"    ;;
 	90)     LDISKFS_SERIES="5.14-rhel9.series"      ;;
-	810)    LDISKFS_SERIES="4.18-rhel8.10.series"   ;;
+	810)    LDISKFS_SERIES="4.18-rhel8.10.series"
+		AS_VERSION_COMPARE([$RHEL_RELEASE_STR],[553.22.1],
+			[LDISKFS_SERIES="4.18-rhel8.10-553.series"],[],[])
+		;;
 	89)     LDISKFS_SERIES="4.18-rhel8.9.series"    ;;
 	88)     LDISKFS_SERIES="4.18-rhel8.8.series"    ;;
 	87)     LDISKFS_SERIES="4.18-rhel8.7.series"    ;;
@@ -91,6 +98,7 @@ AS_IF([test x$RHEL_KERNEL = xyes], [
 	    ])
 ], [test x$UBUNTU_KERNEL = xyes], [
         BASEVER=$(echo $LINUXRELEASE | cut -d'-' -f1)
+	AS_VERSION_COMPARE([$BASEVER],[6.11.0],[
 	AS_VERSION_COMPARE([$BASEVER],[6.10.0],[
 	AS_VERSION_COMPARE([$BASEVER],[6.8.0],[
 	AS_VERSION_COMPARE([$BASEVER],[5.19.0],[
@@ -170,7 +178,9 @@ AS_IF([test x$RHEL_KERNEL = xyes], [
 	],
 	[LDISKFS_SERIES="6.7-ml.series"])],
 	[LDISKFS_SERIES="6.10-ml.series"],
-	[LDISKFS_SERIES="6.10-ml.series"])
+	[LDISKFS_SERIES="6.10-ml.series"])],
+	[LDISKFS_SERIES="6.11-ml.series"],
+	[LDISKFS_SERIES="6.11-ml.series"])
 ], [test x$OPENEULER_KERNEL = xyes], [
 	case $OPENEULER_VERSION_NO in
 	2203.0) LDISKFS_SERIES="5.10.0-oe2203.series" ;;

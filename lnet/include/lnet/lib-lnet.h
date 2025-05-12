@@ -19,7 +19,7 @@
 #define CFS_FAIL_MATCH_MD_NID		0xe001
 #define CFS_FAIL_DELAY_MSG_FORWARD	0xe002
 
-#include <linux/generic-radix-tree.h>
+#include <lustre_compat/linux/generic-radix-tree.h>
 #include <linux/netdevice.h>
 
 #include <libcfs/libcfs.h>
@@ -1062,20 +1062,6 @@ static inline void
 lnet_peer_net_set_sel_priority_locked(struct lnet_peer_net *lpn, __u32 priority)
 {
 	lpn->lpn_sel_priority = priority;
-}
-
-
-static inline struct lnet_peer_net *
-lnet_find_peer_net_locked(struct lnet_peer *peer, __u32 net_id)
-{
-	struct lnet_peer_net *peer_net;
-
-	list_for_each_entry(peer_net, &peer->lp_peer_nets, lpn_peer_nets) {
-		if (peer_net->lpn_net_id == net_id)
-			return peer_net;
-	}
-
-	return NULL;
 }
 
 static inline bool

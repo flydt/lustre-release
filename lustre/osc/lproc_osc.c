@@ -139,15 +139,14 @@ static ssize_t max_dirty_mb_store(struct kobject *kobj,
 	struct obd_device *obd = container_of(kobj, struct obd_device,
 					      obd_kset.kobj);
 	struct client_obd *cli = &obd->u.cli;
-	unsigned long pages_number, max_dirty_mb;
+	u64 pages_number;
 	int rc;
 
-	rc = kstrtoul(buffer, 10, &max_dirty_mb);
-	if (rc)
+	rc = sysfs_memparse(buffer, count, &pages_number, "MiB");
+	if (rc < 0)
 		return rc;
 
-	pages_number = MiB_TO_PAGES(max_dirty_mb);
-
+	pages_number = round_up(pages_number, 1024 * 1024) >> PAGE_SHIFT;
 	if (pages_number >= MiB_TO_PAGES(OSC_MAX_DIRTY_MB_MAX) ||
 	    pages_number > cfs_totalram_pages() / 4) /* 1/4 of RAM */
 		return -ERANGE;
@@ -228,38 +227,33 @@ static ssize_t osc_cached_mb_seq_write(struct file *file,
 	return count;
 }
 
-LPROC_SEQ_FOPS(osc_cached_mb);
+LDEBUGFS_SEQ_FOPS(osc_cached_mb);
 
-static int osc_unevict_cached_mb_seq_show(struct seq_file *m, void *v)
+static ssize_t osc_unevict_cached_mb_show(struct kobject *kobj,
+					  struct attribute *attr,
+					  char *buf)
 {
-	struct obd_device *obd = m->private;
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
 	struct client_obd *cli = &obd->u.cli;
 	int shift = 20 - PAGE_SHIFT;
 
-	seq_printf(m, "%ld\n",
-		   atomic_long_read(&cli->cl_unevict_lru_in_list) >> shift);
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%ld\n",
+			 atomic_long_read(&cli->cl_unevict_lru_in_list) >> shift);
 }
 
-static ssize_t osc_unevict_cached_mb_seq_write(struct file *file,
-					       const char __user *buffer,
-					       size_t count, loff_t *off)
+static ssize_t osc_unevict_cached_mb_store(struct kobject *kobj,
+					   struct attribute *attr,
+					   const char *buffer,
+					   size_t count)
 {
-	struct seq_file *m = file->private_data;
-	struct obd_device *obd = m->private;
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
 	struct client_obd *cli = &obd->u.cli;
-	char kernbuf[128];
 
-	if (count >= sizeof(kernbuf))
-		return -EINVAL;
-
-	if (copy_from_user(kernbuf, buffer, count))
-		return -EFAULT;
-
-	kernbuf[count] = 0;
-	if (count == 5 && strncmp(kernbuf, "clear", 5) == 0) {
+	if (count == 5 && strncmp(buffer, "clear", 5) == 0) {
 		struct lu_env *env;
-		__u16 refcheck;
+		u16 refcheck;
 
 		env = cl_env_get(&refcheck);
 		if (!IS_ERR(env)) {
@@ -278,7 +272,7 @@ static ssize_t osc_unevict_cached_mb_seq_write(struct file *file,
 
 	return -EINVAL;
 }
-LPROC_SEQ_FOPS(osc_unevict_cached_mb);
+LUSTRE_RW_ATTR(osc_unevict_cached_mb);
 
 static ssize_t cur_dirty_bytes_show(struct kobject *kobj,
 				    struct attribute *attr,
@@ -293,38 +287,30 @@ static ssize_t cur_dirty_bytes_show(struct kobject *kobj,
 }
 LUSTRE_RO_ATTR(cur_dirty_bytes);
 
-static int osc_cur_grant_bytes_seq_show(struct seq_file *m, void *v)
+static ssize_t cur_grant_bytes_show(struct kobject *kobj,
+				    struct attribute *attr,
+				    char *buf)
 {
-	struct obd_device *obd = m->private;
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
 	struct client_obd *cli = &obd->u.cli;
 
-	seq_printf(m, "%lu\n", cli->cl_avail_grant);
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%lu\n", cli->cl_avail_grant);
 }
 
-static ssize_t osc_cur_grant_bytes_seq_write(struct file *file,
-					     const char __user *buffer,
-					     size_t count, loff_t *off)
+static ssize_t cur_grant_bytes_store(struct kobject *kobj,
+				     struct attribute *attr,
+				     const char *buffer,
+				     size_t count)
 {
-	struct seq_file *m = file->private_data;
-	struct obd_device *obd = m->private;
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
 	struct client_obd *cli = &obd->u.cli;
 	struct obd_import *imp;
-	char kernbuf[22] = "";
 	u64 val;
 	int rc;
 
-	if (obd == NULL)
-		return 0;
-
-	if (count >= sizeof(kernbuf))
-		return -EINVAL;
-
-	if (copy_from_user(kernbuf, buffer, count))
-		return -EFAULT;
-	kernbuf[count] = 0;
-
-	rc = sysfs_memparse(kernbuf, count, &val, "MiB");
+	rc = sysfs_memparse(buffer, count, &val, "MiB");
 	if (rc < 0)
 		return rc;
 
@@ -338,7 +324,7 @@ static ssize_t osc_cur_grant_bytes_seq_write(struct file *file,
 
 	return rc ? rc : count;
 }
-LPROC_SEQ_FOPS(osc_cur_grant_bytes);
+LUSTRE_RW_ATTR(cur_grant_bytes);
 
 static ssize_t cur_lost_grant_bytes_show(struct kobject *kobj,
 					 struct attribute *attr,
@@ -530,7 +516,6 @@ LUSTRE_RO_ATTR(destroys_in_flight);
 LUSTRE_RW_ATTR(max_pages_per_rpc);
 LUSTRE_RW_ATTR(short_io_bytes);
 
-#ifdef CONFIG_PROC_FS
 static int osc_unstable_stats_seq_show(struct seq_file *m, void *v)
 {
 	struct obd_device *obd = m->private;
@@ -546,7 +531,8 @@ static int osc_unstable_stats_seq_show(struct seq_file *m, void *v)
 		   pages, mb);
 	return 0;
 }
-LPROC_SEQ_FOPS_RO(osc_unstable_stats);
+
+LDEBUGFS_SEQ_FOPS_RO(osc_unstable_stats);
 
 static ssize_t idle_timeout_show(struct kobject *kobj, struct attribute *attr,
 				 char *buf)
@@ -669,23 +655,19 @@ static ssize_t grant_shrink_store(struct kobject *kobj, struct attribute *attr,
 }
 LUSTRE_RW_ATTR(grant_shrink);
 
-LPROC_SEQ_FOPS_RO_TYPE(osc, connect_flags);
-LPROC_SEQ_FOPS_RO_TYPE(osc, server_uuid);
-LPROC_SEQ_FOPS_RO_TYPE(osc, timeouts);
-LPROC_SEQ_FOPS_RO_TYPE(osc, state);
-LPROC_SEQ_FOPS_RW_TYPE(osc, import);
+LDEBUGFS_SEQ_FOPS_RO_TYPE(osc, connect_flags);
+LDEBUGFS_SEQ_FOPS_RO_TYPE(osc, server_uuid);
+LDEBUGFS_SEQ_FOPS_RO_TYPE(osc, timeouts);
+LDEBUGFS_SEQ_FOPS_RO_TYPE(osc, state);
+LDEBUGFS_SEQ_FOPS_RW_TYPE(osc, import);
 
-struct lprocfs_vars lprocfs_osc_obd_vars[] = {
+struct ldebugfs_vars ldebugfs_osc_obd_vars[] = {
 	{ .name	=	"connect_flags",
 	  .fops	=	&osc_connect_flags_fops		},
 	{ .name	=	"ost_server_uuid",
 	  .fops	=	&osc_server_uuid_fops		},
 	{ .name	=	"osc_cached_mb",
 	  .fops	=	&osc_cached_mb_fops		},
-	{ .name	=	"osc_unevict_cached_mb",
-	  .fops	=	&osc_unevict_cached_mb_fops	},
-	{ .name =	"cur_grant_bytes",
-	  .fops =	&osc_cur_grant_bytes_fops	},
 	{ .name	=	"timeouts",
 	  .fops	=	&osc_timeouts_fops		},
 	{ .name	=	"import",
@@ -811,7 +793,7 @@ static ssize_t osc_rpc_stats_seq_write(struct file *file,
 
 	return len;
 }
-LPROC_SEQ_FOPS(osc_rpc_stats);
+LDEBUGFS_SEQ_FOPS(osc_rpc_stats);
 
 static int osc_stats_seq_show(struct seq_file *seq, void *v)
 {
@@ -841,21 +823,15 @@ static ssize_t osc_stats_seq_write(struct file *file,
 	return len;
 }
 
-LPROC_SEQ_FOPS(osc_stats);
+LDEBUGFS_SEQ_FOPS(osc_stats);
 
-static int lprocfs_osc_attach_seqstat(struct obd_device *obd)
+static void ldebugfs_osc_attach_seqstat(struct obd_device *obd)
 {
-	int rc;
-
-	rc = lprocfs_seq_create(obd->obd_proc_entry, "osc_stats", 0644,
-				&osc_stats_fops, obd);
-	if (rc == 0)
-		rc = lprocfs_obd_seq_create(obd, "rpc_stats", 0644,
-					    &osc_rpc_stats_fops, obd);
-
-	return rc;
+	debugfs_create_file("osc_stats", 0644, obd->obd_debugfs_entry, obd,
+			    &osc_stats_fops);
+	debugfs_create_file("rpc_stats", 0644, obd->obd_debugfs_entry, obd,
+			    &osc_rpc_stats_fops);
 }
-#endif /* CONFIG_PROC_FS */
 
 LUSTRE_OBD_UINT_PARAM_ATTR(at_min);
 LUSTRE_OBD_UINT_PARAM_ATTR(at_max);
@@ -869,6 +845,7 @@ static struct attribute *osc_attrs[] = {
 	&lustre_attr_checksum_type.attr,
 	&lustre_attr_checksum_dump.attr,
 	&lustre_attr_cur_dirty_bytes.attr,
+	&lustre_attr_cur_grant_bytes.attr,
 	&lustre_attr_cur_lost_grant_bytes.attr,
 	&lustre_attr_cur_dirty_grant_bytes.attr,
 	&lustre_attr_destroys_in_flight.attr,
@@ -876,6 +853,7 @@ static struct attribute *osc_attrs[] = {
 	&lustre_attr_max_dirty_mb.attr,
 	&lustre_attr_max_pages_per_rpc.attr,
 	&lustre_attr_max_rpcs_in_flight.attr,
+	&lustre_attr_osc_unevict_cached_mb.attr,
 	&lustre_attr_short_io_bytes.attr,
 	&lustre_attr_resend_count.attr,
 	&lustre_attr_ost_conn_uuid.attr,
@@ -898,27 +876,20 @@ int osc_tunables_init(struct obd_device *obd)
 {
 	int rc;
 
-	obd->obd_vars = lprocfs_osc_obd_vars;
+	obd->obd_debugfs_vars = ldebugfs_osc_obd_vars;
 	obd->obd_ktype.default_groups = KOBJ_ATTR_GROUPS(osc);
 	rc = lprocfs_obd_setup(obd, false);
 	if (rc)
 		return rc;
-#ifdef CONFIG_PROC_FS
-	/* If the basic OSC proc tree construction succeeded then
-	 * lets do the rest.
-	 */
-	rc = lprocfs_osc_attach_seqstat(obd);
-	if (rc)
-		goto obd_cleanup;
 
-#endif /* CONFIG_PROC_FS */
+	ldebugfs_osc_attach_seqstat(obd);
+
 	rc = sptlrpc_lprocfs_cliobd_attach(obd);
-	if (rc)
-		goto obd_cleanup;
+	if (rc) {
+		lprocfs_obd_cleanup(obd);
+		return rc;
+	}
 
 	ptlrpc_lprocfs_register_obd(obd);
-obd_cleanup:
-	if (rc)
-		lprocfs_obd_cleanup(obd);
-	return rc;
+	return 0;
 }

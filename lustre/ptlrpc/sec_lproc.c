@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2014, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/ptlrpc/sec_lproc.c
  *
  * Author: Eric Mei <ericm@clusterfs.com>
  */
@@ -410,30 +390,17 @@ EXPORT_SYMBOL(sptlrpc_lprocfs_dir);
 
 int sptlrpc_lproc_init(void)
 {
-	int rc = 0;
-
-	LASSERT(sptlrpc_debugfs_dir == NULL);
+	LASSERT(!sptlrpc_debugfs_dir);
 
 	sptlrpc_debugfs_dir = debugfs_create_dir("sptlrpc",
 						 debugfs_lustre_root);
 	ldebugfs_add_vars(sptlrpc_debugfs_dir, sptlrpc_lprocfs_vars, NULL);
 
-	sptlrpc_lprocfs_dir = lprocfs_register("sptlrpc", proc_lustre_root,
-					       NULL, NULL);
-	if (IS_ERR_OR_NULL(sptlrpc_lprocfs_dir)) {
-		rc = PTR_ERR(sptlrpc_lprocfs_dir);
-		rc = sptlrpc_lprocfs_dir ? PTR_ERR(sptlrpc_lprocfs_dir)
-			: -ENOMEM;
-		sptlrpc_lprocfs_dir = NULL;
-	}
-	return rc;
+	return 0;
 }
 
 void sptlrpc_lproc_fini(void)
 {
 	debugfs_remove_recursive(sptlrpc_debugfs_dir);
 	sptlrpc_debugfs_dir = NULL;
-
-	if (!IS_ERR_OR_NULL(sptlrpc_lprocfs_dir))
-		lprocfs_remove(&sptlrpc_lprocfs_dir);
 }

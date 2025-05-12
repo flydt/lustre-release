@@ -29,6 +29,7 @@
 #include <linux/kobject.h>
 #include <linux/rhashtable.h>
 #include <linux/uio.h>
+#include <linux/pm_qos.h>
 #include <libcfs/libcfs.h>
 #include <lnet/api.h>
 #include <lnet/lib-types.h>
@@ -527,6 +528,39 @@ struct ptlrpc_replay_async_args {
 	int		praa_old_status;
 };
 
+/* max latency being allowed when connection is busy */
+#define CPU_MAX_RESUME_LATENCY_US 20
+/* default time during which low latency will be set */
+#define DEFAULT_CPU_LATENCY_TIMEOUT_US 3000
+
+/**
+ * Structure for PM QoS management.
+ */
+struct cpu_latency_qos {
+	struct dev_pm_qos_request *pm_qos_req;
+	struct delayed_work delayed_work;
+	/* current/last time being active, in jiffies */
+	u64 deadline;
+	/* max timeout value already used, in usecs */
+	u64 max_time;
+	struct mutex lock;
+};
+
+/* per-cpu PM QoS management */
+extern struct cpu_latency_qos *cpus_latency_qos;
+
+/* whether we should use PM-QoS to lower CPUs resume latency during I/O */
+extern bool ptlrpc_enable_pmqos;
+
+/* max CPUs power resume latency to be used during I/O */
+extern int ptlrpc_pmqos_latency_max_usec;
+
+/* default timeout to end CPUs resume latency constraint */
+extern u64 ptlrpc_pmqos_default_duration_usec;
+
+/* whether we should use PM-QoS to lower CPUs resume latency during I/O */
+extern bool ptlrpc_pmqos_use_stats_for_duration;
+
 /**
  * Structure to single define portal connection.
  */
@@ -575,7 +609,7 @@ union ptlrpc_async_args {
 struct ptlrpc_request_set;
 typedef int (*set_producer_func)(struct ptlrpc_request_set *, void *);
 
-/**
+/*
  * Definition of request set structure.
  * Request set is a list of requests (not necessary to the same target) that
  * once populated with RPCs could be sent in parallel.
@@ -587,32 +621,32 @@ typedef int (*set_producer_func)(struct ptlrpc_request_set *, void *);
  * returned.
  */
 struct ptlrpc_request_set {
-	atomic_t		set_refcount;
-	/** number of in queue requests */
+	struct kref		set_refcount;
+	/* number of in queue requests */
 	atomic_t		set_new_count;
-	/** number of uncompleted requests */
+	/* number of uncompleted requests. */
 	atomic_t		set_remaining;
-	/** wait queue to wait on for request events */
+	/* wait queue to wait on for request events */
 	wait_queue_head_t	set_waitq;
-	/** List of requests in the set */
+	/* List of requests in the set */
 	struct list_head	set_requests;
-	/**
+	/*
 	 * Lock for \a set_new_requests manipulations
 	 * locked so that any old caller can communicate requests to
 	 * the set holder who can then fold them into the lock-free set
 	 */
 	spinlock_t		set_new_req_lock;
-	/** List of new yet unsent requests. Only used with ptlrpcd now. */
+	/* List of new yet unsent requests. Only used with ptlrpcd now. */
 	struct list_head	set_new_requests;
 
-	/** rq_status of requests that have been freed already */
+	/* rq_status of requests that have been freed already */
 	int			set_rc;
-	/** Additional fields used by the flow control extension */
-	/** Maximum number of RPCs in flight */
+	/* Additional fields used by the flow control extension */
+	/* Maximum number of RPCs in flight */
 	int			set_max_inflight;
-	/** Callback function used to generate RPCs */
+	/* Callback function used to generate RPCs */
 	set_producer_func	set_producer;
-	/** opaq argument passed to the producer callback */
+	/* opaq argument passed to the producer callback */
 	void			*set_producer_arg;
 	unsigned int		 set_allow_intr:1;
 };
@@ -669,7 +703,7 @@ struct ptlrpc_reply_state {
 	unsigned long		rs_prealloc:1; /* rs from prealloc list */
 	/* transaction committed and rs dispatched by ptlrpc_commit_replies */
 	unsigned long		rs_committed:1;
-	atomic_t		rs_refcount; /* number of users */
+	struct kref		rs_refcount; /* number of users */
 	/** Number of locks awaiting client ACK */
 	int			rs_nlocks;
 
@@ -2227,8 +2261,9 @@ int ptlrpc_service_health_check(struct ptlrpc_service *service);
 void ptlrpc_server_drop_request(struct ptlrpc_request *req);
 void ptlrpc_request_change_export(struct ptlrpc_request *req,
 				  struct obd_export *export);
-void ptlrpc_update_export_timer(struct obd_export *exp,
-				time64_t extra_delay);
+void ptlrpc_update_export_timer(struct ptlrpc_request *req);
+timeout_t ptlrpc_export_prolong_timeout(struct ptlrpc_request *req,
+					bool recovery);
 
 int ptlrpc_hr_init(void);
 void ptlrpc_hr_fini(void);
@@ -2290,7 +2325,7 @@ int lustre_pack_reply_flags(struct ptlrpc_request *, int count, __u32 *lens,
 int lustre_shrink_msg(struct lustre_msg *msg, int segment,
 		      unsigned int newlen, int move_data);
 int lustre_grow_msg(struct lustre_msg *msg, int segment, unsigned int newlen);
-void lustre_free_reply_state(struct ptlrpc_reply_state *rs);
+void lustre_free_reply_state(struct kref *kref);
 int __lustre_unpack_msg(struct lustre_msg *m, int len);
 __u32 lustre_msg_hdr_size(__u32 magic, __u32 count);
 __u32 lustre_msg_size(__u32 magic, int count, __u32 *lengths);
@@ -2330,6 +2365,7 @@ __u32 lustre_msg_get_conn_cnt(struct lustre_msg *msg);
 __u32 lustre_msg_get_magic(struct lustre_msg *msg);
 timeout_t lustre_msg_get_timeout(struct lustre_msg *msg);
 timeout_t lustre_msg_get_service_timeout(struct lustre_msg *msg);
+int lustre_msg_get_projid(struct lustre_msg *msg, __u32 *projid);
 int lustre_msg_get_uid_gid(struct lustre_msg *msg, __u32 *uid, __u32 *gid);
 char *lustre_msg_get_jobid(struct lustre_msg *msg);
 __u32 lustre_msg_get_cksum(struct lustre_msg *msg);
@@ -2360,6 +2396,7 @@ struct job_info {
 };
 
 void lustre_msg_set_jobinfo(struct lustre_msg *msg, const struct job_info *ji);
+void lustre_msg_set_projid(struct lustre_msg *msg, __u32 projid);
 void lustre_msg_set_cksum(struct lustre_msg *msg, __u32 cksum);
 void lustre_msg_set_mbits(struct lustre_msg *msg, __u64 mbits);
 
@@ -2497,21 +2534,6 @@ ptlrpc_client_wake_req(struct ptlrpc_request *req)
 		wake_up(&req->rq_set->set_waitq);
 }
 
-static inline void
-ptlrpc_rs_addref(struct ptlrpc_reply_state *rs)
-{
-	LASSERT(atomic_read(&rs->rs_refcount) > 0);
-	atomic_inc(&rs->rs_refcount);
-}
-
-static inline void
-ptlrpc_rs_decref(struct ptlrpc_reply_state *rs)
-{
-	LASSERT(atomic_read(&rs->rs_refcount) > 0);
-	if (atomic_dec_and_test(&rs->rs_refcount))
-		lustre_free_reply_state(rs);
-}
-
 /* Should only be called once per req */
 static inline void ptlrpc_req_drop_rs(struct ptlrpc_request *req)
 {
@@ -2525,7 +2547,7 @@ static inline void ptlrpc_req_drop_rs(struct ptlrpc_request *req)
 	req->rq_repmsg = NULL;
 	spin_unlock(&req->rq_early_free_lock);
 
-	ptlrpc_rs_decref(req->rq_reply_state);
+	kref_put(&req->rq_reply_state->rs_refcount, lustre_free_reply_state);
 	req->rq_reply_state = NULL;
 }
 
@@ -2567,7 +2589,7 @@ ptlrpc_req2svc(struct ptlrpc_request *req)
  * @{
  */
 int client_obd_setup(struct obd_device *obd, struct lustre_cfg *lcfg);
-int client_obd_cleanup(struct obd_device *obd);
+void client_obd_cleanup(struct obd_device *obd);
 int client_connect_import(const struct lu_env *env,
 			  struct obd_export **exp, struct obd_device *obd,
 			  struct obd_uuid *cluuid, struct obd_connect_data *ocd,
@@ -2616,7 +2638,6 @@ void ptlrpcd_stop(struct ptlrpcd_ctl *pc, int force);
 void ptlrpcd_free(struct ptlrpcd_ctl *pc);
 void ptlrpcd_wake(struct ptlrpc_request *req);
 void ptlrpcd_add_req(struct ptlrpc_request *req);
-void ptlrpcd_add_rqset(struct ptlrpc_request_set *set);
 int ptlrpcd_addref(void);
 void ptlrpcd_decref(void);
 

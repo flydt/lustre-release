@@ -208,10 +208,19 @@ static int lustre_lnet_add_intf_descr(struct list_head *list, char *intf,
 			free(intf_descr);
 			return LUSTRE_CFG_RC_BAD_PARAM;
 		}
+		if ((open_sq_bracket - intf_name) >=
+			sizeof(intf_descr->intf_name)) {
+			free(intf_descr);
+			return LUSTRE_CFG_RC_BAD_PARAM;
+		}
 		strncpy(intf_descr->intf_name, intf_name,
 			open_sq_bracket - intf_name);
 		intf_descr->intf_name[open_sq_bracket - intf_name] = '\0';
 	} else {
+		if (strlen(intf_name) >= sizeof(intf_descr->intf_name)) {
+			free(intf_descr);
+			return LUSTRE_CFG_RC_BAD_PARAM;
+		}
 		strcpy(intf_descr->intf_name, intf_name);
 		intf_descr->cpt_expr = NULL;
 	}
@@ -676,13 +685,9 @@ int yaml_lnet_fault_rule(yaml_document_t *results, __u32 opc, char *src,
 	if (rc < 0)
 		return rc;
 
-	if (local_nid) {
-		rc = fault_attr_parse_nid(local_nid, &fa_local_nid);
-		if (rc < 0)
-			return rc;
-	} else {
-		fa_local_nid = LNET_ANY_NID;
-	}
+	rc = fault_attr_parse_nid(local_nid, &fa_local_nid);
+	if (rc < 0)
+		return rc;
 
 skip_options:
 	/* Create Netlink emitter to send request to kernel */
@@ -749,6 +754,9 @@ skip_options:
 				   libcfs_nidstr(&fa_local_nid));
 	if (rc == 0)
 		goto emitter_error;
+
+	if (attr == NULL)
+		goto yaml_mapping_end_event;
 
 	rc = lnet_yaml_uint_mapping(&event, &output, "fa_ptl_mask",
 				    &attr->fa_ptl_mask,
@@ -3373,6 +3381,50 @@ int lustre_lnet_config_hsensitivity(int sen, int seq_no, struct cYAML **err_rc)
 	return rc;
 }
 
+int lustre_lnet_config_lnd_timeout(int timeout, __u32 net, int seq_no,
+				   struct cYAML **err_rc)
+{
+	int rc = LUSTRE_CFG_RC_NO_ERR;
+	char err_str[LNET_MAX_STR_LEN] = "";
+	char val[INT_STRING_LEN];
+	__u32 lnd = LNET_NETTYP(net);
+
+	snprintf(val, sizeof(val), "%d", timeout);
+
+	switch (lnd) {
+	case SOCKLND:
+		rc = write_sysfs_file(socklnd_modparam_path, "sock_timeout",
+				      val, 1, strlen(val) + 1);
+		break;
+	case O2IBLND:
+		rc = write_sysfs_file(o2iblnd_modparam_path, "timeout", val, 1,
+				      strlen(val) + 1);
+		break;
+	case KFILND:
+		rc = write_sysfs_file(kfilnd_modparam_path, "kfi_timeout", val,
+				      1, strlen(val) + 1);
+		break;
+	case GNILND:
+		rc = write_sysfs_file(gnilnd_modparam_path, "timeout", val, 1,
+				      strlen(val) + 1);
+		break;
+	default:
+		snprintf(err_str, sizeof(err_str),
+			 "\"Net %s does not accept a LND timeout\"",
+			 libcfs_lnd2str(lnd));
+		rc = -EINVAL;
+	}
+
+	/* Check return code from writing sysfs file */
+	if (rc)
+		snprintf(err_str, sizeof(err_str),
+			 "\"Failed to set LND timeout for net %s\"",
+			 libcfs_lnd2str(lnd));
+
+	cYAML_build_error(rc, seq_no, "set", "lnd_timeout", err_str, err_rc);
+	return rc;
+}
+
 int lustre_lnet_config_transaction_to(int timeout, int seq_no, struct cYAML **err_rc)
 {
 	int rc = LUSTRE_CFG_RC_NO_ERR;
@@ -4503,7 +4555,7 @@ int lustre_lnet_calc_service_id(__u64 *service_id)
 	char val[LNET_MAX_STR_LEN];
 	int service_port = -1, l_errno = 0;
 
-	rc = read_sysfs_file(o2ib_modparam_path, "service", val,
+	rc = read_sysfs_file(o2iblnd_modparam_path, "service", val,
 			     1, sizeof(val));
 	if (rc) {
 		l_errno = errno;

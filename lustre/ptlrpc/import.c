@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/ptlrpc/import.c
  *
  * Author: Mike Shaver <shaver@clusterfs.com>
  */
@@ -975,11 +955,11 @@ static int ptlrpc_connect_set_flags(struct obd_import *imp,
 		 * see lru_size_store().
 		 */
 		if (ns_connect_lru_resize(ns) &&
-		    ns->ns_lru_size_set_before_connection &&
+		    test_bit(LDLM_NS_LRU_SIZE_SET_BEFORE_CONN, ns->ns_flags) &&
 		    ns->ns_max_unused != 0)
 			ns->ns_connect_flags &= ~OBD_CONNECT_LRU_RESIZE;
 
-		ns->ns_lru_size_set_before_connection = 0;
+		clear_bit(LDLM_NS_LRU_SIZE_SET_BEFORE_CONN, ns->ns_flags);
 		spin_unlock(&ns->ns_lock);
 	}
 

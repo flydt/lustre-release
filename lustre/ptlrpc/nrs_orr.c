@@ -1,32 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
+// SPDX-License-Identifier: GPL-2.0
 
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License version 2 for more details.  A copy is
- * included in the COPYING file that accompanied this code.
-
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * GPL HEADER END
- */
 /*
  * Copyright (c) 2013, 2017, Intel Corporation.
  *
  * Copyright 2012 Xyratex Technology Limited
  */
+
 /*
- * lustre/ptlrpc/nrs_orr.c
- *
  * Network Request Scheduler (NRS) ORR and TRR policies
  *
  * Request scheduling in a Round-Robin manner over backend-fs objects and OSTs
@@ -36,10 +16,6 @@
  * Author: Nikitas Angelinas <nikitas_angelinas@xyratex.com>
  */
 
-/**
- * \addtogoup nrs
- * @{
- */
 #define DEBUG_SUBSYSTEM S_RPC
 #include <linux/delay.h>
 
@@ -1692,14 +1668,15 @@ LDEBUGFS_SEQ_FOPS(ptlrpc_lprocfs_nrs_orr_offset_type);
 static const char *nrs_orr_supp2str(enum nrs_orr_supp supp)
 {
 	switch(supp) {
-	default:
-		LBUG();
 	case NOS_OST_READ:
 		return LPROCFS_NRS_SUPP_NAME_READS;
 	case NOS_OST_WRITE:
 		return LPROCFS_NRS_SUPP_NAME_WRITES;
 	case NOS_OST_RW:
 		return LPROCFS_NRS_SUPP_NAME_READWRITES;
+	default:
+		LBUG();
+		return NULL;
 	}
 }
 

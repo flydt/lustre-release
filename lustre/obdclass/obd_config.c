@@ -18,6 +18,9 @@
 #include <linux/kobject.h>
 #include <linux/string.h>
 
+#ifdef HAVE_SERVER_SUPPORT
+#include <cfs_hash.h>
+#endif
 #include <llog_swab.h>
 #include <lprocfs_status.h>
 #include <lustre_disk.h>
@@ -464,14 +467,14 @@ static int class_parse_value(char *buf, int opc, void *value, char **endh,
 	tmp = *endp;
 	*endp = '\0';
 	switch (opc) {
-	default:
-		LBUG();
 	case CLASS_PARSE_NID:
 		rc = parse_nid(buf, value, quiet);
 		break;
 	case CLASS_PARSE_NET:
 		rc = parse_net(buf, value);
 		break;
+	default:
+		LBUG();
 	}
 	*endp = tmp;
 	if (rc != 0)
@@ -637,7 +640,6 @@ int class_attach(struct lustre_cfg *lcfg)
 	}
 
 	obd->obd_self_export = exp;
-	list_del_init(&exp->exp_obd_chain_timed);
 	class_export_put(exp);
 
 	rc = class_register_device(obd);
@@ -1373,7 +1375,7 @@ EXPORT_SYMBOL(lustre_register_quota_process_config);
  * These may come from direct calls (e.g. class_manual_cleanup)
  * or processing the config llog, or ioctl from lctl.
  */
-int class_process_config(struct lustre_cfg *lcfg)
+int class_process_config(struct lustre_cfg *lcfg, struct kobject *kobj)
 {
 	struct obd_device *obd;
 	struct lnet_nid nid;
@@ -1477,27 +1479,10 @@ int class_process_config(struct lustre_cfg *lcfg)
 		/* llite has no OBD */
 		if (class_match_param(lustre_cfg_string(lcfg, 1),
 				      PARAM_LLITE, NULL) == 0) {
-			struct lustre_sb_info *lsi;
-			unsigned long addr;
 			ssize_t count;
 
-			/*
-			 * The instance name contains the sb:
-			 * lustre-client-aacfe000
-			 */
-			tmp = strrchr(lustre_cfg_string(lcfg, 0), '-');
-			if (!tmp || !*(++tmp))
-				GOTO(out, err = -EINVAL);
-
-			if (sscanf(tmp, "%lx", &addr) != 1)
-				GOTO(out, err = -EINVAL);
-
-			lsi = s2lsi((struct super_block *)addr);
-			/* This better be a real Lustre superblock! */
-			LASSERT(lsi->lsi_lmd->lmd_magic == LMD_MAGIC);
-
-			count = class_modify_config(lcfg, PARAM_LLITE,
-						    lsi->lsi_kobj);
+			LASSERT(kobj);
+			count = class_modify_config(lcfg, PARAM_LLITE, kobj);
 			err = count < 0 ? count : 0;
 			GOTO(out, err);
 		} else if ((class_match_param(lustre_cfg_string(lcfg, 1),
@@ -1766,28 +1751,27 @@ int class_config_llog_handler(const struct lu_env *env,
 			      struct llog_rec_hdr *rec, void *data)
 {
 	struct config_llog_instance *cfg = data;
-	int cfg_len = rec->lrh_len;
-	char *cfg_buf = (char *) (rec + 1);
 	int rc = 0;
+
 	ENTRY;
 
 	/* class_config_dump_handler(handle, rec, data); */
 
 	switch (rec->lrh_type) {
 	case OBD_CFG_REC: {
-		struct lustre_cfg *lcfg, *lcfg_new;
+		struct lustre_cfg *lcfg = REC_DATA(rec);
+		struct lustre_cfg *lcfg_new;
 		struct lustre_cfg_bufs bufs;
 		char *inst_name = NULL;
 		int inst_len = 0;
 		int swab = 0;
 
-		lcfg = (struct lustre_cfg *)cfg_buf;
 		if (lcfg->lcfg_version == __swab32(LUSTRE_CFG_VERSION)) {
 			lustre_swab_lustre_cfg(lcfg);
 			swab = 1;
 		}
 
-		rc = lustre_cfg_sanity_check(cfg_buf, cfg_len);
+		rc = lustre_cfg_sanity_check(lcfg, REC_DATA_LEN(rec));
 		if (rc)
 			GOTO(out, rc);
 
@@ -1950,16 +1934,15 @@ int class_config_llog_handler(const struct lu_env *env,
 		 * [3]: inactive-on-startup
 		 * [4]: restrictive net
 		 */
-		if (cfg && cfg->cfg_sb && s2lsi(cfg->cfg_sb) &&
-		    !IS_SERVER(s2lsi(cfg->cfg_sb))) {
+		if (cfg && cfg->cfg_sb && s2lsi(cfg->cfg_sb)) {
 			struct lustre_sb_info *lsi = s2lsi(cfg->cfg_sb);
 			char *nidnet = lsi->lsi_lmd->lmd_nidnet;
 
 			if (lcfg->lcfg_command == LCFG_SETUP &&
 			    lcfg->lcfg_bufcount != 2 && nidnet) {
-				CDEBUG(D_CONFIG, "Adding net %s info to setup "
-				       "command for client %s\n", nidnet,
-				       lustre_cfg_string(lcfg, 0));
+				CDEBUG(D_CONFIG,
+				       "Adding net %s info to setup command for client %s\n",
+				       nidnet, lustre_cfg_string(lcfg, 0));
 				lustre_cfg_bufs_set_string(&bufs, 4, nidnet);
 			}
 		}
@@ -1992,7 +1975,7 @@ int class_config_llog_handler(const struct lu_env *env,
 
 		lcfg_new->lcfg_nal = 0; /* illegal value for obsolete field */
 
-		rc = class_process_config(lcfg_new);
+		rc = class_process_config(lcfg_new, cfg->cfg_kobj);
 		OBD_FREE(lcfg_new, lustre_cfg_len(lcfg_new->lcfg_bufcount,
 						  lcfg_new->lcfg_buflens));
 out_inst:
@@ -2095,21 +2078,18 @@ void llog_get_marker_cfg_flags(struct llog_rec_hdr *rec,
 int class_config_yaml_output(struct llog_rec_hdr *rec, char *buf, int size,
 			     unsigned int *cfg_flags, bool raw)
 {
-	struct lustre_cfg *lcfg = (struct lustre_cfg *)(rec + 1);
+	struct lustre_cfg *lcfg = REC_DATA(rec);
 	char *ptr = buf;
 	char *end = buf + size;
 	int rc = 0, i;
 	struct lcfg_type_data *ldata;
-	int swab = 0;
 
 	LASSERT(rec->lrh_type == OBD_CFG_REC);
 
-	if (lcfg->lcfg_version == __swab32(LUSTRE_CFG_VERSION)) {
+	if (lcfg->lcfg_version == __swab32(LUSTRE_CFG_VERSION))
 		lustre_swab_lustre_cfg(lcfg);
-		swab = 1;
-	}
 
-	rc = lustre_cfg_sanity_check(lcfg, rec->lrh_len);
+	rc = lustre_cfg_sanity_check(lcfg, REC_DATA_LEN(rec));
 	if (rc < 0)
 		return rc;
 
@@ -2235,15 +2215,15 @@ out_overflow:
  */
 static int class_config_parse_rec(struct llog_rec_hdr *rec, char *buf, int size)
 {
-	struct lustre_cfg	*lcfg = (struct lustre_cfg *)(rec + 1);
-	char			*ptr = buf;
-	char			*end = buf + size;
-	int			 rc = 0;
+	struct lustre_cfg *lcfg = REC_DATA(rec);
+	char *ptr = buf;
+	char *end = buf + size;
+	int rc = 0;
 
 	ENTRY;
 
 	LASSERT(rec->lrh_type == OBD_CFG_REC);
-	rc = lustre_cfg_sanity_check(lcfg, rec->lrh_len);
+	rc = lustre_cfg_sanity_check(lcfg, REC_DATA_LEN(rec));
 	if (rc < 0)
 		RETURN(rc);
 
@@ -2341,7 +2321,7 @@ int class_manual_cleanup(struct obd_device *obd)
 		RETURN(-ENOMEM);
 	lustre_cfg_init(lcfg, LCFG_CLEANUP, &bufs);
 
-	rc = class_process_config(lcfg);
+	rc = class_process_config(lcfg, NULL);
 	if (rc) {
 		CERROR("cleanup failed %d: %s\n", rc, obd->obd_name);
 		GOTO(out, rc);
@@ -2349,7 +2329,7 @@ int class_manual_cleanup(struct obd_device *obd)
 
 	/* the lcfg is almost the same for both ops */
 	lcfg->lcfg_command = LCFG_DETACH;
-	rc = class_process_config(lcfg);
+	rc = class_process_config(lcfg, NULL);
 	if (rc)
 		CERROR("detach failed %d: %s\n", rc, obd->obd_name);
 out:

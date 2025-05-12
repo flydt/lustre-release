@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/ofd/ofd_obd.c
  *
  * This file contains OBD API methods for OBD Filter Device (OFD) which are
  * used for export handling, configuration purposes and recovery.
@@ -67,12 +47,12 @@ static int ofd_export_stats_init(struct ofd_device *ofd,
 				 struct obd_export *exp,
 				 struct lnet_nid *client_nid)
 {
-	struct obd_device	*obd = ofd_obd(ofd);
-	struct nid_stat		*stats;
-	int			 rc;
+	struct obd_device *obd = ofd_obd(ofd);
+	char param[MAX_OBD_NAME * 4];
+	struct nid_stat	*stats;
+	int rc;
 
 	ENTRY;
-
 	if (obd_uuid_equals(&exp->exp_client_uuid, &obd->obd_uuid))
 		/* Self-export gets no proc entry */
 		RETURN(0);
@@ -83,24 +63,17 @@ static int ofd_export_stats_init(struct ofd_device *ofd,
 		RETURN(rc == -EALREADY ? 0 : rc);
 
 	stats = exp->exp_nid_stats;
-	stats->nid_stats = lprocfs_stats_alloc(LPROC_OFD_STATS_LAST,
-					       LPROCFS_STATS_FLAG_NOPERCPU);
+	scnprintf(param, sizeof(param), "obdfilter.%s.exports.%s.stats",
+		  obd->obd_name, libcfs_nidstr(client_nid));
+	stats->nid_stats = ldebugfs_stats_alloc(LPROC_OFD_STATS_LAST, param,
+						stats->nid_debugfs,
+						LPROCFS_STATS_FLAG_NOPERCPU);
 	if (!stats->nid_stats)
 		RETURN(-ENOMEM);
 
 	ofd_stats_counter_init(stats->nid_stats, 0, LPROCFS_CNTR_HISTOGRAM);
 
-	rc = lprocfs_stats_register(stats->nid_proc, "stats", stats->nid_stats);
-	if (rc != 0) {
-		lprocfs_stats_free(&stats->nid_stats);
-		GOTO(out, rc);
-	}
-
 	rc = lprocfs_nid_ldlm_stats_init(stats);
-	if (rc != 0)
-		GOTO(out, rc);
-
-out:
 	RETURN(rc);
 }
 
@@ -262,14 +235,13 @@ static int ofd_parse_connect_data(const struct lu_env *env,
 
 	data->ocd_version = LUSTRE_VERSION_CODE;
 
-	if (OCD_HAS_FLAG(data, PINGLESS)) {
-		if (ptlrpc_pinger_suppress_pings()) {
-			spin_lock(&exp->exp_obd->obd_dev_lock);
-			list_del_init(&exp->exp_obd_chain_timed);
-			spin_unlock(&exp->exp_obd->obd_dev_lock);
-		} else {
-			data->ocd_connect_flags &= ~OBD_CONNECT_PINGLESS;
-		}
+	if (OCD_HAS_FLAG(data, PINGLESS) && !ptlrpc_pinger_suppress_pings())
+		data->ocd_connect_flags &= ~OBD_CONNECT_PINGLESS;
+
+	if (!OCD_HAS_FLAG(data, PINGLESS)) {
+		spin_lock(&exp->exp_lock);
+		exp->exp_timed = 1;
+		spin_unlock(&exp->exp_lock);
 	}
 
 	if (!ofd->ofd_lut.lut_dt_conf.ddp_has_lseek_data_hole)
@@ -772,6 +744,9 @@ int ofd_statfs(const struct lu_env *env,  struct obd_export *exp,
 	}
 
 	/* OS_STATFS_READONLY can be set by OSD already, only add flags */
+	if (ofd->ofd_readonly)
+		osfs->os_state |= OS_STATFS_READONLY;
+
 	if (ofd->ofd_raid_degraded)
 		osfs->os_state |= OS_STATFS_DEGRADED;
 

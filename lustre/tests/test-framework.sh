@@ -687,6 +687,13 @@ init_test_env() {
 	export BLCKSIZE=${BLCKSIZE:-4096}
 	export MACHINEFILE=${MACHINEFILE:-$TMP/$(basename $0 .sh).machines}
 	get_lustre_env
+	# use /dev/urandom when consuming space on ZFS to avoid compression
+	if [[ "$ost1_FSTYPE" == "zfs" ]]; then
+		DD_DEV="/dev/urandom"
+	else
+		DD_DEV="/dev/zero"
+	fi
+	DD="dd if=$DD_DEV bs=1M"
 
 	# use localrecov to enable recovery for local clients, LU-12722
 	[[ $MDS1_VERSION -lt $(version_code 2.13.52) ]] || {
@@ -808,6 +815,18 @@ lustre_build_version() {
 # Report the Lustre numeric build version code for the supplied facet.
 lustre_version_code() {
 	version_code $(lustre_build_version $1)
+}
+
+zfs_version_code() {
+	local facet=$1
+	local facet_version=${facet}_ZFS_VERSION
+
+	if [[ -z "${!facet_version}" ]]; then
+		local zfs_ver=$(do_facet $facet "modinfo --field version zfs")
+
+		export $facet_version=$(version_code ${zfs_ver%-*})
+	fi
+	echo ${!facet_version}
 }
 
 # Extract the server-side /etc/os-release information into local variables
@@ -1155,6 +1174,9 @@ load_modules_local() {
 			fi
 			mount --bind $mount_lustre $sbin_mount ||
 				error "can't bind $mount_lustre to $sbin_mount"
+			# ignore errors to symlink .libs for read-only /sbin
+			[[ -e /sbin/.libs ]] ||
+				ln -sf $LUSTRE/utils/.libs /sbin/.libs || true
 		fi
 	fi
 }
@@ -1251,6 +1273,8 @@ unload_modules() {
 		[ -s $sbin_mount ] && ! grep -q "STUB MARK" $sbin_mount ||
 			rm -f $sbin_mount
 	fi
+
+	[ -L /sbin/.libs ] && rm /sbin/.libs
 
 	[[ $rc -eq 0 ]] && echo "modules unloaded."
 
@@ -1365,7 +1389,7 @@ start_gss_daemons() {
 		return 0
 	fi
 
-	nodes=$(comma_list $(mdts_nodes))
+	nodes=$(mdts_nodes)
 	echo "Starting gss daemon on mds: $nodes"
 	if $GSS_SK; then
 		# Start all versions, in case of switching
@@ -1395,7 +1419,7 @@ start_gss_daemons() {
 }
 
 stop_gss_daemons() {
-	local nodes=$(comma_list $(mdts_nodes))
+	local nodes=$(mdts_nodes)
 
 	send_sigint $nodes lsvcgssd lgssd
 
@@ -2056,7 +2080,7 @@ set_params_clients() {
 }
 
 set_params_mdts() {
-	local mdts=${1:-$(comma_list $(mdts_nodes))}
+	local mdts=${1:-$(mdts_nodes)}
 	shift || true
 	local params="${@:-$MDS_LCTL_SETPARAM_PARAM}"
 
@@ -2522,7 +2546,7 @@ mount_facet() {
 
 	health=$(do_facet ${facet} "$LCTL get_param -n health_check")
 	if [[ "$health" != "healthy" ]]; then
-		error "$facet is in a unhealthy state"
+		error "$facet is in a unhealthy state, got: '$health'"
 	fi
 
 	set_default_debug_facet $facet
@@ -2593,6 +2617,17 @@ start() {
 	eval export ${facet}_MOUNT=$mntpt
 	mount_facet ${facet}
 	RC=$?
+
+	if [[ $RC == 0 && $facet == *ost* && $OSTDEVBASE == */tmp/* ]]; then
+		varname="${facet}_FSTRIM"
+		if [[ -z ${!varname} ]]; then
+			if do_facet ${facet} "fstrim -v $mntpt"; then
+				eval export $varname="yes"
+			else
+				eval export $varname="no"
+			fi
+		fi
+	fi
 
 	return $RC
 }
@@ -2795,12 +2830,11 @@ zconf_mount() {
 	do_node $client mkdir -p $mnt
 	if [ -n "$FILESET" -a -z "$SKIP_FILESET" ];then
 		do_node $client $MOUNT_CMD $flags $opts $MGSNID:/$FSNAME \
-			$mnt || return 1
+			$mnt || return $?
 		#disable FILESET if not supported
 		do_nodes $client lctl get_param -n \
 			mdc.$FSNAME-MDT0000*.import | grep -q subtree ||
 				device=$MGSNID:/$FSNAME
-		do_node $client mkdir -p $mnt/$FILESET
 		do_node $client "! grep -q $mnt' ' /proc/mounts ||
 			umount $mnt"
 	fi
@@ -2813,10 +2847,10 @@ zconf_mount() {
 		local prunedopts=$(echo $opts |
 				sed -e "s#skpath=[^,^ ]*#skpath=$mountkey#g")
 		do_node $client $MOUNT_CMD $flags $prunedopts $device $mnt ||
-				return 1
+				return $?
 	else
 		do_node $client $MOUNT_CMD $flags $opts $device $mnt ||
-				return 1
+				return $?
 	fi
 
 	set_default_debug_nodes $client
@@ -2858,7 +2892,7 @@ mount_mds_client() {
 	local host=$(facet_active_host $SINGLEMDS)
 	echo $host
 	zconf_mount $host $MOUNT2 $MOUNT_OPTS ||
-		error "unable to mount $MOUNT2 on $host"
+		error "unable to mount $MOUNT2 on $host with ($?)"
 }
 
 # Unmount the file system on the MDS
@@ -2987,7 +3021,6 @@ zconf_mount_clients() {
 		do_nodes $clients lctl get_param -n \
 			mdc.$FSNAME-MDT0000*.import | grep -q subtree ||
 				device=$MGSNID:/$FSNAME
-		do_nodes $clients mkdir -p $mnt/$FILESET
 		do_nodes $clients "! grep -q $mnt' ' /proc/mounts ||
 			umount $mnt"
 	fi
@@ -3179,7 +3212,7 @@ remount_facet() {
 	local facet=$1
 
 	stop $facet
-	mount_facet $facet
+	mount_facet $@
 }
 
 reboot_facet() {
@@ -3584,8 +3617,7 @@ wait_update_facet() {
 }
 
 sync_all_data_mdts() {
-	do_nodes $(comma_list $(mdts_nodes)) \
-	    "lctl set_param -n os[cd]*.*MDT*.force_sync=1"
+	do_nodes $(mdts_nodes) "lctl set_param -n os[cd]*.*MDT*.force_sync=1"
 }
 
 sync_all_data_osts() {
@@ -3632,7 +3664,7 @@ fill_ost() {
 	if (( lwm <= $free_kb / 1024 )) ||
 	   [ ! -f $DIR/${filename}.fill_ost$ost_idx ]; then
 		$LFS setstripe -i $ost_idx -c1 $DIR/${filename}.fill_ost$ost_idx
-		dd if=/dev/zero of=$DIR/${filename}.fill_ost$ost_idx bs=1M \
+		$DD of=$DIR/${filename}.fill_ost$ost_idx \
 			count=$size_mb oflag=append conv=notrunc
 	fi
 
@@ -3664,7 +3696,7 @@ ost_watermarks_set() {
 	local ost_name=$(ostname_from_index $ost_idx)
 	local facets=$(get_facets MDS)
 
-	do_nodes $(comma_list $(mdts_nodes)) $LCTL set_param -n \
+	do_nodes $(mdts_nodes) $LCTL set_param -n \
 		osp.*$ost_name*.reserved_mb_low=$lwm \
 		osp.*$ost_name*.reserved_mb_high=$hwm > /dev/null
 
@@ -3746,15 +3778,16 @@ ost_watermarks_clear_enospc() {
 }
 
 wait_delete_completed_mds() {
-	local max_wait=${1:-20}
+	local max_wait=${1:-60}
 	local mds2sync=""
 	local stime=$(date +%s)
 	local etime
 	local node
 	local changes
+	local mdts=$(mdts_nodes)
 
 	# find MDS with pending deletions
-	for node in $(mdts_nodes); do
+	for node in ${mdts//,/ }; do
 		changes=$(do_node $node "$LCTL get_param -n osc.*MDT*.sync_*" \
 			2>/dev/null | calc_sum)
 		if [[ $changes -eq 0 ]]; then
@@ -3874,7 +3907,7 @@ wait_mds_ost_sync () {
 	local WAIT_TIMEOUT=${1:-$MAX}
 	local WAIT=0
 	local new_wait=true
-	local list=$(comma_list $(mdts_nodes))
+	local list=$(mdts_nodes)
 	local cmd="$LCTL get_param -n osp.*osc*.old_sync_processed"
 	if ! do_facet $SINGLEMDS \
 		"$LCTL list_param osp.*osc*.old_sync_processed 2> /dev/null"
@@ -3933,9 +3966,9 @@ wait_destroy_complete () {
 	# why it takes so long time
 	local MAX=${1:-5}
 	local WAIT=0
-	local list=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 	while [ $WAIT -lt $MAX ]; do
-		local -a RPCs=($(do_nodes $list $LCTL get_param -n osp.*.destroys_in_flight))
+		local -a RPCs=($(do_nodes $mdts $LCTL get_param -n osp.*.destroys_in_flight))
 		local con=1
 		local i
 
@@ -3956,14 +3989,19 @@ wait_destroy_complete () {
 
 fstrim_inram_devs() {
 	local i
+	local v
+	local pids
 
 	[[ "$(facet_fstype ost1)" = "ldiskfs" ]] || return 0
 	[[ $OSTDEVBASE == */tmp/* ]] || return 0
 
 	for (( i=1; i <= $OSTCOUNT; i++)); do
-		do_facet ost$i "fstrim -v $(facet_mntpt ost$i)" &
+		v="ost${i}_FSTRIM"
+		[[ ${!v} != "yes" ]] && continue
+		do_facet ost$i "fstrim $(facet_mntpt ost$i)" &
+		pids+=" $!"
 	done
-	wait
+	[[ -n $pids ]] && wait $pids
 
 	return 0
 }
@@ -4067,10 +4105,11 @@ all_mds_up() {
 
 	[ -n "$delay" ] || error "fail to get maxage"
 	sleep $delay
-	local nodes=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
+
 	# initiate statfs RPC, all to all MDTs
-	do_nodes $nodes $LCTL get_param -N osp.*MDT*MDT*.filesfree >&/dev/null
-	do_nodes $nodes $LCTL get_param -N osp.*MDT*MDT*.filesfree >&/dev/null
+	do_nodes $mdts $LCTL get_param -N osp.*MDT*MDT*.filesfree >&/dev/null
+	do_nodes $mdts $LCTL get_param -N osp.*MDT*MDT*.filesfree >&/dev/null
 }
 
 client_up() {
@@ -4321,10 +4360,7 @@ replay_barrier_nosync() {
 get_client_uuid() {
 	local mntpnt=${1:-$MOUNT}
 
-	local name=$($LFS getname $mntpnt | cut -d' ' -f1)
-	local uuid=$($LCTL get_param -n llite.$name.uuid)
-
-	echo -n $uuid
+	echo -n $($LFS getname -u $mntpnt)
 }
 
 mds_evict_client() {
@@ -5624,7 +5660,7 @@ switch_identity() {
 remount_client()
 {
 	zconf_umount $HOSTNAME $1 || error "umount failed"
-	zconf_mount $HOSTNAME $1 || error "mount failed"
+	zconf_mount $HOSTNAME $1 || error "mount failed with ($?)"
 }
 
 writeconf_facet() {
@@ -6535,14 +6571,10 @@ run_lfsck() {
 			awk '/^status/ { print \\\$2 }'" "completed" 60 ||
 			error "MDS${k} namespace isn't the expected 'completed'"
 	done
-	local rep_mdt=$(do_nodes $(comma_list $(mdts_nodes)) \
-			$LCTL get_param -n mdd.$FSNAME-*.lfsck_* |
-			awk '/repaired/ { print $2 }' | calc_sum)
-	local rep_ost=$(do_nodes $(osts_nodes) \
-			$LCTL get_param -n obdfilter.$FSNAME-*.lfsck_* |
-			awk '/repaired/ { print $2 }' | calc_sum)
-	local repaired=$((rep_mdt + rep_ost))
-	[ $repaired -eq 0 ] ||
+	local repaired=$(do_nodes $(tgts_nodes) \
+			 "$LCTL get_param -n *.$FSNAME-*.lfsck_*" |
+			 awk '/repaired/ { print $2 }' | calc_sum)
+	(( repaired == 0 )) ||
 		error "lfsck repaired $rep_mdt MDT and $rep_ost OST errors"
 }
 
@@ -6967,32 +6999,33 @@ drop_bl_callback() {
 drop_mdt_ldlm_reply() {
 #define OBD_FAIL_MDS_LDLM_REPLY_NET	0x157
 	RC=0
-	local list=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 
-	do_nodes $list lctl set_param fail_loc=0x157
+	do_nodes $mdts lctl set_param fail_loc=0x157
 
 	do_facet client "$@" || RC=$?
 
-	do_nodes $list lctl set_param fail_loc=0
+	do_nodes $mdts lctl set_param fail_loc=0
 	return $RC
 }
 
 drop_mdt_ldlm_reply_once() {
 #define OBD_FAIL_MDS_LDLM_REPLY_NET	0x157
 	RC=0
-	local list=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 
-	do_nodes $list lctl set_param fail_loc=0x80000157
+	do_nodes $mdts lctl set_param fail_loc=0x80000157
 
 	do_facet client "$@" || RC=$?
 
-	do_nodes $list lctl set_param fail_loc=0
+	do_nodes $mdts lctl set_param fail_loc=0
 	return $RC
 }
 
 clear_failloc() {
-	facet=$1
-	pause=$2
+	local facet=$1
+	local pause=$2
+
 	sleep $pause
 	echo "clearing fail_loc on $facet"
 	do_facet $facet "lctl set_param fail_loc=0 2>/dev/null || true"
@@ -7241,7 +7274,7 @@ error_exit() {
 error_ignore() {
 	local TYPE="IGNORE ($1)"
 	shift
-	report_error "$@"
+	report_error false "$@"
 }
 
 error_and_remount() {
@@ -7926,21 +7959,26 @@ local_node() {
 	${!is_local}
 }
 
-remote_node () {
+remote_node() {
 	local node=$1
 
 	! local_node $node
 }
 
-remote_mds ()
+# return true if any MDT is on a remote node
+remote_mds()
 {
+	local mdts=$(mdts_nodes)
 	local node
-	for node in $(mdts_nodes); do
+
+	for node in ${mdts//,/ }; do
 		remote_node $node && return 0
 	done
+
 	return 1
 }
 
+# return true if any MDT is on a remote node and no remote shell is configured
 remote_mds_nodsh()
 {
 	[ -n "$CLIENTONLY" ] && return 0 || true
@@ -8017,12 +8055,12 @@ facets_nodes () {
 
 # Get name of the active MGS node.
 mgs_node () {
-		echo -n $(facets_nodes $(get_facets MGS))
-	}
+	echo -n $(facets_nodes $(get_facets MGS))
+}
 
 # Get all of the active MDS nodes.
-mdts_nodes () {
-	echo -n $(facets_nodes $(get_facets MDS))
+mdts_nodes() {
+	comma_list $(facets_nodes $(get_facets MDS))
 }
 
 # Get all of the active OSS nodes in a comma-separated list.
@@ -8062,18 +8100,15 @@ all_mdts_nodes () {
 	local host
 	local failover_host
 	local nodes
-	local nodes_sort
 	local i
 
-	for i in $(seq $MDSCOUNT); do
+	for ((i=1; i <= $MDSCOUNT; i++)); do
 		host=mds${i}_HOST
 		failover_host=mds${i}failover_HOST
 		nodes="$nodes ${!host} ${!failover_host}"
 	done
 
-	[ -n "$nodes" ] || nodes="${mds_HOST} ${mdsfailover_HOST}"
-	nodes_sort=$(for i in $nodes; do echo $i; done | sort -u)
-	echo -n $nodes_sort
+	comma_list $nodes
 }
 
 # Get all of the OSS nodes, including active and passive nodes.
@@ -8331,6 +8366,24 @@ get_mpiuser_id() {
 			skip_env "failed to get the GID for $mpi_user"
 		echo "mpi_user=$1 MPI_USER_GID=$MPI_USER_GID"
 	fi
+}
+
+# obtain and cache Kerberos ticket-granting ticket
+refresh_krb5_tgt() {
+	local myRUNAS_UID=$1
+	local myRUNAS_GID=$2
+	shift 2
+	local myRUNAS=$@
+	if [ -z "$myRUNAS" ]; then
+		error_exit "myRUNAS command must be specified for refresh_krb5_tgt"
+	fi
+
+	CLIENTS=${CLIENTS:-$HOSTNAME}
+	do_nodes $CLIENTS "set -x
+if ! $myRUNAS krb5_login.sh; then
+    echo "Failed to refresh Krb5 TGT for UID/GID $myRUNAS_UID/$myRUNAS_GID."
+    exit 1
+fi"
 }
 
 # Run multiop in the background, but wait for it to print
@@ -8617,8 +8670,7 @@ run_mdtest () {
 	save_lustre_params $(get_facets MDS) \
 		mdt.*.enable_remote_dir_gid > $params_file
 
-	do_nodes $(comma_list $(mdts_nodes)) \
-		$LCTL set_param mdt.*.enable_remote_dir_gid=-1
+	do_nodes $(mdts_nodes) $LCTL set_param mdt.*.enable_remote_dir_gid=-1
 
 	stack_trap "restore_lustre_params < $params_file" EXIT
 
@@ -8916,6 +8968,18 @@ wait_mgc_import_state() {
 		_wait_mgc_import_state "$facet" "$expected" \
 				       $error_on_failure || return
 	fi
+}
+
+wait_osp_import() {
+	local facet=$1
+	local remtgt=$(facet_svc $2)
+	local expected=$3
+	local loctgt=$(facet_svc $facet)
+	local param="osp.$remtgt-os[pc]-${loctgt#*-}.*_server_uuid"
+
+	do_rpc_nodes "$(facet_active_host $facet)" \
+			wait_import_state $expected $param ||
+		error "$param: import is not in expected state"
 }
 
 wait_dne_interconnect() {
@@ -10683,7 +10747,7 @@ lsnapshot () {
 	local cmd=$1
 	shift
 
-	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+	if (( $MDS1_VERSION >= $(version_code 2.16.50) )); then
 		do_facet mgs "$LCTL snapshot $cmd -F $FSNAME $*"
 	else
 		do_facet mgs "$LCTL snapshot_$cmd -F $FSNAME $*"
@@ -10993,7 +11057,7 @@ __changelog_deregister() {
 	local cl_user=$2
 	local rc=0
 
-	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+	if (( $MDS1_VERSION >= $(version_code 2.16.50) )); then
 		changelog_deregister="changelog deregister"
 	else
 		changelog_deregister="changelog_deregister"
@@ -11013,7 +11077,7 @@ __changelog_deregister() {
 
 declare -Ax CL_USERS
 changelog_register() {
-	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+	if (( $MDS1_VERSION >= $(version_code 2.16.50) )); then
 		changelog_register="changelog register"
 	else
 		changelog_register="changelog_register"
@@ -11077,8 +11141,7 @@ changelog_user_rec() {
 changelog_chmask() {
 	local mask=$1
 
-	do_nodes $(comma_list $(mdts_nodes)) \
-		$LCTL set_param mdd.*.changelog_mask="$mask"
+	do_nodes $(mdts_nodes) $LCTL set_param mdd.*.changelog_mask="$mask"
 }
 
 # usage: __changelog_clear FACET CL_USER [+]INDEX
@@ -11498,39 +11561,29 @@ change_project() {
 #		  bhardlimit|bsoftlimit|bgrace|ihardlimit|isoftlimit|igrace \
 #		  <pool_name>
 getquota() {
-	local spec
+	local type=$1
+	local id=$2
 	local uuid
+	local spec=$4
+	local pool=$5
 	local pool_arg
 
 	sync_all_data > /dev/null 2>&1 || true
 
-	[ "$#" != 4 -a "$#" != 5 ] &&
+	[[ "$#" != 4 && "$#" != 5 ]] &&
 		error "getquota: wrong number of arguments: $#"
-	[ "$1" != "-u" -a "$1" != "-g" -a "$1" != "-p" ] &&
+	[[ "$type" != "-u" && "$type" != "-g" && "$type" != "-p" ]] &&
 		error "getquota: wrong u/g/p specifier $1 passed"
 
-	uuid="$3"
+	[[ "$spec" =~ "curspace" ]] && spec="space"
+	[[ "$spec" =~ "curinode" ]] && spec="inodes"
+	[[ ! -z "$pool" ]] && pool_arg="--pool $pool "
+	[[ "$3" =~ "OST" ]] && uuid="--ost $(echo "$3" | tail -c 4) "
+	[[ "$3" =~ "MDT" ]] && uuid="--mdt $(echo "$3" | tail -c 4) "
 
-	case "$4" in
-		curspace)   spec=1;;
-		bsoftlimit) spec=2;;
-		bhardlimit) spec=3;;
-		bgrace)     spec=4;;
-		curinodes)  spec=5;;
-		isoftlimit) spec=6;;
-		ihardlimit) spec=7;;
-		igrace)     spec=8;;
-		*)          error "unknown quota parameter $4";;
-	esac
-
-	[ ! -z "$5" ] && pool_arg="--pool $5 "
-	[ "$uuid" = "global" ] && uuid=$DIR
-
-	$LFS quota -v "$1" "$2" $pool_arg $DIR 1>&2
-	$LFS quota -v "$1" "$2" $pool_arg $DIR |
-		awk 'BEGIN { num='$spec' } { if ($1 ~ "'$uuid'") \
-		{ if (NF == 1) { getline } else { num++ } ; print $num;} }' \
-		| tr -d "*"
+	echo -n "$type $id $uuid $spec:" 1>&2
+	$LFS quota -q $uuid --$spec "$type" "$id" $pool_arg$DIR | tr -d "*" 1>&2
+	$LFS quota -q $uuid --$spec "$type" "$id" $pool_arg$DIR | tr -d "*"
 }
 
 # set mdt quota type

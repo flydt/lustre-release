@@ -344,8 +344,8 @@ int lfsck_fid_alloc(const struct lu_env *env, struct lfsck_instance *lfsck,
 static int __lfsck_ibits_lock(const struct lu_env *env,
 			      struct lfsck_instance *lfsck,
 			      struct dt_object *obj, struct ldlm_res_id *resid,
-			      struct lustre_handle *lh, __u64 bits,
-			      enum ldlm_mode mode)
+			      struct lustre_handle *lh,
+			      enum mds_ibits_locks bits, enum ldlm_mode mode)
 {
 	struct lfsck_thread_info *info = lfsck_env_info(env);
 	union ldlm_policy_data *policy = &info->lti_policy;
@@ -412,7 +412,7 @@ static int __lfsck_ibits_lock(const struct lu_env *env,
  */
 int lfsck_ibits_lock(const struct lu_env *env, struct lfsck_instance *lfsck,
 		     struct dt_object *obj, struct lustre_handle *lh,
-		     __u64 bits, enum ldlm_mode mode)
+		     enum mds_ibits_locks bits, enum ldlm_mode mode)
 {
 	struct ldlm_res_id *resid = &lfsck_env_info(env)->lti_resid;
 
@@ -495,7 +495,8 @@ void lfsck_ibits_unlock(struct lustre_handle *lh, enum ldlm_mode mode)
  */
 int lfsck_lock(const struct lu_env *env, struct lfsck_instance *lfsck,
 	       struct dt_object *obj, const char *name,
-	       struct lfsck_lock_handle *llh, __u64 bits, enum ldlm_mode mode)
+	       struct lfsck_lock_handle *llh, enum mds_ibits_locks bits,
+	       enum ldlm_mode mode)
 {
 	struct ldlm_res_id *resid = &lfsck_env_info(env)->lti_resid;
 	int rc;
@@ -3094,9 +3095,6 @@ int lfsck_start(const struct lu_env *env, struct dt_device *key,
 	if (unlikely(lfsck == NULL))
 		RETURN(-ENXIO);
 
-	if (unlikely(lfsck->li_stopping))
-		GOTO(put, rc = -ENXIO);
-
 	/* System is not ready, try again later. */
 	if (unlikely(lfsck->li_namespace == NULL ||
 		     lfsck_dev_site(lfsck)->ss_server_fld == NULL))
@@ -3312,9 +3310,9 @@ trigger:
 		GOTO(out, rc);
 	}
 
-	wait_event_idle(thread->t_ctl_waitq,
-			thread_is_running(thread) ||
-			thread_is_stopped(thread));
+	wait_event_interruptible(thread->t_ctl_waitq,
+				 thread_is_running(thread) ||
+				 thread_is_stopped(thread));
 	if (start == NULL || !(start->ls_flags & LPF_BROADCAST)) {
 		lfsck->li_start_unplug = 1;
 		wake_up(&thread->t_ctl_waitq);
@@ -3337,8 +3335,8 @@ trigger:
 
 			lfsck->li_start_unplug = 1;
 			wake_up(&thread->t_ctl_waitq);
-			wait_event_idle(thread->t_ctl_waitq,
-					thread_is_stopped(thread));
+			wait_event_interruptible(thread->t_ctl_waitq,
+						 thread_is_stopped(thread));
 		}
 	} else {
 		lfsck->li_start_unplug = 1;
@@ -3366,37 +3364,26 @@ int lfsck_stop(const struct lu_env *env, struct dt_device *key,
 	int rc1 = 0;
 
 	ENTRY;
+	LASSERT(stop);
 	lfsck = lfsck_instance_find(key, true, false);
 	if (unlikely(lfsck == NULL))
 		RETURN(-ENXIO);
 
 	thread = &lfsck->li_thread;
-	if (stop && stop->ls_flags & LPF_BROADCAST && !lfsck->li_master) {
+	if ((stop->ls_flags & LPF_BROADCAST) && !lfsck->li_master) {
 		CERROR("%s: only allow to specify '-A' via MDS\n",
 		       lfsck_lfsck2name(lfsck));
 		GOTO(put, rc = -EPERM);
 	}
 
 	spin_lock(&lfsck->li_lock);
-	/* The target is umounted */
-	if (stop && stop->ls_status == LS_PAUSED)
-		lfsck->li_stopping = 1;
-
-	if (thread_is_init(thread) || thread_is_stopped(thread))
-		/* no error if LFSCK stopped already, or not started */
+	if (thread_is_init(thread) || thread_is_stopped(thread) ||
+	    thread_is_stopping(thread))
+		/* no error if LFSCK is stopped, or not started */
 		GOTO(unlock, rc = 0);
 
-	if (thread_is_stopping(thread) && stop->ls_status != LS_PAUSED)
-		/* Someone is stopping LFSCK and it is not umount. */
-		GOTO(unlock, rc = -EINPROGRESS);
-
-	if (stop) {
-		lfsck->li_status = stop->ls_status;
-		lfsck->li_flags = stop->ls_flags;
-	} else {
-		lfsck->li_status = LS_STOPPED;
-		lfsck->li_flags = 0;
-	}
+	lfsck->li_status = stop->ls_status;
+	lfsck->li_flags = stop->ls_flags;
 
 	thread_set_flags(thread, SVC_STOPPING);
 
@@ -3425,20 +3412,15 @@ int lfsck_stop(const struct lu_env *env, struct dt_device *key,
 	}
 
 	wake_up(&thread->t_ctl_waitq);
-	spin_unlock(&lfsck->li_lock);
-	if (stop && stop->ls_flags & LPF_BROADCAST)
-		rc1 = lfsck_stop_all(env, lfsck, stop);
-
-	/* It was me set the status as 'stopping' just now, if it is not
-	 * 'stopping' now, then either stopped, or re-started by race.
-	 */
-	wait_event_idle(thread->t_ctl_waitq,
-			!thread_is_stopping(thread));
-
-	GOTO(put, rc = 0);
-
+	EXIT;
 unlock:
 	spin_unlock(&lfsck->li_lock);
+
+	if (stop->ls_flags & LPF_BROADCAST)
+		rc1 = lfsck_stop_all(env, lfsck, stop);
+
+	wait_event_interruptible(thread->t_ctl_waitq,
+				 !thread_is_stopping(thread));
 put:
 	lfsck_instance_put(env, lfsck);
 
@@ -3671,7 +3653,7 @@ int lfsck_register(const struct lu_env *env, struct dt_device *key,
 	INIT_LIST_HEAD(&lfsck->li_list_double_scan);
 	INIT_LIST_HEAD(&lfsck->li_list_idle);
 	INIT_LIST_HEAD(&lfsck->li_list_lmv);
-	atomic_set(&lfsck->li_ref, 1);
+	refcount_set(&lfsck->li_ref, 1);
 	atomic_set(&lfsck->li_double_scan_count, 0);
 	init_waitqueue_head(&lfsck->li_thread.t_ctl_waitq);
 	lfsck->li_out_notify = notify;

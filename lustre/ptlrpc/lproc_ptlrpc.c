@@ -1,33 +1,16 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
+
 #define DEBUG_SUBSYSTEM S_CLASS
 
 
@@ -205,7 +188,6 @@ static const char *ll_eopcode2str(__u32 opcode)
 static void
 ptlrpc_ldebugfs_register(struct dentry *root, char *dir, char *name,
 			 struct dentry **debugfs_root_ret,
-			 struct kobject *kobj,
 			 struct lprocfs_stats **stats_ret)
 {
 	struct dentry *svc_debugfs_entry;
@@ -214,16 +196,14 @@ ptlrpc_ldebugfs_register(struct dentry *root, char *dir, char *name,
 					     LPROCFS_CNTR_STDDEV;
 	int i;
 
-	LASSERT(!*debugfs_root_ret);
 	LASSERT(!*stats_ret);
-
 	if (dir)
 		svc_debugfs_entry = debugfs_create_dir(dir, root);
 	else
 		svc_debugfs_entry = root;
 
 	svc_stats = ldebugfs_stats_alloc(EXTRA_MAX_OPCODES + LUSTRE_MAX_OPCODES,
-					 name, svc_debugfs_entry, kobj, 0);
+					 name, svc_debugfs_entry, 0);
 	if (!svc_stats)
 		return;
 
@@ -262,10 +242,12 @@ ptlrpc_ldebugfs_register(struct dentry *root, char *dir, char *name,
 	*stats_ret = svc_stats;
 }
 
-static int
-ptlrpc_lprocfs_req_buffer_history_len_seq_show(struct seq_file *m, void *v)
+static ssize_t req_buffer_history_len_show(struct kobject *kobj,
+					   struct attribute *attr,
+					   char *buf)
 {
-	struct ptlrpc_service *svc = m->private;
+	struct ptlrpc_service *svc = container_of(kobj, struct ptlrpc_service,
+						  srv_kobj);
 	struct ptlrpc_service_part *svcpt;
 	int total = 0;
 	int i;
@@ -273,17 +255,16 @@ ptlrpc_lprocfs_req_buffer_history_len_seq_show(struct seq_file *m, void *v)
 	ptlrpc_service_for_each_part(svcpt, i, svc)
 		total += svcpt->scp_hist_nrqbds;
 
-	seq_printf(m, "%d\n", total);
-
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%d\n", total);
 }
+LUSTRE_RO_ATTR(req_buffer_history_len);
 
-LDEBUGFS_SEQ_FOPS_RO(ptlrpc_lprocfs_req_buffer_history_len);
-
-static int
-ptlrpc_lprocfs_req_buffer_history_max_seq_show(struct seq_file *m, void *n)
+static ssize_t req_buffer_history_max_show(struct kobject *kobj,
+					   struct attribute *attr,
+					   char *buf)
 {
-	struct ptlrpc_service *svc = m->private;
+	struct ptlrpc_service *svc = container_of(kobj, struct ptlrpc_service,
+						  srv_kobj);
 	struct ptlrpc_service_part *svcpt;
 	int total = 0;
 	int i;
@@ -291,23 +272,22 @@ ptlrpc_lprocfs_req_buffer_history_max_seq_show(struct seq_file *m, void *n)
 	ptlrpc_service_for_each_part(svcpt, i, svc)
 		total += svc->srv_hist_nrqbds_cpt_max;
 
-	seq_printf(m, "%d\n", total);
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%d\n", total);
 }
 
-static ssize_t
-ptlrpc_lprocfs_req_buffer_history_max_seq_write(struct file *file,
-						const char __user *buffer,
-						size_t count, loff_t *off)
+static ssize_t req_buffer_history_max_store(struct kobject *kobj,
+					    struct attribute *attr,
+					    const char *buffer,
+					    size_t count)
 {
-	struct seq_file *m = file->private_data;
-	struct ptlrpc_service *svc = m->private;
+	struct ptlrpc_service *svc = container_of(kobj, struct ptlrpc_service,
+						  srv_kobj);
 	unsigned long long val;
 	unsigned long long limit;
 	int bufpages;
 	int rc;
 
-	rc = kstrtoull_from_user(buffer, count, 0, &val);
+	rc = kstrtoull(buffer, 10, &val);
 	if (rc < 0)
 		return rc;
 
@@ -339,29 +319,29 @@ ptlrpc_lprocfs_req_buffer_history_max_seq_write(struct file *file,
 
 	return count;
 }
+LUSTRE_RW_ATTR(req_buffer_history_max);
 
-LDEBUGFS_SEQ_FOPS(ptlrpc_lprocfs_req_buffer_history_max);
-
-static int
-ptlrpc_lprocfs_req_buffers_max_seq_show(struct seq_file *m, void *n)
+static ssize_t req_buffers_max_show(struct kobject *kobj,
+				    struct attribute *attr,
+				    char *buf)
 {
-	struct ptlrpc_service *svc = m->private;
+	struct ptlrpc_service *svc = container_of(kobj, struct ptlrpc_service,
+						  srv_kobj);
 
-	seq_printf(m, "%d\n", svc->srv_nrqbds_max);
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%d\n", svc->srv_nrqbds_max);
 }
 
-static ssize_t
-ptlrpc_lprocfs_req_buffers_max_seq_write(struct file *file,
-					 const char __user *buffer,
-					 size_t count, loff_t *off)
+static ssize_t req_buffers_max_store(struct kobject *kobj,
+				     struct attribute *attr,
+				     const char *buffer,
+				     size_t count)
 {
-	struct seq_file *m = file->private_data;
-	struct ptlrpc_service *svc = m->private;
+	struct ptlrpc_service *svc = container_of(kobj, struct ptlrpc_service,
+						  srv_kobj);
 	int val;
 	int rc;
 
-	rc = kstrtoint_from_user(buffer, count, 0, &val);
+	rc = kstrtouint(buffer, 10, &val);
 	if (rc < 0)
 		return rc;
 
@@ -376,8 +356,7 @@ ptlrpc_lprocfs_req_buffers_max_seq_write(struct file *file,
 
 	return count;
 }
-
-LDEBUGFS_SEQ_FOPS(ptlrpc_lprocfs_req_buffers_max);
+LUSTRE_RW_ATTR(req_buffers_max);
 
 static ssize_t threads_min_show(struct kobject *kobj, struct attribute *attr,
 				char *buf)
@@ -480,8 +459,6 @@ LUSTRE_RW_ATTR(threads_max);
 static const char *nrs_state2str(enum ptlrpc_nrs_pol_state state)
 {
 	switch (state) {
-	default:
-		LBUG();
 	case NRS_POL_STATE_INVALID:
 		return "invalid";
 	case NRS_POL_STATE_STOPPED:
@@ -492,6 +469,9 @@ static const char *nrs_state2str(enum ptlrpc_nrs_pol_state state)
 		return "starting";
 	case NRS_POL_STATE_STARTED:
 		return "started";
+	default:
+		LBUG();
+		return NULL;
 	}
 }
 
@@ -1170,10 +1150,13 @@ static ssize_t high_priority_ratio_store(struct kobject *kobj,
 LUSTRE_RW_ATTR(high_priority_ratio);
 
 static struct attribute *ptlrpc_svc_attrs[] = {
+	&lustre_attr_high_priority_ratio.attr,
+	&lustre_attr_req_buffer_history_len.attr,
+	&lustre_attr_req_buffer_history_max.attr,
+	&lustre_attr_req_buffers_max.attr,
 	&lustre_attr_threads_min.attr,
 	&lustre_attr_threads_started.attr,
 	&lustre_attr_threads_max.attr,
-	&lustre_attr_high_priority_ratio.attr,
 	NULL,
 };
 
@@ -1211,24 +1194,15 @@ int ptlrpc_sysfs_register_service(struct kset *parent,
 				    &parent->kobj, "%s", svc->srv_name);
 }
 
-void ptlrpc_ldebugfs_register_service(struct dentry *entry,
+void ptlrpc_ldebugfs_register_service(struct dentry *entry, char *param,
 				      struct ptlrpc_service *svc)
 {
 	struct ldebugfs_vars ldebugfs_vars[] = {
-		{ .name	= "req_buffer_history_len",
-		  .fops	= &ptlrpc_lprocfs_req_buffer_history_len_fops,
-		  .data	= svc },
-		{ .name = "req_buffer_history_max",
-		  .fops	= &ptlrpc_lprocfs_req_buffer_history_max_fops,
-		  .data	= svc },
 		{ .name = "timeouts",
 		  .fops = &ptlrpc_lprocfs_timeouts_fops,
 		  .data = svc },
 		{ .name = "nrs_policies",
 		  .fops = &ptlrpc_lprocfs_nrs_policies_fops,
-		  .data = svc },
-		{ .name = "req_buffers_max",
-		  .fops = &ptlrpc_lprocfs_req_buffers_max_fops,
 		  .data = svc },
 		{ NULL }
 	};
@@ -1240,9 +1214,8 @@ void ptlrpc_ldebugfs_register_service(struct dentry *entry,
 		.release	= lprocfs_seq_release,
 	};
 
-	ptlrpc_ldebugfs_register(entry, svc->srv_name, "stats",
-				 &svc->srv_debugfs_entry,
-				 &svc->srv_kobj, &svc->srv_stats);
+	ptlrpc_ldebugfs_register(entry, svc->srv_name, param,
+				 &svc->srv_debugfs_entry, &svc->srv_stats);
 	if (!svc->srv_debugfs_entry)
 		return;
 
@@ -1254,9 +1227,12 @@ void ptlrpc_ldebugfs_register_service(struct dentry *entry,
 
 void ptlrpc_lprocfs_register_obd(struct obd_device *obd)
 {
-	ptlrpc_ldebugfs_register(obd->obd_debugfs_entry, NULL, "stats",
+	char param[MAX_OBD_NAME * 4];
+
+	scnprintf(param, sizeof(param), "%s.%s.stats",
+		  kobject_name(&obd->obd_type->typ_kobj), obd->obd_name);
+	ptlrpc_ldebugfs_register(obd->obd_debugfs_entry, NULL, param,
 				 &obd->obd_svc_debugfs_entry,
-				 &obd->obd_kset.kobj,
 				 &obd->obd_svc_stats);
 }
 EXPORT_SYMBOL(ptlrpc_lprocfs_register_obd);
@@ -1480,3 +1456,146 @@ ssize_t pinger_recov_store(struct kobject *kobj, struct attribute *attr,
 	return rc ?: count;
 }
 EXPORT_SYMBOL(pinger_recov_store);
+
+static struct kobject *ptlrpc_kobj;
+
+static ssize_t
+enable_pmqos_show(struct kobject *kobj, struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", ptlrpc_enable_pmqos);
+}
+
+static ssize_t
+enable_pmqos_store(struct kobject *kobj, struct attribute *attr,
+		   const char *buf, size_t count)
+{
+	bool val;
+	int rc;
+
+	rc = kstrtobool(buf, &val);
+	if (rc < 0)
+		return rc;
+
+	CDEBUG(D_INFO, "Setting 'enable_pmqos' to %s\n", val ? "true" : "false");
+	ptlrpc_enable_pmqos = val;
+
+	return count;
+}
+
+LUSTRE_RW_ATTR(enable_pmqos);
+
+static ssize_t
+pmqos_latency_max_usec_show(struct kobject *kobj, struct attribute *attr,
+			    char *buf)
+{
+	return sprintf(buf, "%d\n", ptlrpc_pmqos_latency_max_usec);
+}
+
+static ssize_t
+pmqos_latency_max_usec_store(struct kobject *kobj, struct attribute *attr,
+			     const char *buf, size_t count)
+{
+	int val;
+	int rc;
+
+	rc = kstrtoint(buf, 0, &val);
+	if (rc < 0)
+		return rc;
+
+	CDEBUG(D_INFO, "Setting 'pmqos_latency_max_usec' to %d", val);
+	ptlrpc_pmqos_latency_max_usec = val;
+
+	return count;
+}
+
+LUSTRE_RW_ATTR(pmqos_latency_max_usec);
+
+static ssize_t
+pmqos_default_duration_usec_show(struct kobject *kobj,
+				 struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%llu\n", ptlrpc_pmqos_default_duration_usec);
+}
+
+static ssize_t
+pmqos_default_duration_usec_store(struct kobject *kobj,
+				  struct attribute *attr, const char *buf,
+				  size_t count)
+{
+	u64 val;
+	int rc;
+
+	rc = kstrtoull(buf, 0, &val);
+	if (rc < 0)
+		return rc;
+
+	CDEBUG(D_INFO, "Setting 'pmqos_default_duration_usec' to %llu", val);
+	ptlrpc_pmqos_default_duration_usec = val;
+
+	return count;
+}
+
+LUSTRE_RW_ATTR(pmqos_default_duration_usec);
+
+static ssize_t
+pmqos_use_stats_for_duration_show(struct kobject *kobj,
+				  struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", ptlrpc_pmqos_use_stats_for_duration);
+}
+
+static ssize_t
+pmqos_use_stats_for_duration_store(struct kobject *kobj,
+				   struct attribute *attr, const char *buf,
+				   size_t count)
+{
+	bool val;
+	int rc;
+
+	rc = kstrtobool(buf, &val);
+	if (rc < 0)
+		return rc;
+
+	CDEBUG(D_INFO, "Setting 'pmqos_use_stats_for_duration' to %s\n",
+	       val ? "true" : "false");
+	ptlrpc_pmqos_use_stats_for_duration = val;
+
+	return count;
+}
+
+LUSTRE_RW_ATTR(pmqos_use_stats_for_duration);
+
+static struct attribute *ptlrpc_attrs[] = {
+	&lustre_attr_enable_pmqos.attr,
+	&lustre_attr_pmqos_latency_max_usec.attr,
+	&lustre_attr_pmqos_default_duration_usec.attr,
+	&lustre_attr_pmqos_use_stats_for_duration.attr,
+	NULL,
+};
+
+static struct attribute_group ptlrpc_attr_group = {
+	.attrs = ptlrpc_attrs,
+};
+
+int ptlrpc_lproc_init(void)
+{
+	int rc = 0;
+
+	ptlrpc_kobj = kobject_create_and_add("ptlrpc", &lustre_kset->kobj);
+	if (!ptlrpc_kobj)
+		RETURN(-ENOMEM);
+
+	rc = sysfs_create_group(ptlrpc_kobj, &ptlrpc_attr_group);
+	if (rc)
+		ptlrpc_lproc_fini();
+
+	return rc;
+}
+
+void ptlrpc_lproc_fini(void)
+{
+	if (ptlrpc_kobj) {
+		sysfs_remove_group(ptlrpc_kobj, &ptlrpc_attr_group);
+		kobject_put(ptlrpc_kobj);
+	}
+}

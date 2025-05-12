@@ -5064,7 +5064,7 @@ test_136() {
 	sync;sync;sync
 
 #define OBD_FAIL_OUT_DROP_DESTROY      0x170b
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 	do_nodes $mdts $LCTL set_param fail_loc=0x170b
 	rmdir $DIR/$tdir &
 	sleep 0.5
@@ -5354,11 +5354,20 @@ test_202() {
 	local td=$DIR/$tdir
 	local tf=$td/$tfile
 
-	(( $MDS1_VERSION >= $(version_code 2.16.0) )) ||
-	   (( $MDS1_VERSION < $(version_code v2_15_55-64-g13557aa869) &&
-	   $MDS1_VERSION >= $(version_code 2.14.0-ddn178) )) ||
-	   (( $MDS1_VERSION < $(version_code 2.14.0-ddn87-14-gf1bd967799) )) ||
-		skip "need MDS with LU-18416 fix for layout version"
+	if ! do_facet $SINGLEMDS $LCTL get_param version | grep "ddn"; then
+		# master and b2_15
+		(( $MDS1_VERSION >= $(version_code v2_16_50-35-gc66a7dea85) )) ||
+		(( $MDS1_VERSION < $(version_code v2_15_55-64-g13557aa869) &&
+		   $MDS1_VERSION >= $(version_code v2_15_6-RC1) )) ||
+			skip "need MDS with LU-18435 fix for layout version"
+	else
+		# b_es6_0 and b_es5_2
+		(( $MDS1_VERSION >= $(version_code 2.14.0-ddn180) )) ||
+		(( $MDS1_VERSION < $(version_code 2.14.0-ddn86-14-gf1bd967799) &&
+		   $MDS1_VERSION >= $(version_code 2.14.0-ddn1) )) ||
+		(( $MDS1_VERSION < $(version_code 2.12.9-ddn19-4-g3455e9100f) )) ||
+			skip "need MDS with LU-18435 fix for layout version"
+	fi
 
 	mkdir_on_mdt0 $td || error "can't mkdir"
 	$LFS setstripe -E128M -c1 -Eeof -c2 $td || error "can't setstripe"

@@ -1,37 +1,19 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2016, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  *
  * cl_device and cl_device_type implementation for VVP layer.
  *
- *   Author: Nikita Danilov <nikita.danilov@sun.com>
- *   Author: Jinshan Xiong <jinshan.xiong@intel.com>
+ * Author: Nikita Danilov <nikita.danilov@sun.com>
+ * Author: Jinshan Xiong <jinshan.xiong@intel.com>
  */
 
 #define DEBUG_SUBSYSTEM S_LLITE
@@ -273,8 +255,14 @@ void (*vvp_folio_memcg_unlock)(struct folio *folio);
 #endif
 
 /**
+ * vvp_global_init() - init global resources required by the VVP layer
+ *
  * A mutex serializing calls to vvp_inode_fini() under extreme memory
  * pressure, when environments cannot be allocated.
+ *
+ * Returns:
+ * * %0  Success
+ * * <0 Failure
  */
 int vvp_global_init(void)
 {
@@ -487,7 +475,9 @@ static void vvp_pgcache_page_show(const struct lu_env *env,
 		   page_count(vmpage));
 	has_flags = 0;
 	seq_page_flag(seq, vmpage, locked, has_flags);
+#ifdef HAVE_PG_ERROR
 	seq_page_flag(seq, vmpage, error, has_flags);
+#endif
 	seq_page_flag(seq, vmpage, referenced, has_flags);
 	seq_page_flag(seq, vmpage, uptodate, has_flags);
 	seq_page_flag(seq, vmpage, dirty, has_flags);

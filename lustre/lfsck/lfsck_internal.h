@@ -657,7 +657,7 @@ struct lfsck_instance {
 	/* For the lfsck_lmv_unit to be handled. */
 	struct list_head	  li_list_lmv;
 
-	atomic_t		  li_ref;
+	refcount_t		  li_ref;
 	atomic_t		  li_double_scan_count;
 	struct ptlrpc_thread	  li_thread;
 	struct task_struct	 *li_task;
@@ -735,8 +735,7 @@ struct lfsck_instance {
 				  li_drop_dryrun:1, /* Ever dryrun, not now. */
 				  li_master:1, /* Master instance or not. */
 				  li_current_oit_processed:1,
-				  li_start_unplug:1,
-				  li_stopping:1;
+				  li_start_unplug:1;
 	struct lfsck_rec_lmv_save li_rec_lmv_save[LFSCK_REC_LMV_MAX_DEPTH];
 };
 
@@ -915,7 +914,7 @@ int lfsck_fid_alloc(const struct lu_env *env, struct lfsck_instance *lfsck,
 		    struct lu_fid *fid, bool locked);
 int lfsck_ibits_lock(const struct lu_env *env, struct lfsck_instance *lfsck,
 		     struct dt_object *obj, struct lustre_handle *lh,
-		     __u64 bits, enum ldlm_mode mode);
+		     enum mds_ibits_locks bits, enum ldlm_mode mode);
 void lfsck_ibits_unlock(struct lustre_handle *lh, enum ldlm_mode mode);
 int lfsck_remote_lookup_lock(const struct lu_env *env,
 			     struct lfsck_instance *lfsck,
@@ -923,7 +922,8 @@ int lfsck_remote_lookup_lock(const struct lu_env *env,
 			     struct lustre_handle *lh, enum ldlm_mode mode);
 int lfsck_lock(const struct lu_env *env, struct lfsck_instance *lfsck,
 	       struct dt_object *obj, const char *name,
-	       struct lfsck_lock_handle *llh, __u64 bits, enum ldlm_mode mode);
+	       struct lfsck_lock_handle *llh, enum mds_ibits_locks bits,
+	       enum ldlm_mode mode);
 void lfsck_unlock(struct lfsck_lock_handle *llh);
 int lfsck_find_mdt_idx_by_fid(const struct lu_env *env,
 			      struct lfsck_instance *lfsck,
@@ -1396,7 +1396,7 @@ static inline void lfsck_component_put(const struct lu_env *env,
 static inline struct lfsck_instance *
 lfsck_instance_get(struct lfsck_instance *lfsck)
 {
-	atomic_inc(&lfsck->li_ref);
+	refcount_inc(&lfsck->li_ref);
 
 	return lfsck;
 }
@@ -1404,7 +1404,7 @@ lfsck_instance_get(struct lfsck_instance *lfsck)
 static inline void lfsck_instance_put(const struct lu_env *env,
 				      struct lfsck_instance *lfsck)
 {
-	if (atomic_dec_and_test(&lfsck->li_ref))
+	if (refcount_dec_and_test(&lfsck->li_ref))
 		lfsck_instance_cleanup(env, lfsck);
 }
 

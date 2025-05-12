@@ -2381,6 +2381,9 @@ test_26d() {
 run_test 26d "RAoLU when Client eviction"
 
 test_26e() {
+	(( MDS1_VERSION >= $(version_code 2.16.51) )) ||
+		skip "need MDS version at least 2.16.51"
+
 	# test needs a running copytool
 	copytool setup
 	mkdir_on_mdt0 $DIR/$tdir
@@ -4370,16 +4373,16 @@ test_223b() {
 	copytool setup -b 1
 	changelog_register
 
-	$LFS hsm_archive --archive $HSM_ARCHIVE_NUMBER $f
+	$LFS hsm archive --archive $HSM_ARCHIVE_NUMBER $f
 	wait_request_state $fid ARCHIVE SUCCEED
-	$LFS hsm_release $f
+	$LFS hsm release $f
 
 	# Prevent restore from completing
 	copytool_suspend
-	$LFS hsm_restore $f
+	$LFS hsm restore $f
 	wait_request_state $fid RESTORE STARTED
 
-	$LFS hsm_cancel $f
+	$LFS hsm cancel $f
 	wait_request_state $fid RESTORE CANCELED
 
 	copytool_continue
@@ -5701,6 +5704,99 @@ test_410()
 	$LFS hsm_release $f || error "could not release file"
 }
 run_test 410 "lfs data_version -s allows release of force-archived file"
+
+cleanup_411() {
+	local nm=$1
+
+	do_facet mgs $LCTL nodemap_del $nm || true
+	do_facet mgs $LCTL nodemap_activate 0
+	wait_nm_sync active
+}
+
+test_411()
+{
+	local client_ip=$(host_nids_address $HOSTNAME $NETTYPE)
+	local client_nid=$(h2nettype $client_ip)
+	local tf1=$DIR/$tdir/fileA
+	local tf2=$DIR/$tdir/fileB
+	local nm=test_411
+	local roles
+	local fid
+
+	do_facet mgs $LCTL nodemap_modify --name default \
+		--property admin --value 1
+	do_facet mgs $LCTL nodemap_modify --name default \
+		--property trusted --value 1
+	do_facet mgs $LCTL nodemap_add $nm
+	do_facet mgs $LCTL nodemap_add_range 	\
+		--name $nm --range $client_nid
+	do_facet mgs $LCTL nodemap_modify --name $nm \
+		--property admin --value 1
+	do_facet mgs $LCTL nodemap_modify --name $nm \
+		--property trusted --value 1
+	do_facet mgs $LCTL nodemap_activate 1
+	stack_trap "cleanup_411 $nm" EXIT
+	wait_nm_sync active
+	wait_nm_sync $nm trusted_nodemap
+
+	roles=$(do_facet mds $LCTL get_param -n nodemap.$nm.rbac)
+	[[ "$roles" =~ "hsm_ops" ]] ||
+		skip "role 'hsm_ops' not supported by server"
+
+	mkdir_on_mdt0 $DIR/$tdir || error "mkdir $DIR/$tdir failed"
+	echo hi > $tf1 || error "create $tf1 failed"
+	echo hi > $tf2 || error "create $tf2 failed"
+
+	copytool setup
+
+	# with hsm_ops role, all ops should pass
+	fid=$(path2fid $tf1)
+	$LFS hsm_state $tf1 || error "hsm_state $tf1 failed"
+	$LFS hsm_archive $tf1 || error "hsm_archive $tf1 failed"
+	wait_request_state $fid ARCHIVE SUCCEED
+	$LFS hsm_release $tf1 || error "hsm_release $tf1 failed"
+	check_hsm_flags $tf1 "0x0000000d"
+	$LFS hsm_restore $tf1 || error "hsm_restore $tf1 failed"
+	wait_request_state $fid RESTORE SUCCEED
+	$LFS hsm_remove $tf1 || error "hsm_remove $tf1 failed"
+	wait_request_state $fid REMOVE SUCCEED
+	check_hsm_flags $tf1 "0x00000000"
+	$LFS hsm_set --exists $tf1 || error "hsm_set $tf1 failed"
+	check_hsm_flags $tf1 "0x00000001"
+	$LFS hsm_clear --exists $tf1 || error "hsm_clear $tf1 failed"
+	check_hsm_flags $tf1 "0x00000000"
+
+	# check copytool cleanup works with the hsm_ops rbac role present
+	# and nodemap activated
+	kill_copytools
+	wait_copytools || error "copytool failed to stop"
+
+	copytool setup
+	# Re-add cleanup_411 to the stack to make sure it is always called
+	# before the copytool is cleaned up.
+	stack_trap "cleanup_411 $nm" EXIT
+
+	# remove hsm_ops from rbac roles
+	roles=$(echo "$roles" | sed 's/hsm_ops,//;s/,hsm_ops//;s/^hsm_ops,//')
+	do_facet mgs $LCTL nodemap_modify --name $nm \
+		--property rbac --value $roles
+	wait_nm_sync $nm rbac
+
+	# without hsm_ops role, all ops should fail
+	fid=$(path2fid $tf2)
+	$LFS hsm_state $tf2 || error "hsm_state $tf2 failed"
+	$LFS hsm_archive $tf2 && error "hsm_archive $tf2 succeeded"
+	$LFS hsm_release $tf2 && error "hsm_release $tf2 succeeded"
+	check_hsm_flags $tf2 "0x00000000"
+	$LFS hsm_restore $tf2 && error "hsm_restore $tf2 succeeded"
+	$LFS hsm_remove $tf2 && error "hsm_remove $tf2 succeeded"
+	check_hsm_flags $tf2 "0x00000000"
+	$LFS hsm_set --exists $tf2 && error "hsm_set $tf2 succeeded"
+	check_hsm_flags $tf2 "0x00000000"
+	$LFS hsm_clear --exists $tf2 && error "hsm_clear $tf2 succeeded"
+	check_hsm_flags $tf2 "0x00000000"
+}
+run_test 411 "hsm_ops rbac role"
 
 test_500()
 {

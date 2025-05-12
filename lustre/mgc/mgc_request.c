@@ -818,8 +818,6 @@ static int mgc_precleanup(struct obd_device *obd)
 
 static int mgc_cleanup(struct obd_device *obd)
 {
-	int rc;
-
 	ENTRY;
 
 	/* COMPAT_146 - old config logs may have added profiles secretly */
@@ -830,8 +828,8 @@ static int mgc_cleanup(struct obd_device *obd)
 	lprocfs_obd_cleanup(obd);
 	ptlrpcd_decref();
 
-	rc = client_obd_cleanup(obd);
-	RETURN(rc);
+	client_obd_cleanup(obd);
+	RETURN(0);
 }
 
 static int mgc_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
@@ -1445,7 +1443,7 @@ fail:;
 		CDEBUG(D_INFO, "ir apply logs %lld/%lld for %s -> %s\n",
 		       prev_version, max_version, obdname, params);
 
-		rc = class_process_config(lcfg);
+		rc = class_process_config(lcfg, &obd->obd_kset.kobj);
 		OBD_FREE(lcfg, lustre_cfg_len(lcfg->lcfg_bufcount,
 					      lcfg->lcfg_buflens));
 		if (rc)
@@ -1464,7 +1462,7 @@ free_nids:
 	RETURN(rc);
 }
 
-/**
+/*
  * This function is called if this client was notified for target restarting
  * by the MGS. A CONFIG_READ RPC is going to send to fetch recovery or
  * nodemap logs.
@@ -1709,7 +1707,9 @@ static bool mgc_import_in_recovery(struct obd_import *imp)
 }
 
 /**
- * Get a configuration log from the MGS and process it.
+ * mgc_process_log() - Get a configuration log from the MGS and process it
+ * @mgc: MGC device by which to fetch the configuration log
+ * @cld: log processing state (stored in lock callback data)
  *
  * This function is called for both clients and servers to process the
  * configuration log from the MGS.  The MGC enqueues a DLM lock on the
@@ -1719,7 +1719,7 @@ static bool mgc_import_in_recovery(struct obd_import *imp)
  * the new additions to the end of the log.
  *
  * Since the MGC import is not replayable, if the import is being evicted
- * (rcl == -ESHUTDOWN, \see ptlrpc_import_delay_req()), retry to process
+ * (rcl == -ESHUTDOWN, @ptlrpc_import_delay_req()), retry to process
  * the log until recovery is finished or the import is closed.
  *
  * Make a local copy of the log before parsing it if appropriate (non-MGS
@@ -1730,11 +1730,9 @@ static bool mgc_import_in_recovery(struct obd_import *imp)
  * trying to update from the same log simultaneously, in which case we
  * should use a per-log semaphore instead of cld_lock.
  *
- * \param[in] mgc	MGC device by which to fetch the configuration log
- * \param[in] cld	log processing state (stored in lock callback data)
- *
- * \retval		0 on success
- * \retval		negative errno on failure
+ * Return:
+ * * %0: Success
+ * * %negative: Failure
  */
 int mgc_process_log(struct obd_device *mgc, struct config_llog_data *cld)
 {

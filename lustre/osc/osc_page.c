@@ -535,7 +535,7 @@ static inline bool lru_page_busy(struct client_obd *cli, struct cl_page *page)
  */
 static inline bool lru_page_unevictable(struct cl_page *clpage)
 {
-	return PageMlocked(cl_page_vmpage(clpage));
+	return folio_test_mlocked_page(cl_page_vmpage(clpage));
 }
 
 enum shrink_action {
@@ -686,7 +686,7 @@ static long osc_lru_list_shrink(const struct lu_env *env,
 		RETURN(0);
 
 	pvec = (struct cl_page **)osc_env_info(env)->oti_pvec;
-	io = osc_env_thread_io(env);
+	io = osc_env_new_io(env);
 
 	spin_lock(&cli->cl_lru_list_lock);
 	if (force && reason == SK_REASON_NORMAL_LRU)

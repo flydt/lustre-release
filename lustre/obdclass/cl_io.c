@@ -44,7 +44,7 @@ static inline int cl_io_is_loopable(const struct cl_io *io)
 	return cl_io_type_is_valid(io->ci_type) && io->ci_type != CIT_MISC;
 }
 
-/**
+/*
  * cl_io invariant that holds at all times when exported cl_io_*() functions
  * are entered and left.
  */
@@ -59,8 +59,8 @@ static inline int cl_io_invariant(const struct cl_io *io)
 		    (io->ci_state == CIS_LOCKED && io->ci_parent != NULL));
 }
 
-/**
- * Finalize \a io, by calling cl_io_operations::cio_fini() bottom-to-top.
+/*
+ * Finalize @io, by calling cl_io_operations::cio_fini() bottom-to-top.
  */
 void cl_io_fini(const struct lu_env *env, struct cl_io *io)
 {
@@ -100,6 +100,7 @@ void cl_io_fini(const struct lu_env *env, struct cl_io *io)
 		/* Check ignore layout change conf */
 		LASSERT(ergo(io->ci_ignore_layout || !io->ci_verify_layout,
 				!io->ci_need_restart));
+		break;
 	case CIT_GLIMPSE:
 		break;
 	case CIT_LADVISE:
@@ -142,9 +143,16 @@ static int __cl_io_init(const struct lu_env *env, struct cl_io *io,
 }
 
 /**
- * Initialize sub-io, by calling cl_io_operations::cio_init() top-to-bottom.
+ * cl_io_sub_init() - Initialize sub-IO (cl_io_operations::cio_init()
+ * top-to-bottom)
+ * @env: execution environment
+ * @io: pointer to a cl_io struct
+ * @iot: Requested transfer type (READ / WRITE)
+ * @obj: Sub object linked to IO operation (obj != cl_object_top(obj)).
  *
- * \pre obj != cl_object_top(obj)
+ * Return:
+ * * %0: Success
+ * * %-ERRNO: Failure
  */
 int cl_io_sub_init(const struct lu_env *env, struct cl_io *io,
 		   enum cl_io_type iot, struct cl_object *obj)
@@ -156,14 +164,18 @@ int cl_io_sub_init(const struct lu_env *env, struct cl_io *io,
 EXPORT_SYMBOL(cl_io_sub_init);
 
 /**
- * Initialize \a io, by calling cl_io_operations::cio_init() top-to-bottom.
+ * cl_io_init() - Initialize @io (cl_io_operations::cio_init() top-to-bottom)
+ * @env: execution environment
+ * @io: pointer to a cl_io struct
+ * @iot: Requested transfer type (READ / WRITE)
+ * @obj: Object linked to IO operation (obj == cl_object_top(obj))
  *
  * Caller has to call cl_io_fini() after a call to cl_io_init(), no matter
  * what the latter returned.
  *
- * \pre obj == cl_object_top(obj)
- * \pre cl_io_type_is_valid(iot)
- * \post cl_io_type_is_valid(io->ci_type) && io->ci_type == iot
+ * Return:
+ * * %0: Success
+ * * %-ERRNO: Failure
  */
 int cl_io_init(const struct lu_env *env, struct cl_io *io,
 	       enum cl_io_type iot, struct cl_object *obj)
@@ -178,9 +190,16 @@ int cl_io_init(const struct lu_env *env, struct cl_io *io,
 EXPORT_SYMBOL(cl_io_init);
 
 /**
- * Initialize read or write io.
+ * cl_io_rw_init() - Initialize read or write IO
+ * @env: execution environment
+ * @io: pointer to a cl_io struct
+ * @iot: Requested transfer type (READ / WRITE)
+ * @pos: IO start position
+ * @bytes: Number of bytes to Read/Write depending on @iot
  *
- * \pre iot == CIT_READ || iot == CIT_WRITE
+ * * Return:
+ * * %0: Success
+ * * %-ERRNO: Failure
  */
 int cl_io_rw_init(const struct lu_env *env, struct cl_io *io,
 		  enum cl_io_type iot, loff_t pos, size_t bytes)
@@ -276,8 +295,8 @@ static int cl_lockset_lock(const struct lu_env *env, struct cl_io *io,
 	RETURN(result);
 }
 
-/**
- * Takes locks necessary for the current iteration of io.
+/*
+ * Takes locks necessary for the current iteration of IO.
  *
  * Calls cl_io_operations::cio_lock() top-to-bottom to collect locks required
  * by layers for the current iteration. Then sort locks (to avoid dead-locks),
@@ -316,8 +335,8 @@ int cl_io_lock(const struct lu_env *env, struct cl_io *io)
 }
 EXPORT_SYMBOL(cl_io_lock);
 
-/**
- * Release locks takes by io.
+/*
+ * Release locks takes by IO
  */
 void cl_io_unlock(const struct lu_env *env, struct cl_io *io)
 {
@@ -356,11 +375,17 @@ void cl_io_unlock(const struct lu_env *env, struct cl_io *io)
 EXPORT_SYMBOL(cl_io_unlock);
 
 /**
- * Prepares next iteration of io.
+ * cl_io_iter_init() - Prepares next iteration of IO.
+ * @env: execution environment
+ * @io: pointer to a cl_io struct
  *
  * Calls cl_io_operations::cio_iter_init() top-to-bottom. This exists to give
- * layers a chance to modify io parameters, e.g., so that lov can restrict io
+ * layers a chance to modify @io parameters, e.g., so that lov can restrict @io
  * to a single stripe.
+ *
+ * * Return:
+ * * %0: successfully initialized
+ * * %-ERRNO: failure
  */
 int cl_io_iter_init(const struct lu_env *env, struct cl_io *io)
 {
@@ -387,8 +412,8 @@ int cl_io_iter_init(const struct lu_env *env, struct cl_io *io)
 }
 EXPORT_SYMBOL(cl_io_iter_init);
 
-/**
- * Finalizes io iteration.
+/*
+ * Finalizes IO iteration.
  *
  * Calls cl_io_operations::cio_iter_fini() bottom-to-top.
  */
@@ -412,7 +437,10 @@ void cl_io_iter_fini(const struct lu_env *env, struct cl_io *io)
 EXPORT_SYMBOL(cl_io_iter_fini);
 
 /**
- * Records that read or write io progressed \a bytes forward.
+ * cl_io_rw_advance() - Records read/write @io progressed @bytes forward
+ * @env: execution environment
+ * @io: pointer to a cl_io struct
+ * @bytes: Number of bytes IO should advance
  */
 void cl_io_rw_advance(const struct lu_env *env, struct cl_io *io, size_t bytes)
 {
@@ -437,7 +465,7 @@ void cl_io_rw_advance(const struct lu_env *env, struct cl_io *io, size_t bytes)
 	EXIT;
 }
 
-/**
+/*
  * Adds a lock to a lockset.
  */
 int cl_io_lock_add(const struct lu_env *env, struct cl_io *io,
@@ -462,7 +490,7 @@ static void cl_free_io_lock_link(const struct lu_env *env,
 	OBD_FREE_PTR(link);
 }
 
-/**
+/*
  * Allocates new lock link, and uses it to add a lock to a lockset.
  */
 int cl_io_lock_alloc_add(const struct lu_env *env, struct cl_io *io,
@@ -486,8 +514,8 @@ int cl_io_lock_alloc_add(const struct lu_env *env, struct cl_io *io,
 }
 EXPORT_SYMBOL(cl_io_lock_alloc_add);
 
-/**
- * Starts io by calling cl_io_operations::cio_start() top-to-bottom.
+/*
+ * Starts IO by calling cl_io_operations::cio_start() top-to-bottom.
  */
 int cl_io_start(const struct lu_env *env, struct cl_io *io)
 {
@@ -513,8 +541,8 @@ int cl_io_start(const struct lu_env *env, struct cl_io *io)
 }
 EXPORT_SYMBOL(cl_io_start);
 
-/**
- * Wait until current io iteration is finished by calling
+/*
+ * Wait until current IO iteration is finished by calling
  * cl_io_operations::cio_end() bottom-to-top.
  */
 void cl_io_end(const struct lu_env *env, struct cl_io *io)
@@ -536,10 +564,10 @@ void cl_io_end(const struct lu_env *env, struct cl_io *io)
 }
 EXPORT_SYMBOL(cl_io_end);
 
-/**
- * Called by read io, to decide the readahead extent
+/*
+ * Called by read IO, to decide the readahead extent
  *
- * \see cl_io_operations::cio_read_ahead()
+ * see cl_io_operations::cio_read_ahead()
  */
 int cl_io_read_ahead(const struct lu_env *env, struct cl_io *io,
 		     pgoff_t start, struct cl_read_ahead *ra)
@@ -566,8 +594,8 @@ int cl_io_read_ahead(const struct lu_env *env, struct cl_io *io,
 }
 EXPORT_SYMBOL(cl_io_read_ahead);
 
-/**
- * Called before io start, to reserve enough LRU slots to avoid
+/*
+ * Called before IO start, to reserve enough LRU slots to avoid
  * deadlock.
  *
  * \see cl_io_operations::cio_lru_reserve()
@@ -596,10 +624,16 @@ int cl_io_lru_reserve(const struct lu_env *env, struct cl_io *io,
 EXPORT_SYMBOL(cl_io_lru_reserve);
 
 /**
- * Commit a list of contiguous pages into writeback cache.
+ * cl_io_commit_async() - Commit a list of contiguous pages into writeback cache
+ * @env: execution environment
+ * @io: pointer to a cl_io struct
+ * @queue: pointer to cl_page_list struct (pages that will be committed)
+ * @from: Starting position
+ * @to: Ending position
+ * @cb: callback function
  *
- * \returns 0 if all pages committed, or errcode if error occurred.
- * \see cl_io_operations::cio_commit_async()
+ * Returns 0 if all pages committed, or errcode if error occurred.
+ * see cl_io_operations::cio_commit_async()
  */
 int cl_io_commit_async(const struct lu_env *env, struct cl_io *io,
 		       struct cl_page_list *queue, int from, int to,
@@ -635,15 +669,39 @@ void cl_io_extent_release(const struct lu_env *env, struct cl_io *io)
 }
 EXPORT_SYMBOL(cl_io_extent_release);
 
+int cl_dio_submit_rw(const struct lu_env *env, struct cl_io *io,
+		     enum cl_req_type crt, struct cl_dio_pages *cdp)
+{
+	const struct cl_io_slice *scan;
+	int result = 0;
+
+	ENTRY;
+
+	list_for_each_entry(scan, &io->ci_layers, cis_linkage) {
+		if (scan->cis_iop->cio_dio_submit == NULL)
+			continue;
+		result = scan->cis_iop->cio_dio_submit(env, io, scan, crt,
+						       cdp);
+		if (result != 0)
+			break;
+	}
+	RETURN(result);
+}
+EXPORT_SYMBOL(cl_dio_submit_rw);
+
 /**
- * Submits a list of pages for immediate io.
+ * cl_io_submit_rw() - Submits a list of pages for immediate IO.
+ * @env: execution environment
+ * @io: pointer to a cl_io struct
+ * @crt: Requested transfer type (READ / WRITE)
+ * @queue: pointer to a cl_2queue struct (pages in IO operation)
  *
  * After the function gets returned, The submitted pages are moved to
  * queue->c2_qout queue, and queue->c2_qin contain both the pages don't need
  * to be submitted, and the pages are errant to submit.
  *
- * \returns 0 if at least one page was submitted, error code otherwise.
- * \see cl_io_operations::cio_submit()
+ * Returns 0 if at least one page was submitted, error code otherwise.
+ * (see cl_io_operations::cio_submit())
  */
 int cl_io_submit_rw(const struct lu_env *env, struct cl_io *io,
 		    enum cl_req_type crt, struct cl_2queue *queue)
@@ -668,11 +726,21 @@ int cl_io_submit_rw(const struct lu_env *env, struct cl_io *io,
 EXPORT_SYMBOL(cl_io_submit_rw);
 
 /**
- * Submit a sync_io and wait for the IO to be finished, or error happens.
- * If \a timeout is zero, it means to wait for the IO unconditionally.
+ * cl_io_submit_sync() - submit a sync_io and wait for the IO to be finished,
+ * or error happens. If @timeout is zero, it means to wait for the IO
+ * unconditionally.
+ * @env: execution environment
+ * @io: pointer to a cl_io struct
+ * @iot: Requested transfer type (READ / WRITE)
+ * @queue: pointer to a cl_2queue struct (pages in IO operation)
+ * @timeout: Time in seconds to wait for IO completion.
  *
  * This is used for synchronous submission of an async IO, so the waiting is
  * done here in this function and the IO is done when this function returns.
+ *
+ * Return:
+ * * %0: Success
+ * * %-ERRNO: Failure
  */
 int cl_io_submit_sync(const struct lu_env *env, struct cl_io *io,
 		      enum cl_req_type iot, struct cl_2queue *queue,
@@ -719,9 +787,11 @@ int cl_io_submit_sync(const struct lu_env *env, struct cl_io *io,
 EXPORT_SYMBOL(cl_io_submit_sync);
 
 /**
- * Main io loop.
+ * cl_io_loop() - Main IO loop.
+ * @env: thread environment in which the I/O operation is executed
+ * @io: pointer to a cl_io struct
  *
- * Pumps io through iterations calling
+ * Pumps IO through iterations calling
  *
  *    - cl_io_iter_init()
  *
@@ -735,7 +805,11 @@ EXPORT_SYMBOL(cl_io_submit_sync);
  *
  *    - cl_io_iter_fini()
  *
- * repeatedly until there is no more io to do.
+ * repeatedly until there is no more @io to do.
+ *
+ * Return:
+ * * %0: IO was success
+ * * %-ERRNO: Failure
  */
 int cl_io_loop(const struct lu_env *env, struct cl_io *io)
 {
@@ -798,13 +872,17 @@ int cl_io_loop(const struct lu_env *env, struct cl_io *io)
 EXPORT_SYMBOL(cl_io_loop);
 
 /**
- * Adds io slice to the cl_io.
+ * cl_io_slice_add() - Adds IO slice to the cl_io.
+ * @io: pointer to a cl_io struct
+ * @slice: pointer to the cl_io_slice struct (Part of IO operation)
+ * @obj: Object linked to IO operation
+ * @ops: operations/methods applicable on @slice
  *
  * This is called by cl_object_operations::coo_io_init() methods to add a
- * per-layer state to the io. New state is added at the end of
+ * per-layer state to the @io. New state is added at the end of
  * cl_io::ci_layers list, that is, it is at the bottom of the stack.
  *
- * \see cl_lock_slice_add(), cl_req_slice_add(), cl_page_slice_add()
+ * see cl_lock_slice_add(), cl_req_slice_add(), cl_page_slice_add()
  */
 void cl_io_slice_add(struct cl_io *io, struct cl_io_slice *slice,
 		     struct cl_object *obj,
@@ -825,7 +903,7 @@ void cl_io_slice_add(struct cl_io *io, struct cl_io_slice *slice,
 EXPORT_SYMBOL(cl_io_slice_add);
 
 
-/**
+/*
  * Initializes page list.
  */
 void cl_page_list_init(struct cl_page_list *plist)
@@ -837,7 +915,7 @@ void cl_page_list_init(struct cl_page_list *plist)
 }
 EXPORT_SYMBOL(cl_page_list_init);
 
-/**
+/*
  * Adds a page to a page list.
  */
 void cl_page_list_add(struct cl_page_list *plist, struct cl_page *page,
@@ -858,7 +936,7 @@ void cl_page_list_add(struct cl_page_list *plist, struct cl_page *page,
 }
 EXPORT_SYMBOL(cl_page_list_add);
 
-/**
+/*
  * Removes a page from a page list.
  */
 void cl_page_list_del(const struct lu_env *env,
@@ -876,7 +954,7 @@ void cl_page_list_del(const struct lu_env *env,
 }
 EXPORT_SYMBOL(cl_page_list_del);
 
-/**
+/*
  * Moves a page from one page list to another.
  */
 void cl_page_list_move(struct cl_page_list *dst, struct cl_page_list *src,
@@ -892,7 +970,7 @@ void cl_page_list_move(struct cl_page_list *dst, struct cl_page_list *src,
 }
 EXPORT_SYMBOL(cl_page_list_move);
 
-/**
+/*
  * Moves a page from one page list to the head of another list.
  */
 void cl_page_list_move_head(struct cl_page_list *dst, struct cl_page_list *src,
@@ -908,7 +986,7 @@ void cl_page_list_move_head(struct cl_page_list *dst, struct cl_page_list *src,
 }
 EXPORT_SYMBOL(cl_page_list_move_head);
 
-/**
+/*
  * splice the cl_page_list, just as list head does
  */
 void cl_page_list_splice(struct cl_page_list *src, struct cl_page_list *dst)
@@ -922,7 +1000,7 @@ void cl_page_list_splice(struct cl_page_list *src, struct cl_page_list *dst)
 }
 EXPORT_SYMBOL(cl_page_list_splice);
 
-/**
+/*
  * Disowns pages in a queue.
  */
 void cl_page_list_disown(const struct lu_env *env, struct cl_page_list *plist)
@@ -951,7 +1029,7 @@ void cl_page_list_disown(const struct lu_env *env, struct cl_page_list *plist)
 }
 EXPORT_SYMBOL(cl_page_list_disown);
 
-/**
+/*
  * Releases pages from queue.
  */
 void cl_page_list_fini(const struct lu_env *env, struct cl_page_list *plist)
@@ -967,7 +1045,7 @@ void cl_page_list_fini(const struct lu_env *env, struct cl_page_list *plist)
 }
 EXPORT_SYMBOL(cl_page_list_fini);
 
-/**
+/*
  * Assumes all pages in a queue.
  */
 void cl_page_list_assume(const struct lu_env *env,
@@ -979,7 +1057,7 @@ void cl_page_list_assume(const struct lu_env *env,
 		cl_page_assume(env, io, page);
 }
 
-/**
+/*
  * Discards all pages in a queue.
  */
 void cl_page_list_discard(const struct lu_env *env, struct cl_io *io,
@@ -994,7 +1072,7 @@ void cl_page_list_discard(const struct lu_env *env, struct cl_io *io,
 }
 EXPORT_SYMBOL(cl_page_list_discard);
 
-/**
+/*
  * Initialize dual page queue.
  */
 void cl_2queue_init(struct cl_2queue *queue)
@@ -1006,7 +1084,7 @@ void cl_2queue_init(struct cl_2queue *queue)
 }
 EXPORT_SYMBOL(cl_2queue_init);
 
-/**
+/*
  * Disown pages in both lists of a 2-queue.
  */
 void cl_2queue_disown(const struct lu_env *env, struct cl_2queue *queue)
@@ -1018,7 +1096,7 @@ void cl_2queue_disown(const struct lu_env *env, struct cl_2queue *queue)
 }
 EXPORT_SYMBOL(cl_2queue_disown);
 
-/**
+/*
  * Discard (truncate) pages in both lists of a 2-queue.
  */
 void cl_2queue_discard(const struct lu_env *env,
@@ -1031,7 +1109,7 @@ void cl_2queue_discard(const struct lu_env *env,
 }
 EXPORT_SYMBOL(cl_2queue_discard);
 
-/**
+/*
  * Assume to own the pages in cl_2queue
  */
 void cl_2queue_assume(const struct lu_env *env,
@@ -1041,7 +1119,7 @@ void cl_2queue_assume(const struct lu_env *env,
 	cl_page_list_assume(env, io, &queue->c2_qout);
 }
 
-/**
+/*
  * Finalize both page lists of a 2-queue.
  */
 void cl_2queue_fini(const struct lu_env *env, struct cl_2queue *queue)
@@ -1053,8 +1131,8 @@ void cl_2queue_fini(const struct lu_env *env, struct cl_2queue *queue)
 }
 EXPORT_SYMBOL(cl_2queue_fini);
 
-/**
- * Initialize a 2-queue to contain \a page in its incoming page list.
+/*
+ * Initialize a 2-queue to contain @page in its incoming page list.
  */
 void cl_2queue_init_page(struct cl_2queue *queue, struct cl_page *page)
 {
@@ -1068,11 +1146,7 @@ void cl_2queue_init_page(struct cl_2queue *queue, struct cl_page *page)
 }
 EXPORT_SYMBOL(cl_2queue_init_page);
 
-/**
- * Returns top-level io.
- *
- * \see cl_object_top()
- */
+/* Returns top-level io. (See cl_object.c:cl_object_top()) */
 struct cl_io *cl_io_top(struct cl_io *io)
 {
 	ENTRY;
@@ -1083,9 +1157,14 @@ struct cl_io *cl_io_top(struct cl_io *io)
 EXPORT_SYMBOL(cl_io_top);
 
 /**
+ * cl_req_attr_set() - Set attr for IO request
+ * @env: execution environment
+ * @obj: Object linked to IO operation (obj == cl_object_top(obj))
+ * @attr: Per-transfer attributes
+ *
  * Fills in attributes that are passed to server together with transfer. Only
- * attributes from \a flags may be touched. This can be called multiple times
- * for the same request.
+ * attributes from @obj->cra_flags may be touched. This can be called multiple
+ * times for the same request
  */
 void cl_req_attr_set(const struct lu_env *env, struct cl_object *obj,
 		     struct cl_req_attr *attr)
@@ -1102,13 +1181,14 @@ void cl_req_attr_set(const struct lu_env *env, struct cl_object *obj,
 EXPORT_SYMBOL(cl_req_attr_set);
 
 /**
- * Initialize synchronous io wait \a anchor for \a nr pages with optional
- * \a end handler.
- * \param anchor owned by caller, initialzied here.
- * \param nr number of pages initally pending in sync.
- * \param end optional callback sync_io completion, can be used to
- *  trigger erasure coding, integrity, dedupe, or similar operation.
- * \q end is called with a spinlock on anchor->csi_waitq.lock
+ * cl_sync_io_init_notify() - Initialize synchronous IO wait @anchor for @nr
+ * pages with optional @end handler.
+ * @anchor: owned by caller, initialized here.
+ * @nr: number of pages initially pending in sync.
+ * @dio_aio: Is it a DIO or AIO
+ * @end: optional callback sync_io completion, can be used to trigger erasure
+ * coding, integrity, dedupe, or similar operation. @end is called with a
+ * spinlock on anchor->csi_waitq.lock
  */
 void cl_sync_io_init_notify(struct cl_sync_io *anchor, int nr,
 			    void *dio_aio, cl_sync_io_end_t *end)
@@ -1125,7 +1205,7 @@ void cl_sync_io_init_notify(struct cl_sync_io *anchor, int nr,
 }
 EXPORT_SYMBOL(cl_sync_io_init_notify);
 
-/**
+/*
  * Wait until all IO completes. Transfer completion routine has to call
  * cl_sync_io_note() for every entity.
  */
@@ -1175,6 +1255,20 @@ static inline void dio_aio_complete(struct kiocb *iocb, ssize_t res)
 #endif
 }
 
+void cl_dio_pages_2queue(struct cl_dio_pages *cdp)
+{
+	int i = 0;
+
+	cl_2queue_init(&cdp->cdp_queue);
+
+	for (i = 0; i < cdp->cdp_count; i++) {
+		struct cl_page *page = cdp->cdp_cl_pages[i];
+
+		cl_page_list_add(&cdp->cdp_queue.c2_qin, page, false);
+	}
+}
+EXPORT_SYMBOL(cl_dio_pages_2queue);
+
 static void cl_dio_aio_end(const struct lu_env *env, struct cl_sync_io *anchor)
 {
 	struct cl_dio_aio *aio = container_of(anchor, typeof(*aio), cda_sync);
@@ -1199,16 +1293,32 @@ static inline void csd_dup_free(struct cl_iter_dup *dup)
 static void cl_sub_dio_end(const struct lu_env *env, struct cl_sync_io *anchor)
 {
 	struct cl_sub_dio *sdio = container_of(anchor, typeof(*sdio), csd_sync);
+	struct cl_dio_pages *cdp = &sdio->csd_dio_pages;
 	ssize_t ret = anchor->csi_sync_rc;
+	bool array_incomplete = false;
+	int i;
 
 	ENTRY;
 
-	/* release pages */
-	while (sdio->csd_pages.pl_nr > 0) {
-		struct cl_page *page = cl_page_list_first(&sdio->csd_pages);
-
-		cl_page_list_del(env, &sdio->csd_pages, page, false);
-		cl_page_put(env, page);
+	if (cdp->cdp_cl_pages) {
+		for (i = 0; i < cdp->cdp_count; i++) {
+			struct cl_page *page = cdp->cdp_cl_pages[i];
+			/* if we failed allocating pages, the page array may be
+			 * incomplete, so check the pointers
+			 *
+			 * FIXME: This extra tracking of array completeness is
+			 * just a debug check and will be removed later in the
+			 * series.
+			 */
+			if (page)
+				cl_page_put(env, page);
+			else if (array_incomplete)
+				LASSERT(!page);
+			else
+				array_incomplete = true;
+		}
+		OBD_FREE_PTR_ARRAY_LARGE(cdp->cdp_cl_pages,
+					 cdp->cdp_count);
 	}
 
 	if (sdio->csd_unaligned) {
@@ -1221,7 +1331,7 @@ static void cl_sub_dio_end(const struct lu_env *env, struct cl_sync_io *anchor)
 		 */
 		if (!sdio->csd_write && sdio->csd_bytes > 0)
 			ret = ll_dio_user_copy(sdio);
-		ll_free_dio_buffer(&sdio->csd_dio_pages);
+		ll_free_dio_buffer(cdp);
 		/* handle the freeing here rather than in cl_sub_dio_free
 		 * because we have the unmodified iovec pointer
 		 */
@@ -1230,8 +1340,7 @@ static void cl_sub_dio_end(const struct lu_env *env, struct cl_sync_io *anchor)
 		/* unaligned DIO does not get user pages, so it doesn't have to
 		 * release them, but aligned I/O must
 		 */
-		ll_release_user_pages(sdio->csd_dio_pages.cdp_pages,
-				      sdio->csd_dio_pages.cdp_count);
+		ll_release_user_pages(cdp->cdp_pages, cdp->cdp_count);
 	}
 	cl_sync_io_note(env, &sdio->csd_ll_aio->cda_sync, ret);
 
@@ -1284,7 +1393,6 @@ struct cl_sub_dio *cl_sub_dio_alloc(struct cl_dio_aio *ll_aio,
 		 */
 		cl_sync_io_init_notify(&sdio->csd_sync, 1, sdio,
 				       cl_sub_dio_end);
-		cl_page_list_init(&sdio->csd_pages);
 
 		sdio->csd_ll_aio = ll_aio;
 		sdio->csd_creator_free = sync;
@@ -1678,7 +1786,7 @@ ssize_t ll_dio_user_copy(struct cl_sub_dio *sdio)
 }
 EXPORT_SYMBOL(ll_dio_user_copy);
 
-/**
+/*
  * Indicate that transfer of a single page completed.
  */
 void cl_sync_io_note(const struct lu_env *env, struct cl_sync_io *anchor,

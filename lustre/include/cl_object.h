@@ -359,7 +359,8 @@ struct cl_object_operations {
 	 * cl_object_operations::coo_attr_get() is used.
 	 */
 	int (*coo_attr_update)(const struct lu_env *env, struct cl_object *obj,
-			       const struct cl_attr *attr, unsigned int valid);
+			       const struct cl_attr *attr,
+			       enum cl_attr_valid valid);
 	/**
 	 * Mark the inode dirty. By this way, the inode will add into the
 	 * writeback list of the corresponding @bdi_writeback, and then it will
@@ -430,6 +431,11 @@ struct cl_object_operations {
 	 */
 	int (*coo_inode_ops)(const struct lu_env *env, struct cl_object *obj,
 			     enum coo_inode_opc opc, void *data);
+	/**
+	 * Get ProjID for a request.
+	 */
+	void (*coo_req_projid_set)(const struct lu_env *env,
+				   struct cl_object *obj, __u32 *projid);
 };
 
 /**
@@ -767,9 +773,14 @@ struct cl_page {
 	enum cl_page_type	cp_type:CP_TYPE_BITS;
 	unsigned		cp_defer_uptodate:1,
 				cp_ra_updated:1,
-				cp_ra_used:1;
-	/* which slab kmem index this memory allocated from */
-	short int		cp_kmem_index;
+				cp_ra_used:1,
+				cp_in_kmem_array:1;
+	union {
+		/* which slab kmem index this memory allocated from */
+		short int	cp_kmem_index;
+		/* or the page size if it's not in the slab kmem array */
+		short int	cp_kmem_size;
+	};
 
 	/**
 	 * Owning IO in cl_page_state::CPS_OWNED state. Sub-page can be owned
@@ -1405,6 +1416,8 @@ static inline void cl_read_ahead_release(const struct lu_env *env,
 }
 
 
+struct cl_dio_pages;
+
 /**
  * Per-layer io operations.
  * \see vvp_io_ops, lov_io_ops, lovsub_io_ops, osc_io_ops
@@ -1501,6 +1514,14 @@ struct cl_io_operations {
 			   struct cl_io *io,
 			   const struct cl_io_slice *slice,
 			   enum cl_req_type crt, struct cl_2queue *queue);
+	/* the dio version of cio_submit, this either submits all pages
+	 * successfully or fails.  Uses an array, rather than a queue.
+	 */
+	int  (*cio_dio_submit)(const struct lu_env *env,
+			       struct cl_io *io,
+			       const struct cl_io_slice *slice,
+			       enum cl_req_type crt,
+			       struct cl_dio_pages *cdp);
 	/**
 	 * Queue async page for write.
 	 * The difference between cio_submit and cio_queue is that
@@ -1777,9 +1798,10 @@ struct cl_io {
 			int			 sa_falloc_mode;
 			loff_t			 sa_falloc_offset;
 			loff_t			 sa_falloc_end;
-			uid_t			 sa_falloc_uid;
-			gid_t			 sa_falloc_gid;
-			__u32			 sa_falloc_projid;
+			/* id fields used for truncate/fallocate */
+			uid_t			 sa_attr_uid;
+			gid_t			 sa_attr_gid;
+			__u32			 sa_attr_projid;
 		} ci_setattr;
 		struct cl_data_version_io {
 			u64 dv_data_version;
@@ -1970,7 +1992,7 @@ struct cl_req_attr {
 	/** Generic attributes for the server consumption. */
 	struct obdo	*cra_oa;
 	/** process jobid/uid/gid performing the io */
-	struct job_info cra_jobinfo;
+	struct job_info	cra_jobinfo;
 };
 
 enum cache_stats_item {
@@ -2120,7 +2142,8 @@ void cl_object_attr_unlock(struct cl_object *o);
 int  cl_object_attr_get(const struct lu_env *env, struct cl_object *obj,
 			struct cl_attr *attr);
 int  cl_object_attr_update(const struct lu_env *env, struct cl_object *obj,
-			   const struct cl_attr *attr, unsigned int valid);
+			   const struct cl_attr *attr,
+			   enum cl_attr_valid valid);
 void cl_object_dirty_for_sync(const struct lu_env *env, struct cl_object *obj);
 int  cl_object_glimpse(const struct lu_env *env, struct cl_object *obj,
 		       struct ost_lvb *lvb);
@@ -2140,7 +2163,8 @@ int cl_object_flush(const struct lu_env *env, struct cl_object *obj,
 		    struct ldlm_lock *lock);
 int cl_object_inode_ops(const struct lu_env *env, struct cl_object *obj,
 			enum coo_inode_opc opc, void *data);
-
+void cl_req_projid_set(const struct lu_env *env, struct cl_object *obj,
+		       __u32 *projid);
 
 /**
  * Returns true, iff \a o0 and \a o1 are slices of the same object.
@@ -2317,6 +2341,8 @@ int cl_lock_enqueue(const struct lu_env *env, struct cl_io *io,
 		    struct cl_lock *lock, struct cl_sync_io *anchor);
 void cl_lock_cancel(const struct lu_env *env, struct cl_lock *lock);
 
+struct cl_dio_pages;
+
 /* cl_io */
 int   cl_io_init(const struct lu_env *env, struct cl_io *io,
 		 enum cl_io_type iot, struct cl_object *obj);
@@ -2337,6 +2363,8 @@ int   cl_io_lock_add(const struct lu_env *env, struct cl_io *io,
 		     struct cl_io_lock_link *link);
 int   cl_io_lock_alloc_add(const struct lu_env *env, struct cl_io *io,
 			   struct cl_lock_descr *descr);
+int   cl_dio_submit_rw    (const struct lu_env *env, struct cl_io *io,
+			   enum cl_req_type iot, struct cl_dio_pages *cdp);
 int   cl_io_submit_rw(const struct lu_env *env, struct cl_io *io,
 		      enum cl_req_type iot, struct cl_2queue *queue);
 int   cl_io_submit_sync(const struct lu_env *env, struct cl_io *io,
@@ -2467,6 +2495,7 @@ void cl_sync_io_note(const struct lu_env *env, struct cl_sync_io *anchor,
 		     int ioret);
 int cl_sync_io_wait_recycle(const struct lu_env *env, struct cl_sync_io *anchor,
 			    long timeout, int ioret);
+void cl_dio_pages_2queue(struct cl_dio_pages *ldp);
 struct cl_dio_aio *cl_dio_aio_alloc(struct kiocb *iocb, struct cl_object *obj,
 				    bool is_aio);
 struct cl_sub_dio *cl_sub_dio_alloc(struct cl_dio_aio *ll_aio,
@@ -2507,6 +2536,9 @@ struct cl_dio_pages {
 	 * pages, but for unaligned i/o, this is the internal buffer
 	 */
 	struct page		**cdp_pages;
+
+	struct cl_page		**cdp_cl_pages;
+	struct cl_2queue	cdp_queue;
 	/** # of pages in the array. */
 	size_t			cdp_count;
 	/* the file offset of the first page. */
@@ -2540,7 +2572,6 @@ struct cl_iter_dup {
  */
 struct cl_sub_dio {
 	struct cl_sync_io	csd_sync;
-	struct cl_page_list	csd_pages;
 	ssize_t			csd_bytes;
 	struct cl_dio_aio	*csd_ll_aio;
 	struct cl_dio_pages	csd_dio_pages;

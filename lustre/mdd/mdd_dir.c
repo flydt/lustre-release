@@ -193,7 +193,7 @@ static int mdd_links_read_with_rec(const struct lu_env *env,
  *
  * \retval		0 if getting the parent FID succeeds.
  * \retval		negative errno if getting the parent FID fails.
- **/
+ */
 static inline int mdd_parent_fid(const struct lu_env *env,
 				 struct mdd_object *obj,
 				 const struct lu_attr *attr,
@@ -386,7 +386,7 @@ int mdd_dir_is_empty(const struct lu_env *env, struct mdd_object *dir)
 	RETURN(result);
 }
 
-/**
+/*
  * Determine if the target object can be hard linked, and right now it only
  * checks if the link count reach the maximum limit. Note: for ldiskfs, the
  * directory nlink count might exceed the maximum link count(see
@@ -1223,7 +1223,7 @@ static int changelog_name2digest(const char *name, int namelen,
 
 		digest->cdf_fid = *fid;
 		memcpy(digest->cdf_excerpt,
-		       LLCRYPT_FNAME_DIGEST(ln->ln_name, ln->ln_namelen),
+		       LLCRYPT_EXTRACT_DIGEST(ln->ln_name, ln->ln_namelen),
 		       LL_CRYPTO_BLOCK_SIZE);
 		p = (char *)digest;
 		len = sizeof(*digest);
@@ -2210,7 +2210,7 @@ cleanup:
 		mdd_write_unlock(env, mdd_cobj);
 
 	if (rc == 0) {
-		if (cattr->la_nlink == 0)
+		if (mdd_is_dead_obj(mdd_cobj))
 			cl_flags |= CLF_UNLINK_LAST;
 		else
 			cl_flags &= ~CLF_UNLINK_HSM_EXISTS;
@@ -2285,7 +2285,7 @@ static int mdd_create_data(const struct lu_env *env, struct md_object *pobj,
 	 * XXX: Setting the lov ea is not locked but setting the attr is locked?
 	 * Should this be fixed?
 	 */
-	CDEBUG(D_OTHER, "ea %p/%u, cr_flags %#llo, no_create %u\n",
+	CDEBUG(D_OTHER, "ea %p/%u, cr_flags %#lo, no_create %u\n",
 	       spec->u.sp_ea.eadata, spec->u.sp_ea.eadatalen,
 	       spec->sp_cr_flags, spec->no_create);
 
@@ -3750,13 +3750,14 @@ static int mdd_migrate_sanity_check(const struct lu_env *env,
 				    struct mdd_object *tobj,
 				    const struct lu_attr *spattr,
 				    const struct lu_attr *tpattr,
-				    const struct lu_attr *attr)
+				    const struct lu_attr *attr,
+				    bool nsonly)
 {
 	int rc;
 
 	ENTRY;
 
-	if (!mdd_object_remote(sobj)) {
+	if (!nsonly && !mdd_object_remote(sobj)) {
 		mdd_read_lock(env, sobj, DT_SRC_CHILD);
 		if (sobj->mod_count > 0) {
 			CDEBUG(D_INFO, "%s: "DFID" is opened, count %d\n",
@@ -4017,7 +4018,7 @@ static int mdd_update_link(const struct lu_env *env,
 		RETURN(0);
 
 	CDEBUG(D_INFO, "update "DFID"/"DNAME":"DFID"\n",
-	       PFID(fid), PNAME(lname), PFID(mdd_object_fid(tobj)));
+	       PFID(fid), encode_fn_luname(lname), PFID(mdd_object_fid(tobj)));
 
 	pobj = mdd_object_find(env, mdd, fid);
 	if (IS_ERR(pobj)) {
@@ -4131,11 +4132,12 @@ static int mdd_iterate_linkea(const struct lu_env *env,
 				    &fid);
 
 		/* Note: lname might miss \0 at the end */
-		snprintf(filename, sizeof(info->mdi_name), "%.*s",
+		snprintf(filename, sizeof(info->mdi_name), DNAME,
 			 lname.ln_namelen, lname.ln_name);
 		lname.ln_name = filename;
 
-		CDEBUG(D_INFO, DFID"/"DNAME"\n", PFID(&fid), PNAME(&lname));
+		CDEBUG(D_INFO, DFID"/"DNAME"\n",
+		       PFID(&fid), encode_fn_luname(&lname));
 
 		rc = cb(env, sobj, tobj, tname, tpfid, &lname, &fid, opaque,
 			handle);
@@ -4185,12 +4187,9 @@ static int mdd_migrate_linkea_prepare(const struct lu_env *env,
 	/* If there are still links locally, don't migrate this file */
 	LASSERT(ldata->ld_leh != NULL);
 
-	/*
-	 * If linkEA is overflow, it means there are some unknown name entries
-	 * under unknown parents, which will prevent the migration.
-	 */
+	/* If linkEA is overflow, switch to ns-only migrate */
 	if (unlikely(ldata->ld_leh->leh_overflow_time))
-		RETURN(-EOVERFLOW);
+		RETURN(+EOVERFLOW);
 
 	rc = mdd_fld_lookup(env, mdd, mdd_object_fid(sobj), &source_mdt_index);
 	if (rc)
@@ -4416,9 +4415,10 @@ static int mdd_migrate_update(const struct lu_env *env,
 
 	ENTRY;
 
-	CDEBUG(D_INFO, "update "DFID" from "DFID"/%s to "DFID"/%s\n",
+	CDEBUG(D_INFO, "update "DFID" from "DFID"/"DNAME" to "DFID"/"DNAME"\n",
 	       PFID(mdd_object_fid(obj)), PFID(mdd_object_fid(spobj)),
-	       sname->ln_name, PFID(mdd_object_fid(tpobj)), tname->ln_name);
+	       encode_fn_luname(sname), PFID(mdd_object_fid(tpobj)),
+	       encode_fn_luname(tname));
 
 	rc = __mdd_index_delete(env, spobj, sname->ln_name,
 				S_ISDIR(attr->la_mode), handle);
@@ -4589,38 +4589,80 @@ static int mdd_migrate_create(const struct lu_env *env,
  * here, because this command will decide target MDT in subdir migration in
  * LMV.
  */
-static int mdd_migrate_cmd_check(struct mdd_device *mdd,
+static int mdd_migrate_cmd_check(const struct lu_env *env, struct mdd_device *mdd,
+				 struct mdd_object *sobj,
 				 const struct lmv_mds_md_v1 *lmv,
 				 const struct lmv_user_md_v1 *lum,
-				 const struct lu_name *lname)
+				 size_t lum_len, const struct lu_name *lname)
 {
+	struct mdd_thread_info *info = mdd_env_info(env);
 	__u32 lum_stripe_count = lum->lum_stripe_count;
 	__u32 lum_hash_type = lum->lum_hash_type &
 			      cpu_to_le32(LMV_HASH_TYPE_MASK);
-	__u32 lmv_hash_type = lmv->lmv_hash_type &
-			      cpu_to_le32(LMV_HASH_TYPE_MASK);
+	struct md_layout_change *mlc = &info->mdi_mlc;
+	__u32 lmv_hash_type;
+	int rc = 0;
+	ENTRY;
 
-	if (!lmv_is_sane(lmv))
-		return -EBADF;
+	if (lmv && !lmv_is_sane(lmv))
+		RETURN(-EBADF);
 
-	/* if stripe_count unspecified, set to 1 */
+	/* If stripe_count unspecified, set to 1 */
 	if (!lum_stripe_count)
 		lum_stripe_count = cpu_to_le32(1);
 
-	/* TODO: check specific MDTs */
-	if (lum_stripe_count != lmv->lmv_migrate_offset ||
-	    lum->lum_stripe_offset != lmv->lmv_master_mdt_index ||
-	    (lum_hash_type && lum_hash_type != lmv_hash_type)) {
-		CERROR("%s: '"DNAME"' migration was interrupted, run 'lfs migrate -m %d -c %d -H %s "DNAME"' to finish migration: rc = %d\n",
-			mdd2obd_dev(mdd)->obd_name, PNAME(lname),
-			le32_to_cpu(lmv->lmv_master_mdt_index),
-			le32_to_cpu(lmv->lmv_migrate_offset),
-			mdt_hash_name[le32_to_cpu(lmv_hash_type)],
-			PNAME(lname), -EPERM);
-		return -EPERM;
+	/* Easy check for plain and single-striped dirs
+	 * if the object is on the target MDT already
+	 */
+	if (!lmv || lmv->lmv_stripe_count == cpu_to_le32(1)) {
+		struct seq_server_site  *ss = mdd_seq_site(mdd);
+		struct lu_seq_range range = { 0 };
+
+		fld_range_set_type(&range, LU_SEQ_RANGE_MDT);
+		rc = fld_server_lookup(env, ss->ss_server_fld,
+				fid_seq(mdd_object_fid(sobj)), &range);
+		if (rc)
+			RETURN(rc);
+
+		if (lum_stripe_count == cpu_to_le32(1) &&
+		    le32_to_cpu(lum->lum_stripe_offset) == range.lsr_index)
+			RETURN(-EALREADY);
+		RETURN(0);
 	}
 
-	return -EALREADY;
+	lmv_hash_type = lmv->lmv_hash_type & cpu_to_le32(LMV_HASH_TYPE_MASK);
+
+	if (lmv_is_migrating(lmv)) {
+		if (lum_stripe_count != lmv->lmv_migrate_offset ||
+		    lum->lum_stripe_offset != lmv->lmv_master_mdt_index ||
+		    (lum_hash_type && lum_hash_type != lmv_hash_type)) {
+			rc = -EPERM;
+		}
+	} else {
+		/* check at top level if the target layout already applied */
+		if ((lum_hash_type && lum_hash_type != lmv_hash_type) ||
+		    lum->lum_stripe_offset != lmv->lmv_master_mdt_index ||
+		    lum_stripe_count != lmv->lmv_stripe_count)
+			RETURN(0);
+	}
+
+	if (rc == 0) {
+		mlc->mlc_buf.lb_buf = (void*)lum;
+		mlc->mlc_buf.lb_len = lum_len;
+		rc = mo_layout_check(env, &sobj->mod_obj, mlc);
+	}
+
+	if (rc == -EPERM) {
+		CERROR("%s: '"DNAME"' migration was interrupted, run "
+		       "'lfs migrate -m %d -c %d -H %s "DNAME"' to finish migration: rc = %d\n",
+		       mdd2obd_dev(mdd)->obd_name, encode_fn_luname(lname),
+		       le32_to_cpu(lmv->lmv_master_mdt_index),
+		       le32_to_cpu(lmv->lmv_migrate_offset),
+		       mdt_hash_name[le32_to_cpu(lmv_hash_type)],
+		       encode_fn_luname(lname), rc);
+	}
+
+	RETURN(rc);
 }
 
 /**
@@ -4671,8 +4713,8 @@ static int mdd_migrate_object(const struct lu_env *env,
 
 	ENTRY;
 
-	CDEBUG(D_INFO, "migrate %s from "DFID"/"DFID" to "DFID"/"DFID"\n",
-	       sname->ln_name, PFID(mdd_object_fid(spobj)),
+	CDEBUG(D_INFO, "migrate "DNAME" from "DFID"/"DFID" to "DFID"/"DFID"\n",
+	       encode_fn_luname(sname), PFID(mdd_object_fid(spobj)),
 	       PFID(mdd_object_fid(sobj)), PFID(mdd_object_fid(tpobj)),
 	       PFID(mdd_object_fid(tobj)));
 
@@ -4690,7 +4732,17 @@ retry:
 		RETURN(rc);
 
 	rc = mdd_migrate_sanity_check(env, mdd, spobj, tpobj, sobj, tobj,
-				      spattr, tpattr, attr);
+				      spattr, tpattr, attr,
+				      spec->sp_migrate_nsonly);
+	if (rc == -EBUSY && !spec->sp_migrate_nsonly) {
+		spec->sp_migrate_nsonly = 1;
+		CWARN("%s: "DFID"/%s is open, migrate only dentry\n",
+		      mdd2obd_dev(mdd)->obd_name, PFID(mdd_object_fid(spobj)),
+		      sname->ln_name);
+		rc = mdd_migrate_sanity_check(env, mdd, spobj, tpobj, sobj,
+					      tobj, spattr, tpattr, attr,
+					      spec->sp_migrate_nsonly);
+	}
 	if (rc)
 		RETURN(rc);
 
@@ -4698,6 +4750,7 @@ retry:
 
 	if (S_ISDIR(attr->la_mode) && !spec->sp_migrate_nsonly) {
 		struct lmv_user_md_v1 *lum = spec->u.sp_ea.eadata;
+		size_t lum_len = spec->u.sp_ea.eadatalen;
 
 		LASSERT(lum);
 
@@ -4712,19 +4765,11 @@ retry:
 			GOTO(out, rc);
 
 		lmv = sbuf.lb_buf;
-		if (lmv) {
-			if (!lmv_is_sane(lmv))
-				GOTO(out, rc = -EBADF);
-			if (lmv_is_migrating(lmv)) {
-				rc = mdd_migrate_cmd_check(mdd, lmv, lum,
-							   sname);
-				GOTO(out, rc);
-			}
-		}
+		rc = mdd_migrate_cmd_check(env, mdd, sobj, lmv, lum,
+					   lum_len, sname);
+		if (rc)
+			GOTO(out, rc);
 	} else if (!S_ISDIR(attr->la_mode)) {
-		if (spobj == tpobj)
-			GOTO(out, rc = -EALREADY);
-
 		/* update namespace only if @sobj is on MDT where @tpobj is. */
 		if (!mdd_object_remote(tpobj) && !mdd_object_remote(sobj))
 			spec->sp_migrate_nsonly = true;
@@ -5023,7 +5068,7 @@ int mdd_dir_layout_shrink(const struct lu_env *env,
 
 	lmv = lmv_buf.lb_buf;
 	if (!lmv_is_sane(lmv))
-		RETURN(-EBADF);
+		GOTO(out_lmv, rc = -EBADF);
 
 	lmu = mlc->mlc_buf.lb_buf;
 
@@ -5061,7 +5106,7 @@ int mdd_dir_layout_shrink(const struct lu_env *env,
 				    fid);
 
 		/* Note: lname might miss \0 at the end */
-		snprintf(filename, sizeof(info->mdi_name), "%.*s",
+		snprintf(filename, sizeof(info->mdi_name), DNAME,
 			 lname.ln_namelen, lname.ln_name);
 		lname.ln_name = filename;
 
@@ -5137,6 +5182,7 @@ out:
 		mdd_object_put(env, stripe);
 		mdd_object_put(env, pobj);
 	}
+out_lmv:
 	lu_buf_free(&lmv_buf);
 	return rc;
 }

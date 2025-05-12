@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/lustre/llite/rw26.c
  *
  * Lustre Lite I/O page cache routines for the 2.5/2.6 kernel version
  */
@@ -52,10 +32,14 @@
 
 #ifdef HAVE_INVALIDATE_FOLIO
 /**
- * Implements Linux VM address_space::invalidate_folio() method. This method is
- * called when the folio is truncated from a file, either as a result of
- * explicit truncate, or when inode is removed from memory (as a result of
- * final iput(), umount, or memory pressure induced icache shrinking).
+ * ll_invalidate_folio() - Implements Linux VM address_space::invalidate_folio()
+ * method. This method is called when the folio is truncated from a file, either
+ * as a result of explicit truncate, or when inode is removed from memory
+ * (as a result of final iput(), umount, or memory pressure induced icache
+ * shrinking).
+ * @folio: Pointer to folio struct (collection of pages)
+ * @offset: Starting offset in bytes
+ * @len: length of folio to be invalidated
  *
  * [0, off] bytes of the folio remain valid (this is for a case of non-page
  * aligned truncate). Lustre leaves partially truncated folios in the cache,
@@ -104,10 +88,14 @@ static void ll_invalidate_folio(struct folio *folio, size_t offset, size_t len)
 #else
 
 /**
- * Implements Linux VM address_space::invalidatepage() method. This method is
- * called when the page is truncate from a file, either as a result of
- * explicit truncate, or when inode is removed from memory (as a result of
- * final iput(), umount, or memory pressure induced icache shrinking).
+ * ll_invalidatepage() - Implements Linux VM address_space::invalidatepage()
+ * method. This method is called when the page is truncate from a file, either
+ * as a result of explicit truncate, or when inode is removed from memory
+ * (as a result of final iput(), umount, or memory pressure induced icache
+ * shrinking).
+ *
+ * @vmpage: pointer to struct page (single page)
+ * @offset: Starting offset in bytes
  *
  * [0, offset] bytes of the page remain valid (this is for a case of not-page
  * aligned truncate). Lustre leaves partially truncated page in the cache,
@@ -375,12 +363,10 @@ ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 {
 	struct cl_dio_pages *cdp = &sdio->csd_dio_pages;
 	struct cl_sync_io *anchor = &sdio->csd_sync;
-	struct cl_2queue *queue = &io->ci_queue;
 	struct cl_object *obj = io->ci_obj;
 	struct cl_page *page;
 	int iot = rw == READ ? CRT_READ : CRT_WRITE;
 	loff_t offset = cdp->cdp_file_offset;
-	int io_pages = 0;
 	ssize_t rc = 0;
 	int i = 0;
 
@@ -389,7 +375,15 @@ ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 	cdp->cdp_from = offset & ~PAGE_MASK;
 	cdp->cdp_to = (offset + size) & ~PAGE_MASK;
 
-	cl_2queue_init(queue);
+	/* this is a special temporary allocation which lets us track the
+	 * cl_pages and convert them to a list
+	 *
+	 * this is used in 'pushing down' the conversion to a page queue
+	 */
+	OBD_ALLOC_PTR_ARRAY_LARGE(cdp->cdp_cl_pages, cdp->cdp_count);
+	if (!cdp->cdp_cl_pages)
+		GOTO(out, rc = -ENOMEM);
+
 	while (size > 0) {
 		size_t from = offset & ~PAGE_MASK;
 		size_t to = min(from + size, PAGE_SIZE);
@@ -412,10 +406,7 @@ ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 			 */
 			page->cp_inode = inode;
 		}
-		/* We keep the refcount from cl_page_find, so we don't need
-		 * another one here
-		 */
-		cl_page_list_add(&queue->c2_qin, page, false);
+		cdp->cdp_cl_pages[i] = page;
 		/*
 		 * Call page clip for incomplete pages, to set range of bytes
 		 * in the page and to tell transfer formation engine to send
@@ -423,7 +414,6 @@ ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 		 */
 		if (from != 0 || to != PAGE_SIZE)
 			cl_page_clip(env, page, from, to);
-		++io_pages;
 		i++;
 
 		offset += to - from;
@@ -435,36 +425,26 @@ ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 	LASSERT(i == cdp->cdp_count);
 	LASSERT(size == 0);
 
-	atomic_add(io_pages, &anchor->csi_sync_nr);
+	atomic_add(cdp->cdp_count, &anchor->csi_sync_nr);
 	/*
 	 * Avoid out-of-order execution of adding inflight
 	 * modifications count and io submit.
 	 */
 	smp_mb();
-	rc = cl_io_submit_rw(env, io, iot, queue);
-	if (rc == 0) {
-		cl_page_list_splice(&queue->c2_qout, &sdio->csd_pages);
-	} else {
-		atomic_add(-queue->c2_qin.pl_nr,
+	rc = cl_dio_submit_rw(env, io, iot, cdp);
+	if (rc != 0) {
+		atomic_add(-cdp->cdp_count,
 			   &anchor->csi_sync_nr);
-		cl_page_list_for_each(page, &queue->c2_qin)
+		for (i = 0; i < cdp->cdp_count; i++) {
+			page = cdp->cdp_cl_pages[i];
 			page->cp_sync_io = NULL;
-	}
-	/* handle partially submitted reqs */
-	if (queue->c2_qin.pl_nr > 0) {
-		CERROR(DFID " failed to submit %d dio pages: %zd\n",
-		       PFID(lu_object_fid(&obj->co_lu)),
-		       queue->c2_qin.pl_nr, rc);
-		if (rc == 0)
-			rc = -EIO;
+		}
 	}
 
 out:
-	/* if pages were not submitted successfully above, this takes care of
-	 * taking them off the list and removing the single reference they have
-	 * from when they were created
+	/* cleanup of the page array is handled by cl_sub_dio_end, so there's
+	 * no work to do on error here
 	 */
-	cl_2queue_fini(env, queue);
 	RETURN(rc);
 }
 
@@ -727,14 +707,21 @@ ll_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
 #endif /* !defined(HAVE_DIO_ITER) */
 
 /**
- * Prepare partially written-to page for a write.
- * @pg is owned when passed in and disowned when it returns non-zero result to
- * the caller.
+ * ll_prepare_partial_page() - Prepare partially written-to page for a write.
+ * @env: execution environment for this thread
+ * @io: pointer to the client I/O structure
+ * @pg: owned when passed in and disowned when it returns non-zero result to
+ * the caller
+ * @file: file structure associated with the page
+ *
+ * Return:
+ * * %0: Success (Ready for read/write)
+ * * %-ERRNO: Failure
  */
 static int ll_prepare_partial_page(const struct lu_env *env, struct cl_io *io,
 				   struct cl_page *pg, struct file *file)
 {
-	struct cl_attr *attr   = vvp_env_thread_attr(env);
+	struct cl_attr *attr   = vvp_env_new_attr(env);
 	struct cl_object *obj  = io->ci_obj;
 	loff_t offset = cl_page_index(pg) << PAGE_SHIFT;
 	int result;
@@ -797,12 +784,17 @@ static int ll_tiny_write_begin(struct page *vmpage, struct address_space *mappin
 	return 0;
 }
 
+/*
+ * write_begin is responsible for allocating page cache pages to be used
+ * to hold data for buffered i/o on the 'write' path.
+ * Called by generic_perform_write() to allocate one page [or one folio]
+ */
 static int ll_write_begin(struct file *file, struct address_space *mapping,
 			  loff_t pos, unsigned int len,
 #ifdef HAVE_GRAB_CACHE_PAGE_WRITE_BEGIN_WITH_FLAGS
 			  unsigned int flags,
 #endif
-			  struct page **pagep, void **fsdata)
+			  struct wbe_folio **foliop, void **fsdata)
 {
 	struct ll_cl_context *lcc = NULL;
 	const struct lu_env  *env = NULL;
@@ -943,7 +935,7 @@ out:
 		if (io)
 			io->ci_result = result;
 	} else {
-		*pagep = vmpage;
+		*foliop = wbe_page_folio(vmpage);
 		*fsdata = lcc;
 	}
 	RETURN(result);
@@ -987,13 +979,14 @@ out:
 
 static int ll_write_end(struct file *file, struct address_space *mapping,
 			loff_t pos, unsigned len, unsigned copied,
-			struct page *vmpage, void *fsdata)
+			struct wbe_folio *vmfolio, void *fsdata)
 {
 	struct ll_cl_context *lcc = fsdata;
 	const struct lu_env *env;
 	struct cl_io *io;
 	struct vvp_io *vio;
 	struct cl_page *page;
+	struct page *vmpage = wbe_folio_page(vmfolio);
 	unsigned from = pos & (PAGE_SIZE - 1);
 	bool unplug = false;
 	int result = 0;

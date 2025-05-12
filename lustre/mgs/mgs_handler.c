@@ -801,8 +801,12 @@ static int mgs_iocontrol_pool(const struct lu_env *env,
 	if (copy_from_user(lcfg, data->ioc_pbuf1, data->ioc_plen1))
 		GOTO(out_lcfg, rc = -EFAULT);
 
+	rc = lustre_cfg_sanity_check(lcfg, data->ioc_plen1);
+	if (rc)
+		GOTO(out_lcfg, rc);
+
 	if (lcfg->lcfg_bufcount < 2)
-		GOTO(out_lcfg, rc = -EFAULT);
+		GOTO(out_lcfg, rc = -EINVAL);
 
 	/* first arg is always <fsname>.<poolname> */
 	rc = mgs_extract_fs_pool(lustre_cfg_string(lcfg, 1), mgi->mgi_fsname,
@@ -873,7 +877,8 @@ static int mgs_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 	if (rc)
 		RETURN(rc);
 	rc = lu_env_add(&env);
-	LASSERT(rc == 0);
+	if (unlikely(rc))
+		GOTO(out_fini, rc);
 
 	rc = -EINVAL;
 	switch (cmd) {
@@ -892,8 +897,12 @@ static int mgs_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 		if (copy_from_user(lcfg, data->ioc_pbuf1, data->ioc_plen1))
 			GOTO(out_free, rc = -EFAULT);
 
-		if (lcfg->lcfg_bufcount < 1)
+		rc = lustre_cfg_sanity_check(lcfg, data->ioc_plen1);
+		if (rc)
 			GOTO(out_free, rc);
+
+		if (lcfg->lcfg_bufcount < 1)
+			GOTO(out_free, rc = -EINVAL);
 
 		rc = mgs_set_param(&env, mgs, lcfg);
 		if (rc)
@@ -1010,6 +1019,7 @@ out_free:
 	}
 out:
 	lu_env_remove(&env);
+out_fini:
 	lu_env_fini(&env);
 	RETURN(rc);
 }
@@ -1349,8 +1359,7 @@ static void mgs_object_free(const struct lu_env *env, struct lu_object *o)
 
 	dt_object_fini(&obj->mgo_obj);
 	lu_object_header_fini(h);
-	OBD_FREE_PRE(obj, sizeof(*obj), "kfreed");
-	kfree_rcu(obj, mgo_header.loh_rcu);
+	OBD_FREE_RCU(obj, sizeof(*obj), mgo_header.loh_rcu);
 }
 
 static int mgs_object_print(const struct lu_env *env, void *cookie,

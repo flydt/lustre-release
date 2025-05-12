@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2004, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2016, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -87,13 +69,14 @@ struct vm_area_struct *our_vma(struct mm_struct *mm, unsigned long addr,
 }
 
 /**
- * API independent part for page fault initialization.
- * \param env - corespondent lu_env to processing
- * \param vma - virtual memory area addressed to page fault
- * \param index - page index corespondent to fault.
- * \param mkwrite - whether it is mmap write.
+ * ll_fault_io_init() - API independent part for page fault initialization.
+ * @env: corespondent lu_env to processing
+ * @vma: virtual memory area addressed to page fault
+ * @index: page index corespondent to fault.
+ * @mkwrite: whether it is mmap write.
  *
- * \return error codes from cl_io_init.
+ * Return:
+ * * pointer to a struct cl_io on success error otherwise
  */
 static struct cl_io *
 ll_fault_io_init(struct lu_env *env, struct vm_area_struct *vma,
@@ -111,7 +94,7 @@ ll_fault_io_init(struct lu_env *env, struct vm_area_struct *vma,
 		RETURN(ERR_PTR(-EOPNOTSUPP));
 
 restart:
-	io = vvp_env_thread_io(env);
+	io = vvp_env_new_io(env);
 	io->ci_obj = ll_i2info(inode)->lli_clob;
 	LASSERT(io->ci_obj != NULL);
 
@@ -280,15 +263,15 @@ int ll_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 }
 
 /**
- * Lustre implementation of a vm_operations_struct::fault() method, called by
- * VM to server page fault (both in kernel and user space).
+ * ll_fault0() - Lustre implementation of a vm_operations_struct::fault()
+ * method, called by VM to server page fault (both in kernel and user space).
+ * @vma: is virtiual area struct related to page fault
+ * @vmf: structure which describe type and address where hit fault
  *
- * \param vma - is virtiual area struct related to page fault
- * \param vmf - structure which describe type and address where hit fault
- *
- * \return allocated and filled _locked_ page for address
- * \retval VM_FAULT_ERROR on general error
- * \retval NOPAGE_OOM not have memory for allocate new page
+ * Return:
+ * * allocated and filled _locked_ page for address
+ * * VM_FAULT_ERROR on general error
+ * * NOPAGE_OOM not have memory for allocate new page
  */
 static vm_fault_t ll_fault0(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
@@ -550,8 +533,11 @@ static vm_fault_t ll_page_mkwrite(struct vm_area_struct *vma,
 }
 
 /**
- *  To avoid cancel the locks covering mmapped region for lock cache pressure,
- *  we track the mapped vma count in vvp_object::vob_mmap_cnt.
+ * ll_vm_open() - Called when VMA is being opened
+ * @vma: virtual memory area (VMA) structure that is being opened
+ *
+ * To avoid cancel the locks covering mmapped region for lock cache pressure,
+ * we track the mapped vma count in vvp_object::vob_mmap_cnt.
  */
 static void ll_vm_open(struct vm_area_struct *vma)
 {
@@ -571,7 +557,8 @@ static void ll_vm_open(struct vm_area_struct *vma)
 }
 
 /**
- * Dual to ll_vm_open().
+ * ll_vm_close() - Called when VMA is being closed(Dual to ll_vm_open())
+ * @vma: virtual memory area (VMA) structure that is being closed
  */
 static void ll_vm_close(struct vm_area_struct *vma)
 {

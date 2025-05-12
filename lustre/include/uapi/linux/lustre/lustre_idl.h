@@ -644,6 +644,7 @@ enum lustre_msg_version {
 #define MSG_CONNECT_NEXT_VER	0x00000080 /* use next version of lustre_msg */
 #define MSG_CONNECT_TRANSNO	0x00000100 /* client sent transno in replay */
 #define MSG_PACK_UID_GID	0x00000200 /* thread UID/GID in ptlrpc_body */
+#define MSG_PACK_PROJID		0x00000400 /* thread PROJID in ptlrpc_body */
 
 /* number of previous object versions in pb_pre_versions[] */
 #define PTLRPC_NUM_VERSIONS     4
@@ -657,7 +658,7 @@ struct ptlrpc_body_v3 {
 	__u64 pb_last_xid;	/* highest replied XID w/o lower unreplied XID*/
 	__u16 pb_tag;		/* multiple modifying RPCs virtual slot index */
 	__u16 pb_padding0;
-	__u32 pb_padding1;
+	__u32 pb_projid;	/* req: inode projid, use by tbf rules */
 	__u64 pb_last_committed;/* rep: highest pb_transno committed to disk */
 	__u64 pb_transno;	/* server-assigned transno for modifying RPCs */
 	__u32 pb_flags;		/* req: MSG_* flags */
@@ -688,7 +689,7 @@ struct ptlrpc_body_v2 {
 	__u64 pb_last_xid; /* highest replied XID without lower unreplied XID */
 	__u16 pb_tag;      /* virtual slot idx for multiple modifying RPCs */
 	__u16 pb_padding0;
-	__u32 pb_padding1;
+	__u32 pb_projid;   /* req: inode projid, use by tbf rules */
 	__u64 pb_last_committed;
 	__u64 pb_transno;
 	__u32 pb_flags;
@@ -848,6 +849,8 @@ struct ptlrpc_body_v2 {
 #define OBD_CONNECT2_SPARSE            0x1000000000ULL /* sparse LNet read */
 #define OBD_CONNECT2_MIRROR_ID_FIX     0x2000000000ULL /* rr_mirror_id move */
 #define OBD_CONNECT2_UPDATE_LAYOUT     0x4000000000ULL /* update compressibility */
+#define OBD_CONNECT2_READDIR_OPEN	0x8000000000ULL /* read first dir page on open */
+
 /* XXX README XXX README XXX README XXX README XXX README XXX README XXX
  * Please DO NOT add OBD_CONNECT flags before first ensuring that this value
  * is not in use by some other branch/patch.  Email adilger@whamcloud.com
@@ -963,6 +966,43 @@ struct ptlrpc_body_v2 {
 				 OBD_CONNECT_ATTRFID |	\
 				 OBD_CONNECT_FULL20)
 
+/* INODE LOCK PARTS */
+enum mds_ibits_locks {
+	MDS_INODELOCK_NONE	= 0x000000000, /* no lock bits are used */
+	MDS_INODELOCK_LOOKUP	= 0x000000001, /* For namespace, dentry etc Was
+						* used to protect permission
+						* (mode, owner, group, etc)
+						* before 2.4.
+						*/
+	MDS_INODELOCK_UPDATE	= 0x000000002, /* size, links, timestamps */
+	MDS_INODELOCK_OPEN	= 0x000000004, /* For opened files */
+	MDS_INODELOCK_LAYOUT	= 0x000000008, /* for layout */
+
+	/* The PERM bit is added in 2.4, and is used to protect permission
+	 * (mode, owner, group, ACL, etc.) separate from LOOKUP lock.
+	 * For remote directories (in DNE) these locks will be granted by
+	 * different MDTs (different LDLM namespace).
+	 *
+	 * For local directory, the MDT always grants UPDATE|PERM together.
+	 * For remote directory, master MDT (where remote directory is) grants
+	 * UPDATE|PERM, and remote MDT (where name entry is) grants LOOKUP_LOCK.
+	 */
+	MDS_INODELOCK_PERM	= 0x000000010,
+	MDS_INODELOCK_XATTR	= 0x000000020, /* non-permission extended attrs */
+	MDS_INODELOCK_DOM	= 0x000000040, /* Data for Data-on-MDT files */
+	/* Do not forget to increase MDS_INODELOCK_NUMBITS when adding bits */
+
+	/* Reserve to make 64bit, not used anywhere, therefore
+	 * MDS_INODELOCK_NUMBITS is not increased for this member
+	 */
+	MDS_INODELOCK_64BIT	= 0x100000000,
+};
+#define MDS_INODELOCK_NUMBITS 7
+/* This FULL lock is useful to take on unlink sort of operations */
+#define MDS_INODELOCK_FULL ((1 << MDS_INODELOCK_NUMBITS) - 1)
+/* DOM lock shouldn't be canceled early, use this macro for ELC */
+#define MDS_INODELOCK_ELC (MDS_INODELOCK_FULL & ~MDS_INODELOCK_DOM)
+
 /* This structure is used for both request and reply.
  *
  * If we eventually have separate connect data for different types, which we
@@ -974,7 +1014,7 @@ struct obd_connect_data {
 	__u32 ocd_grant;	 /* initial cache grant amount (bytes) */
 	__u32 ocd_index;	 /* LOV index to connect to */
 	__u32 ocd_brw_size;	 /* Maximum BRW size in bytes */
-	__u64 ocd_ibits_known;	 /* inode bits this client understands */
+	enum mds_ibits_locks ocd_ibits_known; /* inode bits this client understands */
 	__u8  ocd_grant_blkbits; /* log2 of the backend filesystem blocksize */
 	__u8  ocd_grant_inobits; /* log2 of the per-inode space consumption */
 	__u16 ocd_grant_tax_kb;	 /* extent insertion overhead, in 1K blocks */
@@ -1799,36 +1839,6 @@ enum mds_reint_op {
 #define DISP_OPEN_STRIPE     0x08000000
 #define DISP_OPEN_DENY	     0x10000000
 
-/* INODE LOCK PARTS */
-enum mds_ibits_locks {
-	MDS_INODELOCK_LOOKUP	= 0x000001, /* For namespace, dentry etc.  Was
-					     * used to protect permission (mode,
-					     * owner, group, etc) before 2.4.
-					     */
-	MDS_INODELOCK_UPDATE	= 0x000002, /* size, links, timestamps */
-	MDS_INODELOCK_OPEN	= 0x000004, /* For opened files */
-	MDS_INODELOCK_LAYOUT	= 0x000008, /* for layout */
-
-	/* The PERM bit is added in 2.4, and is used to protect permission
-	 * (mode, owner, group, ACL, etc.) separate from LOOKUP lock.
-	 * For remote directories (in DNE) these locks will be granted by
-	 * different MDTs (different LDLM namespace).
-	 *
-	 * For local directory, the MDT always grants UPDATE|PERM together.
-	 * For remote directory, master MDT (where remote directory is) grants
-	 * UPDATE|PERM, and remote MDT (where name entry is) grants LOOKUP_LOCK.
-	 */
-	MDS_INODELOCK_PERM	= 0x000010,
-	MDS_INODELOCK_XATTR	= 0x000020, /* non-permission extended attrs */
-	MDS_INODELOCK_DOM	= 0x000040, /* Data for Data-on-MDT files */
-	/* Do not forget to increase MDS_INODELOCK_NUMBITS when adding bits */
-};
-#define MDS_INODELOCK_NUMBITS 7
-/* This FULL lock is useful to take on unlink sort of operations */
-#define MDS_INODELOCK_FULL ((1 << MDS_INODELOCK_NUMBITS) - 1)
-/* DOM lock shouldn't be canceled early, use this macro for ELC */
-#define MDS_INODELOCK_ELC (MDS_INODELOCK_FULL & ~MDS_INODELOCK_DOM)
-
 /* NOTE: until Lustre 1.8.7/2.1.1 the fid_ver() was packed into name[2],
  * but was moved into name[1] along with the OID to avoid consuming the
  * name[2,3] fields that need to be used for the quota id (also a FID).
@@ -2514,7 +2524,7 @@ struct ldlm_res_id {
 
 /* lock types */
 enum ldlm_mode {
-	LCK_MINMODE	= 0,
+	LCK_MODE_MIN	= 0,
 	LCK_EX		= 1,
 	LCK_PW		= 2,
 	LCK_PR		= 4,
@@ -2524,9 +2534,11 @@ enum ldlm_mode {
 	LCK_GROUP	= 64,
 	LCK_COS		= 128,
 	LCK_TXN		= 256,
-	LCK_MAXMODE
+	LCK_MODE_END
 };
 
+#define LCK_MINMODE	LCK_MODE_MIN /* deprecated since 2.16.0 */
+#define LCK_MAXMODE	LCK_MODE_MAX /* deprecated since 2.16.0 */
 #define LCK_MODE_NUM    9
 
 enum ldlm_type {
@@ -2534,10 +2546,12 @@ enum ldlm_type {
 	LDLM_EXTENT	= 11,
 	LDLM_FLOCK	= 12,
 	LDLM_IBITS	= 13,
-	LDLM_MAX_TYPE
+	LDLM_TYPE_END,
+	LDLM_TYPE_MIN   = LDLM_PLAIN
 };
 
-#define LDLM_MIN_TYPE LDLM_PLAIN
+#define LDLM_TYPE_MAX	LDLM_TYPE_END /* deprecated since 2.16.0 */
+
 
 struct ldlm_extent {
 	__u64 start;
@@ -2552,10 +2566,10 @@ static inline bool ldlm_extent_equal(const struct ldlm_extent *ex1,
 }
 
 struct ldlm_inodebits {
-	__u64 bits;
+	enum mds_ibits_locks bits;
 	union {
-		__u64 try_bits; /* optional bits to try */
-		__u64 cancel_bits; /* for lock convert */
+		enum mds_ibits_locks try_bits; /* optional bits to try */
+		enum mds_ibits_locks cancel_bits; /* for lock convert */
 	};
 	__u64 li_gid;
 	__u32 li_padding;
@@ -3825,14 +3839,38 @@ enum nodemap_rbac_roles {
 	NODEMAP_RBAC_CHLG_OPS		= 0x00000010,
 	NODEMAP_RBAC_FSCRYPT_ADMIN	= 0x00000020,
 	NODEMAP_RBAC_SERVER_UPCALL	= 0x00000040,
+	NODEMAP_RBAC_IGN_ROOT_PRJQUOTA	= 0x00000080,
+	NODEMAP_RBAC_HSM_OPS		= 0x00000100,
+	NODEMAP_RBAC_LOCAL_ADMIN	= 0x00000200,
 	NODEMAP_RBAC_NONE	= (__u32)~(NODEMAP_RBAC_FILE_PERMS	|
 					   NODEMAP_RBAC_DNE_OPS	|
 					   NODEMAP_RBAC_QUOTA_OPS	|
 					   NODEMAP_RBAC_BYFID_OPS	|
 					   NODEMAP_RBAC_CHLG_OPS	|
 					   NODEMAP_RBAC_FSCRYPT_ADMIN	|
-					   NODEMAP_RBAC_SERVER_UPCALL),
+					   NODEMAP_RBAC_SERVER_UPCALL	|
+					   NODEMAP_RBAC_IGN_ROOT_PRJQUOTA |
+					   NODEMAP_RBAC_HSM_OPS		|
+					   NODEMAP_RBAC_LOCAL_ADMIN),
 	NODEMAP_RBAC_ALL	= 0xFFFFFFFF, /* future caps ON by default */
+};
+
+enum nodemap_raise_privs {
+	NODEMAP_RAISE_PRIV_RAISE	= 0x00000001,
+	NODEMAP_RAISE_PRIV_ADMIN	= 0x00000002,
+	NODEMAP_RAISE_PRIV_TRUSTED	= 0x00000004,
+	NODEMAP_RAISE_PRIV_DENY_UNKN	= 0x00000008,
+	NODEMAP_RAISE_PRIV_RO		= 0x00000010,
+	NODEMAP_RAISE_PRIV_RBAC		= 0x00000020,
+	NODEMAP_RAISE_PRIV_FORBID_ENC	= 0x00000040,
+	NODEMAP_RAISE_PRIV_NONE	= (__u32)~(NODEMAP_RAISE_PRIV_RAISE	|
+					   NODEMAP_RAISE_PRIV_ADMIN	|
+					   NODEMAP_RAISE_PRIV_TRUSTED	|
+					   NODEMAP_RAISE_PRIV_DENY_UNKN	|
+					   NODEMAP_RAISE_PRIV_RO	|
+					   NODEMAP_RAISE_PRIV_RBAC	|
+					   NODEMAP_RAISE_PRIV_FORBID_ENC),
+	NODEMAP_RAISE_PRIV_ALL	= 0xFFFFFFFF, /* future privs RAISED by def */
 };
 
 /*

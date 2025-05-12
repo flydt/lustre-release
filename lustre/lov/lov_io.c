@@ -715,12 +715,12 @@ static void lov_io_sub_inherit(struct lov_io_sub *sub, struct lov_io *lio,
 		if (cl_io_is_fallocate(io)) {
 			io->u.ci_setattr.sa_falloc_offset = start;
 			io->u.ci_setattr.sa_falloc_end = end;
-			io->u.ci_setattr.sa_falloc_uid =
-				parent->u.ci_setattr.sa_falloc_uid;
-			io->u.ci_setattr.sa_falloc_gid =
-				parent->u.ci_setattr.sa_falloc_gid;
-			io->u.ci_setattr.sa_falloc_projid =
-				parent->u.ci_setattr.sa_falloc_projid;
+			io->u.ci_setattr.sa_attr_uid =
+				parent->u.ci_setattr.sa_attr_uid;
+			io->u.ci_setattr.sa_attr_gid =
+				parent->u.ci_setattr.sa_attr_gid;
+			io->u.ci_setattr.sa_attr_projid =
+				parent->u.ci_setattr.sa_attr_projid;
 		}
 		if (cl_io_is_trunc(io)) {
 			loff_t new_size = parent->u.ci_setattr.sa_attr.lvb_size;
@@ -728,6 +728,12 @@ static void lov_io_sub_inherit(struct lov_io_sub *sub, struct lov_io *lio,
 			new_size = lov_size_to_stripe(lsm, index, new_size,
 						      stripe);
 			io->u.ci_setattr.sa_attr.lvb_size = new_size;
+			io->u.ci_setattr.sa_attr_uid =
+				parent->u.ci_setattr.sa_attr_uid;
+			io->u.ci_setattr.sa_attr_gid =
+				parent->u.ci_setattr.sa_attr_gid;
+			io->u.ci_setattr.sa_attr_projid =
+				parent->u.ci_setattr.sa_attr_projid;
 		}
 		lov_lsm2layout(lsm, lsm->lsm_entries[index],
 			       &io->u.ci_setattr.sa_layout);
@@ -1316,6 +1322,83 @@ static int lov_io_lru_reserve(const struct lu_env *env,
 	RETURN(0);
 }
 
+static int lov_dio_submit(const struct lu_env *env,
+			  struct cl_io *io,
+			  const struct cl_io_slice *ios,
+			  enum cl_req_type crt, struct cl_dio_pages *cdp)
+{
+	struct cl_page_list	*plist = &lov_env_info(env)->lti_plist;
+	struct lov_io		*lio = cl2lov_io(env, ios);
+	struct cl_2queue	*queue;
+	struct cl_page		*page;
+	struct cl_page_list	*qin;
+	struct lov_io_sub	*sub;
+	int index;
+	int rc = 0;
+	ENTRY;
+
+	cl_dio_pages_2queue(cdp);
+	queue = &cdp->cdp_queue;
+
+	qin = &queue->c2_qin;
+	page = cl_page_list_first(qin);
+
+	cl_page_list_init(plist);
+	while (qin->pl_nr > 0) {
+		struct cl_2queue  *cl2q = &lov_env_info(env)->lti_cl2q;
+
+		page = cl_page_list_first(qin);
+		if (lov_page_is_empty(page)) {
+			cl_page_list_move(&queue->c2_qout, qin, page);
+
+			/*
+			 * it could only be mirror read to get here therefore
+			 * the pages will be transient. We don't care about
+			 * the return code of cl_page_prep() at all.
+			 */
+			LASSERT(page->cp_type == CPT_TRANSIENT);
+			cl_page_completion(env, page, crt, 0);
+			continue;
+		}
+
+		cl_2queue_init(cl2q);
+		cl_page_list_move(&cl2q->c2_qin, qin, page);
+
+		index = page->cp_lov_index;
+		/* DIO is already split by stripe */
+		cl_page_list_splice(qin, &cl2q->c2_qin);
+
+		sub = lov_sub_get(env, lio, index);
+		if (!IS_ERR(sub)) {
+			rc = cl_io_submit_rw(sub->sub_env, &sub->sub_io,
+					     crt, cl2q);
+		} else {
+			rc = PTR_ERR(sub);
+		}
+
+		cl_page_list_splice(&cl2q->c2_qin, plist);
+		cl_page_list_splice(&cl2q->c2_qout, &queue->c2_qout);
+		cl_2queue_fini(env, cl2q);
+
+		if (rc != 0)
+			break;
+	}
+
+	cl_page_list_splice(plist, qin);
+	cl_page_list_fini(env, plist);
+
+	/* if submit failed, no pages were sent */
+	LASSERT(ergo(rc != 0, list_empty(&queue->c2_qout.pl_pages)));
+	while (queue->c2_qout.pl_nr > 0) {
+		struct cl_page *page;
+
+		page = cl_page_list_first(&queue->c2_qout);
+		cl_page_list_del(env, &queue->c2_qout, page, false);
+	}
+
+	RETURN(rc);
+}
+
 /**
  * lov implementation of cl_operations::cio_submit() method. It takes a list
  * of pages in \a queue, splits it into per-stripe sub-lists, invokes
@@ -1766,6 +1849,7 @@ static const struct cl_io_operations lov_io_ops = {
 	.cio_read_ahead                = lov_io_read_ahead,
 	.cio_lru_reserve	       = lov_io_lru_reserve,
 	.cio_submit                    = lov_io_submit,
+	.cio_dio_submit                = lov_dio_submit,
 	.cio_commit_async              = lov_io_commit_async,
 };
 
@@ -1784,6 +1868,14 @@ static void lov_empty_io_fini(const struct lu_env *env,
 		atomic_dec_and_test(&lov->lo_active_ios))
 		wake_up(&lov->lo_waitq);
 	EXIT;
+}
+
+static int lov_empty_dio_submit(const struct lu_env *env,
+				struct cl_io *io,
+				const struct cl_io_slice *ios,
+				enum cl_req_type crt, struct cl_dio_pages *cdp)
+{
+	return -EBADF;
 }
 
 static int lov_empty_io_submit(const struct lu_env *env,
@@ -1851,6 +1943,7 @@ static const struct cl_io_operations lov_empty_io_ops = {
 		}
 	},
 	.cio_submit                    = lov_empty_io_submit,
+	.cio_dio_submit                = lov_empty_dio_submit,
 	.cio_commit_async              = LOV_EMPTY_IMPOSSIBLE
 };
 
@@ -1890,8 +1983,6 @@ int lov_io_init_empty(const struct lu_env *env, struct cl_object *obj,
 
 	lio->lis_object = lov;
 	switch (io->ci_type) {
-	default:
-		LBUG();
 	case CIT_MISC:
 	case CIT_GLIMPSE:
 	case CIT_READ:
@@ -1912,6 +2003,8 @@ int lov_io_init_empty(const struct lu_env *env, struct cl_object *obj,
 		CERROR("Page fault on a file without stripes: "DFID"\n",
 		       PFID(lu_object_fid(&obj->co_lu)));
 		break;
+	default:
+		LBUG();
 	}
 	if (result == 0) {
 		cl_io_slice_add(io, &lio->lis_cl, obj, &lov_empty_io_ops);

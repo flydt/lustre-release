@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2014, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -70,9 +52,11 @@ static int ll_readlink_internal(struct inode *inode,
 		 * will print a warning to the console, avoid this by
 		 * printing just the last part of the symlink.
 		 */
-		CDEBUG(D_INODE, "using cached symlink %s%.*s, len = %d\n",
-		       print_limit < symlen ? "..." : "", print_limit,
-		       (*symname) + symlen - print_limit, symlen);
+		CDEBUG(D_INODE, "using cached symlink %s"DNAME", len = %d\n",
+		       print_limit < symlen ? "..." : "",
+		       encode_fn_dname(print_limit,
+				       (*symname) + symlen - print_limit),
+		       symlen);
 		RETURN(0);
 	}
 
@@ -210,8 +194,8 @@ static const char *ll_get_link(struct dentry *dentry,
 	int rc;
 
 	ENTRY;
-	CDEBUG(D_VFSTRACE, "VFS Op:name=%pd, inode="DFID"(%p)\n",
-	       dentry, PFID(ll_inode2fid(inode)), inode);
+	CDEBUG(D_VFSTRACE, "VFS Op:name="DNAME", inode="DFID"(%p)\n",
+	       encode_fn_dentry(dentry), PFID(ll_inode2fid(inode)), inode);
 	if (!dentry)
 		RETURN(ERR_PTR(-ECHILD));
 	ll_inode_size_lock(inode);
@@ -261,6 +245,13 @@ static const char *ll_follow_link(struct dentry *dentry, void **cookie)
 /**
  * ll_getattr_link() - link-specific getattr to set the correct st_size
  *		       for encrypted symlinks
+ * @map: (if HAVE_USER_NAMESPACE_ARG is defined) pointer to struct mnt_idmap
+ * @path: pointer to struct path (path to symlink)
+ * @stat: pointer to struct kstat (holds STATX_SIZE, STATX_BLOCKS and
+ * STATX_MTIME of symlink)
+ * @request_mask: attributes mask request (STATX_SIZE, BLOCKS, MTIME) see
+ * ll_getattr_dentry()
+ * @flags: attribute to get
  *
  * Override st_size of encrypted symlinks to be the length of the decrypted
  * symlink target (or the no-key encoded symlink target, if the key is

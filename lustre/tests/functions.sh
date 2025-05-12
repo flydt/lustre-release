@@ -295,10 +295,11 @@ setstripe_getstripe () {
 	is_lustre $file || return 0
 
 	if [ -n "$params" ]; then
+		echo "setstripe option: $params"
 		$LFS setstripe $params $file ||
 			error "setstripe $params failed"
 	fi
-	$LFS getstripe $file ||
+	$LFS getstripe -d $file ||
 		error "getstripe $file failed"
 }
 
@@ -625,8 +626,9 @@ run_ior() {
 				"is not set!" && return 1; }
 	fi
 
-	IOR=${IOR:-$(which IOR 2> /dev/null || true)}
-	[ x$IOR = x ] && skip_env "IOR not found"
+	IOR=${IOR:-$(which ior 2> /dev/null)}
+	[[ -z "$IOR" ]] && IOR=$(which IOR 2> /dev/null)
+	[[ -n "$IOR" ]] || skip_env "IOR/ior not found"
 
 	# threads per client
 	ior_THREADS=${ior_THREADS:-2}

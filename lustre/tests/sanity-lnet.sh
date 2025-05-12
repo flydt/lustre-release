@@ -18,7 +18,6 @@ init_test_env "$@"
 init_logging
 
 ALWAYS_EXCEPT="$SANITY_LNET_EXCEPT "
-always_except LU-18129 230
 always_except LU-10391 253 254
 
 [[ "$SLOW" = "no" ]] && EXCEPT_SLOW=""
@@ -1237,7 +1236,7 @@ init_router_test_vars() {
 	local rnodes_required
 	((rnodes_required=routers_required+rpeers_required))
 	# all remote nodes, including some that may not be used
-	local rnodes_all=( $(remote_nodes_list) )
+	local rnodes_all=( $(remote_nodes_list | tr ',' ' ') )
 	[[ -z $rnodes_all || "${#rnodes_all[@]}" -lt $rnodes_required ]] &&
 		skip "Need at least $rnodes_required remote nodes" \
 			"found \"${rnodes_all[@]}\""
@@ -1909,12 +1908,40 @@ function restore_lnet_params() {
 	done < $LNET_PARAMS_FILE
 }
 
+function set_ltt_node() {
+	# Achieves a desired LNet Transaction Timeout (LTT) value for a node by
+	# setting the LND timeout (LNDT) value for the network being used for
+	# tests.
+	local node=$1
+	local ltt=$2
+	local nettype=$3
+
+	if do_node $node $LNETCTL net set -h | grep -q -- "--lnd-timeout:"; then
+		# lnetctl supports setting the LNDT parameter.
+		local retry_count=$(do_node $node $LNETCTL global show |
+				    awk '/retry_count/{print $NF}')
+
+		# Determine LNDT value to achieve LTT. This is taken from the
+		# the formula, using LNet retry count (LRC):
+		# LTT = LNDT(LRC + 1) + 1
+		# LNDT = (LTT - 1)/(LRC + 1)
+		local lnd_timeout=$(( (ltt - 1) / (retry_count + 1) ))
+
+		do_node $node $LNETCTL net set \
+			--net ${nettype} --lnd-timeout $lnd_timeout ||
+			error "Failed to set LND timeout on ${nettype} net"
+	fi
+	# Also set the default global LTT
+	do_node $node $LNETCTL set transaction_timeout $ltt ||
+		error "Failed to set transaction_timeout on $node"
+}
+
 function lnet_health_pre() {
 	save_lnet_params
 
 	# Lower transaction timeout to speed up test execution
-	$LNETCTL set transaction_timeout 10 ||
-		error "Failed to set transaction_timeout $?"
+	set_ltt_node $HOSTNAME 10 $NETTYPE ||
+		error "Failed to set transaction timeout $?"
 
 	RETRY_PARAM=$($LNETCTL global show | awk '/retry_count/{print $NF}')
 	RSND_PRE=$($LNETCTL stats show | awk '/resend_count/{print $NF}')
@@ -2034,7 +2061,7 @@ setup_health_test() {
 
 	LNIDS=( $($LCTL list_nids | xargs echo) )
 
-	RNODE=$(awk '{print $1}' <<<$rnodes)
+	RNODE=(${rnodes//,/ })
 	RNIDS=( $(do_node $RNODE $LCTL list_nids | xargs echo) )
 
 	if [[ -z ${RNIDS[@]} ]]; then
@@ -2148,15 +2175,10 @@ cleanup_health_test() {
 add_health_test_drop_rules() {
 	local args="-m GET -r 1 -e ${1}"
 	local src dst
-	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
-		net_drop_add="net_drop add"
-	else
-		net_drop_add="net_drop_add"
-	fi
 
 	for src in "${LNIDS[@]}"; do
 		for dst in "${RNIDS[@]}" "${LNIDS[@]}"; do
-			$LCTL $net_drop_add -s $src -d $dst ${args} ||
+			$LCTL net_drop add -s $src -d $dst ${args} ||
 				error "Failed to add drop rule $src $dst $args"
 		done
 	done
@@ -2164,11 +2186,6 @@ add_health_test_drop_rules() {
 
 do_lnet_health_ping_test() {
 	local hstatus="$1"
-	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
-		net_drop_del="net_drop del"
-	else
-		net_drop_del="net_drop_del"
-	fi
 
 	echo "Simulate $hstatus"
 
@@ -2180,7 +2197,7 @@ do_lnet_health_ping_test() {
 
 	lnet_health_post
 
-	$LCTL $net_drop_del -a
+	$LCTL net_drop del -a
 
 	return 0
 }
@@ -2692,7 +2709,7 @@ test_212() {
 	[[ -z $my_nid ]] &&
 		error "Failed to get primary NID for local host $HOSTNAME"
 
-	local rnode=$(awk '{print $1}' <<<$rnodes)
+	local rnode=(${rnodes//,/ })
 	local rnodenids=$(do_node $rnode $LCTL list_nids | xargs echo)
 	local rloaded=false
 
@@ -3527,9 +3544,14 @@ test_230() {
 	local cmd
 	for ((i = 4; i < 16; i+=1)); do
 		reinit_dlc || return $?
-		add_net "tcp" "${INTERFACES[0]}" || return $?
-		do_lnetctl net set --all --conns-per-peer $i ||
-			error "should have succeeded $?"
+		if ((i % 2 == 0)); then
+			add_net "tcp" "${INTERFACES[0]}" || return $?
+			do_lnetctl net set --all --conns-per-peer $i ||
+				error "should have succeeded $?"
+		else
+			do_lnetctl net add --net "tcp" --if ${INTERFACES[0]} --conns-per-peer $i ||
+				error "should have succeeded $?"
+		fi
 		$LNETCTL net show -v 1 | grep -q "conns_per_peer: $i" ||
 			error "failed to set conns-per-peer to $i"
 		lnid="$(lctl list_nids | head -n 1)"
@@ -3548,8 +3570,8 @@ test_230() {
 		cmd="printf 'network tcp\nconn_list\n' | lctl | grep -c '$lnid'"
 
 		# Expect 2+conns_per_peer*2 connections. Wait no longer
-		# than 2 seconds.
-		wait_update $HOSTNAME "$cmd" "$((2+i*2))" 2 ||
+		# than 10 seconds.
+		wait_update $HOSTNAME "$cmd" "$((2+i*2))" 10 ||
 			error "expected number of tcp connections $((2+i*2))"
 	done
 
@@ -3673,6 +3695,54 @@ test_232() {
 }
 run_test 232 "Test setting ToS value"
 
+check_parameter() {
+	local para=$1
+	local value=$2
+
+	echo "check parameter ${para} value ${value}"
+
+	return $(( $(do_lnetctl net show -v | \
+		     tee /dev/stderr | \
+		     grep -c "^ \+${para}: ${value}$") != ${#INTERFACES[@]} ))
+}
+
+test_241() {
+	reinit_dlc || return $?
+
+	do_lnetctl net add --net ${NETTYPE} --if ${INTERFACES[0]} ||
+		error "Failed to add net"
+
+	do_lnetctl net set -h | grep -q -- "--lnd-timeout:" ||
+		skip "lnetctl net set does not support --lnd-timeout option"
+
+	# Capture existing timeout value, we'll restore to this later
+	local old_lnd_to=$($LNETCTL net show --net ${NETTYPE} -v |
+			   awk '/^\s+timeout:/{print $NF}')
+	local expected_lnd_to=$(( old_lnd_to + 1 ))
+
+	# Set new timeout and check it shows up in tunables
+	do_lnetctl net set --net ${NETTYPE} --lnd-timeout ${expected_lnd_to} ||
+		error "Failed to set LND timeout on ${NETTYPE} net"
+
+	check_parameter "timeout" ${expected_lnd_to} ||
+		error "Expected LND timeout $expected_lnd_to"
+
+	# Check if setting LND timeout to zero ends up defaulting to global
+	# lnd_timeout value
+	local global_lnd_to=$($LNETCTL global show -v |
+			      awk '/lnd_timeout:/{print $NF}')
+
+	do_lnetctl net set --net ${NETTYPE} --lnd-timeout 0 ||
+		"Failed to set LND timeout on ${NETTYPE} net to zero"
+
+	check_parameter "timeout" ${global_lnd_to} ||
+		error "Expected LND timeout $global_lnd_to"
+
+	# Restore tunable timeout to old value
+	do_lnetctl net set --net ${NETTYPE} --lnd-timeout ${old_lnd_to}
+}
+run_test 241 "Check setting LND timeout value via lnetctl updates tunables"
+
 ### Test that linux route is added for each ni
 test_250() {
 	local skip_param
@@ -3740,34 +3810,35 @@ run_test 252 "Ping to down peer should unlink quickly"
 do_expired_message_drop_test() {
 	local rnid lnid old_tto
 
-	old_tto=$($LNETCTL global show |
-		  awk '/transaction_timeout:/{print $NF}')
+	local old_retry=$($LNETCTL global show |
+			  awk '/^\s+retry_count:/{print $NF}')
 
-	[[ -z $old_tto ]] &&
+	# Capture default, global LNet transaction timeout (LTT). If there's an
+	# LND timeout (LNDT) set for $NETTYPE, the true LTT = LNDT(LRC + 1) + 1.
+	local old_ltt=$($LNETCTL global show |
+			awk '/^\s+transaction_timeout:/{print $NF}')
+	local old_lnd_to=$($LNETCTL net show --net $NETTYPE --verbose |
+			   awk '/^\s+timeout:/{print $NF}')
+	[[ -z "$old_lnd_to" ]] ||
+		old_ltt=$(( old_lnd_to * (old_retry + 1) + 1 ))
+
+	do_lnetctl set retry_count 0 || error "Failed to set retry count to 0"
+	$LNETCTL global show
+
+	[[ -z $old_ltt ]] &&
 		error "Cannot determine LNet transaction timeout"
 
-	local tto=10
+	# Set new LNet transaction timeout (LTT)
+	local ltt=10
+	set_ltt_node $HOSTNAME $ltt $NETTYPE ||
+		error "Failed to set transaction timeout"
 
-	do_lnetctl set transaction_timeout "${tto}" ||
-		error "Failed to set transaction_timeout"
-
-	# We want to consume all peer credits for at least transaction_timeout
-	# seconds
-	local delay
-
-	delay=$((tto + 1))
-
-	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
-		net_delay_add="net_delay add"
-		net_delay_del="net_delay del"
-	else
-		net_delay_add="net_delay_add"
-		net_delay_del="net_delay_del"
-	fi
+	# We want to consume all peer credits for at least LTT seconds
+	local delay=$((ltt + 1))
 
 	for lnid in "${LNIDS[@]}"; do
 		for rnid in "${RNIDS[@]}"; do
-			$LCTL $net_delay_add -s "${lnid}" -d "${rnid}" \
+			$LCTL net_delay add -s "${lnid}" -d "${rnid}" \
 				-l "${delay}" -r 1 -m GET ||
 				error "Failed to add delay rule"
 		done
@@ -3808,7 +3879,7 @@ do_expired_message_drop_test() {
 
 	sleep ${delay}
 
-	$LCTL $net_delay_del -a
+	$LCTL net_delay del -a
 
 	wait
 
@@ -3825,7 +3896,10 @@ do_expired_message_drop_test() {
 	[[ $dropped -ne 1 ]] &&
 		error "Expect 1 dropped GET but found $dropped"
 
-	do_lnetctl set transaction_timeout "${old_tto}"
+	# Restore retry_count and transaction timeout values in the order they
+	# were changed.
+	do_lnetctl set retry_count $old_retry
+	set_ltt_node $HOSTNAME ${old_ltt} $NETTYPE
 
 	return 0
 }
@@ -3940,24 +4014,29 @@ test_256() {
 		skip "Need local peer credits >= router's peer credits"
 	fi
 
-	local old_tto=$(do_node $router $LNETCTL global show |
-			awk '/transaction_timeout:/{print $NF}')
-
-	[[ -n $old_tto ]] ||
-		error "Cannot determine LNet transaction timeout"
-
-	local tto=10
-
-	do_node $router $LNETCTL set transaction_timeout $tto ||
-		error "Failed to set transaction_timeout"
-
 	local old_retry=$(do_node $router $LNETCTL global show |
 			  awk '/retry_count:/{print $NF}')
 
 	[[ -n $old_retry ]] ||
 		error "Cannot determine LNet retry count"
 
+	# Capture default, global LNet transaction timeout (LTT). If there's an
+	# LND timeout (LNDT) set for the router's REMOTE_NET, the true
+	# LTT = LNDT(LRC + 1) + 1.
+	local old_ltt=$(do_node $router $LNETCTL global show |
+			awk '/transaction_timeout:/{print $NF}')
+	local old_lnd_to=$(do_node $router $LNETCTL net show --net $REMOTE_NET \
+			   --verbose | awk '/^\s+timeout:/{print $NF}')
+	[[ -n $old_lnd_to ]] && old_ltt=$(( old_lnd_to * (old_retry + 1) + 1 ))
+
+	# Set router's retry_count to zero to shorten/simplify message timeout.
+
 	do_node $router $LNETCTL set retry_count 0 ||
+		error "Failed to set retry_count"
+
+	local ltt=10
+
+	set_ltt_node $router $ltt $REMOTE_NET ||
 		error "Failed to set transaction_timeout"
 
 #define CFS_FAIL_DELAY_MSG_FORWARD      0xe002
@@ -3965,7 +4044,7 @@ test_256() {
 
 	# We want to consume all peer credits for at least transaction_timeout
 	# seconds
-	local delay=$((tto + 1))
+	local delay=$((ltt + 1))
 
 	local rnid lnid cmd
 	local args="-l $delay -r 1 -m GET"
@@ -3978,28 +4057,40 @@ test_256() {
 		done
 	done
 
-	local i
+	local idx
+	declare -a pids
 
-	for i in $(seq 1 ${rtr_pc}); do
+	for idx in $(seq 1 ${rtr_pc}); do
+		echo "$LNETCTL ping --timeout $((delay+2)) $rpnid"
 		$LNETCTL ping --timeout $((delay+2)) $rpnid 1>/dev/null &
+		pids[$idx]=$!
 	done
+
+	((idx++))
 
 	echo "Issued ${rtr_pc} pings to $rpnid"
 
-	local pid
-
 	# This ping should be queued on the router's peer NI tx credit queue
 	$LNETCTL ping --timeout $((delay+2)) $rpnid &
+	pids[$idx]=$!
 
 	echo "Issued last ping - sleep $delay"
 	sleep ${delay}
 
 	do_node $router $LCTL net_delay_del -a
 
-	wait
+	local rc=0 rcsum=0
+	for idx in $(seq 1 $((rtr_pc + 1))); do
+		wait ${pids[$idx]} || rc=$?
+		((rc != 0)) && echo "ping pid ${pids[$idx]} returned rc=$rc"
+		((rcsum += rc))
+	done
 
-	do_node $router $LNETCTL set transaction_timeout ${old_tto}
+	((rcsum == 0)) || error "Detected ping failures"
+
+	# Restore old retry_count and REMOTE_NET LTT values
 	do_node $router $LNETCTL set retry_count ${old_retry}
+	set_ltt_node $router ${old_ltt} $REMOTE_NET
 
 	# Router should not drop any of the messages that have exceeded their
 	# deadline
@@ -4119,6 +4210,34 @@ test_260() {
 	unload_modules || error "Failed to cleanup Modules"
 }
 run_test 260 "test that linux sysctl parameter are set correctly"
+
+test_280() {
+	local rc=0
+
+	modinfo ksocklnd 2>/dev/null || rc=$?
+
+	((rc == 1)) || skip "Need request_module to fail"
+
+	local lnd=""
+
+	case $NETTYPE in
+		o2ib*) lnd=ko2iblnd;;
+		tcp*) lnd=ksocklnd;;
+		kfi*) lnd=kkfilnd;;
+		gni*) lnd=kgnilnd;;
+	esac
+
+	[[ -n $lnd ]] || skip "Unsupported NETTYPE $NETTYPE"
+
+	load_lnet || error "Failed to load lnet"
+
+	$LUSTRE_RMMOD $lnd || error "Failed to unload $lnd"
+
+	$LNETCTL lnet configure -a
+
+	$LUSTRE_RMMOD
+}
+run_test 280 "Don't panic when request_module fails"
 
 test_300() {
 	# LU-13274
@@ -4311,17 +4430,6 @@ test_305() {
 		error "pinging own hostname $nid failed $?"
 }
 run_test 305 "Resolve hostname before lnetctl ping"
-
-check_parameter() {
-	local para=$1
-	local value=$2
-
-	echo "check parameter ${para} value ${value}"
-
-	return $(( $(do_lnetctl net show -v | \
-		     tee /dev/stderr | \
-		     grep -c "^ \+${para}: ${value}$") != ${#INTERFACES[@]} ))
-}
 
 static_config() {
 	local module=$1
@@ -4517,6 +4625,18 @@ test_402() {
 	return 0
 }
 run_test 402 "Destination net rule should not panic"
+
+test_410() {
+	reinit_dlc || return $?
+
+	$LCTL mark "$LNETCTL fault reset"
+	echo "$LNETCTL fault reset"
+	$LNETCTL fault reset '' &&
+		error "Command should fail"
+
+	return 0
+}
+run_test 410 "No segfault in lnetctl fault command"
 
 test_500() {
 	reinit_dlc || return $?

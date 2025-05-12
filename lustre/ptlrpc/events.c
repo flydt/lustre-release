@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -413,7 +395,7 @@ void reply_out_callback(struct lnet_event *ev)
 		 * net's ref on 'rs'
 		 */
 		LASSERT(ev->unlinked);
-		ptlrpc_rs_decref(rs);
+		kref_put(&rs->rs_refcount, lustre_free_reply_state);
 		EXIT;
 		return;
 	}
@@ -543,8 +525,11 @@ int ptlrpc_uuid_to_peer(struct obd_uuid *uuid,
 	/* Choose the matching UUID that's closest */
 	while (lustre_uuid_to_peer(uuid->uuid, &dst_nid, count++) == 0) {
 		if (refnet != LNET_NET_ANY &&
-		    LNET_NID_NET(&dst_nid) != refnet)
+		    LNET_NID_NET(&dst_nid) != refnet) {
+			if (rc < 0)
+				rc = -ENETUNREACH;
 			continue;
+		}
 
 		dist = LNetDist(&dst_nid, &src_nid, &order);
 		if (dist < 0)

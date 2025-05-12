@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/ofd/ofd_dev.c
  *
  * This file contains OSD API methods for OBD Filter Device (OFD),
  * request handlers and supplemental functions to set OFD up and clean it up.
@@ -37,6 +17,7 @@
  * Author: Mike Pershin <mike.pershin@intel.com>
  * Author: Johann Lombardi <johann.lombardi@intel.com>
  */
+
 /*
  * The OBD Filter Device (OFD) module belongs to the Object Storage
  * Server stack and connects the RPC oriented Unified Target (TGT)
@@ -1229,7 +1210,8 @@ static int ofd_getattr_hdl(struct tgt_session_info *tsi)
 			repbody->oa.o_layout_version =
 			     fo->ofo_ff.ff_layout_version + fo->ofo_ff.ff_range;
 
-			CDEBUG(D_INODE, DFID": get layout version: %u\n",
+			CDEBUG(D_INODE, "%s:"DFID": get layout version: %#x\n",
+			       tsi->tsi_tgt->lut_obd->obd_name,
 			       PFID(&tsi->tsi_fid),
 			       repbody->oa.o_layout_version);
 		}
@@ -1973,7 +1955,8 @@ static int ofd_fallocate_hdl(struct tgt_session_info *tsi)
 	 * mode == 0 (which is standard prealloc) and PUNCH is supported
 	 * Rest of mode options are not supported yet.
 	 */
-	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
+	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE |
+		     FALLOC_FL_ZERO_RANGE))
 		RETURN(-EOPNOTSUPP);
 
 	/* PUNCH_HOLE mode should always be accompanied with KEEP_SIZE flag
@@ -2122,7 +2105,8 @@ static int ofd_punch_hdl(struct tgt_session_info *tsi)
 		GOTO(out, rc = PTR_ERR(fo));
 
 	la_from_obdo(&info->fti_attr, oa,
-		     OBD_MD_FLMTIME | OBD_MD_FLATIME | OBD_MD_FLCTIME);
+		     OBD_MD_FLMTIME | OBD_MD_FLATIME | OBD_MD_FLCTIME |
+			     OBD_MD_FLUID | OBD_MD_FLGID | OBD_MD_FLPROJID);
 	info->fti_attr.la_size = start;
 	info->fti_attr.la_valid |= LA_SIZE;
 

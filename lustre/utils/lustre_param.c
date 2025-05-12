@@ -61,17 +61,33 @@
 
 #include "lctl_thread.h"
 #include "lustreapi_internal.h"
+#include "lstddef.h"
 
 #include <sys/un.h>
 #include <time.h>
 #include <sys/time.h>
 #include <errno.h>
 #include <string.h>
+#include <lstddef.h>
 
 #include "obdctl.h"
 #include <stdio.h>
 #include <yaml.h>
 
+/**
+ * Parse the arguments to set_param and return the first parameter and value
+ * pair and the number of arguments consumed.
+ *
+ * \param[in] argc   number of arguments remaining in argv
+ * \param[in] argv   list of param-value arguments to set_param (this function
+ *                   will modify the strings by overwriting '=' with '\0')
+ * \param[out] param the parameter name
+ * \param[out] value the parameter value
+ *
+ * \retval the number of args consumed from argv (1 for "param=value" format, 2
+ *         for "param value" format)
+ * \retval -errno if unsuccessful
+ */
 static int sp_parse_param_value(int argc, char **argv, char **param,
 				char **value)
 {
@@ -173,7 +189,7 @@ static char *display_name(const char *filename, struct stat *st,
  *
  * \retval -errno on error.
  */
-static int clean_path(struct param_opts *popt, char *path)
+int jt_clean_path(struct param_opts *popt, char *path)
 {
 	char *nidstart = NULL;
 	char *nidend = NULL;
@@ -250,25 +266,22 @@ static int clean_path(struct param_opts *popt, char *path)
 
 /**
  * The application lctl can perform three operations for lustre
- * tunables. This enum defines those four operations which are
+ * tunables. This enum defines those three operations which are
  *
  * 1) LIST_PARAM	- list available tunables
  * 2) GET_PARAM		- report the current setting of a tunable
  * 3) SET_PARAM		- set the tunable to a new value
- * 4) LIST_PATHNAME	- list paths of available tunables
  */
 enum parameter_operation {
 	LIST_PARAM,
 	GET_PARAM,
 	SET_PARAM,
-	LIST_PATHNAME,
 };
 
 char *parameter_opname[] = {
 	[LIST_PARAM] = "list_param",
 	[GET_PARAM] = "get_param",
 	[SET_PARAM] = "set_param",
-	[LIST_PATHNAME] = "list_pathname",
 };
 
 /**
@@ -381,6 +394,32 @@ int write_param(const char *path, const char *param_name,
 	return rc;
 }
 
+bool stats_param(const char *pattern)
+{
+	char * const flag_v[] = {
+	"console",
+	"debug_",
+	"fail_",
+	"force",
+	"import",
+	"panic_",
+	"peers",
+	"srpc_sepol",
+	"stats",
+	"target_obd",
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(flag_v); i++)
+		if (strstr(pattern, flag_v[i]))
+			return true;
+
+	if (strncmp(pattern, "nis", strlen(pattern)) == 0)
+		return true;
+
+	return false;
+}
+
 /**
  * Perform a read, write or just a listing of a parameter
  *
@@ -455,6 +494,11 @@ static int do_param_op(struct param_opts *popt, char *pattern, char *value,
 			continue;
 		if (popt->po_only_dir && !S_ISDIR(st.st_mode))
 			continue;
+		if (popt->po_permissions &&
+		    (st.st_mode & popt->po_permissions) != popt->po_permissions)
+			continue;
+		if (popt->po_tunable && stats_param(paths.gl_pathv[i]))
+			continue;
 
 		param_name = display_name(paths.gl_pathv[i], &st, popt);
 		if (!param_name) {
@@ -519,21 +563,8 @@ static int do_param_op(struct param_opts *popt, char *pattern, char *value,
 			dup_cache[dup_count++] = strdup(param_name);
 
 			if (popt->po_show_name)
-				printf("%s\n", param_name);
-			break;
-		case LIST_PATHNAME:
-			for (j = 0; j < dup_count; j++) {
-				if (!strcmp(dup_cache[j], param_name))
-					break;
-			}
-			if (j != dup_count) {
-				free(param_name);
-				param_name = NULL;
-				continue;
-			}
-			dup_cache[dup_count++] = strdup(param_name);
-			if (popt->po_show_name)
-				printf("%s\n", paths.gl_pathv[i]);
+				printf("%s\n", popt->po_only_pathname ?
+					       paths.gl_pathv[i] : param_name);
 			break;
 		}
 
@@ -548,7 +579,7 @@ static int do_param_op(struct param_opts *popt, char *pattern, char *value,
 		}
 
 		/* Turn param_name into file path format */
-		rc2 = clean_path(popt, param_name);
+		rc2 = jt_clean_path(popt, param_name);
 		if (rc2 < 0) {
 			fprintf(stderr, "error: %s: cleaning '%s': %s\n",
 				opname, param_name, strerror(-rc2));
@@ -617,7 +648,11 @@ static int listparam_cmdline(int argc, char **argv, struct param_opts *popt)
 	{ .val = 'F',	.name = "classify",	.has_arg = no_argument},
 	{ .val = 'l',	.name = "links",	.has_arg = no_argument},
 	{ .val = 'L',	.name = "no-links",	.has_arg = no_argument},
+	{ .val = 'r',	.name = "readable",	.has_arg = no_argument},
 	{ .val = 'R',	.name = "recursive",	.has_arg = no_argument},
+	{ .val = 't',	.name = "tunable",	.has_arg = no_argument},
+	{ .val = 'w',	.name = "writable",	.has_arg = no_argument},
+	{ .name = NULL },
 	};
 
 	int ch;
@@ -626,7 +661,9 @@ static int listparam_cmdline(int argc, char **argv, struct param_opts *popt)
 	popt->po_only_name = 1;
 	popt->po_follow_symlinks = 1;
 
-	while ((ch = getopt_long(argc, argv, "DFlLpR",
+	/* reset optind for each getopt_long() in case of multiple calls */
+	optind = 0;
+	while ((ch = getopt_long(argc, argv, "DFlLprRtw",
 				      long_opts, NULL)) != -1) {
 		switch (ch) {
 		case 'D':
@@ -644,8 +681,17 @@ static int listparam_cmdline(int argc, char **argv, struct param_opts *popt)
 		case 'p':
 			popt->po_only_pathname = 1;
 			break;
+		case 'r':
+			popt->po_permissions |= S_IREAD;
+			break;
 		case 'R':
 			popt->po_recursive = 1;
+			break;
+		case 't':
+			popt->po_tunable = 1;
+			break;
+		case 'w':
+			popt->po_recursive |= S_IWRITE;
 			break;
 		default:
 			return -1;
@@ -671,7 +717,7 @@ int jt_lcfg_listparam(int argc, char **argv)
 
 		path = argv[i];
 
-		rc2 = clean_path(&popt, path);
+		rc2 = jt_clean_path(&popt, path);
 		if (rc2 < 0) {
 			fprintf(stderr, "error: %s: cleaning '%s': %s\n",
 				jt_cmdname(argv[0]), path, strerror(-rc2));
@@ -680,8 +726,7 @@ int jt_lcfg_listparam(int argc, char **argv)
 			continue;
 		}
 
-		rc2 = do_param_op(&popt, path, NULL, popt.po_only_pathname ?
-				  LIST_PATHNAME : LIST_PARAM, NULL);
+		rc2 = do_param_op(&popt, path, NULL, LIST_PARAM, NULL);
 		if (rc2 < 0) {
 			if (rc == 0)
 				rc = rc2;
@@ -711,8 +756,13 @@ static int getparam_cmdline(int argc, char **argv, struct param_opts *popt)
 	{ .val = 'L',	.name = "no-links",	.has_arg = no_argument},
 	{ .val = 'n',	.name = "no-name",	.has_arg = no_argument},
 	{ .val = 'N',	.name = "only-name",	.has_arg = no_argument},
+	{ .val = 'N',	.name = "name-only",	.has_arg = no_argument},
+	{ .val = 'r',	.name = "readable",	.has_arg = no_argument},
 	{ .val = 'R',	.name = "recursive",	.has_arg = no_argument},
+	{ .val = 't',	.name = "tunable",	.has_arg = no_argument},
+	{ .val = 'w',	.name = "writable",	.has_arg = no_argument},
 	{ .val = 'y',	.name = "yaml",		.has_arg = no_argument},
+	{ .name = NULL },
 	};
 
 	int ch;
@@ -720,7 +770,9 @@ static int getparam_cmdline(int argc, char **argv, struct param_opts *popt)
 	popt->po_show_name = 1;
 	popt->po_follow_symlinks = 1;
 
-	while ((ch = getopt_long(argc, argv, "FHlLnNRy",
+	/* reset optind for each getopt_long() in case of multiple calls */
+	optind = 0;
+	while ((ch = getopt_long(argc, argv, "FHlLnNrRtwy",
 				      long_opts, NULL)) != -1) {
 		switch (ch) {
 		case 'F':
@@ -741,8 +793,17 @@ static int getparam_cmdline(int argc, char **argv, struct param_opts *popt)
 		case 'N':
 			popt->po_only_name = 1;
 			break;
+		case 'r':
+			popt->po_permissions |= S_IREAD;
+			break;
 		case 'R':
 			popt->po_recursive = 1;
+			break;
+		case 't':
+			popt->po_tunable = 1;
+			break;
+		case 'w':
+			popt->po_permissions |= S_IWRITE;
 			break;
 		case 'y':
 			popt->po_yaml = 1;
@@ -783,7 +844,7 @@ int jt_lcfg_getparam(int argc, char **argv)
 
 		path = argv[i];
 
-		rc2 = clean_path(&popt, path);
+		rc2 = jt_clean_path(&popt, path);
 		if (rc2 < 0) {
 			fprintf(stderr, "error: %s: cleaning '%s': %s\n",
 				jt_cmdname(argv[0]), path, strerror(-rc2));
@@ -810,6 +871,46 @@ int jt_lcfg_getparam(int argc, char **argv)
 }
 
 /**
+ * Parses a cleaned set_param path and checks whether it is deprecated. If yes,
+ * the user is notified with a warning. This function does not exit the program.
+ *
+ * \param[in] path	The set_param key to be checked for deprecation.
+ *
+ */
+static void setparam_check_deprecated(const char *path)
+{
+	regex_t regex;
+	int err, i;
+
+	struct deprecated_param {
+		const char *regex;
+		const char *message;
+	};
+
+	static const struct deprecated_param deprecated_params[] = {
+		{ .regex = "^nodemap/[^/]+/fileset$",
+		  .message =
+			  "Warning: The parameter '%s' is deprecated. Please use \"lctl nodemap_set_fileset\" instead.\n" },
+		/* Add more deprecated parameters here in the future */
+	};
+
+	for (i = 0; i < ARRAY_SIZE(deprecated_params); i++) {
+		err = regcomp(&regex, deprecated_params[i].regex, REG_EXTENDED);
+		if (err) {
+			fprintf(stderr, "Error compiling regex: %s\n",
+				deprecated_params[i].regex);
+			continue;
+		}
+
+		err = regexec(&regex, path, 0, NULL, 0);
+		if (!err)
+			fprintf(stdout, deprecated_params[i].message, path);
+
+		regfree(&regex);
+	}
+}
+
+/**
  * Parses the commandline options to set_param.
  *
  * \param[in] argc	count of arguments given to set_param
@@ -821,12 +922,14 @@ int jt_lcfg_getparam(int argc, char **argv)
 static int setparam_cmdline(int argc, char **argv, struct param_opts *popt)
 {
 	struct option long_opts[] = {
+	{ .val = 'C',	.name = "client",	.has_arg = optional_argument},
 	{ .val = 'd',	.name = "delete",	.has_arg = no_argument},
 	{ .val = 'F',	.name = "file",		.has_arg = no_argument},
 	{ .val = 'n',	.name = "noname",	.has_arg = no_argument},
 	{ .val = 'P',	.name = "perm",		.has_arg = no_argument},
 	{ .val = 'P',	.name = "permanent",	.has_arg = no_argument},
 	{ .val = 't',	.name = "thread",	.has_arg = optional_argument},
+	{ .name = NULL },
 	};
 
 	int ch;
@@ -840,15 +943,44 @@ static int setparam_cmdline(int argc, char **argv, struct param_opts *popt)
 	popt->po_file = 0;
 	popt->po_parallel_threads = 0;
 	popt->po_follow_symlinks = 1;
+	popt->po_client = 0;
 	opterr = 0;
 
 	/* reset optind for each getopt_long() in case of multiple calls */
 	optind = 0;
-	while ((ch = getopt_long(argc, argv, "dFnPt::",
+	while ((ch = getopt_long(argc, argv, "C::dFnPt::",
 				 long_opts, NULL)) != -1) {
 		switch (ch) {
+		case 'C':
+			if (popt->po_perm) {
+				fprintf(stderr,
+					"error: %s: -C cannot be used with -P\n",
+					argv[0]);
+				return -1;
+			}
+			popt->po_client = 1;
+			if (optarg)
+				/* remove leading '=' from fsname if present */
+				popt->po_fsname = strdup(optarg +
+							 (optarg[0] == '='));
+			break;
+		case 'd':
+			popt->po_delete = 1;
+			break;
+		case 'F':
+			popt->po_file = 1;
+			break;
 		case 'n':
 			popt->po_show_name = 0;
+			break;
+		case 'P':
+			if (popt->po_client) {
+				fprintf(stderr,
+					"error: %s: -P cannot be used with -C\n",
+					argv[0]);
+				return -1;
+			}
+			popt->po_perm = 1;
 			break;
 		case 't':
 #if HAVE_LIBPTHREAD
@@ -870,25 +1002,14 @@ static int setparam_cmdline(int argc, char **argv, struct param_opts *popt)
 			}
 #endif
 			break;
-		case 'P':
-			popt->po_perm = 1;
-			break;
-		case 'd':
-			popt->po_delete = 1;
-			break;
-		case 'F':
-			popt->po_file = 1;
-			break;
 		default:
 			return -1;
 		}
 	}
-	if (popt->po_perm && popt->po_file) {
-		fprintf(stderr, "warning: ignoring -P option\n");
-		popt->po_perm = 0;
-	}
-	if (popt->po_delete && !popt->po_perm)
+	if (popt->po_delete && !popt->po_perm && !popt->po_client) {
+		fprintf(stderr, "warning: setting '-P' option with '-d'\n");
 		popt->po_perm = 1;
+	}
 	return optind;
 }
 
@@ -914,18 +1035,15 @@ int jt_lcfg_setparam(int argc, char **argv)
 	if (index < 0 || index >= argc)
 		return CMD_HELP;
 
-	if (popt.po_perm)
+	if (popt.po_perm || popt.po_file)
 		/*
 		 * We can't delete parameters that were
 		 * set with old conf_param interface
 		 */
 		return jt_lcfg_setparam_perm(argc, argv, &popt);
 
-	if (popt.po_file) {
-		fprintf(stderr,
-			"warning: 'lctl set_param -F' is deprecated, use 'lctl apply_yaml' instead\n");
-		return -EINVAL;
-	}
+	if (popt.po_client)
+		return jt_lcfg_setparam_client(argc, argv, &popt);
 
 	if (popt_is_parallel(popt)) {
 		rc = spwq_init(&wq, &popt);
@@ -954,9 +1072,11 @@ int jt_lcfg_setparam(int argc, char **argv)
 		/* Increment index by the number of arguments consumed. */
 		index += rc;
 
-		rc = clean_path(&popt, path);
+		rc = jt_clean_path(&popt, path);
 		if (rc < 0)
 			break;
+
+		setparam_check_deprecated(path);
 
 		rc = do_param_op(&popt, path, value, SET_PARAM, wq_ptr);
 		if (rc < 0) {
@@ -997,5 +1117,247 @@ int jt_lcfg_setparam(int argc, char **argv)
 		}
 	}
 
+	return rc;
+}
+
+/*
+ * Param set to single client file, used by all mounts on a client or specific
+ * filesystem if FSNAME is specified.
+ * These params should be loaded directly after mounting.
+ * Called from set param with -C option.
+ */
+static int lcfg_setparam_client(char *func, char *buf, struct param_opts *popt)
+{
+	glob_t paths;
+	char path[NAME_MAX];
+	char *param_name, *param, *tmp;
+	char *dir_path = "/etc/lustre";
+	char *line = NULL;
+	bool found_param_name = false;
+	bool found_param_value = false;
+	size_t len = 0;
+	size_t buf_len;
+	FILE *file = NULL;
+	int fd = -1;
+	int rc, rc1;
+
+	buf_len = strlen(buf);
+	if (buf && buf[buf_len - 1] == '\n') {
+		param = buf;
+	} else {
+		param = malloc(++buf_len + 1);
+		snprintf(param, buf_len + 1, "%s\n", buf);
+	}
+
+	param_name = strdup(buf);
+	tmp = strchr(param_name, '=');
+	if (tmp) {
+		*tmp = '\0';
+	} else if (!popt->po_delete) {
+		rc = -EINVAL;
+		fprintf(stderr, "error: %s: client: argument '%s' does not contain '=': %s\n",
+			jt_cmdname(func), param, strerror(-rc));
+		goto out;
+	}
+
+	if (!popt->po_delete) {
+		if (popt->po_fsname && !strstr(buf, popt->po_fsname)) {
+			rc = -EINVAL;
+			fprintf(stderr,
+				"error: %s: client: argument '%s' must contain '%s' to be written to "PATH_FORMAT": %s\n",
+			jt_cmdname(func), buf, popt->po_fsname,
+			popt->po_fsname, strerror(-rc));
+			goto out;
+		}
+		char *tmp_path = strdup(param_name);
+
+		rc = jt_clean_path(popt, tmp_path);
+		if (rc < 0) {
+			fprintf(stderr,
+				"error: %s: client: cleaning '%s': %s\n",
+				jt_cmdname(func), param_name, strerror(-rc));
+			goto out;
+		}
+		rc = llapi_param_get_paths(tmp_path, &paths);
+		if (rc) {
+			rc = -errno;
+			fprintf(stderr,
+				"error: %s: client: param_paths '%s': %s\n",
+				jt_cmdname(func), param_name, strerror(errno));
+			goto out;
+		}
+		free(tmp_path);
+	}
+
+	snprintf(path, sizeof(path), PATH_FORMAT,
+		 popt->po_fsname ? popt->po_fsname : "client");
+
+	file = fopen(path, "r");
+
+	if (file) {
+		while (getline(&line, &len, file) != -1) {
+			if (strstr(line, param_name)) {
+				found_param_name = true;
+				if (!popt->po_delete && strstr(line, param))
+					found_param_value = true;
+				break;
+			}
+		}
+		if (found_param_value && !popt->po_delete)
+			goto out_file; /* nothing to change */
+	}
+
+	if (!found_param_name) {
+		if (popt->po_delete)
+			goto out_file; /* nothing to delete */
+		mkdir(dir_path, 0644);
+		fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+		if (fd < 0) {
+			rc = -errno;
+			fprintf(stderr,
+				"error: %s: client: failed open file %s: %s\n",
+				jt_cmdname(func), path, strerror(-rc));
+			goto out_fd;
+		}
+		rc1 = write(fd, param, strlen(param));
+		if (rc1 < strlen(param)) {
+			rc = -ENOMEM;
+			fprintf(stderr,
+				"error: %s: client: failed to write '%s': %s\n",
+				jt_cmdname(func), param, strerror(-rc));
+			goto out_fd;
+		}
+	} else {
+		struct stat st;
+		struct timeval now;
+		ssize_t line_len;
+		size_t tmp_len;
+		char *tmp_path;
+		char *bak_path;
+
+		line = NULL;
+		len = 0;
+
+		tmp_len = strlen(path) + 8;
+		tmp_path = malloc(tmp_len);
+		snprintf(tmp_path, tmp_len, "%s.XXXXXX", path);
+
+		rewind(file);
+
+		fd = mkstemp(tmp_path);
+		if (fd < 0) {
+			rc = -errno;
+			fprintf(stderr,
+				"error: %s: client: failed open file %s: %s\n",
+				jt_cmdname(func), tmp, strerror(-rc));
+			goto out_fd;
+		}
+
+		bak_path = malloc(strlen(path) + 5);
+		snprintf(bak_path, strlen(path) + 5, "%s.bak", path);
+		gettimeofday(&now, NULL);
+		if (stat(bak_path, &st) == -1 ||
+		    st.st_atim.tv_sec < now.tv_sec - 100) {
+			rc = rename(path, bak_path);
+			free(bak_path);
+		}
+		if (rc) {
+			fprintf(stderr,
+				"error: %s: client: failed to backup %s: %s\n",
+				jt_cmdname(func), path, strerror(-rc));
+			goto out_fd;
+		}
+
+		while ((line_len = getline(&line, &len, file)) != -1) {
+			if (strstr(line, param_name)) {
+				if (popt->po_delete)
+					continue; /* do not write param */
+				rc = write(fd, param, strlen(param));
+				if (rc < strlen(param)) {
+					fprintf(stderr,
+						"error: %s: client: failed to write '%s': %s\n",
+						jt_cmdname(func), param,
+						strerror(-rc));
+					goto out;
+				}
+			} else {
+				rc1 = write(fd, line, line_len);
+				if (rc1 < line_len) {
+					rc = -ENOMEM;
+					fprintf(stderr,
+						"error: %s: client: failed to write '%s': %s\n",
+						jt_cmdname(func), line,
+						strerror(-rc));
+					goto out;
+				}
+			}
+		}
+
+		rc = fsync(fd);
+		if (rc && errno != EEXIST && errno != ENOENT) {
+			rc = -errno;
+			fprintf(stderr,
+				"error: %s: client: failed to sync %s: %s\n",
+				jt_cmdname(func), tmp_path, strerror(-rc));
+			goto out_fd;
+		}
+
+		rc = rename(tmp_path, path);
+		if (rc) {
+			fprintf(stderr,
+				"error: %s: client: failed to rename %s: %s\n",
+				jt_cmdname(func), tmp_path, strerror(-rc));
+			goto out_fd;
+		}
+	}
+
+out_fd:
+	close(fd);
+out_file:
+	if (file)
+		fclose(file);
+	free(line);
+out:
+	if (param != buf)
+		free(param);
+	free(param_name);
+
+	return rc;
+}
+
+int jt_lcfg_setparam_client(int argc, char **argv, struct param_opts *popt)
+{
+	int rc, rc1;
+	int i;
+	int first_param;
+	char *buf = NULL;
+	char *tmp;
+
+	first_param = optind;
+	if (first_param < 0 || first_param >= argc)
+		return CMD_HELP;
+
+	if (popt->po_show_name)
+		printf("params %s /etc/lustre/mount.%s.params:\n",
+		       popt->po_delete ? "deleted from" : "written to",
+		       popt->po_fsname ? popt->po_fsname : "client");
+
+	for (i = first_param, rc = 0; i < argc; i++) {
+		buf = argv[i];
+
+		rc1 = lcfg_setparam_client(argv[0], buf, popt);
+		if (popt->po_show_name && !rc1) {
+			tmp = strchr(buf, '=');
+			if (popt->po_delete)
+				printf("%.*s=\n", tmp ? (int) (tmp - buf) :
+						  (int) strlen(buf), buf);
+			else
+				printf("%s\n", buf);
+		}
+		if (!rc && rc1)
+			rc = rc1;
+	}
+
+	free(popt->po_fsname);
 	return rc;
 }

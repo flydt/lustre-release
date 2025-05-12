@@ -1,30 +1,10 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2017, Intel Corporation.
  */
+
 /*
- * lustre/mdt/mdt_io.c
- *
  * Author: Mikhail Pershin <mike.pershin@intel.com>
  */
 
@@ -35,28 +15,6 @@
 #include <lustre_nodemap.h>
 
 #include "mdt_internal.h"
-
-/* functions below are stubs for now, they will be implemented with
- * grant support on MDT */
-static inline void mdt_dom_read_lock(struct mdt_object *mo)
-{
-	down_read(&mo->mot_dom_sem);
-}
-
-static inline void mdt_dom_read_unlock(struct mdt_object *mo)
-{
-	up_read(&mo->mot_dom_sem);
-}
-
-static inline void mdt_dom_write_lock(struct mdt_object *mo)
-{
-	down_write(&mo->mot_dom_sem);
-}
-
-static inline void mdt_dom_write_unlock(struct mdt_object *mo)
-{
-	up_write(&mo->mot_dom_sem);
-}
 
 static void mdt_dom_resource_prolong(struct ldlm_prolong_args *arg)
 {
@@ -365,13 +323,13 @@ static int mdt_preprw_read(const struct lu_env *env, struct obd_export *exp,
 			   struct niobuf_local *lnb)
 {
 	struct dt_object *dob;
-	int i, j, rc, tot_bytes = 0;
+	int i, j, rc;
 	int maxlnb = *nr_local;
 	int level;
 
 	ENTRY;
 
-	mdt_dom_read_lock(mo);
+	down_read(&mo->mot_dom_sem);
 	*nr_local = 0;
 	/* the only valid case when READ can find object is missing or stale
 	 * when export is just evicted and open files are closed forcefully
@@ -411,7 +369,6 @@ static int mdt_preprw_read(const struct lu_env *env, struct obd_export *exp,
 		j += rc;
 		maxlnb -= rc;
 		*nr_local += rc;
-		tot_bytes += rnb[i].rnb_len;
 	}
 
 	rc = dt_attr_get(env, dob, la);
@@ -425,7 +382,7 @@ static int mdt_preprw_read(const struct lu_env *env, struct obd_export *exp,
 	RETURN(0);
 buf_put:
 	dt_bufs_put(env, dob, lnb, *nr_local);
-	mdt_dom_read_unlock(mo);
+	up_read(&mo->mot_dom_sem);
 	return rc;
 }
 
@@ -437,7 +394,7 @@ static int mdt_preprw_write(const struct lu_env *env, struct obd_export *exp,
 			    struct niobuf_local *lnb)
 {
 	struct dt_object *dob;
-	int i, j, k, rc = 0, tot_bytes = 0;
+	int i, j, k, rc = 0;
 	int maxlnb = *nr_local;
 
 	ENTRY;
@@ -446,7 +403,7 @@ static int mdt_preprw_write(const struct lu_env *env, struct obd_export *exp,
 	 * space back if possible */
 	tgt_grant_prepare_write(env, exp, oa, rnb, obj->ioo_bufcnt);
 
-	mdt_dom_read_lock(mo);
+	down_read(&mo->mot_dom_sem);
 	*nr_local = 0;
 	/* don't report error in cases with failed export */
 	if (!mdt_object_exists(mo)) {
@@ -488,7 +445,6 @@ static int mdt_preprw_write(const struct lu_env *env, struct obd_export *exp,
 		j += rc;
 		maxlnb -= rc;
 		*nr_local += rc;
-		tot_bytes += rnb[i].rnb_len;
 	}
 
 	rc = dt_write_prep(env, dob, lnb, *nr_local);
@@ -499,7 +455,7 @@ static int mdt_preprw_write(const struct lu_env *env, struct obd_export *exp,
 err:
 	dt_bufs_put(env, dob, lnb, *nr_local);
 unlock:
-	mdt_dom_read_unlock(mo);
+	up_read(&mo->mot_dom_sem);
 	/* tgt_grant_prepare_write() was called, so we must commit */
 	tgt_grant_commit(exp, oa->o_grant_used, rc);
 	/* let's still process incoming grant information packed in the oa,
@@ -575,7 +531,7 @@ static int mdt_commitrw_read(const struct lu_env *env, struct mdt_device *mdt,
 	if (niocount)
 		dt_bufs_put(env, dob, lnb, niocount);
 
-	mdt_dom_read_unlock(mo);
+	up_read(&mo->mot_dom_sem);
 	RETURN(rc);
 }
 
@@ -699,7 +655,7 @@ out_stop:
 
 out:
 	dt_bufs_put(env, dob, lnb, niocount);
-	mdt_dom_read_unlock(mo);
+	up_read(&mo->mot_dom_sem);
 	if (granted > 0)
 		tgt_grant_commit(exp, granted, old_rc);
 	RETURN(rc);
@@ -1008,7 +964,8 @@ int mdt_fallocate_hdl(struct tgt_session_info *tsi)
 	 * mode == 0 (which is standard prealloc) and PUNCH is supported
 	 * Rest of mode options are not supported yet.
 	 */
-	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
+	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE |
+		     FALLOC_FL_ZERO_RANGE))
 		RETURN(-EOPNOTSUPP);
 
 	if (mode & FALLOC_FL_PUNCH_HOLE && !(mode & FALLOC_FL_KEEP_SIZE)) {
@@ -1050,7 +1007,7 @@ int mdt_fallocate_hdl(struct tgt_session_info *tsi)
 
 	la_from_obdo(la, oa, OBD_MD_FLMTIME | OBD_MD_FLATIME | OBD_MD_FLCTIME);
 
-	mdt_dom_write_lock(mo);
+	down_write(&mo->mot_dom_sem);
 	dob = mdt_obj2dt(mo);
 
 	if (la->la_valid & (LA_ATIME | LA_MTIME | LA_CTIME))
@@ -1059,7 +1016,7 @@ int mdt_fallocate_hdl(struct tgt_session_info *tsi)
 
 	rc = mdt_object_fallocate(tsi->tsi_env, mdt->mdt_bottom, dob, start,
 				  end, mode, la);
-	mdt_dom_write_unlock(mo);
+	up_write(&mo->mot_dom_sem);
 	if (rc)
 		GOTO(out_put, rc);
 
@@ -1108,7 +1065,7 @@ static int mdt_dom_fiemap(const struct lu_env *env, struct mdt_device *mdt,
 	if (IS_ERR(mo))
 		RETURN(PTR_ERR(mo));
 
-	mdt_dom_read_lock(mo);
+	down_read(&mo->mot_dom_sem);
 	if (!mdt_object_exists(mo))
 		GOTO(out, rc = -ENOENT);
 	if (mdt_object_remote(mo))
@@ -1118,7 +1075,7 @@ static int mdt_dom_fiemap(const struct lu_env *env, struct mdt_device *mdt,
 
 	rc = dt_fiemap_get(env, mdt_obj2dt(mo), fiemap);
 out:
-	mdt_dom_read_unlock(mo);
+	up_read(&mo->mot_dom_sem);
 	lu_object_put(env, &mo->mot_obj);
 	RETURN(rc);
 }
@@ -1316,7 +1273,7 @@ int mdt_punch_hdl(struct tgt_session_info *tsi)
 		GOTO(out_put, rc);
 	}
 
-	mdt_dom_write_lock(mo);
+	down_write(&mo->mot_dom_sem);
 	dob = mdt_obj2dt(mo);
 
 	la_from_obdo(la, oa, OBD_MD_FLMTIME | OBD_MD_FLATIME | OBD_MD_FLCTIME);
@@ -1330,7 +1287,7 @@ int mdt_punch_hdl(struct tgt_session_info *tsi)
 
 	rc = mdt_object_punch(tsi->tsi_env, mdt->mdt_bottom, dob,
 			      start, end, la);
-	mdt_dom_write_unlock(mo);
+	up_write(&mo->mot_dom_sem);
 	if (rc)
 		GOTO(out_put, rc);
 
@@ -1633,7 +1590,7 @@ int mdt_brw_enqueue(struct mdt_thread_info *mti, struct ldlm_namespace *ns,
 	mdt_intent_fixup_resent(mti, *lockp, lhc, flags);
 	/* resent case */
 	if (!lustre_handle_is_used(&lhc->mlh_reg_lh)) {
-		__u64 ibits = MDS_INODELOCK_DOM;
+		enum mds_ibits_locks ibits = MDS_INODELOCK_DOM;
 
 		mdt_lh_reg_init(lhc, *lockp);
 
@@ -1832,13 +1789,6 @@ int mdt_dom_read_on_open(struct mdt_thread_info *mti, struct mdt_device *mdt,
 	bool dom_lock = false;
 
 	ENTRY;
-
-	if (!req_capsule_field_present(pill, &RMF_NIOBUF_INLINE, RCL_SERVER)) {
-		/* There is no reply buffers for this field, this means that
-		 * client has no support for data in reply.
-		 */
-		RETURN(0);
-	}
 
 	mbo = req_capsule_server_get(pill, &RMF_MDT_BODY);
 	if (!(mbo->mbo_valid & OBD_MD_DOM_SIZE))
@@ -2082,7 +2032,7 @@ void mdt_dom_discard_data(struct mdt_thread_info *info,
 		RETURN_EXIT;
 
 	policy.l_inodebits.bits = MDS_INODELOCK_DOM;
-	policy.l_inodebits.try_bits = 0;
+	policy.l_inodebits.try_bits = MDS_INODELOCK_NONE;
 	policy.l_inodebits.li_initiator_id = mdt_node_id(mdt);
 	fid_build_reg_res_name(mdt_object_fid(mo), &res_id);
 
@@ -2105,6 +2055,8 @@ void mdt_dom_discard_data(struct mdt_thread_info *info,
 		       "Failed to issue discard lock, rc = %d\n", rc);
 		RETURN_EXIT;
 	}
+
+	mo->mot_discard_done = true;
 
 	lock = ldlm_handle2lock(&dom_lh);
 	lock_res_and_lock(lock);

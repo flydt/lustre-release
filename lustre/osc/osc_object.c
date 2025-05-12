@@ -147,7 +147,7 @@ int osc_attr_get(const struct lu_env *env, struct cl_object *obj,
 EXPORT_SYMBOL(osc_attr_get);
 
 int osc_attr_update(const struct lu_env *env, struct cl_object *obj,
-		    const struct cl_attr *attr, unsigned valid)
+		    const struct cl_attr *attr, enum cl_attr_valid valid)
 {
 	struct lov_oinfo *oinfo = cl2osc(obj)->oo_oinfo;
 	struct ost_lvb   *lvb   = &oinfo->loi_lvb;
@@ -213,7 +213,7 @@ static int osc_object_ast_clear(struct ldlm_lock *lock, void *data)
 		cl_object_attr_lock(&osc->oo_cl);
 		memcpy(lvb, &oinfo->loi_lvb, sizeof(oinfo->loi_lvb));
 		cl_object_attr_unlock(&osc->oo_cl);
-		ldlm_clear_lvb_cached(lock);
+		(lock->l_flags &= ~LDLM_FL_LVB_CACHED);
 	}
 	RETURN(LDLM_ITER_CONTINUE);
 }
@@ -240,7 +240,7 @@ static int osc_object_fiemap(const struct lu_env *env, struct cl_object *obj,
 	struct ldlm_res_id resid;
 	union ldlm_policy_data policy;
 	struct lustre_handle lockh;
-	enum ldlm_mode mode = LCK_MINMODE;
+	enum ldlm_mode mode = LCK_MODE_MIN;
 	struct ptlrpc_request *req;
 	struct fiemap *reply;
 	char *tmp;
@@ -338,7 +338,7 @@ static void osc_req_attr_set(const struct lu_env *env, struct cl_object *obj,
 	oa = attr->cra_oa;
 	opg = osc_cl_page_osc(attr->cra_page, cl2osc(obj));
 
-	if ((flags & OBD_MD_FLMTIME) != 0) {
+	if ((flags & OBD_MD_FLMTIME) != 0 && lvb->lvb_mtime > oa->o_mtime) {
 		oa->o_mtime = lvb->lvb_mtime;
 		oa->o_valid |= OBD_MD_FLMTIME;
 	}

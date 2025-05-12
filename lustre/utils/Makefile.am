@@ -24,9 +24,6 @@ endif
 
 # mount only finds helpers in /sbin
 rootsbin_PROGRAMS = mount.lustre
-if SERVER
-rootsbin_PROGRAMS += mount.lustre_tgt
-endif
 bin_SCRIPTS   = llstat llobdstat lljobstat plot-llstat
 bin_PROGRAMS  = lfs
 sbin_SCRIPTS  = ldlm_debug_upcall
@@ -144,6 +141,9 @@ install-exec-hook:
 	    $(INSTALL_DATA) $$p $(DESTDIR)$(libdir)/lustre/$$f; \
 	  else :; fi; \
 	done
+	if [ "$(SERVER)" = "yes" ]; then \
+		ln -sf $(DESTDIR)$(sbindir)/mount.lustre $(DESTDIR)$(sbindir)/mount.lustre_tgt; \
+	fi
 endif # UTILS
 
 llog_reader_SOURCES = llog_reader.c
@@ -214,15 +214,13 @@ PLUGIN_LIB += libmount_utils_ldiskfs.a
 endif # PLUGINS
 endif # LDISKFS_ENABLED
 
-mount_lustre_SOURCES = mount_lustre.c mount_utils.c mount_utils.h $(GSSSRC)
+mount_lustre_SOURCES = mount_lustre.c mount_utils.c mount_utils.h $(GSSSRC) \
+			lustre_param.c
 mount_lustre_CPPFLAGS := ${MNTMODCFLAGS}
 mount_lustre_LDFLAGS  := ${MNTMODLDFLAGS}
-mount_lustre_LDADD    := $(SELINUX) $(LDLIBMOUNT) $(PLUGIN_LIB) $(GSSLIB) \
-			 $(top_builddir)/libcfs/libcfs/libcfs.la $(MNTMODLIBS)
-mount_lustre_tgt_SOURCES = ${mount_lustre_SOURCES}
-mount_lustre_tgt_CPPFLAGS = ${mount_lustre_CPPFLAGS}
-mount_lustre_tgt_LDFLAGS = ${mount_lustre_LDFLAGS}
-mount_lustre_tgt_LDADD = ${mount_lustre_LDADD}
+mount_lustre_LDADD    := $(SELINUX) $(LDLIBMOUNT) $(PLUGIN_LIB) $(GSSLIB)
+mount_lustre_LDADD    += $(top_builddir)/libcfs/libcfs/libcfs.la $(MNTMODLIBS)
+mount_lustre_LDADD    += liblustreapi.la
 
 mkfs_lustre_SOURCES = mkfs_lustre.c mount_utils.c mount_utils.h $(GSSSRC)
 mkfs_lustre_CPPFLAGS := -UTUNEFS ${MNTMODCFLAGS}

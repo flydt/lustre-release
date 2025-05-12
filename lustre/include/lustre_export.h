@@ -127,7 +127,7 @@ struct nid_stat {
 	struct hlist_node	 nid_hash;
 	struct list_head	 nid_list;
 	struct obd_device       *nid_obd;
-	struct proc_dir_entry   *nid_proc;
+	struct dentry		*nid_debugfs;
 	struct lprocfs_stats    *nid_stats;
 	struct lprocfs_stats    *nid_ldlm_stats;
 	/* for obd_nid_stats_hash exp_nid_stats */
@@ -196,7 +196,7 @@ struct obd_export {
 	 * order
 	 * protected by obd_dev_lock
 	 */
-	struct list_head	exp_obd_chain_timed;
+	struct list_head	exp_timed_chain;
 	/** Obd device of this export */
 	struct obd_device      *exp_obd;
 	/**
@@ -223,6 +223,7 @@ struct obd_export {
 	__u64			exp_last_committed;
 	/** When was last request received */
 	time64_t		exp_last_request_time;
+	time64_t		exp_deadline;
 	/** On replay all requests waiting for replay are linked here */
 	struct list_head	exp_req_replay_queue;
 	/**
@@ -259,7 +260,8 @@ struct obd_export {
 				 * set as 0 (false)
 				 */
 				exp_old_falloc:1,
-				exp_hashed:1;
+				exp_hashed:1,
+				exp_timed:1;
 	/* also protected by exp_lock */
 	enum lustre_sec_part	exp_sp_peer;
 	struct sptlrpc_flavor	exp_flvr;		/* current */
@@ -298,6 +300,23 @@ struct obd_export {
 #define exp_mdt_data    u.eu_mdt_data
 #define exp_filter_data u.eu_filter_data
 #define exp_ec_data     u.eu_ec_data
+
+static inline int lprocfs_nid_ldlm_stats_init(struct nid_stat *tmp)
+{
+	/* Always add in ldlm_stats */
+	tmp->nid_ldlm_stats =
+		lprocfs_stats_alloc(LDLM_LAST_OPC - LDLM_FIRST_OPC,
+				    LPROCFS_STATS_FLAG_NOPERCPU);
+	if (!tmp->nid_ldlm_stats)
+		return -ENOMEM;
+
+	lprocfs_init_ldlm_stats(tmp->nid_ldlm_stats);
+
+	debugfs_create_file("ldlm_stats", 0644, tmp->nid_debugfs,
+			    tmp->nid_stats, &ldebugfs_stats_seq_fops);
+
+	return 0;
+}
 
 static inline __u64 *exp_connect_flags_ptr(struct obd_export *exp)
 {
@@ -517,6 +536,11 @@ static inline bool exp_connect_unaligned_dio(struct obd_export *exp)
 static inline bool exp_connect_batch_rpc(struct obd_export *exp)
 {
 	return (exp_connect_flags2(exp) & OBD_CONNECT2_BATCH_RPC);
+}
+
+static inline int exp_connect_open_readdir(struct obd_export *exp)
+{
+	return !!(exp_connect_flags2(exp) & OBD_CONNECT2_READDIR_OPEN);
 }
 
 enum {

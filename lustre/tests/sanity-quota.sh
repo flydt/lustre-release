@@ -95,7 +95,6 @@ lustre_fail() {
 
 RUNAS="runas -u $TSTID -g $TSTID"
 RUNAS2="runas -u $TSTID2 -g $TSTID2"
-DD="dd if=/dev/zero bs=1M"
 
 FAIL_ON_ERROR=false
 
@@ -525,6 +524,17 @@ test_quota_performance() {
 		fi
 	fi
 	rm -f $TESTFILE
+}
+
+set_max_dirty_mb() {
+	local mdmb=$1 # MB
+	local mdmb_param="osc.*.max_dirty_mb"
+	local old_mdmb=($($LCTL get_param -n $mdmb_param))
+
+	echo "old_mdmb $old_mdmb mdmb $mdmb"
+	stack_trap "$LCTL set_param $mdmb_param=$old_mdmb" EXIT
+	$LCTL set_param $mdmb_param=$mdmb ||
+		error "set max_dirty_mb to $mdmb failed"
 }
 
 # test basic quota performance b=21696
@@ -1050,13 +1060,10 @@ test_1g() {
 	local global_limit=40 # MB
 	local testfile="$DIR/$tdir/$tfile-0"
 	local qpool="qpool1"
-	local mdmb_param="osc.*.max_dirty_mb"
-	local max_dirty_mb=$($LCTL get_param -n $mdmb_param | head -1)
 
 	mds_supports_qp
 	setup_quota_test || error "setup quota failed with $?"
-	$LCTL set_param $mdmb_param=1
-	stack_trap "$LCTL set_param $mdmb_param=$max_dirty_mb" EXIT
+	set_max_dirty_mb 1
 
 	# enable ost quota
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
@@ -1092,7 +1099,7 @@ test_1g() {
 	cancel_lru_locks osc
 	sync; sync_all_data || true
 	sleep 5
-	$RUNAS $DD of=$testfile count=$((OSTCOUNT*3)) seek=$limit &&
+	$RUNAS $DD of=$testfile count=$OSTCOUNT seek=$limit oflag=sync &&
 		quota_error u $TSTUSR \
 			"user write success, but expect EDQUOT"
 
@@ -1218,6 +1225,9 @@ test_1j() {
 	local testf="$DIR/$tdir/$tfile-0"
 	local testf1="$DIR/$tdir/$tfile-1"
 	local testf2="$DIR/$tdir/$tfile-2"
+	local client_ip=$(host_nids_address $HOSTNAME $NETTYPE)
+	local client_nid=$(h2nettype $client_ip)
+	local nm=test_1j
 
 	(( $OST1_VERSION >= $(version_code 2.14.0.74) )) ||
 		skip "need OST at least 2.14.0.74"
@@ -1283,6 +1293,48 @@ test_1j() {
 		error "disable root quotas for project failed"
 	do_facet ost2 $LCTL set_param $procf=0 ||
 		error "disable root quotas for project failed"
+
+	if (( $OST1_VERSION >= $(version_code 2.16.50) )); then
+		local cmd="do_facet mgs $LCTL get_param -n "
+		local adm=$($cmd nodemap.default.admin_nodemap)
+		local trs=$($cmd nodemap.default.trusted_nodemap)
+		local act=$($cmd nodemap.active)
+
+		do_facet mgs $LCTL nodemap_modify --name default \
+			--property admin --value 1
+		stack_trap "do_facet mgs $LCTL nodemap_modify --name default \
+			--property admin --value $adm"
+		do_facet mgs $LCTL nodemap_modify --name default \
+			--property trusted --value 1
+		stack_trap "do_facet mgs $LCTL nodemap_modify --name default \
+			--property trusted --value $trs"
+		do_facet mgs $LCTL nodemap_add $nm
+		stack_trap "do_facet mgs $LCTL nodemap_del $nm || true"
+		do_facet mgs $LCTL nodemap_add_range 	\
+			--name $nm --range $client_nid
+		do_facet mgs $LCTL nodemap_modify --name $nm \
+			--property admin --value 1
+		do_facet mgs $LCTL nodemap_modify --name $nm \
+			--property trusted --value 1
+		# do not set ignore_root_prjquota rbac role
+		do_facet mgs $LCTL nodemap_modify --name $nm --property rbac \
+			--value file_perms,dne_ops,quota_ops,byfid_ops,chlg_ops
+		do_facet mgs $LCTL nodemap_activate 1
+		stack_trap "do_facet mgs $LCTL nodemap_activate $act"
+		wait_nm_sync active
+		wait_nm_sync default admin_nodemap
+		wait_nm_sync default trusted_nodemap
+		wait_nm_sync $nm admin_nodemap
+		wait_nm_sync $nm trusted_nodemap
+		wait_nm_sync $nm rbac
+
+		runas -u 0 -g 0 $DD of=$testf count=$((limit/2)) \
+			seek=$limit oflag=direct &&
+			quota_error "project" $TSTPRJID "root write should fail"
+
+		do_facet mgs $LCTL nodemap_activate 0
+		wait_nm_sync active
+	fi
 
 	runas -u 0 -g 0 $DD of=$testf count=$limit seek=$limit oflag=direct ||
 		quota_error "project" $TSTPRJID "root write to project failed"
@@ -1439,7 +1491,7 @@ test_block_soft() {
 	cancel_lru_locks osc
 
 	echo "Write to exceed soft limit"
-	$RUNAS dd if=/dev/zero of=$testfile bs=1K count=10 seek=$OFFSET ||
+	$RUNAS $DD of=$testfile bs=1K count=10 seek=$OFFSET ||
 		quota_error a $TSTUSR "write failure, but expect success"
 	OFFSET=$((OFFSET + 1024)) # make sure we don't write to same block
 	cancel_lru_locks osc
@@ -1457,7 +1509,7 @@ test_block_soft() {
 	$SHOW_QUOTA_INFO_PROJID
 
 	echo "Write before timer goes off"
-	$RUNAS dd if=/dev/zero of=$testfile bs=1K count=10 seek=$OFFSET ||
+	$RUNAS $DD of=$testfile bs=1K count=10 seek=$OFFSET ||
 		quota_error a $TSTUSR "write failure, but expect success"
 	OFFSET=$((OFFSET + 1024))
 	cancel_lru_locks osc
@@ -1475,12 +1527,11 @@ test_block_soft() {
 	# maybe cache write, ignore.
 	# write up to soft least quint to consume all
 	# possible slave granted space.
-	$RUNAS dd if=/dev/zero of=$testfile bs=1K \
-		count=$soft_limit seek=$OFFSET || true
+	$RUNAS $DD of=$testfile bs=1K count=$soft_limit seek=$OFFSET || true
 	OFFSET=$((OFFSET + soft_limit))
 	cancel_lru_locks osc
 	log "Write after cancel lru locks"
-	$RUNAS dd if=/dev/zero of=$testfile bs=1K count=10 seek=$OFFSET &&
+	$RUNAS $DD of=$testfile bs=1K count=10 seek=$OFFSET &&
 		quota_error a $TSTUSR "write success, but expect EDQUOT"
 
 	$SHOW_QUOTA_USER
@@ -1526,6 +1577,7 @@ test_3a() {
 		qmt.$FSNAME-QMT0000.dt-0x0.soft_least_qunit) / 1024 ))
 
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
+	set_max_dirty_mb 1
 
 	echo "User quota (soft limit:$limit MB  grace:$grace seconds)"
 	# make sure the system is clean
@@ -1599,6 +1651,7 @@ test_3b() {
 	echo "grace $grace glbl_grace $glbl_grace"
 
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
+	set_max_dirty_mb 1
 
 	echo "User quota in $qpool(soft limit:$limit MB  grace:$grace seconds)"
 	# make sure the system is clean
@@ -1702,6 +1755,7 @@ test_3c() {
 	echo "grace1 $grace1 grace2 $grace2 glbl_grace $glbl_grace"
 
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
+	set_max_dirty_mb 1
 
 	echo "User quota in qpool2(soft:$limit2 MB grace:$grace2 seconds)"
 	# make sure the system is clean
@@ -2576,14 +2630,17 @@ test_12b() {
 		error "set quota failed"
 
 	echo "Create $ilimit files on mdt0..."
-	$RUNAS createmany -m $TESTFILE0 $ilimit || true
+	local mdt0_created=$($RUNAS createmany -m $TESTFILE0 $ilimit |
+		awk '/total:/ {print $2}')
+	echo "mdt0 created $mdt0_created"
 
 	echo "Create files on mdt1..."
 	$RUNAS createmany -m $TESTFILE1 1 &&
 		quota_error a $TSTUSR "create succeeded, expect EDQUOT"
 
 	echo "Free space from mdt0..."
-	$RUNAS unlinkmany $TESTFILE0 $ilimit || error "unlink mdt0 files failed"
+	$RUNAS unlinkmany $TESTFILE0 $mdt0_created ||
+		error "unlink mdt0 files failed"
 	wait_delete_completed
 	sync_all_data || true
 
@@ -4098,7 +4155,7 @@ test_get_allquota() {
 	done
 
 	echo "Create $qid_cnt files..."
-	createmany -S 4k -U $start_qid -G $start_qid -o ${TFILE} $qid_cnt ||
+	createmany -W 4096 -U $start_qid -G $start_qid -o ${TFILE} $qid_cnt ||
 			error "failed to create many files"
 
 	cancel_lru_locks osc
@@ -4106,14 +4163,14 @@ test_get_allquota() {
 	sleep 5
 
 	start=$SECONDS
-	$LFS quota -a -s $start_qid -e $end_qid -u $MOUNT | tail -n 50
+	$LFS quota -a -s $start_qid -e $end_qid -u $MOUNT | head -n 50
 	total=$((SECONDS - start))
 	(( end - start > 0 )) &&
 		echo "time=$total, rate=$((qid_cnt / total))/s" ||
 		echo "time=0, rate=$qid_cnt/0"
 
 	start=$SECONDS
-	$LFS quota -a -s $start_qid -e $end_qid -g $MOUNT | tail -n 50
+	$LFS quota -a -s $start_qid -e $end_qid -g $MOUNT | head -n 50
 	total=$((SECONDS - start))
 	(( end - start > 0 )) &&
 		echo "time=$total, rate=$((qid_cnt / total))/s" ||
@@ -4413,8 +4470,8 @@ test_55() {
 	usermod -G $TSTUSR,$TSTUSR2 $TSTUSR
 
 	#prepare test file
-	$RUNAS dd if=/dev/zero of=$DIR/$tdir/$tfile bs=1024 count=100000 ||
-	error "failed to dd"
+	$RUNAS $DD of=$DIR/$tdir/$tfile bs=1024 count=100000 ||
+		error "failed to dd"
 
 	cancel_lru_locks osc
 	sync; sync_all_data || true
@@ -5196,15 +5253,16 @@ run_test 67 "quota pools recalculation"
 get_slave_nr() {
 	local pool=$1
 	local qtype=$2
-	local nr
+	local nr=$3
 
 	wait_update_facet "--quiet" mds1 \
 		"$LCTL get_param -n qmt.$FSNAME-QMT0000.dt-$pool.info \
 			>/dev/null 2>&1 || echo foo" "">/dev/null ||
 		error "mds1: failed to create quota pool $pool"
 
-	do_facet mds1 $LCTL get_param -n qmt.$FSNAME-QMT0000.dt-$pool.info |
-		awk '/usr/ {getline; print $2}'
+	wait_update_facet mds1 \
+		"$LCTL get_param -n qmt.$FSNAME-QMT0000.dt-$pool.info | \
+			awk '/usr/ {getline; print \\\$2}'" "$nr" || return 1
 }
 
 test_68()
@@ -5218,40 +5276,32 @@ test_68()
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
 
 	# check slave number for glbal pool
-	local nr=$(get_slave_nr "0x0" "usr")
-	echo "nr result $nr"
-	[[ $nr != $((OSTCOUNT + MDSCOUNT)) ]] &&
-		error "Slave_nr $nr for global pool != ($OSTCOUNT + $MDSCOUNT)"
+	get_slave_nr "0x0" "usr" $((OSTCOUNT + MDSCOUNT)) ||
+		error "Slave_nr for global pool != ($OSTCOUNT + $MDSCOUNT)"
 
 	# create qpool and add OST1
 	pool_add $qpool || error "pool_add failed"
-	nr=$(get_slave_nr $qpool "usr")
-	[[ $nr != 0 ]] && error "Slave number $nr for $qpool != 0"
+	get_slave_nr $qpool "usr" 0 || error "Slave number for $qpool != 0"
 
 	# add OST1 to qpool
 	pool_add_targets $qpool 1 1 || error "pool_add_targets failed"
-	nr=$(get_slave_nr $qpool "usr")
-	[[ $nr != 1 ]] && error "Slave number $nr for $qpool != 1"
+	get_slave_nr $qpool "usr" 1 || error "Slave number for $qpool != 1"
 
 	# add OST0 to qpool
 	pool_add_targets $qpool 0 1 || error "pool_add_targets failed"
-	nr=$(get_slave_nr $qpool "usr")
-	[[ $nr != 2 ]] && error "Slave number $nr for $qpool != 2"
+	get_slave_nr $qpool "usr" 2 || error "Slave number for $qpool != 2"
 
 	# remove OST0
 	pool_remove_target $qpool 0
-	nr=$(get_slave_nr $qpool "usr")
-	[[ $nr != 1 ]] && error "Slave number $nr for $qpool != 1"
+	get_slave_nr $qpool "usr" 1 || error "Slave number for $qpool != 1"
 
 	# remove OST1
 	pool_remove_target $qpool 1
-	nr=$(get_slave_nr $qpool "usr")
-	[[ $nr != 0 ]] && error "Slave number $nr for $qpool != 0"
+	get_slave_nr $qpool "usr" 0 || error "Slave number for $qpool != 0"
 
 	# Check again that all is fine with global pool
-	nr=$(get_slave_nr "0x0" "usr")
-	[[ $nr == $((OSTCOUNT + MDSCOUNT)) ]] ||
-		error "Slave_nr $nr for global pool != ($OSTCOUNT + $MDSCOUNT)"
+	get_slave_nr "0x0" "usr" $((OSTCOUNT + MDSCOUNT)) ||
+		error "Slave_nr for global pool != ($OSTCOUNT + $MDSCOUNT)"
 }
 run_test 68 "slave number in quota pool changed after each add/remove OST"
 
@@ -5288,11 +5338,11 @@ test_69()
 	$LFS setquota -u $TSTUSR -B ${limit}M --pool $qpool $DIR ||
 		error "set user quota failed"
 
-	$RUNAS dd if=/dev/zero of="$dom0/f1" bs=1K count=512 oflag=sync ||
+	$RUNAS $DD of="$dom0/f1" bs=1K count=512 oflag=sync ||
 		quota_error u $TSTUSR "write failed"
 
-	$RUNAS dd if=/dev/zero of="$dom0/f1" bs=1K count=512 seek=512 \
-		oflag=sync || quota_error u $TSTUSR "write failed"
+	$RUNAS $DD of="$dom0/f1" bs=1K count=512 seek=512 oflag=sync ||
+		quota_error u $TSTUSR "write failed"
 
 	$RUNAS $DD of=$testfile count=$limit || true
 
@@ -5307,11 +5357,11 @@ test_69()
 
 	# Now all members of qpool1 should get EDQUOT. Expect success
 	# when write to DOM on MDT0, as it belongs to global pool.
-	$RUNAS dd if=/dev/zero of="$dom0/f1" bs=1K count=512 \
-		oflag=sync || quota_error u $TSTUSR "write failed"
+	$RUNAS $DD of="$dom0/f1" bs=1K count=512 oflag=sync ||
+		quota_error u $TSTUSR "write failed"
 
-	$RUNAS dd if=/dev/zero of="$dom0/f1" bs=1K count=512 seek=512 \
-		oflag=sync || quota_error u $TSTUSR "write failed"
+	$RUNAS $DD of="$dom0/f1" bs=1K count=512 seek=512 oflag=sync ||
+		quota_error u $TSTUSR "write failed"
 }
 run_test 69 "EDQUOT at one of pools shouldn't affect DOM"
 
@@ -5580,7 +5630,7 @@ test_73a()
 	pool_add_targets $qpool 0 $((OSTCOUNT - 1)) ||
 		error "pool_add_targets failed"
 
-	test_default_quota "-u" "data" "qpool1"
+	test_default_quota "-u" "data" $qpool
 }
 run_test 73a "default limits at OST Pool Quotas"
 
@@ -5684,21 +5734,35 @@ run_test 74 "check quota pools per user"
 function cleanup_quota_test_75()
 {
 	do_facet mgs $LCTL nodemap_modify --name default \
-		--property admin --value 1
+		--property admin --value $1
 	do_facet mgs $LCTL nodemap_modify --name default \
-		--property trusted --value 1
+		--property trusted --value $2
 	do_facet mgs $LCTL nodemap_modify --name default \
-		--property squash_uid --value 99
+		--property deny_unknown --value $3
 	do_facet mgs $LCTL nodemap_modify --name default \
-		--property squash_gid --value 99
+		--property squash_uid --value $4
+	do_facet mgs $LCTL nodemap_modify --name default \
+		--property squash_gid --value $5
 
 	wait_nm_sync default admin_nodemap
 	wait_nm_sync default trusted_nodemap
 
-	do_facet mgs $LCTL nodemap_activate 0
-	wait_nm_sync active
+	do_facet mgs $LCTL nodemap_activate $6
+	wait_nm_sync active $6
+	return 0
+}
 
-	resetquota -u $TSTUSR
+stack_trap_nodemap_cleanup_75()
+{
+	local cmd="do_facet mgs $LCTL get_param -n "
+	local adm=$($cmd nodemap.default.admin_nodemap)
+	local trs=$($cmd nodemap.default.trusted_nodemap)
+	local deny=$($cmd nodemap.default.deny_unknown)
+	local uid=$($cmd nodemap.default.squash_uid)
+	local gid=$($cmd nodemap.default.squash_gid)
+	local act=$($cmd nodemap.active)
+
+	stack_trap "cleanup_quota_test_75 $adm $trs $deny $uid $gid $act"
 }
 
 test_dom_75() {
@@ -5776,7 +5840,6 @@ test_75()
 	fi
 
 	setup_quota_test || error "setup quota failed with $?"
-	stack_trap cleanup_quota_test_75 EXIT
 
 	# enable ost quota
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
@@ -5795,6 +5858,7 @@ test_75()
 	$LFS setstripe -E 1M -L mdt $DIR/$tdir_dom ||
 		error "setstripe $tdir_dom failed"
 
+	stack_trap_nodemap_cleanup_75
 	do_facet mgs $LCTL nodemap_activate 1
 	wait_nm_sync active
 	do_facet mgs $LCTL nodemap_modify --name default \
@@ -5820,7 +5884,7 @@ test_75()
 	cancel_lru_locks osc
 
 	echo "Write to exceed soft limit"
-	dd if=/dev/zero of=$testfile bs=1K count=10 seek=$OFFSET ||
+	$DD of=$testfile bs=1K count=10 seek=$OFFSET ||
 	      quota_error a $TSTUSR "root write failure, but expect success (2)"
 	OFFSET=$((OFFSET + 1024)) # make sure we don't write to same block
 	cancel_lru_locks osc
@@ -5997,6 +6061,7 @@ test_79()
 	pool_add $qpool || error "pool_add failed"
 	do_facet mds1 "rm $stopf"
 	wait $pid
+	return 0
 }
 run_test 79 "access to non-existed dt-pool/info doesn't cause a panic"
 
@@ -6417,6 +6482,212 @@ test_86()
 }
 run_test 86 "Pre-acquired quota should be released if quota is over limit"
 
+cleanup_lqes()
+{
+	for ((i = $1; i < $2; i++)); do
+		$LFS setquota -B0 -b0 -I0 -i0 -u $i $MOUNT ||
+			error "Can't cleanup user $i"
+		$LFS setquota -B0 -b0 -I0 -i0 -g $i $MOUNT ||
+			error "Can't cleanup group $i"
+		is_project_quota_supported &&
+			$LFS setquota -B0 -b0 -I0 -i0 -p $i $MOUNT ||
+				error "Can't cleanup project $i"
+	done
+	# The only way to remove lqes from the hash table
+	stop mds1 -f || error "MDS umount failed"
+	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
+	quota_init
+	clients_up || true
+}
+
+test_87()
+{
+	(( $MDS1_VERSION >= $(version_code 2.16.50) )) ||
+		skip "need MDS >= 2.16.50 to add default value in lfs quota -a"
+
+	local blimit=102400
+	local ilimit=10240
+	local d_blimit=409600
+	local d_ilimit=40960
+	local u_blimits
+	local u_ilimits
+	local g_blimits
+	local g_ilimits
+	local p_blimits
+	local p_ilimits
+
+	setup_quota_test || error "setup quota failed with $?"
+
+	echo "test user quota for 'lfs quota -a' to print default quota"
+	$LFS setquota -U -b $d_blimit -B $d_blimit $MOUNT ||
+		error "failed to set USR default block quota setting"
+	$LFS setquota -U -i $d_ilimit -I $d_ilimit $MOUNT ||
+		error "failed to set USR default file quota setting"
+	$LFS setquota -G -b $d_blimit -B $d_blimit $MOUNT ||
+		error "failed to set GRP default block quota setting"
+	$LFS setquota -G -i $d_ilimit -I $d_ilimit $MOUNT ||
+		error "failed to set GRP default file quota setting"
+
+	is_project_quota_supported && {
+		$LFS setquota -P -b $d_blimit -B $d_blimit $MOUNT ||
+			error "failed to set PRJ default block quota setting"
+		$LFS setquota -P -i $d_ilimit -I $d_ilimit $MOUNT ||
+			error "failed to set PRJ default file quota setting"
+	}
+
+	#define OBD_FAIL_QUOTA_NOSYNC		0xA09
+	do_facet mds1 $LCTL set_param fail_loc=0xa09
+	stack_trap "cleanup_lqes 100 200"
+
+	for ((i = 100; i < 150; i++)); do
+		$LFS setquota -u $i -b $blimit -B $blimit $MOUNT ||
+			error "failed to set USR $i block quota setting"
+		$LFS setquota -u $i -i $ilimit -I $ilimit $MOUNT ||
+			error "failed to set USR $i file quota setting"
+
+		$LFS setquota -g $i -b $blimit -B $blimit $MOUNT ||
+			error "failed to set GRP $i block quota setting"
+		$LFS setquota -g $i -i $ilimit -I $ilimit $MOUNT ||
+			error "failed to set GRP $i file quota setting"
+
+		is_project_quota_supported && {
+			$LFS setquota -p $i -b $blimit -B $blimit $MOUNT ||
+				error "failed to set PRJ $i block quota setting"
+			$LFS setquota -p $i -i $ilimit -I $ilimit $MOUNT ||
+				error "failed to set PRJ $i file quota setting"
+		}
+	done
+
+	for ((i = 150; i < 200; i++)); do
+		$LFS setquota -u $i -D $MOUNT ||
+			error "failed to set USR $i to use default quota"
+		$LFS setquota -g $i -D $MOUNT ||
+			error "failed to set GRP $i to use default quota"
+		is_project_quota_supported && {
+			$LFS setquota -p $i -D $MOUNT ||
+			error "failed to set PRJ $i to use default quota"
+		}
+	done
+
+	do_facet mds1 $LCTL set_param fail_loc=0
+	sync; sync_all_data || true
+	sleep 5
+
+	eval $($LFS quota -q -a -s 100 -e 199 -u $MOUNT |
+	    awk '{printf("u_blimits[%d]=%d;u_ilimits[%d]=%d;", \
+		NR, $5, NR, $9)}')
+	eval $($LFS quota -q -a -s 100 -e 199 -g $MOUNT |
+	    awk '{printf("g_blimits[%d]=%d;g_ilimits[%d]=%d;", \
+		 NR, $5, NR, $9)}')
+	is_project_quota_supported &&
+		eval $($LFS quota -q -a -s 100 -e 199 -p $MOUNT |
+		    awk '{printf("p_blimits[%d]=%d;p_ilimits[%d]=%d;", \
+		 		NR, $5, NR, $9)}')
+
+	for i in $(seq 50); do
+		[ ${u_ilimits[$i]} -eq $ilimit ] ||
+		error "file limit for USR ID $((100 + i - 1)) is wrong"
+		[ ${u_blimits[$i]} -eq $blimit ] ||
+		error "block limit for USR ID $((100 + i - 1)) is wrong"
+
+		[ ${g_ilimits[$i]} -eq $ilimit ] ||
+		error "file limit for GRP ID $((100 + i - 1)) is wrong"
+		[ ${g_blimits[$i]} -eq $blimit ] ||
+		error "block limit for GRP ID $((100 + i - 1)) is wrong"
+
+		is_project_quota_supported && {
+			[ ${p_ilimits[$i]} -eq $ilimit ] ||
+			error "file limit for PRJ ID $((100 + i - 1)) is wrong"
+			[ ${p_blimits[$i]} -eq $blimit ] ||
+			error "block limit for PRJ ID $((100 + i - 1)) is wrong"
+		}
+	done
+
+	for i in $(seq 50); do
+		[ ${u_ilimits[$((i + 50))]} -eq $d_ilimit ] ||
+		error "file limit for USR ID $((150 + i - 1)) is wrong"
+		[ ${u_blimits[$((i + 50))]} -eq $d_blimit ] ||
+		error "block limit for USR ID $((150 + i - 1)) is wrong"
+
+		[ ${g_ilimits[$((i + 50))]} -eq $d_ilimit ] ||
+		error "file limit for GRP ID $((150 + i - 1)) is wrong"
+		[ ${g_blimits[$((i + 50))]} -eq $d_blimit ] ||
+		error "block limit for GRP ID $((150 + i - 1)) is wrong"
+
+		is_project_quota_supported && {
+			[ ${p_ilimits[$((i + 50))]} -eq $d_ilimit ] ||
+			error "file limit for PRJ ID $((150 + i - 1)) is wrong"
+			[ ${p_blimits[$((i + 50))]} -eq $d_blimit ] ||
+			error "block limit for PRJ ID $((150 + i - 1)) is wrong"
+		}
+	done
+}
+run_test 87 "lfs quota -a should print default quota setting"
+
+# interop quota
+test_88()
+{
+	(($PAGE_SIZE > 4096)) || skip "require client with >4k pages"
+	setup_quota_test || error "setup quota failed with $?"
+
+	set_ost_qtype $QTYPE || error "enable ost quota failed"
+
+	$LFS setquota -u $TSTUSR -B 100M -i 0 $MOUNT ||
+		error "enable quota -B 100M failed."
+
+	local tfile
+	local result
+
+	local repeat=$(seq 10)
+	local arr=(1075761 1075770 1075800 1076000 1080000 1093000 2010000 \
+		   2080000 2095000 4096000)
+	[[ "$SLOW" = "no" ]] && repeat=1
+
+	for r in $repeat; do
+		for bs in ${arr[@]}; do
+			tfile=$DIR/$tdir/dd_largefile.${bs}
+			${RUNAS} dd if=/dev/urandom of=${tfile} bs=${bs} \
+				count=100 status=progress
+			rm -f ${tfile}
+		done
+	done
+
+	return 0
+}
+run_test 88 "Writing over quota should not hang"
+
+test_89()
+{
+	local cmd="do_facet mgs $LCTL get_param -n "
+
+	(( $MDS1_VERSION >= $(version_code 2.16.53) )) ||
+		skip "need MDS >= 2.16.53 to show default quota with squash_uid"
+
+	local act=$($cmd nodemap.active)
+	do_facet mgs $LCTL nodemap_activate 1
+	wait_nm_sync active
+	stack_trap "do_facet mgs $LCTL nodemap_activate $act; \
+		    wait_nm_sync active"
+
+	local suid=$($cmd nodemap.default.squash_uid)
+	do_facet mgs "$LCTL nodemap_modify --name default \
+		--property squash_uid --value $TSTID"
+	wait_nm_sync default squash_uid
+	stack_trap "do_facet mgs $LCTL nodemap_modify --name default \
+		--property squash_uid --value $suid"
+
+	$LFS setquota -P -B100M $MOUNT &&
+		error "Set default quotas with squashed uid"
+	is_project_quota_supported &&
+		$LFS quota -P $MOUNT ||
+			error "Can't get default prj quota for squashed uid"
+	$LFS quota -U $MOUNT ||
+		error "Can't get default usr quota for squashed uid"
+	$LFS quota -G $MOUNT ||
+		error "Can't get default grp quota for squashed uid"
+}
+run_test 89 "Show default quota with squash_uid"
+
 check_quota_no_mount()
 {
 	local opts="$1"
@@ -6574,6 +6845,66 @@ test_91()
 	setupall
 }
 run_test 91 "new quota index files in quota_master"
+
+test_92()
+{
+	local qpool="qpool1"
+	pool_add $qpool || error "pool_add failed"
+
+	# with the fix it returns EINVAL instead of ENOENT
+	$LFS setquota -u $TSTUSR -B 100M -I 0 --pool $qpool $MOUNT
+	(( $? == 22 )) || error "inode hard limit should be prohibited with PQ"
+	$LFS setquota -u $TSTUSR -B 100M -i 0 --pool $qpool $MOUNT
+	(( $? == 22 )) || error "inode soft limit should be prohibited with PQ"
+	$LFS setquota -u $TSTUSR -B 100M -I 0 -i 10M --pool $qpool $MOUNT
+	(( $? == 22 )) || error "inode limits should be prohibited with PQ"
+}
+run_test 92 "Cannot set inode limit with Quota Pools"
+
+test_93()
+{
+	(( OST1_VERSION >= $(version_code 2.16.52) )) ||
+		skip "Need OST version at least 2.16.52"
+
+	local testfile="$DIR/$tdir/$tfile"
+	local cnt=30
+	local usage
+
+	setup_quota_test || error "setup quota failed with $?"
+
+	$LFS setstripe $testfile -i 0 -c 1 || error "setstripe $testfile failed"
+	$DD of=$testfile count=$cnt || error "failed to write $testfile"
+
+	cancel_lru_locks osc
+	sync; sync_all_data || true
+	sleep 5
+
+	usage=$(getquota -p $TSTPRJID ${FSNAME}-OST0000 curspace)
+	(( usage == 0 )) || error "usage for $TSTPRJID should be 0"
+
+	#define OBD_FAIL_OUT_DROP_PROJID_SET	0x170c
+	do_facet ost1 $LCTL set_param fail_loc=0x8000170C
+	change_project -p $TSTPRJID $testfile
+
+	cancel_lru_locks osc
+	sync; sync_all_data || true
+	sleep 5
+
+	usage=$(getquota -p $TSTPRJID ${FSNAME}-OST0000 curspace)
+	(( usage == 0 )) || error "usage for $TSTPRJID should still be 0"
+
+	$DD of=$testfile conv=notrunc oflag=append count=5 ||
+		error "failed to append $testfile"
+
+	cancel_lru_locks osc
+	sync; sync_all_data || true
+	sleep 5
+
+	usage=$(getquota -p $TSTPRJID global curspace)
+	(( usage > (cnt * 1024 * 9 / 10) )) ||
+		error "usage for $TSTPRJID is incorrect: $usage"
+}
+run_test 93 "update projid while client write to OST"
 
 quota_fini()
 {

@@ -23,6 +23,7 @@
 #include <linux/utsname.h>
 
 #include <libcfs/libcfs.h>
+#include <cfs_hash.h>
 #include <obd_support.h>
 #include <obd_class.h>
 #include <lustre_net.h>
@@ -106,7 +107,7 @@ int jobid_set_current(char *jobid)
 	int ret;
 	int len = strlen(jobid);
 
-	sj = kmalloc(sizeof(*sj) + len + 1, GFP_KERNEL);
+	OBD_ALLOC(sj, sizeof(*sj) + len + 1);
 	if (!sj)
 		return -ENOMEM;
 	rcu_read_lock();
@@ -125,7 +126,7 @@ int jobid_set_current(char *jobid)
 
 	if (IS_ERR(origsj)) {
 		put_pid(sj->sj_session);
-		kfree(sj);
+		OBD_FREE(sj, sizeof(*sj) + strlen(sj->sj_jobid) + 1);
 		rcu_read_unlock();
 		return PTR_ERR(origsj);
 	}
@@ -135,13 +136,13 @@ int jobid_set_current(char *jobid)
 				      jobid_params);
 	if (ret) {
 		put_pid(sj->sj_session);
-		kfree(sj);
+		OBD_FREE(sj, sizeof(*sj) + strlen(sj->sj_jobid) + 1);
 		rcu_read_unlock();
 		return ret;
 	}
 	put_pid(origsj->sj_session);
 	rcu_read_unlock();
-	kfree_rcu(origsj, sj_rcu);
+	OBD_FREE_RCU(origsj, sizeof(*sj) + strlen(origsj->sj_jobid) + 1, sj_rcu);
 	jobid_prune_expedite();
 
 	return 0;
@@ -152,7 +153,7 @@ static void jobid_free(void *vsj, void *arg)
 	struct session_jobid *sj = vsj;
 
 	put_pid(sj->sj_session);
-	kfree(sj);
+	OBD_FREE(sj, sizeof(*sj) + strlen(sj->sj_jobid) + 1);;
 }
 
 static void jobid_prune(struct work_struct *work);
@@ -181,7 +182,8 @@ static void jobid_prune(struct work_struct *work)
 					   &sj->sj_linkage,
 					   jobid_params) == 0) {
 			put_pid(sj->sj_session);
-			kfree_rcu(sj, sj_rcu);
+			OBD_FREE_RCU(sj, sizeof(*sj) + strlen(sj->sj_jobid) + 1,
+				     sj_rcu);
 		}
 	}
 	rhashtable_walk_stop(&iter);

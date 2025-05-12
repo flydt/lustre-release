@@ -126,6 +126,8 @@ enum lcfg_command_type {
 	LCFG_NODEMAP_SQUASH_PROJID	= 0x00ce05d, /**< default map projid */
 	LCFG_NODEMAP_READONLY_MOUNT	= 0x00ce05e, /**< read-only mount */
 	LCFG_NODEMAP_RBAC	  = 0x00ce05f, /**< rbac */
+	LCFG_NODEMAP_DENY_MOUNT	  = 0x00ce060, /**< deny mount */
+	LCFG_NODEMAP_RAISE_PRIVS	= 0x00ce061, /**< sub-nm raise privs */
 };
 
 struct lustre_cfg_bufs {
@@ -320,11 +322,11 @@ static inline int lustre_cfg_sanity_check(void *buf, __kernel_size_t len)
 		return -EINVAL;
 
 	/* check that the buflens are valid */
-	if (len < LCFG_HDR_SIZE(lcfg->lcfg_bufcount))
+	if (LCFG_HDR_SIZE(lcfg->lcfg_bufcount) > len)
 		return -EINVAL;
 
 	/* make sure all the pointers point inside the data */
-	if (len < lustre_cfg_len(lcfg->lcfg_bufcount, lcfg->lcfg_buflens))
+	if (lustre_cfg_len(lcfg->lcfg_bufcount, lcfg->lcfg_buflens) > len)
 		return -EINVAL;
 
 	return 0;

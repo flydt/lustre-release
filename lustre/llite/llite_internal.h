@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -157,6 +139,8 @@ struct ll_inode_info {
 	__u32				lli_inode_magic;
 	rwlock_t			lli_lock;
 
+	__u32				lli_projid;   /* project id */
+
 	volatile unsigned long		lli_flags;
 	struct posix_acl		*lli_posix_acl;
 
@@ -273,10 +257,10 @@ struct ll_inode_info {
 			/* for writepage() only to communicate to fsync */
 			int			lli_async_rc;
 
+			__u32			lli_heat_flags;
 			/* protect the file heat fields */
-			spinlock_t			lli_heat_lock;
-			__u32				lli_heat_flags;
-			struct obd_heat_instance	lli_heat_instances[OBD_HEAT_COUNT];
+			spinlock_t		lli_heat_lock;
+			struct obd_heat_instance lli_heat_instances[OBD_HEAT_COUNT];
 
 			/*
 			 * Whenever a process try to read/write the file, the
@@ -290,9 +274,9 @@ struct ll_inode_info {
 			seqlock_t		lli_jobinfo_seqlock;
 			struct job_info		lli_jobinfo;
 
-			struct mutex		 lli_pcc_lock;
-			enum lu_pcc_state_flags	 lli_pcc_state;
-			atomic_t		 lli_pcc_mapcnt;
+			struct mutex		lli_pcc_lock;
+			enum lu_pcc_state_flags	lli_pcc_state;
+			atomic_t		lli_pcc_mapcnt;
 			/*
 			 * I/O for a file previously opened before attach into
 			 * PCC or once opened while in ATTACHING state will
@@ -304,6 +288,7 @@ struct ll_inode_info {
 			 * Lustre file when mmaped a file.
 			 */
 			atomic_t		 lli_pcc_mapneg;
+			enum pcc_dataset_flags	 lli_pcc_dsflags;
 			/*
 			 * @lli_pcc_generation saves the gobal PCC generation
 			 * when the file was successfully attached into PCC.
@@ -318,7 +303,6 @@ struct ll_inode_info {
 			 * safely.
 			 */
 			__u64			 lli_pcc_generation;
-			enum pcc_dataset_flags	 lli_pcc_dsflags;
 			struct pcc_inode	*lli_pcc_inode;
 
 			struct mutex		 lli_group_mutex;
@@ -349,8 +333,6 @@ struct ll_inode_info {
 	/* Layout version, protected by lli_layout_lock */
 	__u32				lli_layout_gen;
 	spinlock_t			lli_layout_lock;
-
-	__u32				lli_projid;   /* project id */
 
 	struct rw_semaphore		lli_xattrs_list_rwsem;
 	struct mutex			lli_xattrs_enq_lock;
@@ -852,38 +834,38 @@ enum stats_track_type {
 
 /* flags for sbi->ll_flags */
 enum ll_sbi_flags {
-	LL_SBI_NOLCK,			/* DLM locking disabled directio-only */
-	LL_SBI_CHECKSUM,		/* checksum each page as it's written */
-	LL_SBI_LOCALFLOCK,		/* local flocks instead of fs-wide */
-	LL_SBI_FLOCK,			/* flock enabled */
-	LL_SBI_USER_XATTR,		/* support user xattr */
-	LL_SBI_LRU_RESIZE,		/* lru resize support */
-	LL_SBI_LAZYSTATFS,		/* lazystatfs mount option */
 	LL_SBI_32BIT_API,		/* generate 32 bit inodes. */
-	LL_SBI_USER_FID2PATH,		/* fid2path by unprivileged users */
-	LL_SBI_VERBOSE,			/* verbose mount/umount */
 	LL_SBI_ALWAYS_PING,		/* ping even if server suppress_pings */
-	LL_SBI_TEST_DUMMY_ENCRYPTION,	/* test dummy encryption */
+	LL_SBI_CHECKSUM,		/* checksum each page as it's written */
 	LL_SBI_ENCRYPT,			/* client side encryption */
+	LL_SBI_FLOCK,			/* flock enabled */
+	LL_SBI_LOCALFLOCK,		/* local flocks instead of fs-wide */
 	LL_SBI_FOREIGN_SYMLINK,		/* foreign fake-symlink support */
 	LL_SBI_FOREIGN_SYMLINK_UPCALL,	/* foreign fake-symlink upcall set */
+	LL_SBI_LAZYSTATFS,		/* lazystatfs mount option */
+	LL_SBI_LRU_RESIZE,		/* lru resize support */
+	LL_SBI_NOLCK,			/* DLM locking disabled directio-only */
 	LL_SBI_STATFS_PROJECT,		/* statfs returns project quota */
+	LL_SBI_TEST_DUMMY_ENCRYPTION,	/* test dummy encryption */
+	LL_SBI_USER_FID2PATH,		/* fid2path by unprivileged users */
+	LL_SBI_USER_XATTR,		/* support user xattr */
+	LL_SBI_VERBOSE,			/* verbose mount/umount */
 	LL_SBI_NUM_MOUNT_OPT,
 
+	LL_SBI_64BIT_HASH,		/* support 64-bits dir hash/offset */
 	LL_SBI_ACL,			/* support ACL */
 	LL_SBI_AGL_ENABLED,		/* enable agl */
-	LL_SBI_64BIT_HASH,		/* support 64-bits dir hash/offset */
-	LL_SBI_LAYOUT_LOCK,		/* layout lock support */
-	LL_SBI_XATTR_CACHE,		/* support for xattr cache */
-	LL_SBI_NOROOTSQUASH,		/* do not apply root squash */
-	LL_SBI_FAST_READ,		/* fast read support */
-	LL_SBI_FILE_SECCTX,		/* file security context at create */
-	LL_SBI_TINY_WRITE,		/* tiny write support */
-	LL_SBI_FILE_HEAT,		/* file heat support */
-	LL_SBI_PARALLEL_DIO,		/* parallel (async) O_DIRECT RPCs */
 	LL_SBI_ENCRYPT_NAME,		/* name encryption */
-	LL_SBI_UNALIGNED_DIO,		/* unaligned DIO */
+	LL_SBI_FAST_READ,		/* fast read support */
+	LL_SBI_FILE_HEAT,		/* file heat support */
+	LL_SBI_FILE_SECCTX,		/* file security context at create */
 	LL_SBI_HYBRID_IO,		/* allow BIO as DIO */
+	LL_SBI_LAYOUT_LOCK,		/* layout lock support */
+	LL_SBI_NOROOTSQUASH,		/* do not apply root squash */
+	LL_SBI_PARALLEL_DIO,		/* parallel (async) O_DIRECT RPCs */
+	LL_SBI_TINY_WRITE,		/* tiny write support */
+	LL_SBI_UNALIGNED_DIO,		/* unaligned DIO */
+	LL_SBI_XATTR_CACHE,		/* support for xattr cache */
 	LL_SBI_NUM_FLAGS
 };
 
@@ -923,13 +905,15 @@ struct ll_sb_info {
 
 	DECLARE_BITMAP(ll_flags, LL_SBI_NUM_FLAGS); /* enum ll_sbi_flags */
 	gid_t			 ll_enable_setstripe_gid; /*  */
-	unsigned int		 ll_xattr_cache_enabled:1,
-				 ll_xattr_cache_set:1, /* already set to 0/1 */
+	unsigned int		 ll_checksum_set:1,
 				 ll_client_common_fill_super_succeeded:1,
-				 ll_checksum_set:1,
-				 ll_inode_cache_enabled:1,
+				 ll_dir_open_read:1,
 				 ll_enable_statahead_fname:1,
-				 ll_intent_mkdir_enabled:1;
+				 ll_inode_cache_enabled:1,
+				 ll_intent_mkdir_enabled:1,
+				 ll_sync_on_close:1,
+				 ll_xattr_cache_enabled:1,
+				 ll_xattr_cache_set:1; /* already set to 0/1 */
 
 	struct lustre_client_ocd ll_lco;
 
@@ -1160,38 +1144,38 @@ struct ll_readahead_work {
 extern struct kmem_cache *ll_file_data_slab;
 struct lustre_handle;
 struct ll_file_data {
-	struct ll_readahead_state fd_ras;
-	struct ll_grouplock fd_grouplock;
-	__u64 lfd_pos;
-	__u32 fd_flags;
-	fmode_t fd_omode;
+	struct file			*fd_file;
+	__u64				lfd_pos;
 	/* openhandle if lease exists for this file.
 	 * Borrow lli->lli_och_mutex to protect assignment
 	 */
-	struct obd_client_handle *fd_lease_och;
-	struct obd_client_handle *fd_och;
-	struct file *fd_file;
+	struct obd_client_handle	*fd_lease_och;
+	struct obd_client_handle	*fd_och;
+	struct ll_readahead_state	fd_ras;
 	/* Indicate whether need to report failure when close.
 	 * true: failure is known, not report again.
 	 * false: unknown failure, should report.
 	 */
-	bool fd_write_failed;
-	bool ll_lock_no_expand;
-	/* Used by mirrored file to lead IOs to a specific mirror, usually
-	 * for mirror resync. 0 means default.
-	 */
-	__u32 fd_designated_mirror;
-	/* The layout version when resync starts. Resync I/O should carry this
-	 * layout version for verification to OST objects
-	 */
-	__u32 fd_layout_version;
-	struct pcc_file fd_pcc_file;
+	bool				fd_write_failed;
+	unsigned int			lfd_lock_no_expand:1;
+	__u32				fd_flags;
+	enum mds_open_flags		fd_open_mode;
 	/* striped directory may read partially if some stripe inaccessible,
 	 * -errno is saved here, and will return to user in close().
 	 */
-	int fd_partial_readdir_rc;
+	int				fd_partial_readdir_rc;
+	/* Used by mirrored file to lead IOs to a specific mirror, usually
+	 * for mirror resync. 0 means default.
+	 */
+	__u32				fd_designated_mirror;
+	/* The layout version when resync starts. Resync I/O should carry this
+	 * layout version for verification to OST objects
+	 */
+	__u32				fd_layout_version;
+	struct ll_grouplock		fd_grouplock;
+	struct pcc_file			fd_pcc_file;
 	/* mdtest unique/shared dir stat mode: per process statahead struct. */
-	struct ll_statahead_info *fd_sai;
+	struct ll_statahead_info	*fd_sai;
 };
 
 void llite_tunables_unregister(void);
@@ -1200,6 +1184,11 @@ int llite_tunables_register(void);
 static inline struct inode *ll_info2i(struct ll_inode_info *lli)
 {
 	return &lli->lli_vfs_inode;
+}
+
+static inline __u32 ll_i2projid(struct inode *inode)
+{
+	return ll_i2info(inode)->lli_projid;
 }
 
 __u32 ll_i2suppgid(struct inode *i);
@@ -1277,6 +1266,8 @@ void ll_free_rw_stats_info(struct ll_sb_info *sbi);
 enum {
 	LPROC_LL_READ_BYTES,
 	LPROC_LL_WRITE_BYTES,
+	LPROC_LL_HIO_READ,
+	LPROC_LL_HIO_WRITE,
 	LPROC_LL_READ,
 	LPROC_LL_WRITE,
 	LPROC_LL_IOCTL,
@@ -1339,13 +1330,29 @@ int ll_dir_read(struct inode *inode, __u64 *pos, struct md_op_data *op_data,
 int ll_get_mdt_idx(struct inode *inode);
 int ll_get_mdt_idx_by_fid(struct ll_sb_info *sbi, const struct lu_fid *fid);
 struct page *ll_get_dir_page(struct inode *dir, struct md_op_data *op_data,
-			      __u64 offset, int *partial_readdir_rc);
+			      __u64 offset, bool is64bit,
+			      int *partial_readdir_rc);
 void ll_release_page(struct inode *inode, struct page *page, bool remove);
 int quotactl_ioctl(struct super_block *sb, struct if_quotactl *qctl);
 void ll_quota_iter_check_and_cleanup(struct ll_sb_info *sbi, bool check);
 
 /* llite/namei.c */
 extern const struct inode_operations ll_special_inode_operations;
+
+/* Return True if (file.f_flag) has O_LOV_DELAY_CREATE(volatile) flag set */
+static inline bool ll_lov_delay_create_is_set(unsigned int kernel_open_flags)
+{
+	return (kernel_open_flags & O_LOV_DELAY_CREATE) == O_LOV_DELAY_CREATE;
+}
+
+/* Clear (file.f_flag) O_LOV_DELAY_CREATE(volatile) flag */
+static inline void ll_lov_delay_create_clear(unsigned int *kernel_open_flags)
+{
+	if (ll_lov_delay_create_is_set(*kernel_open_flags))
+		*kernel_open_flags &= ~O_LOV_DELAY_CREATE;
+}
+
+enum mds_open_flags ll_kernel_to_mds_open_flags(unsigned int kernel_open_flags);
 
 struct inode *ll_iget(struct super_block *sb, ino_t hash,
 		      struct lustre_md *lic);
@@ -1394,7 +1401,7 @@ extern enum ldlm_mode ll_take_md_lock(struct inode *inode, __u64 bits,
 int ll_file_open(struct inode *inode, struct file *file);
 int ll_file_release(struct inode *inode, struct file *file);
 int ll_release_openhandle(struct dentry *d, struct lookup_intent *l);
-int ll_md_real_close(struct inode *inode, fmode_t fmode);
+int ll_md_real_close(struct inode *inode, enum mds_open_flags fd_open_mode);
 void ll_track_file_opens(struct inode *inode);
 extern void ll_rw_stats_tally(struct ll_sb_info *sbi, pid_t pid,
 			      struct ll_file_data *file, loff_t pos,
@@ -1560,12 +1567,15 @@ struct md_op_data *ll_prep_md_op_data(struct md_op_data *op_data,
 				      void *data);
 void ll_finish_md_op_data(struct md_op_data *op_data);
 int ll_get_obd_name(struct inode *inode, unsigned int cmd, void __user *arg);
+int ll_get_sb_uuid(struct inode *inode, void __user *arg);
 void ll_compute_rootsquash_state(struct ll_sb_info *sbi);
 ssize_t ll_copy_user_md(const struct lov_user_md __user *md,
 			struct lov_user_md **kbuf);
 void ll_open_cleanup(struct super_block *sb, struct req_capsule *pill);
 
 void ll_dom_finish_open(struct inode *inode, struct ptlrpc_request *req);
+void ll_dir_finish_open(struct inode *inode, struct ptlrpc_request *req);
+
 
 /* Compute expected user md size when passing in a md from user space */
 static inline ssize_t ll_lov_user_md_size(const struct lov_user_md *lum)
@@ -2002,7 +2012,8 @@ static inline int ll_file_nolock(const struct file *file)
 }
 
 static inline void ll_set_lock_data(struct obd_export *exp, struct inode *inode,
-				    struct lookup_intent *it, __u64 *bits)
+				    struct lookup_intent *it,
+				    enum mds_ibits_locks *bits)
 {
 	if (!it->it_lock_set) {
 		struct lustre_handle handle;
@@ -2065,9 +2076,10 @@ static inline int d_lustre_invalid(const struct dentry *dentry)
  */
 static inline void d_lustre_invalidate(struct dentry *dentry)
 {
-	CDEBUG(D_DENTRY, "invalidate dentry %pd (%p) parent %p inode %p refc %d\n",
-	       dentry, dentry,
-	       dentry->d_parent, dentry->d_inode, ll_d_count(dentry));
+	CDEBUG(D_DENTRY,
+	       "invalidate dentry "DNAME" (%p) parent %p inode %p refc %d\n",
+	       encode_fn_dentry(dentry), dentry, dentry->d_parent,
+	       dentry->d_inode, ll_d_count(dentry));
 
 	spin_lock(&dentry->d_lock);
 	set_lld_invalid(dentry, 1);
@@ -2109,7 +2121,7 @@ int ll_page_sync_io(const struct lu_env *env, struct cl_io *io,
 int ll_getparent(struct file *file, struct getparent __user *arg);
 
 /* lcommon_cl.c */
-int cl_setattr_ost(struct cl_object *obj, const struct iattr *attr,
+int cl_setattr_ost(struct inode *inode, const struct iattr *attr,
 		   enum op_xvalid xvalid, unsigned int attr_flags);
 
 extern struct lu_env *cl_inode_fini_env;

@@ -1,27 +1,9 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2017, DDN Storage Corporation.
  */
+
 /*
  * Persistent Client Cache
  *
@@ -1484,7 +1466,7 @@ static int pcc_encsize_xattr_set(struct pcc_inode *pcci)
 	if (!IS_ENCRYPTED(inode))
 		RETURN(0);
 
-	if (ll_require_key(inode) == -ENOKEY &&
+	if (!ll_has_encryption_key(inode) &&
 	    pcci->pcci_lli->lli_attr_valid & OBD_MD_FLLAZYSIZE)
 		size = pcci->pcci_lli->lli_lazysize;
 	else
@@ -2300,7 +2282,7 @@ pcc_file_mapping_reset(struct inode *inode, struct file *file, bool cached)
 			pcc_file_fallback_set(ll_i2info(inode), pccf);
 	}
 
-	if (pcc_file) {
+	if (pcc_file && cached) {
 		struct inode *pcc_inode = file_inode(pcc_file);
 
 		if (pcc_inode->i_mapping == &pcc_inode->i_data)
@@ -3208,7 +3190,6 @@ void pcc_vm_open(struct vm_area_struct *vma)
 {
 	struct pcc_vma *pccv = (struct pcc_vma *)vma->vm_private_data;
 	struct vvp_object *vob;
-	struct pcc_file *pccf;
 	struct inode *inode;
 
 	ENTRY;
@@ -3220,7 +3201,6 @@ void pcc_vm_open(struct vm_area_struct *vma)
 	LASSERT(atomic_read(&vob->vob_mmap_cnt) >= 0);
 	atomic_inc(&vob->vob_mmap_cnt);
 
-	pccf = ll_file2pccf(pccv->pccv_file);
 	atomic_inc(&pccv->pccv_refcnt);
 	if (pccv->pccv_vm_ops->open)
 		pccv->pccv_vm_ops->open(vma);
@@ -3234,7 +3214,6 @@ void pcc_vm_close(struct vm_area_struct *vma)
 {
 	struct pcc_vma *pccv = (struct pcc_vma *)vma->vm_private_data;
 	struct vvp_object *vob;
-	struct pcc_file *pccf;
 	struct inode *inode;
 
 	ENTRY;
@@ -3250,7 +3229,6 @@ void pcc_vm_close(struct vm_area_struct *vma)
 	if (pccv->pccv_vm_ops && pccv->pccv_vm_ops->close)
 		pccv->pccv_vm_ops->close(vma);
 
-	pccf = ll_file2pccf(pccv->pccv_file);
 	pcc_inode_mmap_put(inode);
 	if (atomic_dec_and_test(&pccv->pccv_refcnt)) {
 		fput(pccv->pccv_file);

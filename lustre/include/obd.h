@@ -19,7 +19,7 @@
 #include <linux/kobject.h>
 #include <linux/spinlock.h>
 #include <linux/sysfs.h>
-#include <libcfs/linux/xarray.h>
+#include <lustre_compat/linux/xarray.h>
 
 #include <uapi/linux/lustre/lustre_idl.h>
 #include <lustre_lib.h>
@@ -393,15 +393,8 @@ struct lov_md_tgt_desc {
 };
 
 struct lov_obd {
-	struct lov_desc		desc;
-	struct lov_tgt_desc   **lov_tgts;		/* sparse array */
-	struct lu_tgt_pool	lov_packed;		/* all OSTs in a packed
-							 * array */
-	struct mutex		lov_lock;
+	struct lu_tgt_descs	lov_ost_descs;
 	struct obd_connect_data	lov_ocd;
-	atomic_t		lov_refcount;
-	__u32			lov_death_row;	/* tgts scheduled to be deleted */
-	__u32			lov_tgt_size;	/* size of tgts array */
 	int			lov_connects;
 	int			lov_pool_count;
 	struct rhashtable       lov_pools_hash_body; /* used for key access */
@@ -467,6 +460,8 @@ struct niobuf_local {
 	__u16		lnb_guard_disk:1;
 	/* separate unlock for read path to allow shared access */
 	__u16		lnb_locked:1;
+	/* this lnb corresponds to a hole in the file */
+	__u16		lnb_hole:1;
 };
 
 struct tgt_thread_big_cache {
@@ -688,7 +683,7 @@ struct obd_device {
 	struct obd_export       *obd_self_export;
 	struct obd_export	*obd_lwp_export;
 	/* list of exports in LRU order, for ping evictor, with obd_dev_lock */
-	struct list_head	obd_exports_timed;
+	struct rb_root		obd_exports_timed;
 	time64_t		obd_eviction_timer;	/* for ping evictor */
 
 	atomic_t                obd_max_recoverable_clients;
@@ -741,9 +736,9 @@ struct obd_device {
 	struct dentry			*obd_debugfs_entry;
 	struct dentry			*obd_debugfs_gss_dir;
 	struct proc_dir_entry	*obd_proc_entry;
-	struct proc_dir_entry	*obd_proc_exports_entry;
+	struct dentry			*obd_debugfs_exports;
 	struct dentry			*obd_svc_debugfs_entry;
-	struct lprocfs_stats	*obd_svc_stats;
+	struct lprocfs_stats		*obd_svc_stats;
 	const struct attribute	       **obd_attrs;
 	struct lprocfs_vars	*obd_vars;
 	struct ldebugfs_vars	*obd_debugfs_vars;
@@ -901,6 +896,8 @@ enum md_op_flags {
 	MF_QOS_MKDIR		= BIT(6),
 	MF_RR_MKDIR		= BIT(7),
 	MF_OPNAME_KMALLOCED	= BIT(8),
+	MF_SERVER_ENCCTX	= BIT(9),
+	MF_SERVER_SECCTX	= BIT(10),
 };
 
 enum md_cli_flags {
@@ -911,6 +908,8 @@ enum md_cli_flags {
 	CLI_MIGRATE	= BIT(4),
 	CLI_DIRTY_DATA	= BIT(5),
 	CLI_NO_SLOT     = BIT(6),
+	/**< read on open (used for directory for now) */
+	CLI_READ_ON_OPEN = BIT(7),
 };
 
 enum md_op_code {
@@ -1244,7 +1243,7 @@ struct obd_client_handle {
 	struct md_open_data	*och_mod;
 	struct lustre_handle	 och_lease_handle; /* open lock for lease */
 	__u32			 och_magic;
-	int			 och_flags;
+	enum mds_open_flags	 och_flags; /* Open flags from client */
 };
 
 #define OBD_CLIENT_HANDLE_MAGIC 0xd15ea5ed
@@ -1305,18 +1304,18 @@ struct md_ops {
 	int (*m_setxattr)(struct obd_export *exp, const struct lu_fid *fid,
 			  u64 obd_md_valid, const char *name, const void *value,
 			  size_t value_size, unsigned int xattr_flags,
-			  u32 suppgid, struct ptlrpc_request **req);
+			  u32 suppgid, u32 projid, struct ptlrpc_request **req);
 
 	int (*m_getxattr)(struct obd_export *exp, const struct lu_fid *fid,
 			  u64 obd_md_valid, const char *name, size_t buf_size,
-			  struct ptlrpc_request **req);
+			  u32 projid, struct ptlrpc_request **req);
 
 	int (*m_intent_getattr_async)(struct obd_export *exp,
 				      struct md_op_item *item);
 
 	int (*m_revalidate_lock)(struct obd_export *exp,
 				 struct lookup_intent *it, struct lu_fid *fid,
-				 __u64 *bits);
+				 enum mds_ibits_locks *bits);
 
 	int (*m_file_resync)(struct obd_export *exp,
 			     struct md_op_data *op_data);
@@ -1352,7 +1351,7 @@ struct md_ops {
 
 	int (*m_set_lock_data)(struct obd_export *exp,
 			       const struct lustre_handle *lockh, void *data,
-			       __u64 *bits);
+			       enum mds_ibits_locks *bits);
 
 	enum ldlm_mode (*m_lock_match)(struct obd_export *exp, __u64 flags,
 				       const struct lu_fid *fid,

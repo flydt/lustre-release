@@ -56,18 +56,6 @@ enum ma_valid {
 };
 
 typedef enum {
-	MDL_MINMODE	= 0,
-	MDL_EX		= 1,
-	MDL_PW		= 2,
-	MDL_PR		= 4,
-	MDL_CW		= 8,
-	MDL_CR		= 16,
-	MDL_NL		= 32,
-	MDL_GROUP	= 64,
-	MDL_MAXMODE
-} mdl_mode_t;
-
-typedef enum {
 	MDT_NUL_LOCK = 0,
 	MDT_REG_LOCK = BIT(0),
 	MDT_PDO_LOCK = BIT(1),
@@ -130,7 +118,7 @@ struct md_op_spec {
 	} u;
 
 	/** Open flags from client: such as MDS_OPEN_CREAT, and others. */
-	__u64      sp_cr_flags;
+	enum mds_open_flags      sp_cr_flags;
 
 	/* File security context for creates. */
 	const char	*sp_cr_file_secctx_name; /* (security) xattr name */
@@ -248,7 +236,7 @@ struct md_object_operations {
 			     struct md_device *m, const struct lu_fid *fid);
 
 	int (*moo_open)(const struct lu_env *env, struct md_object *obj,
-			u64 open_flags, struct md_op_spec *spec);
+			enum mds_open_flags open_flags, struct md_op_spec *spc);
 
 	int (*moo_close)(const struct lu_env *env, struct md_object *obj,
 			 struct md_attr *ma, u64 open_flags);
@@ -291,11 +279,11 @@ struct md_object_operations {
 				 struct md_object *obj,
 				 struct md_layout_change *layout);
 	/**
-	 * Check whether the file is in PCC-RO state.
+	 * Additonal layout checks
 	 */
-	int (*moo_layout_pccro_check)(const struct lu_env *env,
-				     struct md_object *obj,
-				     struct md_layout_change *layout);
+	int (*moo_layout_check)(const struct lu_env *env,
+				struct md_object *obj,
+				struct md_layout_change *layout);
 };
 
 /**
@@ -309,9 +297,8 @@ struct md_dir_operations {
 			  const struct lu_name *lname, struct lu_fid *fid,
 			  struct md_op_spec *spec);
 
-	mdl_mode_t (*mdo_lock_mode)(const struct lu_env *env,
-				    struct md_object *obj,
-				    mdl_mode_t mode);
+	enum ldlm_mode (*mdo_lock_mode)(const struct lu_env *env,
+			  struct md_object *obj, enum ldlm_mode mode);
 
 	int (*mdo_create)(const struct lu_env *env, struct md_object *pobj,
 			  const struct lu_name *lname, struct md_object *child,
@@ -320,9 +307,8 @@ struct md_dir_operations {
 
 	/** This method is used for creating data object for this meta object*/
 	int (*mdo_create_data)(const struct lu_env *env, struct md_object *p,
-			       struct md_object *o,
-			       const struct md_op_spec *spec,
-			       struct md_attr *ma);
+			  struct md_object *o, const struct md_op_spec *spec,
+			  struct md_attr *ma);
 
 	int (*mdo_rename)(const struct lu_env *env, struct md_object *spobj,
 			  struct md_object *tpobj, const struct lu_fid *lf,
@@ -506,12 +492,12 @@ static inline int mo_layout_change(const struct lu_env *env,
 	return m->mo_ops->moo_layout_change(env, m, layout);
 }
 
-static inline int mo_layout_pccro_check(const struct lu_env *env,
+static inline int mo_layout_check(const struct lu_env *env,
 					struct md_object *m,
 					struct md_layout_change *layout)
 {
-	LASSERT(m->mo_ops->moo_layout_pccro_check);
-	return m->mo_ops->moo_layout_pccro_check(env, m, layout);
+	LASSERT(m->mo_ops->moo_layout_check);
+	return m->mo_ops->moo_layout_check(env, m, layout);
 }
 
 static inline int mo_swap_layouts(const struct lu_env *env,
@@ -579,11 +565,12 @@ static inline int mdo_lookup(const struct lu_env *env, struct md_object *p,
 	return p->mo_dir_ops->mdo_lookup(env, p, lname, f, spec);
 }
 
-static inline mdl_mode_t mdo_lock_mode(const struct lu_env *env,
-				       struct md_object *mo, mdl_mode_t lm)
+static inline enum ldlm_mode mdo_lock_mode(const struct lu_env *env,
+					   struct md_object *mo,
+					   enum ldlm_mode lm)
 {
 	if (mo->mo_dir_ops->mdo_lock_mode == NULL)
-		return MDL_MINMODE;
+		return LCK_MODE_MIN;
 	return mo->mo_dir_ops->mdo_lock_mode(env, mo, lm);
 }
 
@@ -694,13 +681,16 @@ struct lu_ucred {
 	char			 uc_jobid[LUSTRE_JOBID_SIZE];
 	struct lnet_nid		 uc_nid;
 	bool			 uc_enable_audit;
-	int			 uc_rbac_file_perms:1;
-	int			 uc_rbac_dne_ops:1;
-	int			 uc_rbac_quota_ops:1;
-	int			 uc_rbac_byfid_ops:1;
-	int			 uc_rbac_chlg_ops:1;
-	int			 uc_rbac_fscrypt_admin:1;
-	int			 uc_rbac_server_upcall:1;
+	unsigned int		 uc_rbac_file_perms:1;
+	unsigned int		 uc_rbac_dne_ops:1;
+	unsigned int		 uc_rbac_quota_ops:1;
+	unsigned int		 uc_rbac_byfid_ops:1;
+	unsigned int		 uc_rbac_chlg_ops:1;
+	unsigned int		 uc_rbac_fscrypt_admin:1;
+	unsigned int		 uc_rbac_server_upcall:1;
+	unsigned int		 uc_rbac_ignore_root_prjquota:1;
+	unsigned int		 uc_rbac_hsm_ops:1;
+	unsigned int		 uc_rbac_local_admin:1;
 };
 
 struct lu_ucred *lu_ucred(const struct lu_env *env);

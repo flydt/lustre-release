@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2014, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/ofd/ofd_trans.c
  *
  * This file provides functions for OBD Filter Device (OFD) transaction
  * management.
@@ -39,6 +19,8 @@
 
 #define DEBUG_SUBSYSTEM S_FILTER
 
+#include <obd_class.h>
+#include <lustre_nodemap.h>
 #include "ofd_internal.h"
 
 /**
@@ -71,9 +53,22 @@ struct thandle *ofd_trans_create(const struct lu_env *env,
 	if (IS_ERR(th))
 		return th;
 
-	/* export can require sync operations */
-	if (info->fti_exp != NULL)
+	if (info->fti_exp != NULL) {
+		struct lu_nodemap *nodemap;
+
+		/* export can require sync operations */
 		th->th_sync |= info->fti_exp->exp_need_sync;
+
+		nodemap = nodemap_get_from_exp(info->fti_exp);
+		if (!IS_ERR_OR_NULL(nodemap)) {
+			th->th_ignore_root_proj_quota = !!(nodemap->nmf_rbac &
+						NODEMAP_RBAC_IGN_ROOT_PRJQUOTA);
+			nodemap_putref(nodemap);
+		} else {
+			th->th_ignore_root_proj_quota = 1;
+		}
+	}
+
 	return th;
 }
 

@@ -77,7 +77,7 @@ static int qmt_entry_iter_cb(struct cfs_hash *hs, struct cfs_hash_bd *bd,
 	struct lquota_entry	*lqe;
 
 	lqe = hlist_entry(hnode, struct lquota_entry, lqe_hash);
-	LASSERT(atomic_read(&lqe->lqe_ref) > 0);
+	LASSERT(kref_read(&lqe->lqe_ref) > 0);
 
 	if (lqe->lqe_id.qid_uid == 0 || !lqe->lqe_is_default)
 		return 0;
@@ -326,13 +326,12 @@ static int qmt_set(const struct lu_env *env, struct qmt_device *qmt,
 	if (IS_ERR(lqe))
 			RETURN(PTR_ERR(lqe));
 
+	lqe_write_lock(lqe);
 	lqe->lqe_is_deleted = 0;
 	lqe->lqe_is_reset = 0;
+	lqe_write_unlock(lqe);
 	rc = qmt_set_with_lqe(env, qmt, lqe, hard, soft, time, valid,
 			      is_default, is_updated);
-	if (rc == 0)
-		lqe->lqe_is_deleted = 0;
-
 	lqe_putref(lqe);
 	RETURN(rc);
 }
@@ -377,11 +376,8 @@ static int qmt_delete_qid(const struct lu_env *env, struct qmt_device *qmt,
 	if (CFS_FAIL_CHECK(OBD_FAIL_QUOTA_NOSYNC))
 		th->th_sync = 0;
 
-	lqe_write_lock(lqe);
 	rc = lquota_disk_delete(env, th,
 				qpi->qpi_glb_obj[qtype], qid, &ver);
-
-	lqe_write_unlock(lqe);
 	dt_trans_stop(env, qmt->qmt_child, th);
 
 	if (rc == 0) {
@@ -541,6 +537,7 @@ static int qmt_quotactl(const struct lu_env *env, struct lu_device *ld,
 	struct obd_dqblk *dqb = &oqctl->qc_dqblk;
 	struct qmt_pool_info *pool;
 	char *poolname;
+	int qtype = oqctl->qc_type;
 	int rc = 0;
 	bool is_default = false;
 	bool is_first_iter = false;
@@ -614,9 +611,10 @@ static int qmt_quotactl(const struct lu_env *env, struct lu_device *ld,
 			if (IS_ERR(pool))
 				RETURN(PTR_ERR(pool));
 
-			glb_obj = pool->qpi_glb_obj[oqctl->qc_type];
+			glb_obj = pool->qpi_glb_obj[qtype];
 			rc = lquota_obj_iter(env, lu2dt_dev(ld), glb_obj,
-					 oqctl, buffer, size / 2, true, true);
+					     pool->qpi_grace_lqe[qtype], oqctl,
+					     buffer, size / 2, true, true);
 
 			qpi_putref(env, pool);
 
@@ -634,10 +632,11 @@ static int qmt_quotactl(const struct lu_env *env, struct lu_device *ld,
 			if (IS_ERR(pool))
 				RETURN(PTR_ERR(pool));
 
-			glb_obj = pool->qpi_glb_obj[oqctl->qc_type];
+			glb_obj = pool->qpi_glb_obj[qtype];
 			rc = lquota_obj_iter(env, lu2dt_dev(ld), glb_obj,
-					 oqctl, buffer + size / 2, size / 2,
-					 true, false);
+					     pool->qpi_grace_lqe[qtype], oqctl,
+					     buffer + size / 2, size / 2,
+					     true, false);
 			qpi_putref(env, pool);
 
 			if (rc < 0 && rc != -ENOENT)
@@ -1279,7 +1278,7 @@ static int qmt_dqacq(const struct lu_env *env, struct lu_device *ld,
 			RETURN(-ENOLCK);
 		}
 
-		if (ldlm_is_ast_sent(lock)) {
+		if ((lock->l_flags & LDLM_FL_AST_SENT)) {
 			struct ptlrpc_service_part *svc;
 			timeout_t timeout;
 

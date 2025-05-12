@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2010, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -708,7 +690,8 @@ struct ptlrpc_service *ptlrpc_register_service(struct ptlrpc_service_conf *conf,
 	struct ptlrpc_service *service;
 	struct ptlrpc_service_part *svcpt;
 	struct cfs_cpt_table *cptable;
-	__u32 *cpts = NULL;
+	char param[MAX_OBD_NAME * 4];
+	u32 *cpts = NULL;
 	int ncpts;
 	int cpt;
 	int rc;
@@ -836,13 +819,24 @@ struct ptlrpc_service *ptlrpc_register_service(struct ptlrpc_service_conf *conf,
 	mutex_unlock(&ptlrpc_all_services_mutex);
 
 	if (parent) {
+		char *path, *tmp;
+
 		rc = ptlrpc_sysfs_register_service(parent, service);
 		if (rc)
 			GOTO(failed, rc);
+
+		path = kobject_get_path(&parent->kobj, GFP_KERNEL);
+		if (path) {
+			tmp = path + strlen("/fs/lustre/");
+			scnprintf(param, sizeof(param), "%s.%s.stats",
+				  tmp, service->srv_name);
+			tmp = param;
+			while ((tmp = strchr(tmp, '/')) != NULL)
+				*tmp = '.';
+		}
 	}
 
-	if (debugfs_entry != NULL)
-		ptlrpc_ldebugfs_register_service(debugfs_entry, service);
+	ptlrpc_ldebugfs_register_service(debugfs_entry, param, service);
 
 	rc = ptlrpc_service_nrs_setup(service);
 	if (rc != 0)
@@ -1101,34 +1095,158 @@ static void ptlrpc_server_finish_active_request(
 }
 
 /**
+ * Calculate an export eviction timeout.
+ * Used for both cases, lock prolong timeout and ping evictor timeout.
+ *
+ * Whereas a problem client may be still alive trying hard to reconnect and to
+ * resend its RPCs, we should not consider the worst ever case, consisting of
+ * a chain of failures on each step. Let this timeout survive a recovery of
+ * just 1 failure, but let this be the worst possible one - a dead server NID:
+ *
+ * - an RPC timeout;
+ * - the first re-connect is sent to the same NID and times out;
+ * - the second re-connect to the failover pair returns an error;
+ * - the third re-connect to the original node to a different NID succeeds;
+ * - the RPC resend succeeds;
+ *
+ * For lock prolong timeout, we are in the middle of the process -
+ * BL AST is sent, CANCEL is ahead - it is still 1 reply for the current RPC
+ * and at least 1 another RPC (which will trigger another refresh if it will be
+ * not CANCEL) - but more accurate than ldlm_bl_timeout as the timeout is taken
+ * from the RPC (i.e. the view of the client on the current AT) is taken into
+ * account.
+ *
+ * \param[in] at	      AT of RPC service time to calculate timeout for
+ * \param[in] net_at	      network AT
+ * \param[in] rpc_left_time   left service time for the current RPC
+ *                            0 if not applicable
+ * \param[in] pinger	      if the caller is ping evictor or ldlm
+ *
+ * \retval             timeout in seconds to wait for the next client's RPC
+ */
+static timeout_t ptlrpc_export_timeout(struct obd_device *obd,
+				       struct adaptive_timeout *at,
+				       timeout_t netl,
+				       timeout_t rpc_left_time,
+				       bool pinger)
+{
+	timeout_t timeout, at_timeout, req_timeout;
+
+	if (obd_at_off(obd))
+		return obd_timeout / 2;
+
+	if (pinger) {
+		/* There might be a delay till the next RPC. In fact it is two
+		 * PING_INTERVALs due to ptlrpc_pinger_main logic. */
+		timeout = 2 * PING_INTERVAL;
+	} else {
+		/* For the lock prolong, we have an RPC in hand, which may still
+		 * get its reply lost. Therefore, it may be either this one or
+		 * the next client's RPC times out, take the max.
+		 * Considering the current RPC, take just the left time. */
+		LASSERT(at != NULL);
+		at_timeout = at_est2timeout(obd_at_get(obd, at)) + netl;
+		req_timeout = max(rpc_left_time + netl, at_timeout);
+		/* Adding the RPC resend time - not needed in the ping evictor
+		 * case, export is updated on re-connect  */
+		timeout = req_timeout + at_timeout;
+	}
+
+	/* Adding the re-connect time: 1st re-connect timeout,
+	 * 2nd reconnect error, 3rd reconnect success. */
+	timeout += 3 * (INITIAL_CONNECT_TIMEOUT + netl);
+
+	/* Let's be a bit more conservative than client */
+	return max(timeout + (timeout >> 4),
+		   (timeout_t)obd_get_ldlm_enqueue_min(obd));
+}
+
+/**
+ * Used for lock prolog timeout, calculates a timeout for CANCEL to come.
+ * Also used for recovery, calculates a timeout for a next recovery RPC to come.
+ * In this case, there is an RPC, in hand. Thus, a particular svcpt AT is used.
+ *
+ * The reverse import network AT is used as an estimate for the client side one.
+ */
+timeout_t ptlrpc_export_prolong_timeout(struct ptlrpc_request *req,
+					bool recovery)
+{
+	timeout_t netl;
+
+	if (recovery)
+		netl = lustre_msg_get_service_timeout(req->rq_reqmsg);
+	else
+		netl = obd_at_get(req->rq_export->exp_obd,
+				  &req->rq_export->exp_imp_reverse->
+				  imp_at.iat_net_latency);
+
+	return ptlrpc_export_timeout(req->rq_export->exp_obd,
+				     &req->rq_rqbd->rqbd_svcpt->scp_at_estimate,
+				     netl, req->rq_deadline -
+				     ktime_get_real_seconds(), false);
+}
+
+/**
+ * Used for ping evictor, calculates a timeout for any next RPC to come.
+ * As there are different portals and the AT stats is separated for them,
+ * just the last RPC AT is used here.
+ *
+ * The reverse import network AT is used as an estimate for the client side one.
+ */
+static timeout_t ptlrpc_export_pinger_timeout(struct ptlrpc_request *req)
+{
+	struct obd_import *revimp = req->rq_export->exp_imp_reverse;
+	timeout_t netl = obd_at_get(req->rq_export->exp_obd,
+				    &revimp->imp_at.iat_net_latency);
+
+	return ptlrpc_export_timeout(req->rq_export->exp_obd,
+				     &req->rq_rqbd->rqbd_svcpt->scp_at_estimate,
+				     netl, 0, true);
+}
+
+/**
+ * In case the net was down and just came back, when the 1st timeout has been
+ * already expired, clients just keep sending re-connects. Applying the same
+ * formula as in ptlrpc_export_timeout() to this case we get:
+ * - a previous reconnect to not yet recovered network, times out;
+ * - the second reconnect to the failover pair, ENODEV;
+ * - the third reconnect succeeds;
+ */
+static timeout_t ptlrpc_export_extra_timeout(struct obd_export *exp)
+{
+	timeout_t netl;
+
+	/* As this is not the 1st re-connection failure, the client might
+	 * have net latency get extended to the max - CONNECTION_SWITCH_MAX */
+	netl = obd_at_get(exp->exp_obd,
+			  &exp->exp_imp_reverse->imp_at.iat_net_latency);
+	return 3 * INITIAL_CONNECT_TIMEOUT + CONNECTION_SWITCH_MAX + 2 * netl;
+}
+
+/**
  * This function makes sure dead exports are evicted in a timely manner.
  * This function is only called when some export receives a message (i.e.,
  * the network is up.)
  */
-void ptlrpc_update_export_timer(struct obd_export *exp, time64_t extra_delay)
+void ptlrpc_update_export_timer(struct ptlrpc_request *req)
 {
-	struct obd_export *oldest_exp, *newest_exp;
-	time64_t oldest_time, current_time;
-	bool	evict = false;
+	struct obd_export *oldest_exp, *newest_exp, *exp;
+	time64_t current_time, timeout;
+	bool evict = false;
+	void *data;
+	int rc;
 	ENTRY;
 
-	LASSERT(exp);
+	LASSERT(req != NULL);
+	LASSERT(req->rq_export != NULL);
 
-	/*
-	 * Compensate for slow machines, etc, by faking our request time
-	 * into the future.  Although this can break the strict time-ordering
-	 * of the list, we can be really lazy here - we don't have to evict
-	 * at the exact right moment.  Eventually, all silent exports
-	 * will make it to the top of the list.
-	 */
-
-	/* Do not pay attention on 1sec or smaller renewals. */
+	exp = req->rq_export;
 	current_time = ktime_get_real_seconds();
-	/* 1 seconds */
-	if (exp->exp_last_request_time + 1 >= current_time + extra_delay)
-		RETURN_EXIT;
 
-	exp->exp_last_request_time = current_time + extra_delay;
+	rc = obd_export_timed_init(exp, &data);
+	if (rc)
+		/* will be updated next time */
+		RETURN_EXIT;
 
 	/*
 	 * exports may get disconnected from the chain even though the
@@ -1136,54 +1254,60 @@ void ptlrpc_update_export_timer(struct obd_export *exp, time64_t extra_delay)
 	 * manipulating the lists
 	 */
 	spin_lock(&exp->exp_obd->obd_dev_lock);
-
-	if (list_empty(&exp->exp_obd_chain_timed)) {
+	if (list_empty(&exp->exp_timed_chain)) {
 		/* this one is not timed */
 		spin_unlock(&exp->exp_obd->obd_dev_lock);
-		RETURN_EXIT;
+		GOTO(err, 0);
 	}
 
-	newest_exp = list_last_entry(&exp->exp_obd->obd_exports_timed,
-				     struct obd_export, exp_obd_chain_timed);
+	exp->exp_last_request_time = current_time;
 
-	list_move_tail(&exp->exp_obd_chain_timed,
-		       &exp->exp_obd->obd_exports_timed);
+	timeout = ptlrpc_export_pinger_timeout(req);
+
+	/* Do not pay attention on 1sec or smaller renewals. */
+	if (exp->exp_deadline + 1 >= current_time + timeout) {
+		spin_unlock(&exp->exp_obd->obd_dev_lock);
+		GOTO(err, 0);
+	}
+
+	newest_exp = obd_export_timed_get(exp->exp_obd, true);
+	obd_export_timed_del(exp);
+	exp->exp_deadline = current_time + timeout;
+	obd_export_timed_add(exp, &data);
 
 	if (test_bit(OBDF_RECOVERING, exp->exp_obd->obd_flags)) {
 		/* be nice to everyone during recovery */
 		spin_unlock(&exp->exp_obd->obd_dev_lock);
-		RETURN_EXIT;
+		GOTO(err, 0);
 	}
-
-	oldest_exp = list_entry(exp->exp_obd->obd_exports_timed.next,
-				struct obd_export, exp_obd_chain_timed);
-
-	oldest_time = oldest_exp->exp_last_request_time;
+	oldest_exp = obd_export_timed_get(exp->exp_obd, false);
 
 	/* Check if the oldest entry is expired. */
-	if (exp->exp_obd->obd_eviction_timer == 0 &&
-	    current_time > oldest_time + PING_EVICT_TIMEOUT + extra_delay) {
-
-		if (current_time < newest_exp->exp_last_request_time +
-			     PING_EVICT_TIMEOUT / 2) {
-			/* If import is active - evict stale clients */
-			evict = true;
-		} else {
-			/*
-			 * We need a second timer, in case the net was down and
-			 * it just came back. Since the pinger may skip every
-			 * other PING_INTERVAL (see note in ptlrpc_pinger_main),
-			 * we better wait for 3.
-			 */
-			exp->exp_obd->obd_eviction_timer =
-				ktime_get_real_seconds() + 3 * PING_INTERVAL;
-			CDEBUG(D_HA, "%s: Think about evicting %s from %lld\n",
-			       exp->exp_obd->obd_name,
-			       obd_export_nid2str(oldest_exp), oldest_time);
-
+	if (exp->exp_obd->obd_eviction_timer == 0) {
+		if (current_time > oldest_exp->exp_deadline) {
+			timeout = newest_exp->exp_last_request_time +
+				((newest_exp->exp_deadline -
+				  newest_exp->exp_last_request_time) >> 1);
+			if (current_time < timeout) {
+				/* If import is active - evict stale clients */
+				evict = true;
+			} else {
+				/*
+				 * We need a second timer, in case the net was
+				 * down and it just came back.
+				 */
+				exp->exp_obd->obd_eviction_timer =
+					ktime_get_real_seconds() +
+					ptlrpc_export_extra_timeout(oldest_exp);
+				CDEBUG(D_HA, "%s: Think about evicting %s "
+				       "from %lld deadline at %lld\n",
+				       exp->exp_obd->obd_name,
+				       obd_export_nid2str(oldest_exp),
+				       oldest_exp->exp_deadline,
+				       exp->exp_obd->obd_eviction_timer);
+			}
 		}
 	}
-
 	spin_unlock(&exp->exp_obd->obd_dev_lock);
 
 	if (evict) {
@@ -1191,7 +1315,7 @@ void ptlrpc_update_export_timer(struct obd_export *exp, time64_t extra_delay)
 		ping_evictor_wake(exp);
 	} else {
 		if (ktime_get_real_seconds() >
-		    (exp->exp_obd->obd_eviction_timer + extra_delay)) {
+		    exp->exp_obd->obd_eviction_timer) {
 			/*
 			 * The evictor won't evict anyone who we've heard from
 			 * recently, so we don't have to check before we start
@@ -1203,6 +1327,8 @@ void ptlrpc_update_export_timer(struct obd_export *exp, time64_t extra_delay)
 	}
 
 	EXIT;
+err:
+	obd_export_timed_fini(exp, &data);
 }
 
 /**
@@ -1825,7 +1951,8 @@ static int ptlrpc_server_request_add(struct ptlrpc_service_part *svcpt,
 {
 	int rc;
 	bool hp;
-	struct ptlrpc_request *orig;
+	struct ptlrpc_request *orig = NULL;
+	int opc;
 
 	ENTRY;
 
@@ -1836,6 +1963,8 @@ static int ptlrpc_server_request_add(struct ptlrpc_service_part *svcpt,
 	hp = rc > 0;
 	ptlrpc_nrs_req_initialize(svcpt, req, hp);
 
+	opc = lustre_msg_get_opc(req->rq_reqmsg);
+
 	while (req->rq_export != NULL) {
 		struct obd_export *exp = req->rq_export;
 
@@ -1844,16 +1973,25 @@ static int ptlrpc_server_request_add(struct ptlrpc_service_part *svcpt,
 		 * atomically
 		 */
 		spin_lock_bh(&exp->exp_rpc_lock);
-#ifdef HAVE_SERVER_SUPPORT
-		ptlrpc_server_mark_in_progress_obsolete(req);
-#endif
-		orig = ptlrpc_server_check_resend_in_progress(req);
-		if (orig && CFS_FAIL_PRECHECK(OBD_FAIL_PTLRPC_RESEND_RACE)) {
-			spin_unlock_bh(&exp->exp_rpc_lock);
 
-			CFS_RACE(OBD_FAIL_PTLRPC_RESEND_RACE);
-			msleep(4 * MSEC_PER_SEC);
-			continue;
+		/* Cancels are unbounded unlimited requests, they are also
+		 * stateless, so we don't really want to search for duplicates
+		 * as that can take a really long time (under spinlock at that.
+		 * There might be other requests like this and we might want to
+		 * make this code a bit more generic, but this should plug
+		 * the most obious hole for now */
+		if (opc != LDLM_CANCEL) {
+#ifdef HAVE_SERVER_SUPPORT
+			ptlrpc_server_mark_in_progress_obsolete(req);
+#endif
+			orig = ptlrpc_server_check_resend_in_progress(req);
+			if (orig && CFS_FAIL_PRECHECK(OBD_FAIL_PTLRPC_RESEND_RACE)) {
+				spin_unlock_bh(&exp->exp_rpc_lock);
+
+				CFS_RACE(OBD_FAIL_PTLRPC_RESEND_RACE);
+				msleep(4 * MSEC_PER_SEC);
+				continue;
+			}
 		}
 
 		if (orig && likely(atomic_inc_not_zero(&orig->rq_refcount))) {
@@ -2177,7 +2315,8 @@ static int ptlrpc_server_handle_req_in(struct ptlrpc_service_part *svcpt,
 
 		if (rc)
 			goto err_req;
-		ptlrpc_update_export_timer(req->rq_export, 0);
+
+		ptlrpc_update_export_timer(req);
 	}
 
 	/* req_in handling should/must be fast */
@@ -2312,9 +2451,8 @@ static int ptlrpc_server_handle_request(struct ptlrpc_service_part *svcpt,
 	if (likely(request->rq_export)) {
 		if (unlikely(ptlrpc_check_req(request)))
 			goto put_conn;
-		ptlrpc_update_export_timer(request->rq_export,
-					   div_u64(timediff_usecs,
-						   USEC_PER_SEC / 2));
+
+		ptlrpc_update_export_timer(request);
 	}
 
 	/*
@@ -2514,7 +2652,7 @@ static int ptlrpc_handle_rs(struct ptlrpc_reply_state *rs)
 
 		class_export_put(exp);
 		rs->rs_export = NULL;
-		ptlrpc_rs_decref(rs);
+		kref_put(&rs->rs_refcount, lustre_free_reply_state);
 		if (atomic_dec_and_test(&svcpt->scp_nreps_difficult) &&
 		    svc->srv_is_stopping)
 			wake_up_all(&svcpt->scp_waitq);

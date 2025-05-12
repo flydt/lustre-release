@@ -19,7 +19,7 @@
 #define D_MOUNT (D_SUPER | D_CONFIG /* | D_WARNING */)
 
 #include <linux/types.h>
-#include <linux/generic-radix-tree.h>
+#include <lustre_compat/linux/generic-radix-tree.h>
 #ifdef HAVE_LINUX_SELINUX_IS_ENABLED
 #include <linux/selinux.h>
 #endif
@@ -621,9 +621,12 @@ static int lustre_lwp_setup(struct lustre_cfg *lcfg, struct lustre_sb_info *lsi,
 	char *lwpname = NULL;
 	char *lwpuuid = NULL;
 	struct lnet_nid nid;
+	char *nidnet;
+	__u32 refnet;
 	int rc;
 
 	ENTRY;
+
 	if (lcfg->lcfg_nid)
 		lnet_nid4_to_nid(lcfg->lcfg_nid, &nid);
 	else {
@@ -631,6 +634,12 @@ static int lustre_lwp_setup(struct lustre_cfg *lcfg, struct lustre_sb_info *lsi,
 		if (rc)
 			RETURN(rc);
 	}
+
+	nidnet = lsi->lsi_lmd->lmd_nidnet;
+	refnet = nidnet ? libcfs_str2net(nidnet) : LNET_NET_ANY;
+	if (refnet != LNET_NET_ANY && LNET_NID_NET(&nid) != refnet)
+		RETURN(-ENETUNREACH);
+
 	rc = class_add_uuid(lustre_cfg_string(lcfg, 1), &nid);
 	if (rc != 0) {
 		CERROR("%s: Can't add uuid: rc =%d\n", lsi->lsi_svname, rc);
@@ -678,7 +687,7 @@ out:
 	OBD_FREE(lwpname, MTI_NAME_MAXLEN);
 	OBD_FREE(lwpuuid, MTI_NAME_MAXLEN);
 
-	return rc;
+	RETURN(rc);
 }
 
 /* the caller is responsible for memory free */
@@ -748,8 +757,14 @@ static int lustre_lwp_add_conn(struct lustre_cfg *cfg,
 	lustre_cfg_init(lcfg, LCFG_ADD_CONN, bufs);
 
 	rc = class_add_conn(lwp, lcfg);
-	if (rc < 0)
+	if (rc == -ENETUNREACH) {
+		CDEBUG(D_CONFIG,
+		       "%s: ignore conn not on net %s: rc = %d\n",
+		       lwpname, lsi->lsi_lmd->lmd_nidnet, rc);
+		rc = 0;
+	} else if (rc < 0) {
 		CERROR("%s: can't add conn: rc = %d\n", lwpname, rc);
+	}
 
 	OBD_FREE(lcfg, lustre_cfg_len(lcfg->lcfg_bufcount,
 				      lcfg->lcfg_buflens));
@@ -783,9 +798,7 @@ static int client_lwp_config_process(const struct lu_env *env,
 				     struct llog_rec_hdr *rec, void *data)
 {
 	struct config_llog_instance *cfg = data;
-	int cfg_len = rec->lrh_len;
-	char *cfg_buf = (char *) (rec + 1);
-	struct lustre_cfg *lcfg = NULL;
+	struct lustre_cfg *lcfg = REC_DATA(rec);
 	struct lustre_sb_info *lsi;
 	int rc = 0, swab = 0;
 
@@ -800,13 +813,12 @@ static int client_lwp_config_process(const struct lu_env *env,
 		GOTO(out, rc = -EINVAL);
 	lsi = s2lsi(cfg->cfg_sb);
 
-	lcfg = (struct lustre_cfg *)cfg_buf;
 	if (lcfg->lcfg_version == __swab32(LUSTRE_CFG_VERSION)) {
 		lustre_swab_lustre_cfg(lcfg);
 		swab = 1;
 	}
 
-	rc = lustre_cfg_sanity_check(cfg_buf, cfg_len);
+	rc = lustre_cfg_sanity_check(lcfg, REC_DATA_LEN(rec));
 	if (rc < 0)
 		GOTO(out, rc);
 
@@ -846,10 +858,13 @@ static int client_lwp_config_process(const struct lu_env *env,
 	case LCFG_ADD_UUID: {
 		if (cfg->cfg_flags == CFG_F_MARKER) {
 			rc = lustre_lwp_setup(lcfg, lsi, cfg->cfg_lwp_idx);
-			/* XXX: process only the first nid as
+			/* XXX: process only the first nid if on restricted net,
 			 * we don't need another instance of lwp
 			 */
-			cfg->cfg_flags |= CFG_F_SKIP;
+			if (rc == -ENETUNREACH)
+				rc = 0;
+			else
+				cfg->cfg_flags |= CFG_F_SKIP;
 		} else if (cfg->cfg_flags == (CFG_F_MARKER | CFG_F_SKIP)) {
 			struct lnet_nid nid;
 
@@ -1065,6 +1080,7 @@ static int lustre_start_lwp(struct super_block *sb)
 	cfg->cfg_callback = client_lwp_config_process;
 	cfg->cfg_instance = ll_get_cfg_instance(sb);
 	rc = lustre_process_log(sb, logname, cfg);
+
 	/* need to remove config llog from mgc */
 	lsi->lsi_lwp_started = 1;
 
@@ -1305,9 +1321,11 @@ static int server_register_target(struct lustre_sb_info *lsi)
 	struct obd_device *mgc = lsi->lsi_mgc;
 	struct mgs_target_info *mti = NULL;
 	size_t mti_len = sizeof(*mti);
+	struct lnet_nid nid;
 	bool must_succeed;
-	int rc;
 	int tried = 0;
+	char *nidstr;
+	int rc;
 
 	ENTRY;
 	LASSERT(mgc);
@@ -1315,9 +1333,18 @@ static int server_register_target(struct lustre_sb_info *lsi)
 	if (IS_ERR(mti))
 		GOTO(out, rc = PTR_ERR(mti));
 
-	CDEBUG(D_MOUNT, "Registration %s, fs=%s, %s, index=%04x, flags=%#x\n",
-	       mti->mti_svname, mti->mti_fsname, mti->mti_nidlist[0],
-	       mti->mti_stripe_index, mti->mti_flags);
+	if (exp_connect_flags2(lsi->lsi_mgc->u.cli.cl_mgc_mgsexp) &
+	    OBD_CONNECT2_LARGE_NID) {
+		nidstr = mti->mti_nidlist[0]; /* large_nid */
+	} else {
+		lnet_nid4_to_nid(mti->mti_nids[0], &nid);
+		nidstr = libcfs_nidstr(&nid);
+	}
+
+	CDEBUG(D_MOUNT,
+	       "Registration %s, fs=%s, %s, index=%04x, flags=%#x\n",
+	       mti->mti_svname, mti->mti_fsname, nidstr, mti->mti_stripe_index,
+	       mti->mti_flags);
 
 	/* we cannot ignore registration failure if MGS logs must be updated. */
 	must_succeed = !!(lsi->lsi_flags &
@@ -1685,7 +1712,8 @@ static void server_put_super(struct super_block *sb)
 		GOTO(out, rc);
 	}
 	rc = lu_env_add(&env);
-	LASSERT(rc == 0);
+	if (unlikely(rc))
+		GOTO(out_fini, rc);
 
 	/* Stop the target */
 	if (!test_bit(LMD_FLG_NOSVC, lsi->lsi_lmd->lmd_flags) &&
@@ -1776,6 +1804,7 @@ static void server_put_super(struct super_block *sb)
 	}
 
 	lu_env_remove(&env);
+out_fini:
 	lu_env_fini(&env);
 
 out:

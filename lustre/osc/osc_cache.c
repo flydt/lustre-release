@@ -966,7 +966,7 @@ static int osc_extent_truncate(struct osc_extent *ext, pgoff_t trunc_index,
 	if (IS_ERR(env))
 		RETURN(PTR_ERR(env));
 
-	io  = osc_env_thread_io(env);
+	io  = osc_env_new_io(env);
 	io->ci_obj = cl_object_top(osc2cl(obj));
 	io->ci_ignore_layout = 1;
 	fbatch = &osc_env_info(env)->oti_fbatch;
@@ -3140,7 +3140,6 @@ bool osc_page_gang_lookup(const struct lu_env *env, struct cl_io *io,
 			cl_page_get(page);
 			pvec[j++] = ops;
 		}
-		++idx;
 
 		/*
 		 * Here a delicate locking dance is performed. Current thread
@@ -3182,6 +3181,7 @@ bool osc_page_gang_lookup(const struct lu_env *env, struct cl_io *io,
 		if (need_resched())
 			cond_resched();
 
+		++idx;
 		spin_lock(&osc->oo_tree_lock);
 		tree_lock = true;
 	}
@@ -3308,7 +3308,7 @@ int osc_lock_discard_pages(const struct lu_env *env, struct osc_object *osc,
 			   pgoff_t start, pgoff_t end, bool discard)
 {
 	struct osc_thread_info *info = osc_env_info(env);
-	struct cl_io *io = osc_env_thread_io(env);
+	struct cl_io *io = osc_env_new_io(env);
 	osc_page_gang_cbt cb;
 	int result;
 

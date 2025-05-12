@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/ptlrpc/pack_generic.c
  *
  * (Un)packing of OST requests
  *
@@ -328,7 +308,7 @@ int lustre_pack_reply_v2(struct ptlrpc_request *req, int count,
 		RETURN(rc);
 
 	rs = req->rq_reply_state;
-	atomic_set(&rs->rs_refcount, 1); /* 1 ref for rq_reply_state */
+	kref_init(&rs->rs_refcount); /* 1 ref for rq_reply_state */
 	rs->rs_cb_id.cbid_fn = reply_out_callback;
 	rs->rs_cb_id.cbid_arg = rs;
 	rs->rs_svcpt = req->rq_rqbd->rqbd_svcpt;
@@ -540,11 +520,13 @@ int lustre_grow_msg(struct lustre_msg *msg, int segment, unsigned int newlen)
 }
 EXPORT_SYMBOL(lustre_grow_msg);
 
-void lustre_free_reply_state(struct ptlrpc_reply_state *rs)
+void lustre_free_reply_state(struct kref *kref)
 {
+	struct ptlrpc_reply_state *rs = container_of(kref,
+						     struct ptlrpc_reply_state,
+						     rs_refcount);
 	PTLRPC_RS_DEBUG_LRU_DEL(rs);
 
-	LASSERT(atomic_read(&rs->rs_refcount) == 0);
 	LASSERT(!rs->rs_difficult || rs->rs_handled);
 	LASSERT(!rs->rs_difficult || rs->rs_unlinked);
 	LASSERT(!rs->rs_scheduled);
@@ -826,27 +808,6 @@ char *lustre_msg_string(struct lustre_msg *m, __u32 index, __u32 max_len)
 	}
 
 	return str;
-}
-
-/* Wrap up the normal fixed length cases */
-static inline void *__lustre_swab_buf(struct lustre_msg *msg, __u32 index,
-				      __u32 min_size, void *swabber)
-{
-	void *ptr = NULL;
-
-	LASSERT(msg != NULL);
-	switch (msg->lm_magic) {
-	case LUSTRE_MSG_MAGIC_V2:
-		ptr = lustre_msg_buf_v2(msg, index, min_size);
-		break;
-	default:
-		CERROR("incorrect message magic: %08x\n", msg->lm_magic);
-	}
-
-	if (ptr != NULL && swabber != NULL)
-		((void (*)(void *))swabber)(ptr);
-
-	return ptr;
 }
 
 static inline struct ptlrpc_body *lustre_msg_ptlrpc_body(struct lustre_msg *msg)
@@ -1308,6 +1269,34 @@ timeout_t lustre_msg_get_service_timeout(struct lustre_msg *msg)
 	}
 }
 
+int lustre_msg_get_projid(struct lustre_msg *msg, __u32 *projid)
+{
+	switch (msg->lm_magic) {
+	case LUSTRE_MSG_MAGIC_V2: {
+		struct ptlrpc_body *pb;
+
+		if (msg->lm_buflens[MSG_PTLRPC_BODY_OFF] <
+		    sizeof(struct ptlrpc_body))
+			return -EOPNOTSUPP;
+
+		pb = lustre_msg_buf_v2(msg, MSG_PTLRPC_BODY_OFF,
+					  sizeof(struct ptlrpc_body));
+
+		if (!pb || !(pb->pb_flags & MSG_PACK_PROJID))
+			return -EOPNOTSUPP;
+
+		if (projid)
+			*projid = pb->pb_projid;
+
+		return 0;
+	}
+	default:
+		CERROR("incorrect message magic: %08x\n", msg->lm_magic);
+		return -EOPNOTSUPP;
+	}
+}
+EXPORT_SYMBOL(lustre_msg_get_projid);
+
 int lustre_msg_get_uid_gid(struct lustre_msg *msg, __u32 *uid, __u32 *gid)
 {
 	switch (msg->lm_magic) {
@@ -1649,6 +1638,33 @@ void lustre_msg_set_jobinfo(struct lustre_msg *msg, const struct job_info *ji)
 }
 EXPORT_SYMBOL(lustre_msg_set_jobinfo);
 
+void lustre_msg_set_projid(struct lustre_msg *msg, __u32 projid)
+{
+	switch (msg->lm_magic) {
+	case LUSTRE_MSG_MAGIC_V2: {
+		__u32 opc = lustre_msg_get_opc(msg);
+		struct ptlrpc_body *pb;
+
+		/* Don't set projid for ldlm ast RPCs */
+		if (!opc || opc == LDLM_BL_CALLBACK ||
+		    opc == LDLM_CP_CALLBACK || opc == LDLM_GL_CALLBACK)
+			return;
+
+		pb = lustre_msg_buf_v2(msg, MSG_PTLRPC_BODY_OFF,
+				       sizeof(struct ptlrpc_body));
+		LASSERTF(pb, "invalid msg %px: no ptlrpc body!\n", msg);
+
+		pb->pb_projid = projid;
+		pb->pb_flags |= MSG_PACK_PROJID;
+
+		return;
+	}
+	default:
+		LASSERTF(0, "incorrect message magic: %08x\n", msg->lm_magic);
+	}
+}
+EXPORT_SYMBOL(lustre_msg_set_projid);
+
 void lustre_msg_set_cksum(struct lustre_msg *msg, __u32 cksum)
 {
 	switch (msg->lm_magic) {
@@ -1753,7 +1769,7 @@ void lustre_swab_ptlrpc_body(struct ptlrpc_body *body)
 	__swab64s(&body->pb_last_xid);
 	__swab16s(&body->pb_tag);
 	BUILD_BUG_ON(offsetof(typeof(*body), pb_padding0) == 0);
-	BUILD_BUG_ON(offsetof(typeof(*body), pb_padding1) == 0);
+	__swab32s(&body->pb_projid);
 	__swab64s(&body->pb_last_committed);
 	__swab64s(&body->pb_transno);
 	__swab32s(&body->pb_flags);
@@ -1788,7 +1804,7 @@ void lustre_swab_connect(struct obd_connect_data *ocd)
 	__swab64s(&ocd->ocd_connect_flags);
 	__swab32s(&ocd->ocd_version);
 	__swab32s(&ocd->ocd_grant);
-	__swab64s(&ocd->ocd_ibits_known);
+	__swab64s((__u64 *)&ocd->ocd_ibits_known);
 	__swab32s(&ocd->ocd_index);
 	__swab32s(&ocd->ocd_brw_size);
 	/*
@@ -2870,8 +2886,9 @@ void _debug_req(struct ptlrpc_request *req,
 	__u64 req_transno = 0;
 	int req_opc = -1;
 	__u32 req_flags =  (__u32) -1;
-	__u32 req_uid = (__u32) -1;
-	__u32 req_gid = (__u32) -1;
+	__u32 req_uid = MDT_INVALID_UID;
+	__u32 req_gid = MDT_INVALID_GID;
+	__u32 req_projid = MDT_INVALID_PROJID;
 	char *req_jobid = NULL;
 
 	spin_lock(&req->rq_early_free_lock);
@@ -2899,6 +2916,7 @@ void _debug_req(struct ptlrpc_request *req,
 		req_opc = lustre_msg_get_opc(req->rq_reqmsg);
 		req_jobid = lustre_msg_get_jobid(req->rq_reqmsg);
 		lustre_msg_get_uid_gid(req->rq_reqmsg, &req_uid, &req_gid);
+		lustre_msg_get_projid(req->rq_reqmsg, &req_projid);
 		req_flags = lustre_msg_get_flags(req->rq_reqmsg);
 	}
 
@@ -2906,7 +2924,7 @@ void _debug_req(struct ptlrpc_request *req,
 	vaf.fmt = fmt;
 	vaf.va = &args;
 	libcfs_debug_msg(msgdata,
-			 "%pV req@%p x%llu/t%lld(%llu) o%d->%s@%s:%d/%d lens %d/%d e %d to %lld dl %lld ref %d fl " REQ_FLAGS_FMT "/%x/%x rc %d/%d job:'%s' uid:%u gid:%u\n",
+			 "%pV req@%p x%llu/t%lld(%llu) o%d->%s@%s:%d/%d lens %d/%d e %d to %lld dl %lld ref %d fl " REQ_FLAGS_FMT "/%x/%x rc %d/%d job:'%s' uid:%u gid:%u projid:%u\n",
 			 &vaf,
 			 req, req->rq_xid, req->rq_transno, req_transno,
 			 req_opc,
@@ -2923,7 +2941,7 @@ void _debug_req(struct ptlrpc_request *req,
 			 atomic_read(&req->rq_refcount),
 			 DEBUG_REQ_FLAGS(req), req_flags, rep_flags,
 			 req->rq_status, rep_status,
-			 req_jobid ?: "", req_uid, req_gid);
+			 req_jobid ?: "", req_uid, req_gid, req_projid);
 	va_end(args);
 }
 EXPORT_SYMBOL(_debug_req);

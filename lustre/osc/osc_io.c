@@ -253,7 +253,7 @@ void osc_page_touch_at(const struct lu_env *env, struct cl_object *obj,
 {
 	struct lov_oinfo  *loi  = cl2osc(obj)->oo_oinfo;
 	struct cl_attr    *attr = &osc_env_info(env)->oti_attr;
-	int valid;
+	enum cl_attr_valid valid;
 	__u64 kms;
 
 	ENTRY;
@@ -559,6 +559,13 @@ int osc_punch_start(const struct lu_env *env, struct cl_io *io,
 }
 EXPORT_SYMBOL(osc_punch_start);
 
+static inline void osc_set_projid_info(const struct lu_env *env,
+				       struct cl_object *obj, struct obdo *oa)
+{
+	if (!(oa->o_valid & OBD_MD_FLPROJID))
+		cl_req_projid_set(env, obj, &oa->o_projid);
+}
+
 static int osc_io_setattr_start(const struct lu_env *env,
                                 const struct cl_io_slice *slice)
 {
@@ -580,9 +587,10 @@ static int osc_io_setattr_start(const struct lu_env *env,
 	if (cl_io_is_trunc(io))
 		result = osc_cache_truncate_start(env, cl2osc(obj), size,
 						  &oio->oi_trunc);
-	/* flush local pages prior punching them on server */
+	/* flush local pages prior punching/zero-range them on server */
 	if (io_is_falloc &&
-	    io->u.ci_setattr.sa_falloc_mode & FALLOC_FL_PUNCH_HOLE)
+	    (io->u.ci_setattr.sa_falloc_mode &
+	     (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE)))
 		result = osc_punch_start(env, io, obj);
 
 	if (result == 0 && oio->oi_lockless == 0) {
@@ -590,7 +598,7 @@ static int osc_io_setattr_start(const struct lu_env *env,
 		result = cl_object_attr_get(env, obj, attr);
 		if (result == 0) {
 			struct ost_lvb *lvb = &io->u.ci_setattr.sa_attr;
-			unsigned int cl_valid = 0;
+			enum cl_attr_valid cl_valid = 0;
 
 			if (ia_avalid & ATTR_SIZE) {
 				attr->cat_size = size;
@@ -617,6 +625,7 @@ static int osc_io_setattr_start(const struct lu_env *env,
 	memset(oa, 0, sizeof(*oa));
 	if (result == 0) {
 		oa->o_oi = loi->loi_oi;
+		osc_set_projid_info(env, obj, oa);
 		obdo_set_parent_fid(oa, io->u.ci_setattr.sa_parent_fid);
 		oa->o_stripe_idx = io->u.ci_setattr.sa_stripe_index;
 		oa->o_layout = io->u.ci_setattr.sa_layout;
@@ -662,9 +671,9 @@ static int osc_io_setattr_start(const struct lu_env *env,
 
 			oa->o_size = io->u.ci_setattr.sa_falloc_offset;
 			oa->o_blocks = io->u.ci_setattr.sa_falloc_end;
-			oa->o_uid = io->u.ci_setattr.sa_falloc_uid;
-			oa->o_gid = io->u.ci_setattr.sa_falloc_gid;
-			oa->o_projid = io->u.ci_setattr.sa_falloc_projid;
+			oa->o_uid = io->u.ci_setattr.sa_attr_uid;
+			oa->o_gid = io->u.ci_setattr.sa_attr_gid;
+			oa->o_projid = io->u.ci_setattr.sa_attr_projid;
 			oa->o_valid |= OBD_MD_FLSIZE | OBD_MD_FLBLOCKS |
 				OBD_MD_FLUID | OBD_MD_FLGID | OBD_MD_FLPROJID;
 
@@ -678,7 +687,12 @@ static int osc_io_setattr_start(const struct lu_env *env,
 		} else if (ia_avalid & ATTR_SIZE) {
 			oa->o_size = size;
 			oa->o_blocks = OBD_OBJECT_EOF;
-			oa->o_valid |= OBD_MD_FLSIZE | OBD_MD_FLBLOCKS;
+			oa->o_uid = io->u.ci_setattr.sa_attr_uid;
+			oa->o_gid = io->u.ci_setattr.sa_attr_gid;
+			oa->o_projid = io->u.ci_setattr.sa_attr_projid;
+			oa->o_valid |= OBD_MD_FLSIZE | OBD_MD_FLBLOCKS |
+				       OBD_MD_FLUID | OBD_MD_FLGID |
+				       OBD_MD_FLPROJID;
 			result = osc_punch_send(osc_export(cl2osc(obj)),
 						oa, osc_async_upcall, cbargs);
 		} else {
@@ -701,7 +715,7 @@ void osc_io_setattr_end(const struct lu_env *env,
 	struct osc_async_cbargs *cbargs = &oio->oi_cbarg;
 	struct cl_attr  *attr = &osc_env_info(env)->oti_attr;
 	struct obdo *oa = &oio->oi_oa;
-	unsigned int cl_valid = 0;
+	enum cl_attr_valid cl_valid = 0;
 	int result = 0;
 
 	if (cbargs->opc_rpc_sent) {
@@ -792,6 +806,7 @@ static int osc_io_data_version_start(const struct lu_env *env,
 	memset(oa, 0, sizeof(*oa));
 	oa->o_oi = loi->loi_oi;
 	oa->o_valid = OBD_MD_FLID | OBD_MD_FLGROUP;
+	osc_set_projid_info(env, slice->cis_obj, oa);
 
 	if (dv->dv_flags & (LL_DV_RD_FLUSH | LL_DV_WR_FLUSH)) {
 		oa->o_valid |= OBD_MD_FLFLAGS;
@@ -834,7 +849,7 @@ static void osc_io_data_version_end(const struct lu_env *env,
 	struct osc_async_cbargs *cbargs = &oio->oi_cbarg;
 	struct cl_attr *attr = &osc_env_info(env)->oti_attr;
 	struct obdo *oa = &oio->oi_oa;
-	unsigned int cl_valid = 0;
+	enum cl_attr_valid cl_valid = 0;
 
 	ENTRY;
 	wait_for_completion(&cbargs->opc_sync);
@@ -922,6 +937,7 @@ int osc_fsync_ost(const struct lu_env *env, struct osc_object *obj,
 	memset(oa, 0, sizeof(*oa));
 	oa->o_oi = loi->loi_oi;
 	oa->o_valid = OBD_MD_FLID | OBD_MD_FLGROUP;
+	osc_set_projid_info(env, osc2cl(obj), oa);
 
 	/* reload size abd blocks for start and end of sync range */
 	oa->o_size = fio->fi_start;
@@ -1063,6 +1079,7 @@ static int osc_io_ladvise_start(const struct lu_env *env,
 	memset(oa, 0, sizeof(*oa));
 	oa->o_oi = loi->loi_oi;
 	oa->o_valid = OBD_MD_FLID | OBD_MD_FLGROUP;
+	osc_set_projid_info(env, obj, oa);
 	obdo_set_parent_fid(oa, lio->lio_fid);
 
 	ladvise = ladvise_hdr->lah_advise;
@@ -1187,6 +1204,7 @@ int osc_io_lseek_start(const struct lu_env *env,
 	memset(oa, 0, sizeof(*oa));
 	oa->o_oi = loi->loi_oi;
 	oa->o_valid = OBD_MD_FLID | OBD_MD_FLGROUP;
+	osc_set_projid_info(env, obj, oa);
 	oa->o_size = lsio->ls_start;
 	oa->o_mode = lsio->ls_whence;
 	if (oio->oi_lockless) {

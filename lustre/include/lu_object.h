@@ -704,13 +704,6 @@ static inline const struct lu_fid *lu_object_fid(const struct lu_object *o)
 	return &o->lo_header->loh_fid;
 }
 
-/* return device operations vector for this object */
-static inline const struct lu_device_operations *
-lu_object_ops(const struct lu_object *o)
-{
-	return o->lo_dev->ld_ops;
-}
-
 /*
  * Given a compound object, find its slice, corresponding to the device type
  */
@@ -783,16 +776,6 @@ static inline void lu_object_clear_agent_entry(struct lu_object *o)
 	o->lo_header->loh_attr &= ~LOHA_HAS_AGENT_ENTRY;
 }
 
-static inline int lu_object_assert_exists(const struct lu_object *o)
-{
-	return lu_object_exists(o);
-}
-
-static inline int lu_object_assert_not_exists(const struct lu_object *o)
-{
-	return !lu_object_exists(o);
-}
-
 /*
  * Attr of this object.
  */
@@ -814,8 +797,15 @@ struct lu_rdpg {
 	/** requested attr */
 	__u32                   rp_attrs;
 	/** pointers to pages */
-	struct page           **rp_pages;
+	union {
+		struct page	**rp_pages;
+		void		*rp_data;
+	};
 };
+
+/* for dt_index_walk / mdd_readpage */
+void *rdpg_page_get(const struct lu_rdpg *rdpg, unsigned int index);
+void rdpg_page_put(const struct lu_rdpg *rdpg, unsigned int index);
 
 enum lu_xattr_flags {
 	LU_XATTR_REPLACE = BIT(0),
@@ -1370,11 +1360,6 @@ static inline bool lu_name_is_valid(const struct lu_name *ln)
 	return lu_name_is_valid_2(ln->ln_name, ln->ln_namelen);
 }
 
-#define DNAME "%.*s"
-#define PNAME(ln)					\
-	(lu_name_is_valid(ln) ? (ln)->ln_namelen : 0),	\
-	(lu_name_is_valid(ln) ? (ln)->ln_name : "")
-
 /*
  * Common buffer structure to be passed around for various xattr_{s,g}et()
  * methods.
@@ -1596,7 +1581,7 @@ struct lu_tgt_descs {
 	/* TGTs scheduled to be deleted */
 	__u32			ltd_death_row;
 	/* Table refcount used for delayed deletion */
-	int			ltd_refcount;
+	atomic_t		ltd_refcount;
 	/* mutex to serialize concurrent updates to the tgt table */
 	struct mutex		ltd_mutex;
 	/* read/write semaphore used for array relocation */

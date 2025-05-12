@@ -15,7 +15,7 @@
 
 #define DEBUG_SUBSYSTEM S_CLASS
 
-#include <linux/glob.h>
+#include <lustre_compat/linux/glob.h>
 #include <obd_class.h>
 #include <lprocfs_status.h>
 #include <lustre_kernelcomm.h>
@@ -207,16 +207,6 @@ lprocfs_register(const char *name, struct proc_dir_entry *parent,
 EXPORT_SYMBOL(lprocfs_register);
 
 /* Generic callbacks */
-int lprocfs_uuid_seq_show(struct seq_file *m, void *data)
-{
-	struct obd_device *obd = data;
-
-	LASSERT(obd != NULL);
-	seq_printf(m, "%s\n", obd->obd_uuid.uuid);
-	return 0;
-}
-EXPORT_SYMBOL(lprocfs_uuid_seq_show);
-
 static ssize_t uuid_show(struct kobject *kobj, struct attribute *attr,
 			 char *buf)
 {
@@ -286,7 +276,7 @@ static ssize_t kbytesfree_show(struct kobject *kobj, struct attribute *attr,
 		while (blk_size >>= 1)
 			result <<= 1;
 
-		return sprintf(buf, "%llu\n", result);
+		return scnprintf(buf, PAGE_SIZE, "%llu\n", result);
 	}
 
 	return rc;
@@ -311,7 +301,7 @@ static ssize_t kbytesavail_show(struct kobject *kobj, struct attribute *attr,
 		while (blk_size >>= 1)
 			result <<= 1;
 
-		return sprintf(buf, "%llu\n", result);
+		return scnprintf(buf, PAGE_SIZE, "%llu\n", result);
 	}
 
 	return rc;
@@ -330,7 +320,7 @@ static ssize_t filestotal_show(struct kobject *kobj, struct attribute *attr,
 			ktime_get_seconds() - OBD_STATFS_CACHE_SECONDS,
 			OBD_STATFS_NODELAY);
 	if (!rc)
-		return sprintf(buf, "%llu\n", osfs.os_files);
+		return scnprintf(buf, PAGE_SIZE, "%llu\n", osfs.os_files);
 
 	return rc;
 }
@@ -348,11 +338,95 @@ static ssize_t filesfree_show(struct kobject *kobj, struct attribute *attr,
 			ktime_get_seconds() - OBD_STATFS_CACHE_SECONDS,
 			OBD_STATFS_NODELAY);
 	if (!rc)
-		return sprintf(buf, "%llu\n", osfs.os_ffree);
+		return scnprintf(buf, PAGE_SIZE, "%llu\n", osfs.os_ffree);
 
 	return rc;
 }
 LUSTRE_RO_ATTR(filesfree);
+
+static ssize_t maxbytes_show(struct kobject *kobj, struct attribute *attr,
+			     char *buf)
+{
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
+	struct obd_statfs osfs;
+	int rc;
+
+	rc = obd_statfs(NULL, obd->obd_self_export, &osfs,
+			ktime_get_seconds() - OBD_STATFS_CACHE_SECONDS,
+			OBD_STATFS_NODELAY);
+	if (!rc)
+		return scnprintf(buf, PAGE_SIZE, "%llu\n", osfs.os_maxbytes);
+
+	return rc;
+}
+LUSTRE_RO_ATTR(maxbytes);
+
+static ssize_t namelen_max_show(struct kobject *kobj, struct attribute *attr,
+				char *buf)
+{
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
+	struct obd_statfs osfs;
+	int rc;
+
+	rc = obd_statfs(NULL, obd->obd_self_export, &osfs,
+			ktime_get_seconds() - OBD_STATFS_CACHE_SECONDS,
+			OBD_STATFS_NODELAY);
+	if (!rc)
+		return scnprintf(buf, PAGE_SIZE, "%u\n", osfs.os_namelen);
+
+	return rc;
+}
+LUSTRE_RO_ATTR(namelen_max);
+
+ssize_t lprocfs_statfs_state(char *buf, size_t buflen, __u32 state)
+{
+	size_t off = 0;
+
+	while (state != 0) {
+		const struct obd_statfs_state_name *osn;
+
+		osn = obd_statfs_state_name_find(state);
+		if (!osn) {
+			int len;
+
+			/* Only unknown (future) OS_STATFS flags left.
+			 *
+			 * Print in octal to avoid confusion with existing
+			 * 'a' and 'f' flags if it was printed in hex.
+			 */
+			len = scnprintf(buf + off, buflen, "(%#o)", state);
+			off += len;
+			buflen -= len;
+			break;
+		}
+		buf[off++] = osn->osn_name;
+		buflen--;
+		state ^= osn->osn_state;
+	}
+
+	return off + scnprintf(buf + off, buflen, "\n");
+}
+EXPORT_SYMBOL(lprocfs_statfs_state);
+
+static ssize_t statfs_state_show(struct kobject *kobj, struct attribute *attr,
+				 char *buf)
+{
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
+	struct obd_statfs osfs;
+	int rc;
+
+	rc = obd_statfs(NULL, obd->obd_self_export, &osfs,
+			ktime_get_seconds() - OBD_STATFS_CACHE_SECONDS,
+			OBD_STATFS_NODELAY);
+	if (rc)
+		return rc;
+
+	return lprocfs_statfs_state(buf, PAGE_SIZE, osfs.os_state);
+}
+LUSTRE_RO_ATTR(statfs_state);
 
 ssize_t conn_uuid_show(struct kobject *kobj, struct attribute *attr, char *buf)
 {
@@ -476,6 +550,18 @@ void lprocfs_stats_unlock(struct lprocfs_stats *stats,
 	}
 }
 
+static __s64 sum_check(__s64 old, __s64 incr)
+{
+	__s64 new;
+
+	new = old + incr;
+	/* check overflow */
+	if (unlikely(new < old))
+		new = LLONG_MAX;
+
+	return new;
+}
+
 /** add up per-cpu counters */
 void lprocfs_stats_collect(struct lprocfs_stats *stats, int idx,
 			   struct lprocfs_counter *cnt)
@@ -503,16 +589,18 @@ void lprocfs_stats_collect(struct lprocfs_stats *stats, int idx,
 		percpu_cntr = lprocfs_stats_counter_get(stats, i, idx);
 
 		cnt->lc_count += percpu_cntr->lc_count;
-		cnt->lc_sum += percpu_cntr->lc_sum;
 		if (percpu_cntr->lc_min < cnt->lc_min)
 			cnt->lc_min = percpu_cntr->lc_min;
 		if (percpu_cntr->lc_max > cnt->lc_max)
 			cnt->lc_max = percpu_cntr->lc_max;
-		cnt->lc_sumsquare += percpu_cntr->lc_sumsquare;
+		cnt->lc_sum = sum_check(cnt->lc_sum, percpu_cntr->lc_sum);
+		cnt->lc_sumsquare = sum_check(cnt->lc_sumsquare,
+					      percpu_cntr->lc_sumsquare);
 	}
 
 	lprocfs_stats_unlock(stats, LPROCFS_GET_NUM_CPU, &flags);
 }
+EXPORT_SYMBOL(lprocfs_stats_collect);
 
 static void obd_import_flags2str(struct obd_import *imp, struct seq_file *m)
 {
@@ -639,6 +727,7 @@ static const char *const obd_connect_names[] = {
 	"sparse_read",		       /* 0x1000000000 */
 	"mirror_id_fix",	       /* 0x2000000000 */
 	"update_layout",	       /* 0x4000000000 */
+	"readdir_open",		       /* 0x8000000000 */
 	NULL
 };
 
@@ -745,7 +834,7 @@ obd_connect_data_seqprint(struct seq_file *m, struct obd_connect_data *ocd)
 	if (flags & OBD_CONNECT_BRW_SIZE)
 		seq_printf(m, "       max_brw_size: %d\n", ocd->ocd_brw_size);
 	if (flags & OBD_CONNECT_IBITS)
-		seq_printf(m, "       ibits_known: %#llx\n",
+		seq_printf(m, "       ibits_known: %#lx\n",
 			   ocd->ocd_ibits_known);
 	if (flags & OBD_CONNECT_GRANT_PARAM)
 		seq_printf(m, "       grant_block_size: %d\n"
@@ -1071,11 +1160,14 @@ static const struct attribute *obd_def_uuid_attrs[] = {
 
 static const struct attribute *obd_def_attrs[] = {
 	&lustre_attr_blocksize.attr,
+	&lustre_attr_filestotal.attr,
+	&lustre_attr_filesfree.attr,
 	&lustre_attr_kbytestotal.attr,
 	&lustre_attr_kbytesfree.attr,
 	&lustre_attr_kbytesavail.attr,
-	&lustre_attr_filestotal.attr,
-	&lustre_attr_filesfree.attr,
+	&lustre_attr_maxbytes.attr,
+	&lustre_attr_namelen_max.attr,
+	&lustre_attr_statfs_state.attr,
 	&lustre_attr_uuid.attr,
 	NULL,
 };
@@ -1090,7 +1182,6 @@ static void obd_sysfs_release(struct kobject *kobj)
 
 int lprocfs_obd_setup(struct obd_device *obd, bool uuid_only)
 {
-	struct ldebugfs_vars *debugfs_vars = NULL;
 	int rc;
 
 	if (!obd || obd->obd_magic != OBD_DEVICE_MAGIC)
@@ -1121,11 +1212,9 @@ int lprocfs_obd_setup(struct obd_device *obd, bool uuid_only)
 		return rc;
 	}
 
-	if (!obd->obd_type->typ_procroot)
-		debugfs_vars = obd->obd_debugfs_vars;
-	obd->obd_debugfs_entry = debugfs_create_dir(
-		obd->obd_name, obd->obd_type->typ_debugfs_entry);
-	ldebugfs_add_vars(obd->obd_debugfs_entry, debugfs_vars, obd);
+	obd->obd_debugfs_entry = debugfs_create_dir(obd->obd_name,
+						    obd->obd_type->typ_debugfs_entry);
+	ldebugfs_add_vars(obd->obd_debugfs_entry, obd->obd_debugfs_vars, obd);
 
 	if (obd->obd_proc_entry || !obd->obd_type->typ_procroot)
 		GOTO(already_registered, rc);
@@ -1158,13 +1247,11 @@ int lprocfs_obd_cleanup(struct obd_device *obd)
 
 	debugfs_remove_recursive(obd->obd_debugfs_gss_dir);
 	obd->obd_debugfs_gss_dir = NULL;
-
-	if (obd->obd_proc_exports_entry) {
-		/* Should be no exports left */
-		lprocfs_remove(&obd->obd_proc_exports_entry);
-		obd->obd_proc_exports_entry = NULL;
-	}
-
+#ifdef HAVE_SERVER_SUPPORT
+	/* Should be no exports left */
+	debugfs_remove_recursive(obd->obd_debugfs_exports);
+	obd->obd_debugfs_exports = NULL;
+#endif
 	if (obd->obd_proc_entry) {
 		lprocfs_remove(&obd->obd_proc_entry);
 		obd->obd_proc_entry = NULL;
@@ -1245,7 +1332,6 @@ struct lprocfs_stats *lprocfs_stats_alloc(unsigned int num,
 	stats->ls_init = ktime_get_real();
 	spin_lock_init(&stats->ls_lock);
 	kref_init(&stats->ls_refcount);
-	stats->ls_source = NULL;
 	stats->ls_index = -1;
 
 	/* alloc num of counter headers */
@@ -1279,10 +1365,10 @@ static DEFINE_XARRAY_ALLOC(lstats_list);
 
 struct lprocfs_stats *ldebugfs_stats_alloc(int num, char *name,
 					   struct dentry *debugfs_entry,
-					   struct kobject *kobj,
 					   enum lprocfs_stats_flags flags)
 {
 	struct lprocfs_stats *stats = lprocfs_stats_alloc(num, flags);
+	size_t len = strlen(name);
 	char *param;
 	int rc;
 
@@ -1301,17 +1387,16 @@ struct lprocfs_stats *ldebugfs_stats_alloc(int num, char *name,
 	atomic_inc(&lstats_count);
 	xa_unlock(&lstats_list);
 
-	stats->ls_source = kobject_get_path(kobj, GFP_KERNEL);
-	if (!stats->ls_source) {
-		lprocfs_stats_free(&stats);
-		return NULL;
+	param = strrchr(name, '.');
+	if (param) {
+		len -= strlen(param);
+		param++;
+	} else {
+		param = name;
 	}
 
-	param = stats->ls_source;
-	while ((param = strchr(param, '/')) != NULL)
-		*param = '.';
-
-	debugfs_create_file(name, 0644, debugfs_entry, stats,
+	strscpy(stats->ls_source, name, len + 1);
+	debugfs_create_file(param, 0644, debugfs_entry, stats,
 			    &ldebugfs_stats_seq_fops);
 	return stats;
 }
@@ -1352,8 +1437,6 @@ static void stats_free(struct kref *kref)
 		xa_unlock(&lstats_list);
 	}
 
-	kfree(stats->ls_source); /* allocated by kobject_get_path */
-
 	LIBCFS_FREE(stats, offsetof(typeof(*stats), ls_percpu[num_entry]));
 }
 
@@ -1372,12 +1455,15 @@ EXPORT_SYMBOL(lprocfs_stats_free);
 unsigned int lustre_stats_scan(struct lustre_stats_list *slist, const char *source)
 {
 	struct lprocfs_stats *item, **stats;
-	unsigned int cnt = 0, snum;
-	const char *tmp = source;
+	unsigned int cnt = 0, snum = 0, i;
 	unsigned long idx = 0;
 
-	if (source)
-		for (snum = 0; tmp[snum]; tmp[snum] == '.' ? snum++ : *tmp++);
+	if (source) {
+		for (i = 0; source[i]; i++) {
+			if (source[i] == '.')
+				snum++;
+		}
+	}
 
 	xa_for_each(&lstats_list, idx, item) {
 		if (!kref_get_unless_zero(&item->ls_refcount))
@@ -1389,19 +1475,19 @@ unsigned int lustre_stats_scan(struct lustre_stats_list *slist, const char *sour
 		}
 
 		if (source) {
-			char filter[PATH_MAX / 8], *src = item->ls_source;
-			unsigned int num;
-
-			if (strstarts(src, ".fs.lustre."))
-				src += strlen(".fs.lustre.");
+			char filter[MAX_OBD_NAME * 4], *src = item->ls_source;
+			unsigned int num = 0;
 
 			/* glob_match() has a hard time telling *.* from *.*.*
 			 * from *.*.* so we need to compare the number of '.'
 			 * and filter on that as well. This actually avoids
 			 * the overhead of calling glob_match() every time.
 			 */
-			tmp = src;
-			for (num = 0; tmp[num]; tmp[num] == '.' ? num++ : *tmp++);
+			for (i = 0; src[i]; i++) {
+				if (src[i] == '.')
+					num++;
+			}
+
 			if (snum != num) {
 				lprocfs_stats_free(&item);
 				continue;
@@ -1432,6 +1518,7 @@ unsigned int lustre_stats_scan(struct lustre_stats_list *slist, const char *sour
 			} else {
 				strscpy(filter, source, strlen(source) + 1);
 			}
+
 			if (!glob_match(filter, src)) {
 				lprocfs_stats_free(&item);
 				continue;
@@ -1789,11 +1876,9 @@ int lprocfs_alloc_md_stats(struct obd_device *obd,
 	for (i = 0; i < ARRAY_SIZE(mps_stats); i++) {
 		lprocfs_counter_init(stats, i, LPROCFS_TYPE_REQS,
 				     mps_stats[i]);
-		if (!stats->ls_cnt_header[i].lc_name) {
-			CERROR("Missing md_stat initializer md_op operation at offset %d. Aborting.\n",
-			       i);
-			LBUG();
-		}
+		LASSERTF(stats->ls_cnt_header[i].lc_name,
+			 "Missing md_stat initializer md_op operation at offset %d. Aborting.\n",
+			 i);
 	}
 
 	rc = lprocfs_stats_register(obd->obd_proc_entry, "md_stats", stats);
@@ -1817,23 +1902,6 @@ void lprocfs_free_md_stats(struct obd_device *obd)
 	}
 }
 EXPORT_SYMBOL(lprocfs_free_md_stats);
-
-void lprocfs_init_ldlm_stats(struct lprocfs_stats *ldlm_stats)
-{
-	lprocfs_counter_init(ldlm_stats, LDLM_ENQUEUE - LDLM_FIRST_OPC,
-			     LPROCFS_TYPE_REQS, "ldlm_enqueue");
-	lprocfs_counter_init(ldlm_stats, LDLM_CONVERT - LDLM_FIRST_OPC,
-			     LPROCFS_TYPE_REQS, "ldlm_convert");
-	lprocfs_counter_init(ldlm_stats, LDLM_CANCEL - LDLM_FIRST_OPC,
-			     LPROCFS_TYPE_REQS, "ldlm_cancel");
-	lprocfs_counter_init(ldlm_stats, LDLM_BL_CALLBACK - LDLM_FIRST_OPC,
-			     LPROCFS_TYPE_REQS, "ldlm_bl_callback");
-	lprocfs_counter_init(ldlm_stats, LDLM_CP_CALLBACK - LDLM_FIRST_OPC,
-			     LPROCFS_TYPE_REQS, "ldlm_cp_callback");
-	lprocfs_counter_init(ldlm_stats, LDLM_GL_CALLBACK - LDLM_FIRST_OPC,
-			     LPROCFS_TYPE_REQS, "ldlm_gl_callback");
-}
-EXPORT_SYMBOL(lprocfs_init_ldlm_stats);
 
 __s64 lprocfs_read_helper(struct lprocfs_counter *lc,
 			  struct lprocfs_counter_header *header,

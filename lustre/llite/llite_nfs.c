@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/lustre/llite/llite_nfs.c
  *
  * NFS export of Lustre Light File System
  *
@@ -250,13 +230,17 @@ free_dot:
 #endif
 
 /**
- * \a connectable - is nfsd will connect himself or this should be done
- *                  at lustre
+ * ll_encode_fh() - Encode file handle (NFS)
+ * @inode: inode of file which is being encoded
+ * @fh: file handle buffer
+ * @plen: length of file handle (fh) buffer
+ * @parent: inode of parent directory
  *
+ * Return:
  * The return value is file handle type:
- * 1 -- contains child file handle;
- * 2 -- contains child file handle and parent file handle;
- * 255 -- error.
+ * * %1 -- contains child file handle;
+ * * %2 -- contains child file handle and parent file handle;
+ * * %255 -- error.
  */
 static int ll_encode_fh(struct inode *inode, u32 *fh, int *plen,
 			struct inode *parent)

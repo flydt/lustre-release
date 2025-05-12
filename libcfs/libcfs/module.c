@@ -1,33 +1,16 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -104,14 +87,15 @@ static int proc_dobitmasks(const struct ctl_table *table,
 			   int write, void __user *buffer, size_t *lenp,
 			   loff_t *ppos)
 {
-	const int     tmpstrlen = 512;
-	char         *tmpstr = NULL;
-	int           rc;
+	unsigned int *mask = table->data;
+	int is_subsys = (mask == &libcfs_subsystem_debug ||
+			 mask == &libcfs_subsystem_printk) ? 1 : 0;
+	int is_printk = (mask == &libcfs_printk) ? 1 : 0;
+	const int tmpstrlen = 512;
+	char *tmpstr = NULL;
 	size_t nob = *lenp;
 	loff_t pos = *ppos;
-	unsigned int *mask = table->data;
-	int           is_subsys = (mask == &libcfs_subsystem_debug) ? 1 : 0;
-	int           is_printk = (mask == &libcfs_printk) ? 1 : 0;
+	int rc;
 
 	if (!write) {
 		tmpstr = kmalloc(tmpstrlen, GFP_KERNEL | __GFP_ZERO);
@@ -127,6 +111,8 @@ static int proc_dobitmasks(const struct ctl_table *table,
 						      tmpstr + pos, NULL);
 		}
 	} else {
+		if (nob > USHRT_MAX)
+			return -E2BIG;
 		tmpstr = memdup_user_nul(buffer, nob);
 		if (IS_ERR(tmpstr))
 			return PTR_ERR(tmpstr);
@@ -198,12 +184,13 @@ static int proc_fail_loc(const struct ctl_table *table,
 	}
 
 	if (write) {
-		char *kbuf = memdup_user_nul(buffer, *lenp);
+		char kbuf[sizeof(cfs_fail_loc) * 4] = { '\0' };
 
-		if (IS_ERR(kbuf))
-			return PTR_ERR(kbuf);
+		if (*lenp > sizeof(kbuf))
+			return -E2BIG;
+		if (copy_from_user(kbuf, buffer, *lenp))
+			return -EFAULT;
 		rc = kstrtoul(kbuf, 0, &cfs_fail_loc);
-		kfree(kbuf);
 		*ppos += *lenp;
 	} else {
 		char kbuf[64/3+3];
@@ -265,14 +252,16 @@ int debugfs_doint(const struct ctl_table *table, int write,
 	}
 
 	if (write) {
-		char *kbuf = memdup_user_nul(buffer, *lenp);
 		int val;
+		char kbuf[sizeof(val) * 4] = { '\0' };
 
-		if (IS_ERR(kbuf))
-			return PTR_ERR(kbuf);
+		if (*lenp > sizeof(kbuf))
+			return -E2BIG;
+
+		if (copy_from_user(kbuf, buffer, *lenp))
+			return -EFAULT;
 
 		rc = kstrtoint(kbuf, 0, &val);
-		kfree(kbuf);
 		if (!rc) {
 			if (table->extra1 && val < *(int *)table->extra1)
 				val = *(int *)table->extra1;
@@ -308,14 +297,16 @@ static int debugfs_dou64(const struct ctl_table *table, int write,
 	}
 
 	if (write) {
-		char *kbuf = memdup_user_nul(buffer, *lenp);
 		unsigned long long val;
+		char kbuf[sizeof(val) * 4] = { '\0' };
 
-		if (IS_ERR(kbuf))
-			return PTR_ERR(kbuf);
+		if (*lenp > sizeof(kbuf))
+			return -E2BIG;
+
+		if (copy_from_user(kbuf, buffer, *lenp))
+			return -EFAULT;
 
 		rc = kstrtoull(kbuf, 0, &val);
-		kfree(kbuf);
 		if (!rc)
 			*(u64 *)table->data = val;
 		*ppos += *lenp;
@@ -386,6 +377,13 @@ static struct ctl_table lnet_table[] = {
 	{
 		.procname	= "printk",
 		.data		= &libcfs_printk,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= cfs_proc_handler(&proc_dobitmasks),
+	},
+	{
+		.procname	= "subsystem_printk",
+		.data		= &libcfs_subsystem_printk,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= cfs_proc_handler(&proc_dobitmasks),
@@ -641,15 +639,6 @@ int libcfs_setup(void)
 		goto cleanup_lock;
 	}
 
-	cfs_rehash_wq = alloc_workqueue("cfs_rh", WQ_SYSFS, 4);
-	if (!cfs_rehash_wq) {
-		rc = -ENOMEM;
-		CERROR("libcfs: failed to start rehash workqueue: rc = %d\n",
-		       rc);
-		libcfs_debug_cleanup();
-		goto cleanup_lock;
-	}
-
 	CDEBUG(D_OTHER, "libcfs setup OK\n");
 	libcfs_active = 1;
 cleanup_lock:
@@ -696,9 +685,6 @@ static void __exit libcfs_exit(void)
 
 	CDEBUG(D_MALLOC, "before Portals cleanup: kmem %lld\n",
 	       libcfs_kmem_read());
-
-	if (cfs_rehash_wq)
-		destroy_workqueue(cfs_rehash_wq);
 
 	/* the below message is checked in test-framework.sh check_mem_leak() */
 	if (libcfs_kmem_read() != 0)

@@ -1,32 +1,11 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2020, 2022, DDN/Whamcloud Storage Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- */
-/*
- * lustre/ptlrpc/batch.c
  *
  * Batch Metadata Updating on the client
  *
@@ -480,6 +459,9 @@ static int batch_send_update_req(const struct lu_env *env,
 	if (!(flags & BATCH_FL_RDONLY))
 		ptlrpc_get_mod_rpc_slot(req);
 
+	lprocfs_oh_tally_log2(&obd->u.cli.cl_batch_rpc_hist,
+			      head->buh_update_count);
+
 	if (flags & BATCH_FL_SYNC) {
 		rc = ptlrpc_queue_wait(req);
 	} else {
@@ -495,8 +477,6 @@ static int batch_send_update_req(const struct lu_env *env,
 	if (req != NULL)
 		ptlrpc_req_put(req);
 
-	lprocfs_oh_tally_log2(&obd->u.cli.cl_batch_rpc_hist,
-			      head->buh_update_count);
 	RETURN(rc);
 }
 

@@ -25,6 +25,7 @@
 #ifndef _LUSTRE_DLM_H__
 #define _LUSTRE_DLM_H__
 
+#include <cfs_hash.h>
 #include <lustre_lib.h>
 #include <lustre_net.h>
 #include <lustre_import.h>
@@ -150,7 +151,7 @@ extern enum ldlm_mode lck_compat_array[];
 
 static inline void lockmode_verify(enum ldlm_mode mode)
 {
-	LASSERT(mode > LCK_MINMODE && mode < LCK_MAXMODE);
+	LASSERT(mode > LCK_MODE_MIN && mode < LCK_MODE_END);
 }
 
 static inline int lockmode_compat(enum ldlm_mode exist_mode,
@@ -344,7 +345,7 @@ struct ldlm_ns_bucket {
 	 */
 	int			    nsb_reclaim_start;
 	/* counter of entries in this bucket */
-	atomic_t		nsb_count;
+	atomic_t		    nsb_count;
 };
 
 enum {
@@ -364,14 +365,25 @@ enum ldlm_ns_type {
 };
 
 enum ldlm_namespace_flags {
-	/**
+	/*
 	 * Flag to indicate the LRU cancel is in progress.
 	 * Used to limit the process by 1 thread only.
 	 */
-	LDLM_LRU_CANCEL = 0
+	LDLM_NS_LRU_CANCEL,
+	LDLM_NS_STOPPING,
+	/* Controls the stack trace log in ldlm_lock_debug */
+	LDLM_NS_DUMP_STACK,
+	/*
+	 * Flag to indicate the LRU recalc on RPC reply is in progress.
+	 * Used to limit the process by 1 thread only.
+	 */
+	LDLM_NS_RPC_RECALC,
+	 /* lru_size is set even before connection */
+	LDLM_NS_LRU_SIZE_SET_BEFORE_CONN,
+	LDLM_NS_NUM_FLAGS
 };
 
-/**
+/*
  * LDLM Namespace.
  *
  * Namespace serves to contain locks related to a particular service.
@@ -404,8 +416,6 @@ struct ldlm_namespace {
 
 	/** Resource hash table for namespace. */
 	struct cfs_hash		*ns_rs_hash;
-	struct ldlm_ns_bucket	*ns_rs_buckets;
-	unsigned int		ns_bucket_bits;
 
 	/** serialize */
 	spinlock_t		ns_lock;
@@ -559,27 +569,6 @@ struct ldlm_namespace {
 	struct lprocfs_stats	*ns_stats;
 
 	/**
-	 * Flag to indicate namespace is being freed. Used to determine if
-	 * recalculation of LDLM pool statistics should be skipped.
-	 */
-	unsigned int		ns_stopping:1,
-
-
-	/**
-	 * This namespace will control the stack trace log in ldlm_lock_debug
-	 */
-				ns_dump_stack_on_error:1,
-
-	/**
-	 * Flag to indicate the LRU recalc on RPC reply is in progress.
-	 * Used to limit the process by 1 thread only.
-	 */
-				ns_rpc_recalc:1,
-
-	 /* lru_size is set even before connection */
-				ns_lru_size_set_before_connection:1;
-
-	/**
 	 * Which bucket should we start with the lock reclaim.
 	 */
 	int			ns_reclaim_start;
@@ -587,10 +576,8 @@ struct ldlm_namespace {
 	struct kobject		ns_kobj; /* sysfs object */
 	struct completion	ns_kobj_unregister;
 
-	/**
-	 * To avoid another ns_lock usage, a separate bitops field.
-	 */
-	unsigned long		ns_flags;
+	/* See enum ldlm_namespace_flags */
+	DECLARE_BITMAP(ns_flags, LDLM_NS_NUM_FLAGS);
 };
 
 /**
@@ -1176,13 +1163,19 @@ static inline int ldlm_is_granted(struct ldlm_lock *lock)
 static inline bool ldlm_has_layout(struct ldlm_lock *lock)
 {
 	return lock->l_resource->lr_type == LDLM_IBITS &&
-		lock->l_policy_data.l_inodebits.bits & MDS_INODELOCK_LAYOUT;
+		!!(lock->l_policy_data.l_inodebits.bits & MDS_INODELOCK_LAYOUT);
 }
 
 static inline bool ldlm_has_dom(struct ldlm_lock *lock)
 {
 	return lock->l_resource->lr_type == LDLM_IBITS &&
-		lock->l_policy_data.l_inodebits.bits & MDS_INODELOCK_DOM;
+		!!(lock->l_policy_data.l_inodebits.bits & MDS_INODELOCK_DOM);
+}
+
+static inline bool ldlm_has_update(struct ldlm_lock *lock)
+{
+	return lock->l_resource->lr_type == LDLM_IBITS &&
+		lock->l_policy_data.l_inodebits.bits & MDS_INODELOCK_UPDATE;
 }
 
 static inline char *
@@ -1298,7 +1291,7 @@ struct ldlm_enqueue_info {
 	ldlm_created_callback ei_cb_created;	/** lock created callback */
 	void		*ei_cbdata;	/** Data to be passed into callbacks. */
 	void		*ei_namespace;	/** lock namespace **/
-	u64		ei_inodebits;	/** lock inode bits **/
+	enum mds_ibits_locks ei_inodebits;	/** lock inode bits **/
 	unsigned int	ei_enq_slave:1;	/** whether enqueue slave stripes */
 	unsigned int	ei_req_slot:1;	/** whether acquire rpc slot */
 	unsigned int	ei_mod_slot:1;	/** whether acquire mod rpc slot */
@@ -1349,9 +1342,9 @@ extern const char *ldlm_it2str(enum ldlm_intent_flags it);
 	    ((libcfs_debug & (mask)) != 0 &&                            \
 	     (libcfs_subsystem_debug & DEBUG_SUBSYSTEM) != 0)) {        \
 		_ldlm_lock_debug(lock, msgdata, fmt, ##a);              \
-		if (unlikely(ldlm_lock_to_ns(lock)->                    \
-				ns_dump_stack_on_error) &&              \
-						(mask) & D_ERROR)       \
+		if (unlikely(test_bit(LDLM_NS_DUMP_STACK,		\
+				      ldlm_lock_to_ns(lock)->ns_flags)) && \
+		    !!((mask) & D_ERROR))				\
 			dump_stack();				        \
 	}								\
 } while (0)
@@ -1376,7 +1369,7 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
 /** Non-rate-limited lock printing function for debugging purposes. */
 #define LDLM_DEBUG(lock, fmt, a...)   do {                                  \
 	if (likely(lock != NULL)) {					    \
-		LIBCFS_DEBUG_MSG_DATA_DECL(msgdata, D_DLMTRACE, NULL);      \
+		LIBCFS_DEBUG_MSG_DATA_DECL(msgdata, D_DLMTRACE, NULL);	    \
 		ldlm_lock_debug(&msgdata, D_DLMTRACE, NULL, lock,	    \
 				"### " fmt, ##a);			    \
 	} else {							    \
@@ -1430,7 +1423,7 @@ typedef int (*ldlm_reprocessing_policy)(struct ldlm_resource *res,
 					struct list_head *queue,
 					struct list_head *work_list,
 					enum ldlm_process_intention intention,
-					__u64 hint);
+					enum mds_ibits_locks hint);
 
 /**
  * Return values for lock iterators.
@@ -1522,7 +1515,6 @@ int ldlm_request_cancel(struct ptlrpc_request *req,
 
 void ldlm_revoke_export_locks(struct obd_export *exp);
 timeout_t ldlm_bl_timeout(struct ldlm_lock *lock);
-timeout_t ldlm_bl_timeout_by_rpc(struct ptlrpc_request *req);
 #endif
 int ldlm_del_waiting_lock(struct ldlm_lock *lock);
 int ldlm_refresh_waiting_lock(struct ldlm_lock *lock, timeout_t timeout);
@@ -1598,30 +1590,10 @@ static inline int ldlm_res_lvbo_update(struct ldlm_resource *res,
 int is_granted_or_cancelled_nolock(struct ldlm_lock *lock);
 
 int ldlm_error2errno(enum ldlm_error error);
-/* don't call it `errno': this confuses user-space. */
-enum ldlm_error ldlm_errno2error(int err_no);
+
 #if LUSTRE_TRACKS_LOCK_EXP_REFS
 void ldlm_dump_export_locks(struct obd_export *exp);
 #endif
-
-/* Release temporary lock got by ldlm_handle2lock() or __ldlm_handle2lock() */
-#define LDLM_LOCK_PUT(lock)                     \
-do {                                            \
-	ldlm_lock_put(lock);                    \
-} while (0)
-
-/**
- * Release a lock reference obtained by some other means (see
- * LDLM_LOCK_PUT()).
- */
-#define LDLM_LOCK_RELEASE(lock) ldlm_lock_put(lock)
-
-#define LDLM_LOCK_GET(lock)                     \
-({                                              \
-	ldlm_lock_get(lock);                    \
-	/*LDLM_DEBUG((lock), "get");*/          \
-	lock;                                   \
-})
 
 #define ldlm_lock_list_put(head, member, count)			\
 ({								\
@@ -1631,7 +1603,7 @@ do {                                            \
 		if (c-- == 0)					\
 			break;					\
 		list_del_init(&_lock->member);			\
-		LDLM_LOCK_RELEASE(_lock);			\
+		ldlm_lock_put(_lock);				\
 	}							\
 	LASSERT(c <= 0);					\
 })
@@ -1647,7 +1619,6 @@ void ldlm_lock_decref(const struct lustre_handle *lockh, enum ldlm_mode mode);
 void ldlm_lock_decref_and_cancel(const struct lustre_handle *lockh,
 				 enum ldlm_mode mode);
 void ldlm_lock_fail_match_locked(struct ldlm_lock *lock);
-void ldlm_lock_fail_match(struct ldlm_lock *lock);
 void ldlm_lock_allow_match(struct ldlm_lock *lock);
 void ldlm_lock_allow_match_locked(struct ldlm_lock *lock);
 
@@ -1674,10 +1645,10 @@ static inline enum ldlm_mode ldlm_lock_match(struct ldlm_namespace *ns,
 struct ldlm_lock *search_itree(struct ldlm_resource *res,
 			       struct ldlm_match_data *data);
 enum ldlm_mode ldlm_revalidate_lock_handle(const struct lustre_handle *lockh,
-					   __u64 *bits);
+					   enum mds_ibits_locks *bits);
 void ldlm_lock_mode_downgrade(struct ldlm_lock *lock, enum ldlm_mode new_mode);
 void ldlm_lock_cancel(struct ldlm_lock *lock);
-void ldlm_reprocess_all(struct ldlm_resource *res, __u64 hint);
+void ldlm_reprocess_all(struct ldlm_resource *res, enum mds_ibits_locks hint);
 void ldlm_reprocess_recovery_done(struct ldlm_namespace *ns);
 void ldlm_lock_dump_handle(int level, const struct lustre_handle *lockh);
 void ldlm_unlink_lock_skiplist(struct ldlm_lock *req);
@@ -1835,10 +1806,11 @@ int ldlm_cancel_resource_local(struct ldlm_resource *res,
 int ldlm_cli_cancel_list_local(struct list_head *cancels, int count,
 			       enum ldlm_cancel_flags flags);
 int ldlm_cli_cancel_list(struct list_head *head, int count,
+			 struct ldlm_lock *primary,
 			 struct ptlrpc_request *req,
 			 enum ldlm_cancel_flags flags);
 
-int ldlm_inodebits_drop(struct ldlm_lock *lock, __u64 to_drop);
+int ldlm_inodebits_drop(struct ldlm_lock *lock, enum mds_ibits_locks to_drop);
 int ldlm_cli_inodebits_convert(struct ldlm_lock *lock,
 			       enum ldlm_cancel_flags cancel_flags);
 
@@ -1903,9 +1875,7 @@ int ldlm_pool_setup(struct ldlm_pool *pl, int limit);
 time64_t ldlm_pool_recalc(struct ldlm_pool *pl, bool force);
 __u32 ldlm_pool_get_lvf(struct ldlm_pool *pl);
 __u64 ldlm_pool_get_slv(struct ldlm_pool *pl);
-__u64 ldlm_pool_get_clv(struct ldlm_pool *pl);
 __u32 ldlm_pool_get_limit(struct ldlm_pool *pl);
-void ldlm_pool_set_slv(struct ldlm_pool *pl, __u64 slv);
 void ldlm_pool_set_clv(struct ldlm_pool *pl, __u64 clv);
 void ldlm_pool_set_limit(struct ldlm_pool *pl, __u32 limit);
 void ldlm_pool_add(struct ldlm_pool *pl, struct ldlm_lock *lock);
@@ -1924,8 +1894,6 @@ static inline int ldlm_extent_contain(const struct ldlm_extent *ex1,
 {
 	return ex1->start <= ex2->start && ex1->end >= ex2->end;
 }
-
-int ldlm_inodebits_drop(struct ldlm_lock *lock,  __u64 to_drop);
 
 #endif
 /** @} LDLM */

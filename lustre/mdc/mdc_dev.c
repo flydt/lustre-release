@@ -100,10 +100,10 @@ static int mdc_dom_lock_match(const struct lu_env *env, struct obd_export *exp,
 		LASSERT(lock != NULL);
 		if (mdc_set_dom_lock_data(lock, obj)) {
 			lock_res_and_lock(lock);
-			if (!ldlm_is_lvb_cached(lock)) {
+			if (!(lock->l_flags & LDLM_FL_LVB_CACHED)) {
 				LASSERT(lock->l_ast_data == obj);
 				mdc_lock_lvb_update(env, obj, lock, NULL);
-				ldlm_set_lvb_cached(lock);
+				(lock->l_flags |= LDLM_FL_LVB_CACHED);
 			}
 			unlock_res_and_lock(lock);
 		} else {
@@ -229,6 +229,8 @@ static int mdc_lock_discard_pages(const struct lu_env *env,
 
 	io->ci_obj = cl_object_top(osc2cl(osc));
 	io->ci_ignore_layout = 1;
+	io->u.ci_misc.lm_next_rpc_time = 0;
+
 	result = cl_io_init(env, io, CIT_MISC, io->ci_obj);
 	if (result != 0)
 		GOTO(out, result);
@@ -310,7 +312,7 @@ static int mdc_dlm_canceling(const struct lu_env *env,
 		RETURN(0);
 	}
 
-	discard = ldlm_is_discard_data(dlmlock);
+	discard = (dlmlock->l_flags & LDLM_FL_DISCARD_DATA);
 	if (dlmlock->l_granted_mode & (LCK_PW | LCK_GROUP))
 		mode = CLM_WRITE;
 
@@ -406,8 +408,8 @@ void mdc_lock_lvb_update(const struct lu_env *env, struct osc_object *osc,
 	struct cl_object *obj = osc2cl(osc);
 	struct lov_oinfo *oinfo = osc->oo_oinfo;
 	struct cl_attr *attr = &osc_env_info(env)->oti_attr;
-	unsigned valid = CAT_BLOCKS | CAT_ATIME | CAT_CTIME | CAT_MTIME |
-			 CAT_SIZE;
+	enum cl_attr_valid valid = CAT_BLOCKS | CAT_ATIME | CAT_CTIME |
+				   CAT_MTIME | CAT_SIZE;
 	unsigned int setkms = 0;
 
 	ENTRY;
@@ -491,11 +493,11 @@ static void mdc_lock_granted(const struct lu_env *env, struct osc_lock *oscl,
 		descr->cld_end = CL_PAGE_EOF;
 
 		/* no lvb update for matched lock */
-		if (!ldlm_is_lvb_cached(dlmlock)) {
+		if (!(dlmlock->l_flags & LDLM_FL_LVB_CACHED)) {
 			LASSERT(oscl->ols_flags & LDLM_FL_LVB_READY);
 			LASSERT(osc == dlmlock->l_ast_data);
 			mdc_lock_lvb_update(env, osc, dlmlock, NULL);
-			ldlm_set_lvb_cached(dlmlock);
+			(dlmlock->l_flags |= LDLM_FL_LVB_CACHED);
 		}
 	}
 	unlock_res_and_lock(dlmlock);
@@ -732,7 +734,7 @@ static int mdc_enqueue_send(const struct lu_env *env, struct obd_export *exp,
 		matched = ldlm_handle2lock(&lockh);
 
 		if (CFS_FAIL_CHECK(OBD_FAIL_MDC_GLIMPSE_DDOS))
-			ldlm_set_kms_ignore(matched);
+			(matched->l_flags |= LDLM_FL_KMS_IGNORE);
 
 		if (mdc_set_dom_lock_data(matched, einfo->ei_cbdata)) {
 			*flags |= LDLM_FL_LVB_READY;
@@ -1048,28 +1050,27 @@ static int mdc_io_setattr_start(const struct lu_env *env,
 	__u64 size = io->u.ci_setattr.sa_attr.lvb_size;
 	unsigned int ia_avalid = io->u.ci_setattr.sa_avalid;
 	enum op_xvalid ia_xvalid = io->u.ci_setattr.sa_xvalid;
-	int rc;
+	int rc = 0;
 
 	/* silently ignore non-truncate setattr for Data-on-MDT object */
 	if (cl_io_is_trunc(io)) {
 		/* truncate cache dirty pages first */
 		rc = osc_cache_truncate_start(env, cl2osc(obj), size,
 					      &oio->oi_trunc);
-		if (rc < 0)
-			return rc;
 	} else if (cl_io_is_fallocate(io) &&
-		   io->u.ci_setattr.sa_falloc_mode & FALLOC_FL_PUNCH_HOLE) {
+		   (io->u.ci_setattr.sa_falloc_mode &
+		    (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE))) {
 		rc = osc_punch_start(env, io, obj);
-		if (rc < 0)
-			return rc;
 	}
+	if (rc < 0)
+		return rc;
 
 	if (oio->oi_lockless == 0) {
 		cl_object_attr_lock(obj);
 		rc = cl_object_attr_get(env, obj, attr);
 		if (rc == 0) {
 			struct ost_lvb *lvb = &io->u.ci_setattr.sa_attr;
-			unsigned int cl_valid = 0;
+			enum cl_attr_valid cl_valid = 0;
 
 			if (ia_avalid & ATTR_SIZE) {
 				attr->cat_size = size;
@@ -1482,7 +1483,7 @@ static int mdc_object_ast_clear(struct ldlm_lock *lock, void *data)
 	LASSERT(lock->l_resource->lr_type == LDLM_IBITS);
 	memcpy(lvb, &oinfo->loi_lvb, sizeof(oinfo->loi_lvb));
 	cl_object_attr_unlock(&osc->oo_cl);
-	ldlm_clear_lvb_cached(lock);
+	(lock->l_flags &= ~LDLM_FL_LVB_CACHED);
 
 	RETURN(LDLM_ITER_CONTINUE);
 }

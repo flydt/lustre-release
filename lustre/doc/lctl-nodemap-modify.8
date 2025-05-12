@@ -1,11 +1,13 @@
-.TH LCTL-NODEMAP_MODIFY 8 2024-08-14 Lustre "Lustre Configuration Utilities"
+.TH LCTL-NODEMAP_MODIFY 8 2025-02-28 Lustre "Lustre Configuration Utilities"
 .SH NAME
 lctl-nodemap_modify \- modify a nodemap property
 .SH SYNOPSIS
 .SY "lctl nodemap_modify"
+or
+.SY "lctl nodemap modify"
 .BI --name " NODEMAP_NAME"
-.BI --property " PROPERTY_NAME"
-.BI --value " VALUE"
+.B --property
+.IR PROPERTY_NAME {\fB= VALUE |\fB--value " VALUE" }
 .YS
 .SH DESCRIPTION
 .B nodemap_modify
@@ -13,9 +15,11 @@ modifies a property of the given nodemap.
 .SH OPTIONS
 .TP
 .BI --name " NODEMAP_NAME"
-Rhe name of the nodemap to modify
+The name of the nodemap to modify
 .TP
-.BI --property " PROPERTY_NAME"
+.B --property
+.IR PROPERTY_NAME {\fB= VALUE |\fB--value " VALUE" }
+.TP
 One of the following properties:
 .RS 8
 .TP 4
@@ -81,9 +85,38 @@ map UIDs, gid to map GIDs, both to map UIDs and GIDs, and projid to map PROJIDs.
 Defaults to 0, which means encryption is allowed.
 Set to 1 to prevent clients from using encryption.
 .TP
+.B child_raise_privileges
+Defaults to none, allowing child nodemaps to only lower privileges established
+by parent nodemap. Other possible values (multiple can be specified, comma
+separated) are the nodemap properties names that support privilege raise:
+.br
+- admin
+.br
+- trusted
+.br
+- deny_unknown
+.br
+- readonly_mount
+.br
+- forbid_encryption
+.br
+- child_raise_privs
+.br
+It is also possible to specify any roles accepted by the
+.B rbac
+property (see below).
+.br
+Any privilege not explicitly specified cannot be raised. To allow all privileges
+to be raised, use 'all' value.
+.TP
 .B readonly_mount
 Defaults to 0, which lets clients mount in read-write mode. If set to 1,
 clients are forced to a read-only mount if not specified explicitly.
+.TP
+.B deny_mount
+Defaults to 0, accepting client mounts from nodes assigned to the nodemap. If
+set to 1, nodes assigned to the nodemap can no longer mount new Lustre clients.
+Existing clients remain operational until a remount is attempted.
 .TP
 .B rbac
 Defaults to all, which means all roles are allowed. Other possible values
@@ -99,6 +132,13 @@ Defaults to all, which means all roles are allowed. Other possible values
 it is still possible to lock or unlock encrypted directories,
 as these operations only need read access to fscrypt metadata.
 .br
+- hsm_ops, to control whether clients can carry out HSM actions.
+.br
+- ignore_root_prjquota, so that project quota is not enforced for the root user.
+.br
+- local_admin, to allow mapped root to perform admin operations on files, unless
+it is squashed.
+.br
 - quota_ops, to allow quota modifications.
 .br
 - server_upcall, to define which identity upcall to use. If set, identity upcall
@@ -111,11 +151,18 @@ And to forbid all roles, use 'none' value.
 .TP
 .BI --value " VALUE"
 The value to set for the property. Should be 0 or 1 for admin and trusted.
+The use of both
+.BI --property " PROPERTY_NAME" = VALUE
+and
+.BI --value " VALUE"
+is invalid.
 .SH EXAMPLES
+Commands illustrating how to modify nodemap properties:
 .EX
 .B # lctl nodemap_modify --name remotesite --property trusted --value 1
 .B # lctl nodemap_modify --name remotesite --property admin --value 1
 .B # lctl nodemap_modify --name remotesite --property map_mode --value uid
+.B # lctl nodemap_modify --name remotesite --property rbac=all
 .B # lctl nodemap_modify --name othersite --property squash_uid --value 101
 .EE
 .SH AVAILABILITY

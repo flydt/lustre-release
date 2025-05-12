@@ -100,6 +100,34 @@ IDENTITY_FLUSH=mdt.$MDT.identity_flush
 
 SAVE_PWD=$PWD
 
+if (( $MDS1_VERSION >= $(version_code 2.16.51) )); then
+	nodemap_activate="nodemap activate"
+	nodemap_add="nodemap add"
+	nodemap_del="nodemap del"
+	nodemap_modify="nodemap modify"
+	nodemap_add_range="nodemap add_range"
+	nodemap_del_range="nodemap del_range"
+	nodemap_add_idmap="nodemap add_idmap"
+	nodemap_del_idmap="nodemap del_idmap"
+	nodemap_test_nid="nodemap test_nid"
+	nodemap_test_id="nodemap test_id"
+	nodemap_set_fileset="nodemap set_fileset"
+	nodemap_set_sepol="nodemap set_sepol"
+else
+	nodemap_activate="nodemap_activate"
+	nodemap_add="nodemap_add"
+	nodemap_del="nodemap_del"
+	nodemap_modify="nodemap_modify"
+	nodemap_add_range="nodemap_add_range"
+	nodemap_del_range="nodemap_del_range"
+	nodemap_add_idmap="nodemap_add_idmap"
+	nodemap_del_idmap="nodemap_del_idmap"
+	nodemap_test_nid="nodemap_test_nid"
+	nodemap_test_id="nodemap_test_id"
+	nodemap_set_fileset="nodemap_set_fileset"
+	nodemap_set_sepol="nodemap_set_sepol"
+fi
+
 sec_login() {
 	local user=$1
 	local group=$2
@@ -271,10 +299,10 @@ create_nodemaps() {
 	for (( i = 0; i < NODEMAP_COUNT; i++ )); do
 		local csum=${HOSTNAME_CHECKSUM}_${i}
 
-		do_facet mgs $LCTL nodemap_add $csum
+		do_facet mgs $LCTL $nodemap_add $csum
 		rc=$?
 		if [ $rc -ne 0 ]; then
-			echo "nodemap_add $csum failed with $rc"
+			echo "$nodemap_add $csum failed with $rc"
 			return $rc
 		fi
 
@@ -297,8 +325,8 @@ delete_nodemaps() {
 	for ((i = 0; i < NODEMAP_COUNT; i++)); do
 		local csum=${HOSTNAME_CHECKSUM}_${i}
 
-		if ! do_facet mgs $LCTL nodemap_del $csum; then
-			error "nodemap_del $csum failed with $?"
+		if ! do_facet mgs $LCTL $nodemap_del $csum; then
+			error "$nodemap_del $csum failed with $?"
 			return 3
 		fi
 
@@ -317,7 +345,7 @@ delete_nodemaps() {
 
 add_range() {
 	local j
-	local cmd="$LCTL nodemap_add_range"
+	local cmd="$LCTL $nodemap_add_range"
 	local range
 	local rc=0
 
@@ -332,7 +360,7 @@ add_range() {
 
 delete_range() {
 	local j
-	local cmd="$LCTL nodemap_del_range"
+	local cmd="$LCTL $nodemap_del_range"
 	local range
 	local rc=0
 
@@ -348,7 +376,7 @@ delete_range() {
 
 add_idmaps() {
 	local i
-	local cmd="$LCTL nodemap_add_idmap"
+	local cmd="$LCTL $nodemap_add_idmap"
 	local do_proj=true
 	local rc=0
 
@@ -386,7 +414,7 @@ add_idmaps() {
 
 add_root_idmaps() {
 	local i
-	local cmd="$LCTL nodemap_add_idmap"
+	local cmd="$LCTL $nodemap_add_idmap"
 	local rc=0
 
 	echo "Start to add root idmaps ..."
@@ -421,7 +449,7 @@ update_idmaps() { #LU-10040
 	echo "Start to update idmaps ..."
 
 	#Inserting an existed idmap should return error
-	cmd="$LCTL nodemap_add_idmap --name $csum --idtype uid"
+	cmd="$LCTL $nodemap_add_idmap --name $csum --idtype uid"
 	if do_facet mgs \
 		$cmd --idmap $old_id_client:$old_id_fs 2>/dev/null; then
 		error "insert idmap {$old_id_client:$old_id_fs} " \
@@ -454,7 +482,7 @@ update_idmaps() { #LU-10040
 		rc=$((rc + 1)); return $rc; }
 
 	#Delete above updated idmap
-	cmd="$LCTL nodemap_del_idmap --name $csum --idtype uid"
+	cmd="$LCTL $nodemap_del_idmap --name $csum --idtype uid"
 	if ! do_facet mgs $cmd --idmap $new_id:$new_id; then
 		error "$cmd --idmap $new_id:$new_id failed"
 		rc=$((rc + 1))
@@ -462,7 +490,7 @@ update_idmaps() { #LU-10040
 	fi
 
 	#restore the idmaps to make delete_idmaps work well
-	cmd="$LCTL nodemap_add_idmap --name $csum --idtype uid"
+	cmd="$LCTL $nodemap_add_idmap --name $csum --idtype uid"
 	if ! do_facet mgs $cmd --idmap $old_id_client:$old_id_fs; then
 		error "$cmd --idmap $old_id_client:$old_id_fs failed"
 		rc=$((rc + 1))
@@ -474,7 +502,7 @@ update_idmaps() { #LU-10040
 
 delete_idmaps() {
 	local i
-	local cmd="$LCTL nodemap_del_idmap"
+	local cmd="$LCTL $nodemap_del_idmap"
 	local do_proj=true
 	local rc=0
 
@@ -512,7 +540,7 @@ delete_idmaps() {
 
 delete_root_idmaps() {
 	local i
-	local cmd="$LCTL nodemap_del_idmap"
+	local cmd="$LCTL $nodemap_del_idmap"
 	local rc=0
 
 	echo "Start to delete root idmaps ..."
@@ -536,7 +564,7 @@ modify_flags() {
 	local i
 	local proc
 	local option
-	local cmd="$LCTL nodemap_modify"
+	local cmd="$LCTL $nodemap_modify"
 	local rc=0
 
 	proc[0]="admin_nodemap"
@@ -565,9 +593,9 @@ squash_id() {
 
 	local cmd
 
-	cmd[0]="$LCTL nodemap_modify --property squash_uid"
-	cmd[1]="$LCTL nodemap_modify --property squash_gid"
-	cmd[2]="$LCTL nodemap_modify --property squash_projid"
+	cmd[0]="$LCTL $nodemap_modify --property squash_uid"
+	cmd[1]="$LCTL $nodemap_modify --property squash_gid"
+	cmd[2]="$LCTL $nodemap_modify --property squash_projid"
 
 	if ! do_facet mgs ${cmd[$3]} --name $1 --value $2; then
 		return 1
@@ -587,7 +615,7 @@ fi
 test_nid() {
 	local cmd
 
-	cmd="$LCTL nodemap_test_nid"
+	cmd="$LCTL $nodemap_test_nid"
 
 	nid=$(do_facet mgs $cmd $1)
 
@@ -600,13 +628,13 @@ test_nid() {
 
 cleanup_active() {
 	# restore activation state
-	do_facet mgs $LCTL nodemap_activate 0
+	do_facet mgs $LCTL $nodemap_activate 0
 	wait_nm_sync active
 }
 
 test_idmap() {
 	local i
-	local cmd="$LCTL nodemap_test_id"
+	local cmd="$LCTL $nodemap_test_id"
 	local do_root_idmap=true
 	local rc=0
 
@@ -614,7 +642,7 @@ test_idmap() {
 
 	echo "Start to test idmaps ..."
 	## nodemap deactivated
-	if ! do_facet mgs $LCTL nodemap_activate 0; then
+	if ! do_facet mgs $LCTL $nodemap_activate 0; then
 		return 1
 	fi
 	for ((id = $ID0; id < NODEMAP_MAX_ID; id++)); do
@@ -632,7 +660,7 @@ test_idmap() {
 	done
 
 	## nodemap activated
-	if ! do_facet mgs $LCTL nodemap_activate 1; then
+	if ! do_facet mgs $LCTL $nodemap_activate 1; then
 		return 2
 	fi
 
@@ -653,9 +681,9 @@ test_idmap() {
 	for ((i = 0; i < NODEMAP_COUNT; i++)); do
 		local csum=${HOSTNAME_CHECKSUM}_${i}
 
-		if ! do_facet mgs $LCTL nodemap_modify --name $csum \
+		if ! do_facet mgs $LCTL $nodemap_modify --name $csum \
 		     --property trusted --value 1; then
-			error "nodemap_modify $csum failed with $?"
+			error "$nodemap_modify $csum failed with $?"
 			return 3
 		fi
 	done
@@ -676,9 +704,9 @@ test_idmap() {
 	for ((i = 0; i < NODEMAP_COUNT; i++)); do
 		local csum=${HOSTNAME_CHECKSUM}_${i}
 
-		if ! do_facet mgs $LCTL nodemap_modify --name $csum	\
+		if ! do_facet mgs $LCTL $nodemap_modify --name $csum	\
 		     --property admin --value 1; then
-			error "nodemap_modify $csum failed with $?"
+			error "$nodemap_modify $csum failed with $?"
 			return 3
 		fi
 	done
@@ -716,9 +744,9 @@ test_idmap() {
 	for ((i = 0; i < NODEMAP_COUNT; i++)); do
 		local csum=${HOSTNAME_CHECKSUM}_${i}
 
-		if ! do_facet mgs $LCTL nodemap_modify --name $csum	\
+		if ! do_facet mgs $LCTL $nodemap_modify --name $csum	\
 				--property admin --value 0; then
-			error "nodemap_modify ${HOSTNAME_CHECKSUM}_${i} "
+			error "$nodemap_modify ${HOSTNAME_CHECKSUM}_${i} "
 				"failed with $rc"
 			return 3
 		fi
@@ -756,10 +784,10 @@ test_idmap() {
 
 	## reset client trust to 0
 	for ((i = 0; i < NODEMAP_COUNT; i++)); do
-		if ! do_facet mgs $LCTL nodemap_modify		\
+		if ! do_facet mgs $LCTL $nodemap_modify		\
 			--name ${HOSTNAME_CHECKSUM}_${i}	\
 			--property trusted --value 0; then
-			error "nodemap_modify ${HOSTNAME_CHECKSUM}_${i} "
+			error "$nodemap_modify ${HOSTNAME_CHECKSUM}_${i} "
 				"failed with $rc"
 			return 3
 		fi
@@ -1290,8 +1318,13 @@ fops_test_setup() {
 # fileset test directory needs to be initialized on a privileged client
 fileset_test_setup() {
 	local nm=$1
+	local modify_val=""
 
-	if [ -n "$FILESET" -a -z "$SKIP_FILESET" ]; then
+	# exercise new nodemap_modify syntax if available
+	(( $MGS_VERSION >= $(version_code 2.16.51) )) ||
+		modify_val=" --value"
+
+	if [[ -n $FILESET && -z $SKIP_FILESET ]]; then
 		cleanup_mount $MOUNT
 		FILESET="" zconf_mount_clients $CLIENTS $MOUNT
 	fi
@@ -1301,11 +1334,11 @@ fileset_test_setup() {
 	local trust=$(do_facet mgs $LCTL get_param -n \
 		nodemap.${nm}.trusted_nodemap)
 
-	do_facet mgs $LCTL nodemap_modify --name $nm --property admin --value 1
-	do_facet mgs $LCTL nodemap_modify --name $nm --property trusted \
-		--value 1
+	do_facet mgs $LCTL nodemap_modify --name $nm \
+		--property admin${modify_val}=1
+	do_facet mgs $LCTL nodemap_modify --name $nm \
+		--property trusted${modify_val}=1
 
-	wait_nm_sync $nm admin_nodemap
 	wait_nm_sync $nm trusted_nodemap
 
 	# create directory and populate it for subdir mount
@@ -1321,15 +1354,14 @@ fileset_test_setup() {
 			$MOUNT/$subdir/$subsubdir/this_is_$subsubdir"
 
 	do_facet mgs $LCTL nodemap_modify --name $nm \
-		--property admin --value $admin
+		--property admin${modify_val}=$admin
 	do_facet mgs $LCTL nodemap_modify --name $nm \
-		--property trusted --value $trust
+		--property trusted${modify_val}=$trust
 
 	# flush MDT locks to make sure they are reacquired before test
 	do_node ${clients_arr[0]} $LCTL set_param \
 		ldlm.namespaces.$FSNAME-MDT*.lru_size=clear
 
-	wait_nm_sync $nm admin_nodemap
 	wait_nm_sync $nm trusted_nodemap
 }
 
@@ -2109,22 +2141,40 @@ test_26() {
 }
 run_test 26 "test transferring very large nodemap"
 
+nodemap_exercise_fileset_cleanup() {
+	# Already mounted clients are skipped in zconf_mount_clients()
+	for client in "${clients_arr[@]}"; do
+		zconf_mount_clients $client $MOUNT $MOUNT_OPTS ||
+			error "unable to mount client $client"
+	done
+}
+
 nodemap_exercise_fileset() {
-	local nm="$1"
-	local loop=0
+	local have_persistent_fset_cmd
 	local check_proj=true
+	local loop=0
+	local nm="$1"
+	local subdir="subdir_${nm}"
+	local subsubdir="subsubdir_${nm}"
 
 	(( $MDS1_VERSION >= $(version_code 2.14.52) )) || check_proj=false
 
+	# when "have_persistent_fset_cmd" is true, "lctl nodemap_set_fileset"
+	# is persistent, otherwise "lctl set_param -P" must be used
+	have_persistent_fset_cmd=false
+	if (( $MGS_VERSION >= $(version_code 2.16.51) )); then
+		have_persistent_fset_cmd=true
+		subdir="thisisaverylongsubdirtotestlongfilesetsandtotestmultiplefilesetfragmentsonthenodemapiam_${nm}"
+	fi
+
 	# setup
-	if [ "$nm" == "default" ]; then
+	if [[ "$nm" == "default" ]]; then
 		do_facet mgs $LCTL nodemap_activate 1
 		wait_nm_sync active
 		do_facet mgs $LCTL nodemap_modify --name default \
 			--property admin --value 1
 		do_facet mgs $LCTL nodemap_modify --name default \
 			--property trusted --value 1
-		wait_nm_sync default admin_nodemap
 		wait_nm_sync default trusted_nodemap
 		check_proj=false
 	else
@@ -2139,13 +2189,27 @@ nodemap_exercise_fileset() {
 	fileset_test_setup "$nm"
 
 	# add fileset info to $nm nodemap
-	if ! combined_mgs_mds; then
-	    do_facet mgs $LCTL set_param nodemap.${nm}.fileset=/$subdir ||
-		error "unable to add fileset info to $nm nodemap on MGS"
+	if $have_persistent_fset_cmd; then
+		do_facet mgs $LCTL nodemap_set_fileset --name $nm \
+			--fileset "/${subdir}" ||
+			error "can't set fileset to $nm nodemap on MGS"
+		# check fileset is set on local mgs node
+		wait_update_facet mgs "$LCTL get_param nodemap.${nm}.fileset" \
+				"nodemap.${nm}.fileset=/${subdir}" ||
+			error "fileset /${subdir} not set on $nm nodemap"
+	else
+		if ! combined_mgs_mds; then
+			do_facet mgs $LCTL set_param \
+				nodemap.${nm}.fileset=/${subdir} ||
+				error "can't set fileset /${subdir} to $nm nodemap on MGS"
+		fi
+		do_facet mgs $LCTL set_param -P \
+			nodemap.${nm}.fileset=/${subdir} ||
+			error "can't set fileset /${subdir} to $nm nodemap on servers"
 	fi
-	do_facet mgs $LCTL set_param -P nodemap.${nm}.fileset=/$subdir ||
-	       error "unable to add fileset info to $nm nodemap for servers"
-	wait_nm_sync $nm fileset "nodemap.${nm}.fileset=/$subdir"
+
+	# check fileset is set on remote nodes
+	wait_nm_sync $nm fileset "nodemap.${nm}.fileset=/${subdir}"
 
 	if $check_proj; then
 		do_facet mgs $LCTL nodemap_modify --name $nm \
@@ -2164,9 +2228,21 @@ nodemap_exercise_fileset() {
 		wait_nm_sync $nm deny_unknown
 	fi
 
-	# re-mount client
-	zconf_umount_clients ${clients_arr[0]} $MOUNT ||
-		error "unable to umount client ${clients_arr[0]}"
+	# re-start all components to verify persistence of fileset after restart
+	stopall || error "unable to stop"
+	# Unload modules to fully reload nodemap IAM
+	LOAD_MODULES_REMOTE=true unload_modules ||
+		error "unable to unload modules"
+	LOAD_MODULES_REMOTE=true load_modules ||
+		error "unable to load modules"
+	mountmgs || error "unable to start mgs"
+	mountmds || error "unable to start mds"
+	mountoss || error "unable to start oss"
+
+	stack_trap nodemap_exercise_fileset_cleanup EXIT
+
+	# mount a single client for fileset testing and remount
+	# the remaining clients later.
 	# set some generic fileset to trigger SSK code
 	export FILESET=/
 	zconf_mount_clients ${clients_arr[0]} $MOUNT $MOUNT_OPTS ||
@@ -2199,11 +2275,16 @@ nodemap_exercise_fileset() {
 	# remove fileset info from nodemap
 	do_facet mgs $LCTL nodemap_set_fileset --name $nm --fileset clear ||
 		error "unable to delete fileset info on $nm nodemap"
+	# check whether fileset was removed on mgs
 	wait_update_facet mgs "$LCTL get_param nodemap.${nm}.fileset" \
 			  "nodemap.${nm}.fileset=" ||
 		error "fileset info still not cleared on $nm nodemap"
-	do_facet mgs $LCTL set_param -P nodemap.${nm}.fileset=clear ||
+	if ! $have_persistent_fset_cmd; then
+		do_facet mgs $LCTL set_param -P nodemap.${nm}.fileset=clear ||
 		error "unable to reset fileset info on $nm nodemap"
+	fi
+
+	# check whether fileset was removed on remote nodes
 	wait_nm_sync $nm fileset "nodemap.${nm}.fileset="
 	do_facet mgs $LCTL set_param -P -d nodemap.${nm}.fileset ||
 		error "unable to remove fileset rule on $nm nodemap"
@@ -2227,12 +2308,11 @@ nodemap_exercise_fileset() {
 			error "unable to umount client ${clients_arr[0]}"
 	fi
 	fileset_test_cleanup "$nm"
-	if [ "$nm" == "default" ]; then
+	if [[ "$nm" == "default" ]]; then
 		do_facet mgs $LCTL nodemap_modify --name default \
 			 --property admin --value 0
 		do_facet mgs $LCTL nodemap_modify --name default \
 			 --property trusted --value 0
-		wait_nm_sync default admin_nodemap
 		wait_nm_sync default trusted_nodemap
 		do_facet mgs $LCTL nodemap_activate 0
 		wait_nm_sync active 0
@@ -2241,30 +2321,26 @@ nodemap_exercise_fileset() {
 	else
 		nodemap_test_cleanup
 	fi
-	if $SHARED_KEY; then
-		zconf_mount_clients ${clients_arr[0]} $MOUNT $MOUNT_OPTS ||
-			error "unable to remount client ${clients_arr[0]}"
-	fi
+	# The fileset cleanup trap is reset during nodemap clean up.
+	# Call fileset cleanup to restart all shut down clients
+	nodemap_exercise_fileset_cleanup
 }
 
 test_27a() {
-	[ "$MDS1_VERSION" -lt $(version_code 2.11.50) ] &&
+	(( $MDS1_VERSION < $(version_code 2.11.50) )) &&
 		skip "Need MDS >= 2.11.50"
 
 	# if servers run on the same node, it is impossible to tell if they get
 	# synced with the mgs, so this test needs to be skipped
-	if [ $(facet_active_host mgs) == $(facet_active_host mds) ] &&
-	   [ $(facet_active_host mgs) == $(facet_active_host ost1) ]; then
+	if [[ $(facet_active_host mgs) == $(facet_active_host mds) ]] &&
+	   [[ $(facet_active_host mgs) == $(facet_active_host ost1) ]]; then
 		skip "local mode not supported"
 	fi
 
 	for nm in "default" "c0"; do
-		local subdir="subdir_${nm}"
-		local subsubdir="subsubdir_${nm}"
-
-		if [ "$nm" == "default" ] && [ "$SHARED_KEY" == "true" ]; then
-			echo "Skipping nodemap $nm with SHARED_KEY";
-			continue;
+		if [[ "$nm" == "default" && "$SHARED_KEY" == "true" ]]; then
+			echo "Skipping nodemap $nm with SHARED_KEY"
+			continue
 		fi
 
 		echo "Exercising fileset for nodemap $nm"
@@ -2332,32 +2408,44 @@ test_27aa() { #LU-17922
 run_test 27aa "test nodemap idmap range"
 
 test_27ab() { #LU-18109
-	local idmap
+	local offset_start=100000
+	local offset_limit=200000
+	local nid=1.1.1.1@tcp777
+	local activedefault
+	local nm1=Test18109
+	local nm2=OffsetTest
+	local squash=65534
+	local id_start=500
+	local expected
 	local id=500
+	local idmap
 	local offset
 
-	do_facet mgs $LCTL nodemap_add Test18109 ||
-		error "unable to add Test18109 as nodemap"
-	stack_trap "do_facet mgs $LCTL nodemap_del Test18109 || true"
+	(( MDS1_VERSION > $(version_code 2.16.50.170) )) ||
+		skip "need MDS > 2.16.50.170 for nodemap range offset"
 
-	do_facet mgs $LCTL nodemap_add OffsetTest ||
-		error "unable to add OffsetTest as nodemap"
-	stack_trap "do_facet mgs $LCTL nodemap_del OffsetTest || true"
+	do_facet mgs $LCTL nodemap_add $nm1 ||
+		error "unable to add $nm1 as nodemap"
+	stack_trap "do_facet mgs $LCTL nodemap_del $nm1 || true"
 
-	do_facet mgs $LCTL nodemap_add_offset --name Test18109 \
-		--offset 100000 --limit 200000 ||
-			error "cannot set offset 100000-299999 for Test18109"
+	do_facet mgs $LCTL nodemap_add $nm2 ||
+		error "unable to add $nm2 as nodemap"
+	stack_trap "do_facet mgs $LCTL nodemap_del $nm2 || true"
+
+	do_facet mgs $LCTL nodemap_add_offset --name $nm1 \
+		--offset $offset_start --limit $offset_limit ||
+			error "cannot set offset $offset_start-$((offset_start+offset_limit-1)) for $nm1"
 
 	#expected error, invalid offset range supplied
-	do_facet mgs $LCTL nodemap_add_offset --name OffsetTest \
-		--offset 150000 --limit 100000 &&
-			error "cannot set offset 150000-249999 for OffsetTest"
+	do_facet mgs $LCTL nodemap_add_offset --name $nm2 \
+		--offset $((offset_start+50000)) --limit 100000 &&
+			error "setting offset $((offset_start+50000))-249999 on $nm2 should fail"
 
-	do_facet mgs $LCTL nodemap_add_idmap --name Test18109 \
+	do_facet mgs $LCTL nodemap_add_idmap --name $nm1 \
 		 --idtype uid --idmap 500-509:0-9 ||
 		 error "unable to add idmap range 500-509:0-9"
 
-	idmap=$(do_facet mgs $LCTL get_param nodemap.Test18109.idmap |
+	idmap=$(do_facet mgs $LCTL get_param nodemap.$nm1.idmap |
 		grep idtype)
 	while IFS= read -r idmap; do
 		if (( $id <= 509 )); then
@@ -2367,51 +2455,198 @@ test_27ab() { #LU-18109
 		((id++))
 	done < <(echo "$idmap")
 
-	do_facet mgs $LCTL nodemap_del_idmap --name Test18109 \
+	do_facet mgs $LCTL nodemap_add_range --name $nm1 --range $nid ||
+		error "Add range $nid to $nm1 failed"
+	do_facet mgs $LCTL nodemap_modify --name $nm1 \
+		--property admin --value 1 ||
+		error "Setting admin=1 on $nm1 failed"
+	do_facet mgs $LCTL nodemap_modify --name $nm1 \
+		--property trusted --value 1 ||
+		error "Setting trusted=1 on $nm1 failed"
+	do_facet mgs $LCTL nodemap_modify --name $nm1 \
+		--property squash_uid --value $squash ||
+		error "Setting squash_uid=$squash on $nm1 failed"
+	do_facet mgs $LCTL nodemap_modify --name $nm1 \
+		--property squash_gid --value $squash ||
+		error "Setting squash_gid=$squash on $nm1 failed"
+
+	activedefault=$(do_facet mgs $LCTL get_param -n nodemap.active)
+	if ((activedefault != 1)); then
+		do_facet mgs $LCTL nodemap_modify --name default \
+			--property trusted --value 1
+		do_facet mgs $LCTL nodemap_modify --name default \
+			--property admin --value 1
+		do_facet mgs $LCTL nodemap_activate 1
+		wait_nm_sync active
+		stack_trap cleanup_active EXIT
+	fi
+
+	if (( MDS1_VERSION >= $(version_code 2.16.51.45) )); then
+		# with admin=1, we expect root to be offset
+		id=0
+		expected=$offset_start
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype uid --id $id)
+		((idmap == expected)) ||
+			error "uid $id should be mapped to $expected"
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype gid --id $id)
+		((idmap == expected)) ||
+			error "gid $id should be mapped to $expected"
+		# with trusted=1, we expect ids to be offset
+		id=$((id_start+1))
+		expected=$((offset_start+id_start+1))
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype uid --id $id)
+		((idmap == expected)) ||
+			error "uid $id should be mapped to $expected"
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype gid --id $id)
+		((idmap == expected)) ||
+			error "gid $id should be mapped to $expected"
+
+		do_facet mgs $LCTL nodemap_modify --name $nm1 \
+			--property trusted --value 0 ||
+			error "Setting trusted=0 on $nm1 failed"
+
+		# with trusted=0, we expect uid to be mapped+offset,
+		# gid to be squashed+offset
+		expected=$((offset_start+1))
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype uid --id $id)
+		((idmap == expected)) ||
+			error "uid $id should be mapped to $expected"
+		expected=$((offset_start+squash))
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype gid --id $id)
+		((idmap == expected)) ||
+			error "gid $id should be mapped to $expected"
+
+		do_facet mgs $LCTL nodemap_modify --name $nm1 \
+			--property admin --value 0 ||
+			error "Setting admin=0 on $nm1 failed"
+
+		# with admin=0, we expect root to be squashed+offset
+		id=0
+		expected=$((offset_start+squash))
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype uid --id $id)
+		((idmap == expected)) ||
+			error "uid $id should be mapped to $expected"
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype gid --id $id)
+		((idmap == expected)) ||
+			error "gid $id should be mapped to $expected"
+
+		do_facet mgs $LCTL nodemap_modify --name $nm1 \
+			--property admin --value 1 ||
+			error "Setting admin=1 on $nm1 failed"
+		do_facet mgs $LCTL nodemap_modify --name $nm1 \
+			--property trusted --value 1 ||
+			error "Setting trusted=1 on $nm1 failed"
+	fi
+
+	do_facet mgs $LCTL nodemap_del_idmap --name $nm1 \
 		 --idtype uid --idmap 500-509:0 ||
 			error "cannot delete idmap range 500-509:0"
 
 	#expected error, invalid secondary range supplied
-	do_facet mgs $LCTL nodemap_add --name Test18109 \
+	do_facet mgs $LCTL nodemap_add_idmap --name $nm1 \
 		 --idtype uid --idmap 500-509:200000-200010 &&
 		 error "Invalid range 200000-200010 was supplied"
 
-	(( $(do_facet mgs $LCTL get_param nodemap.Test18109.idmap |
+	(( $(do_facet mgs $LCTL get_param nodemap.$nm1.idmap |
 		grep -c idtype) == 0 )) ||
 		error "invalid range 200000-200010 supplied and passed"
 
-	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+	offset=$(do_facet mgs $LCTL get_param nodemap.$nm1.offset |
 		 grep start_uid)
-	[[ "$offset" == *"start_uid: 100000"* ]] ||
-		error "expected start_uid of 100000 not found before remounting"
+	[[ "$offset" == *"start_uid: $offset_start"* ]] ||
+		error "expected start_uid of $offset_start not found before remounting"
 
-	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+	offset=$(do_facet mgs $LCTL get_param nodemap.$nm1.offset |
 		 grep limit_uid)
-	[[ "$offset" == *"limit_uid: 200000"* ]] ||
-		error "expected limit_uid of 200000 not found before remounting"
+	[[ "$offset" == *"limit_uid: $offset_limit"* ]] ||
+		error "expected limit_uid of $offset_limit not found before remounting"
+
+	if (( MDS1_VERSION >= $(version_code 2.16.51.45) )); then
+		# with admin=1, we expect root to be offset
+		id=0
+		expected=$offset_start
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype uid --id $id)
+		((idmap == expected)) ||
+			error "uid $id should be mapped to $expected"
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype gid --id $id)
+		((idmap == expected)) ||
+			error "gid $id should be mapped to $expected"
+		# with trusted=1, we expect ids to be offset
+		id=$((id_start+1))
+		expected=$((offset_start+id_start+1))
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype uid --id $id)
+		((idmap == expected)) ||
+			error "uid $id should be mapped to $expected"
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype gid --id $id)
+		((idmap == expected)) ||
+			error "gid $id should be mapped to $expected"
+
+		do_facet mgs $LCTL nodemap_modify --name $nm1 \
+			--property trusted --value 0 ||
+			error "Setting trusted=0 on $nm1 failed"
+
+		# with trusted=0, we expect uid to be squashed+offset
+		expected=$((offset_start+squash))
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype uid --id $id)
+		((idmap == expected)) ||
+			error "uid $id should be mapped to $expected"
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype gid --id $id)
+		((idmap == expected)) ||
+			error "gid $id should be mapped to $expected"
+
+		do_facet mgs $LCTL nodemap_modify --name $nm1 \
+			--property admin --value 0 ||
+			error "Setting admin=0 on $nm1 failed"
+
+		# with admin=0, we expect root to be squashed+offset
+		id=0
+		expected=$((offset_start+squash))
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype uid --id $id)
+		((idmap == expected)) ||
+			error "uid $id should be mapped to $expected"
+		idmap=$(do_facet mgs $LCTL nodemap_test_id --nid $nid \
+			--idtype gid --id $id)
+		((idmap == expected)) ||
+			error "gid $id should be mapped to $expected"
+	fi
 
 	stopall || error "failed to unmount servers"
 	setupall || error "failed to remount servers"
 
-	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+	offset=$(do_facet mgs $LCTL get_param nodemap.$nm1.offset |
 		 grep start_uid)
-	[[ "$offset" == *"start_uid: 100000"* ]] ||
-		error "expected start_uid of 100000 not found after remounting"
+	[[ "$offset" == *"start_uid: $offset_start"* ]] ||
+		error "expected start_uid of $offset_start not found after remounting"
 
-	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+	offset=$(do_facet mgs $LCTL get_param nodemap.$nm1.offset |
 		 grep limit_uid)
-	[[ "$offset" == *"limit_uid: 200000"* ]] ||
-		error "expected limit_uid of 200000 not found after remounting"
+	[[ "$offset" == *"limit_uid: $offset_limit"* ]] ||
+		error "expected limit_uid of $offset_limit not found after remounting"
 
-	do_facet mgs $LCTL nodemap_del_offset --name Test18109 ||
-		error "cannot del offset from Test18109"
+	do_facet mgs $LCTL nodemap_del_offset --name $nm1 ||
+		error "cannot del offset from $nm1"
 
-	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+	offset=$(do_facet mgs $LCTL get_param nodemap.$nm1.offset |
 		 grep start_uid)
 	[[ "$offset" == *"start_uid: 0"* ]] ||
 		error "expected start_uid 0, found $offset"
 
-	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+	offset=$(do_facet mgs $LCTL get_param nodemap.$nm1.offset |
 		 grep limit_uid)
 	[[ "$offset" == *"limit_uid: 0"* ]] ||
 		error "expected limit_uid 0, found $offset"
@@ -2419,21 +2654,21 @@ test_27ab() { #LU-18109
 	stopall || error "failed to unmount servers"
 	setupall || error "failed to remount servers"
 
-	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+	offset=$(do_facet mgs $LCTL get_param nodemap.$nm1.offset |
 		 grep start_uid)
 	[[ "$offset" == *"start_uid: 0"* ]] ||
 		error "expected start_uid 0, found $offset after remounting"
 
-	offset=$(do_facet mgs $LCTL get_param nodemap.Test18109.offset |
+	offset=$(do_facet mgs $LCTL get_param nodemap.$nm1.offset |
 		 grep limit_uid)
 	[[ "$offset" == *"limit_uid: 0"* ]] ||
 		error "expected limit_uid 0, found $offset after remounting"
 
-	do_facet mgs $LCTL nodemap_del Test18109 ||
-		error "failed to remove nodemap Test18109"
+	do_facet mgs $LCTL nodemap_del $nm1 ||
+		error "failed to remove nodemap $nm1"
 
-	do_facet mgs $LCTL nodemap_del OffsetTest ||
-		error "failed to remove nodemap OffsetTest"
+	do_facet mgs $LCTL nodemap_del $nm2 ||
+		error "failed to remove nodemap $nm2"
 }
 run_test 27ab "test nodemap idmap offset"
 
@@ -2668,6 +2903,18 @@ cleanup_31() {
 	LOAD_MODULES_REMOTE=true unload_modules
 	LOAD_MODULES_REMOTE=true load_modules
 
+	# restore mgsnid on targets
+	for ((num = 1; num <= $MDSCOUNT; num++)); do
+		do_facet mds$num $TUNEFS --erase-param mgsnode \
+			$(mdsdevname $num)
+		do_facet mds$num $TUNEFS --mgsnode=$MGSNID $(mdsdevname $num)
+	done
+	for ((num = 1; num <= $OSTCOUNT; num++)); do
+		do_facet ost$num $TUNEFS --erase-param mgsnode \
+			$(ostdevname $num)
+		do_facet ost$num $TUNEFS --mgsnode=$MGSNID $(ostdevname $num)
+	done
+
 	do_facet mds1 $TUNEFS --erase-param failover.node $(mdsdevname 1)
 	if [ -n "$failover_mds1" ]; then
 		do_facet mds1 $TUNEFS \
@@ -2763,7 +3010,7 @@ test_31() {
 		cut -d'.' -f4-" '!=' $nid
 	for node in ${tgts//,/ }; do
 		wait_update_cond $node \
-			"$LCTL get_param -N *.${FSNAME}*.exports | grep $nid |
+			"$LCTL get_param -N *.${FSNAME}*.exports.* | grep $nid |
 			cut -d'.' -f4-" '!=' $nid
 	done
 	do_facet mgs "$LCTL get_param *.MGS*.exports.*.export"
@@ -2782,6 +3029,8 @@ test_31() {
 	# add network $net2 on all nodes
 	do_rpc_nodes $all load_modules || error "unable to load modules on $all"
 	for node in ${all//,/ }; do
+		do_node $node "$LNETCTL set discovery 0" ||
+			error "Failed to disable discovery on $node"
 		do_node $node "$LNETCTL lnet configure" ||
 			error "unable to configure lnet on node $node"
 		infname=inf_$(echo $node | cut -d'.' -f1 | sed s+-+_+g)
@@ -2790,6 +3039,22 @@ test_31() {
 	done
 
 	LOAD_MODULES_REMOTE=true load_modules || error "failed to load modules"
+
+	# update MGSNID
+	MGSNID=$mgsnid_orig,$mgsnid_new
+	stack_trap "MGSNID=$mgsnid_orig" EXIT
+
+	# add mgsnid on @$net2 to targets
+	for ((num = 1; num <= $MDSCOUNT; num++)); do
+		do_facet mds$num $TUNEFS --erase-param mgsnode \
+			$(mdsdevname $num)
+		do_facet mds$num $TUNEFS --mgsnode=$MGSNID $(mdsdevname $num)
+	done
+	for ((num = 1; num <= $OSTCOUNT; num++)); do
+		do_facet ost$num $TUNEFS --erase-param mgsnode \
+			$(ostdevname $num)
+		do_facet ost$num $TUNEFS --mgsnode=$MGSNID $(ostdevname $num)
+	done
 
 	# necessary to do writeconf in order to register
 	# new @$net2 nid for targets
@@ -2802,10 +3067,6 @@ test_31() {
 
 	setupall server_only || error "setupall failed"
 	export KEEP_ZPOOL="$KZPOOL"
-
-	# update MGSNID
-	MGSNID=$mgsnid_new
-	stack_trap "MGSNID=$mgsnid_orig" EXIT
 
 	# on client, reconfigure LNet and turn LNet Dynamic Discovery off
 	$LUSTRE_RMMOD || error "$LUSTRE_RMMOD failed (1)"
@@ -2859,7 +3120,7 @@ test_31() {
 		cut -d'.' -f4-" '!=' $nid2
 	for node in ${tgts//,/ }; do
 		wait_update_cond $node \
-			"$LCTL get_param -N *.${FSNAME}*.exports | grep $nid2 |
+			"$LCTL get_param -N *.${FSNAME}*.exports.* | grep $nid2|
 			cut -d'.' -f4-" '!=' $nid2
 	done
 	do_facet mgs "$LCTL get_param *.MGS*.exports.*.export"
@@ -2876,6 +3137,34 @@ test_31() {
 	# should fail because of LNet Dynamic Discovery
 	mount_client $MOUNT ${MOUNT_OPTS},network=$net2 &&
 		error "client mount with '-o network' option should be refused"
+
+	# remount with '-o network' server side option
+	(( $MDS1_VERSION >= $(version_code 2.16.51) )) || return 0
+
+	KZPOOL=$KEEP_ZPOOL
+	export KEEP_ZPOOL="true"
+	stopall || error "stopall failed"
+	mountmgs
+	for ((num = 1; num <= $MDSCOUNT; num++)); do
+		start mds$num $(mdsdevname $num) $MDS_MOUNT_OPTS,network=$net2
+	done
+	for ((num = 1; num <= $OSTCOUNT; num++)); do
+		start ost$num $(ostdevname $num) $OST_MOUNT_OPTS,network=$net2
+	done
+	export KEEP_ZPOOL="$KZPOOL"
+	sleep 5
+
+	# check exports on servers are empty for $net
+	do_facet mgs "$LCTL get_param mgs.MGS.exports.*.export"
+	wait_update_facet_cond mgs \
+		"$LCTL get_param -N mgs.MGS.exports.*.export | \
+		 grep ${net}.export | cut -d'@' -f2-" '!=' ${net}.export
+	do_nodes $tgts "$LCTL get_param *.${FSNAME}*.exports.*.export"
+	for node in ${tgts//,/ }; do
+		wait_update_cond $node \
+			"$LCTL get_param -N *.${FSNAME}*.exports.*.export | \
+			grep ${net}.export | cut -d'@' -f2-" '!=' ${net}.export
+	done
 
 	return 0
 }
@@ -5102,29 +5391,74 @@ test_54() {
 }
 run_test 54 "Encryption policies with fscrypt"
 
-cleanup_55() {
-	# unmount client
-	if is_mounted $MOUNT; then
-		umount_client $MOUNT || error "umount $MOUNT failed"
+setup_local_client_nodemap() {
+	local nm_name=${1:-"c0"}
+	local nm_admin_val=${2:-0}
+	local nm_trusted_val=${3:-0}
+	local rc
+
+	if $SHARED_KEY; then
+		export SK_UNIQUE_NM=true
+		export FILESET="/"
 	fi
 
-	do_facet mgs $LCTL nodemap_del c0
+	do_facet mgs $LCTL nodemap_del $nm_name || true
+	wait_nm_sync $nm_name id ''
+
 	do_facet mgs $LCTL nodemap_modify --name default \
-		 --property admin --value 0
+		--property admin --value 1
 	do_facet mgs $LCTL nodemap_modify --name default \
-		 --property trusted --value 0
-	wait_nm_sync default admin_nodemap
+		--property trusted --value 1
+	wait_nm_sync default trusted_nodemap
+
+	client_ip=$(host_nids_address $HOSTNAME $NETTYPE)
+	client_nid=$(h2nettype $client_ip)
+	do_facet mgs $LCTL nodemap_add $nm_name
+	do_facet mgs $LCTL nodemap_add_range \
+		--name $nm_name --range $client_nid ||
+		error "Add range $client_nid to $nm_name failed rc = $?"
+	do_facet mgs $LCTL nodemap_modify --name $nm_name \
+		--property admin --value $nm_admin_val
+	do_facet mgs $LCTL nodemap_modify --name $nm_name \
+		--property trusted --value $nm_trusted_val
+
+	do_facet mgs $LCTL nodemap_activate 1
+	wait_nm_sync active
+}
+
+cleanup_local_client_nodemap() {
+	local nm_name=${1:-"c0"}
+
+	do_facet mgs $LCTL nodemap_del $nm_name
+	do_facet mgs $LCTL nodemap_modify --name default \
+		--property admin --value 0
+	do_facet mgs $LCTL nodemap_modify --name default \
+		--property trusted --value 0
 	wait_nm_sync default trusted_nodemap
 
 	do_facet mgs $LCTL nodemap_activate 0
 	wait_nm_sync active 0
 
 	if $SHARED_KEY; then
+		unset FILESET
 		export SK_UNIQUE_NM=false
 	fi
+	if ! is_mounted $MOUNT; then
+		mount_client $MOUNT ${MOUNT_OPTS} || error "re-mount failed"
+		wait_ssk
+	fi
+}
 
-	# remount client
-	mount_client $MOUNT ${MOUNT_OPTS} || error "remount failed"
+cleanup_55() {
+	# unmount client
+	if is_mounted $MOUNT; then
+		umount_client $MOUNT || error "umount $MOUNT failed"
+	fi
+
+	# reset and deactivate nodemaps, remount client
+	cleanup_local_client_nodemap
+
+	# remount client on $MOUNT_2
 	if [ "$MOUNT_2" ]; then
 		mount_client $MOUNT2 ${MOUNT_OPTS} || error "remount failed"
 	fi
@@ -5157,37 +5491,7 @@ test_55() {
 
 	stack_trap cleanup_55 EXIT
 
-	do_facet mgs $LCTL nodemap_activate 1
-	wait_nm_sync active
-
-	do_facet mgs $LCTL nodemap_del c0 || true
-	wait_nm_sync c0 id ''
-
-	do_facet mgs $LCTL nodemap_modify --name default \
-		--property admin --value 1
-	do_facet mgs $LCTL nodemap_modify --name default \
-		--property trusted --value 1
-	wait_nm_sync default admin_nodemap
-	wait_nm_sync default trusted_nodemap
-
-	client_ip=$(host_nids_address $HOSTNAME $NETTYPE)
-	client_nid=$(h2nettype $client_ip)
-	do_facet mgs $LCTL nodemap_add c0
-	do_facet mgs $LCTL nodemap_add_range \
-		 --name c0 --range $client_nid ||
-		error "Add range $client_nid to c0 failed rc = $?"
-	do_facet mgs $LCTL nodemap_modify --name c0 \
-		 --property admin --value 0
-	do_facet mgs $LCTL nodemap_modify --name c0 \
-		 --property trusted --value 1
-	wait_nm_sync c0 admin_nodemap
-	wait_nm_sync c0 trusted_nodemap
-
-	if $SHARED_KEY; then
-		export SK_UNIQUE_NM=true
-		# set some generic fileset to trigger SSK code
-		export FILESET=/
-	fi
+	setup_local_client_nodemap "c0" 0 1
 
 	# remount client to take nodemap into account
 	zconf_mount_clients $HOSTNAME $MOUNT $MOUNT_OPTS ||
@@ -5597,62 +5901,6 @@ test_60() {
 }
 run_test 60 "Subdirmount of encrypted dir"
 
-setup_61() {
-	if $SHARED_KEY; then
-		export SK_UNIQUE_NM=true
-		export FILESET="/"
-	fi
-
-	do_facet mgs $LCTL nodemap_activate 1
-	wait_nm_sync active
-
-	do_facet mgs $LCTL nodemap_del c0 || true
-	wait_nm_sync c0 id ''
-
-	do_facet mgs $LCTL nodemap_modify --name default \
-		--property admin --value 1
-	do_facet mgs $LCTL nodemap_modify --name default \
-		--property trusted --value 1
-	wait_nm_sync default admin_nodemap
-	wait_nm_sync default trusted_nodemap
-
-	client_ip=$(host_nids_address $HOSTNAME $NETTYPE)
-	client_nid=$(h2nettype $client_ip)
-	do_facet mgs $LCTL nodemap_add c0
-	do_facet mgs $LCTL nodemap_add_range \
-		 --name c0 --range $client_nid || {
-		do_facet mgs $LCTL nodemap_del c0
-		return 1
-	}
-	do_facet mgs $LCTL nodemap_modify --name c0 \
-		 --property admin --value 1
-	do_facet mgs $LCTL nodemap_modify --name c0 \
-		 --property trusted --value 1
-	wait_nm_sync c0 admin_nodemap
-	wait_nm_sync c0 trusted_nodemap
-}
-
-cleanup_61() {
-	do_facet mgs $LCTL nodemap_del c0
-	do_facet mgs $LCTL nodemap_modify --name default \
-		 --property admin --value 0
-	do_facet mgs $LCTL nodemap_modify --name default \
-		 --property trusted --value 0
-	wait_nm_sync default admin_nodemap
-	wait_nm_sync default trusted_nodemap
-
-	do_facet mgs $LCTL nodemap_activate 0
-	wait_nm_sync active 0
-
-	if $SHARED_KEY; then
-		unset FILESET
-		export SK_UNIQUE_NM=false
-	fi
-
-	mount_client $MOUNT ${MOUNT_OPTS} || error "re-mount failed"
-	wait_ssk
-}
-
 test_61() {
 	local testfile=$DIR/$tdir/$tfile
 	local readonly
@@ -5662,7 +5910,7 @@ test_61() {
 	[ -n "$readonly" ] ||
 		skip "Server does not have readonly_mount nodemap flag"
 
-	stack_trap cleanup_61 EXIT
+	stack_trap cleanup_local_client_nodemap EXIT
 	for idx in $(seq 1 $MDSCOUNT); do
 		wait_recovery_complete mds$idx
 	done
@@ -5670,7 +5918,7 @@ test_61() {
 
 	# Activate nodemap, and mount rw.
 	# Should succeed as rw mount is not forbidden by default.
-	setup_61
+	setup_local_client_nodemap "c0" 1 1
 	readonly=$(do_facet mgs \
 			lctl get_param -n nodemap.default.readonly_mount)
 	[ $readonly -eq 0 ] ||
@@ -5913,50 +6161,10 @@ test_63() {
 }
 run_test 63 "fid2path with encrypted files"
 
-setup_64() {
-	do_facet mgs $LCTL nodemap_activate 1
-	wait_nm_sync active
-
-	do_facet mgs $LCTL nodemap_del c0 || true
-	wait_nm_sync c0 id ''
-
-	do_facet mgs $LCTL nodemap_modify --name default \
-		--property admin --value 1
-	do_facet mgs $LCTL nodemap_modify --name default \
-		--property trusted --value 1
-	wait_nm_sync default admin_nodemap
-	wait_nm_sync default trusted_nodemap
-
-	client_ip=$(host_nids_address $HOSTNAME $NETTYPE)
-	client_nid=$(h2nettype $client_ip)
-	do_facet mgs $LCTL nodemap_add c0
-	do_facet mgs $LCTL nodemap_add_range \
-		 --name c0 --range $client_nid ||
-		error "Add range $client_nid to c0 failed rc = $?"
-	do_facet mgs $LCTL nodemap_modify --name c0 \
-		 --property admin --value 1
-	do_facet mgs $LCTL nodemap_modify --name c0 \
-		 --property trusted --value 1
-	wait_nm_sync c0 admin_nodemap
-	wait_nm_sync c0 trusted_nodemap
-}
-
-cleanup_64() {
-	do_facet mgs $LCTL nodemap_del c0
-	do_facet mgs $LCTL nodemap_modify --name default \
-		 --property admin --value 0
-	do_facet mgs $LCTL nodemap_modify --name default \
-		 --property trusted --value 0
-	wait_nm_sync default admin_nodemap
-	wait_nm_sync default trusted_nodemap
-
-	do_facet mgs $LCTL nodemap_activate 0
-	wait_nm_sync active 0
-}
-
 test_64a() {
 	local testfile=$DIR/$tdir/$tfile
 	local srv_uc=""
+	local local_admin=""
 	local rbac
 
 	(( MDS1_VERSION >= $(version_code 2.15.54) )) ||
@@ -5965,9 +6173,12 @@ test_64a() {
 	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
 		srv_uc="server_upcall"
 
-	stack_trap cleanup_64 EXIT
+	(( MDS1_VERSION >= $(version_code 2.16.52) )) &&
+		local_admin="local_admin"
+
+	stack_trap cleanup_local_client_nodemap EXIT
 	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
-	setup_64
+	setup_local_client_nodemap "c0" 1 1
 
 	# check default value for rbac is all
 	rbac=$(do_facet mds $LCTL get_param -n nodemap.c0.rbac)
@@ -5978,6 +6189,7 @@ test_64a() {
 		    chlg_ops \
 		    fscrypt_admin \
 		    $srv_uc \
+		    $local_admin \
 		    ;
 	do
 		[[ "$rbac" =~ "$role" ]] ||
@@ -6033,9 +6245,9 @@ test_64b() {
 	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
 		srv_uc="server_upcall"
 
-	stack_trap cleanup_64 EXIT
+	stack_trap cleanup_local_client_nodemap EXIT
 	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
-	setup_64
+	setup_local_client_nodemap "c0" 1 1
 
         dir_restripe=$(do_node $mds1_HOST \
 		"$LCTL get_param -n mdt.*MDT0000.enable_dir_restripe")
@@ -6115,9 +6327,9 @@ test_64c() {
 	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
 		srv_uc="server_upcall"
 
-	stack_trap cleanup_64 EXIT
+	stack_trap cleanup_local_client_nodemap EXIT
 	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
-	setup_64
+	setup_local_client_nodemap "c0" 1 1
 
 	rbac="quota_ops"
 	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
@@ -6209,9 +6421,9 @@ test_64d() {
 	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
 		srv_uc="server_upcall"
 
-	stack_trap cleanup_64 EXIT
+	stack_trap cleanup_local_client_nodemap EXIT
 	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
-	setup_64
+	setup_local_client_nodemap "c0" 1 1
 
 	rbac="byfid_ops"
 	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
@@ -6262,9 +6474,9 @@ test_64e() {
 	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
 		srv_uc="server_upcall"
 
-	stack_trap cleanup_64 EXIT
+	stack_trap cleanup_local_client_nodemap EXIT
 	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
-	setup_64
+	setup_local_client_nodemap "c0" 1 1
 
 	# activate changelogs
 	changelog_register || error "changelog_register failed"
@@ -6339,9 +6551,10 @@ test_64f() {
 	[ -n "$cli_enc" ] || skip "Need enc support, skip fscrypt_admin role"
         which fscrypt || skip "Need fscrypt, skip fscrypt_admin role"
 
-	stack_trap cleanup_64 EXIT
+	stack_trap cleanup_local_client_nodemap EXIT
 	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
-	setup_64
+	echo "setup local client nodmap c0"
+	setup_local_client_nodemap "c0" 1 1
 
 	yes | fscrypt setup --force --verbose ||
 		echo "fscrypt global setup already done"
@@ -6349,6 +6562,7 @@ test_64f() {
 		/etc/fscrypt.conf
 	yes | fscrypt setup --verbose $MOUNT ||
 		echo "fscrypt setup $MOUNT already done"
+	echo "fscrypt for mount $MOUNT is ready for use"
 	stack_trap "rm -rf $MOUNT/.fscrypt"
 
 	# file_perms is required because fscrypt uses chmod/chown
@@ -6357,16 +6571,18 @@ test_64f() {
 	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac \
 		--value $rbac ||
 		error "setting rbac $rbac failed (1)"
+	echo "waiting for nodemap file_perms and fscrypt to be modified"
 	wait_nm_sync c0 rbac
 
 	mkdir -p $vaultdir
-	set -vx
 	echo -e 'mypass\nmypass' | fscrypt encrypt --verbose \
 	     --source=custom_passphrase --name=protector_64 $vaultdir ||
 		error "fscrypt encrypt $vaultdir failed"
 	fscrypt lock $vaultdir || error "fscrypt lock $vaultdir failed (1)"
+	echo "$vaultdir is locked away with encryption"
 	policy=$(fscrypt status $vaultdir | awk '$1 == "Policy:"{print $2}')
 	[ -n "$policy" ] || error "could not get enc policy"
+	echo "fscrypt policy $policy is ready"
 	protector=$(fscrypt status $vaultdir |
 		  awk 'BEGIN {found=0} { if (found == 1) { print $1 }} \
 			$1 == "PROTECTOR" {found=1}')
@@ -6439,8 +6655,8 @@ test_64g() {
 	setfacl -m g:grptest64g2:rwx $DIR/$tdir
 	ls -lR $DIR/$tdir
 
-	setup_64
-	stack_trap cleanup_64 EXIT
+	setup_local_client_nodemap "c0" 1 1
+	stack_trap cleanup_local_client_nodemap EXIT
 
 	# remove server_upcall from rbac roles,
 	# to make this client use INTERNAL upcall
@@ -6468,6 +6684,114 @@ test_64g() {
 		error "cat $DIR/$tdir/fileA failed"
 }
 run_test 64g "Nodemap enforces server_upcall RBAC role"
+
+test_64h() {
+	local testfile=$DIR/$tdir/$tfile
+	local offset_start=100000
+	local offset_limit=200000
+	local projid=1001
+	local srv_uc=""
+	local rbac
+	local fid
+
+	(( MDS1_VERSION >= $(version_code 2.15.54) )) ||
+		skip "Need MDS >= 2.15.54 for role-based controls"
+
+	(( MDS1_VERSION >= $(version_code 2.16.50) )) &&
+		srv_uc="server_upcall"
+
+	do_nodes $(comma_list $(all_mdts_nodes)) \
+		$LCTL set_param mdt.*.identity_upcall=NONE
+
+	stack_trap \
+	    "$LFS setquota -p $((projid+offset_start)) --delete $DIR/$tdir" EXIT
+	stack_trap cleanup_local_client_nodemap EXIT
+	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
+	chmod 777 $DIR/$tdir
+	$LFS project -p $((projid+offset_start)) -s $DIR/$tdir
+	$LFS setquota -p $((projid+offset_start)) -b 1G -B 1G $DIR/$tdir
+	$LFS project -d $DIR/$tdir
+	$LFS quota -aph $DIR/$tdir
+	setup_local_client_nodemap "c0" 1 1
+
+	# skip test if server does not support local_admin rbac role
+	rbac=$(do_facet mds $LCTL get_param -n nodemap.c0.rbac)
+	[[ "$rbac" =~ "local_admin" ]] ||
+		skip "server does not support 'local_admin' rbac role"
+
+	# Let's offset ids. Even root is offset.
+	do_facet mgs $LCTL nodemap_add_offset --name c0 \
+		--offset $offset_start --limit $offset_limit ||
+			error "cannot set offset for c0"
+
+	rbac="file_perms,quota_ops"
+	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
+	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac \
+		--value $rbac ||
+		error "setting rbac $rbac failed (1)"
+	wait_nm_sync c0 rbac
+
+	$RUNAS touch $testfile
+
+	# Without local_admin, root capabilities are dropped
+	chmod o+x $testfile && error "root chmod should fail (1)"
+	# and setquota/lfs project is not permitted
+	$LFS setquota -p $projid -b 4G -B 4G $DIR/$tdir &&
+		error "setquota should fail (1)"
+	$LFS project -p $((projid+1)) -s $DIR/$tdir &&
+		error "setting projid should fail (1)"
+
+	rbac="file_perms,quota_ops,local_admin"
+	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
+	do_facet mgs $LCTL nodemap_modify --name c0 \
+		 --property rbac --value $rbac ||
+		error "setting rbac $rbac failed (2)"
+	wait_nm_sync c0 rbac
+	# squash root by setting admin=0
+	do_facet mgs $LCTL nodemap_modify --name c0 \
+		 --property admin --value 0
+	wait_nm_sync c0 admin_nodemap
+
+	# Even with local_admin, capabilities are dropped if root is squashed
+	chmod o+x $testfile && error "root chmod should fail (2)"
+	# and setquota/lfs project is not permitted
+	$LFS setquota -p $projid -b 4G -B 4G $DIR/$tdir &&
+		error "setquota should fail (2)"
+	$LFS project -p $((projid+1)) -s $DIR/$tdir &&
+		error "setting projid should fail (2)"
+
+	do_facet mgs $LCTL nodemap_modify --name c0 \
+		 --property admin --value 1
+	wait_nm_sync c0 admin_nodemap
+
+	#  with local_admin and admin=1, capabilities are kept
+	chmod o+x $testfile || error "root chmod failed (1)"
+	# and setquota/lfs project is permitted
+	$LFS setquota -p $projid -b 4G -B 4G $DIR/$tdir ||
+		error "setquota failed (1)"
+	$LFS project -p $((projid+1)) -s $DIR/$tdir ||
+		error "setting projid failed (1)"
+
+	# remove offset and local_admin but keep admin, so that root
+	# on client is root on file system side
+	do_facet mgs $LCTL nodemap_del_offset --name c0 ||
+		error "cannot del offset for c0"
+	rbac="file_perms,quota_ops"
+	[ -z "$srv_uc" ] || rbac="$rbac,$srv_uc"
+	do_facet mgs $LCTL nodemap_modify --name c0 --property rbac \
+		--value $rbac ||
+		error "setting rbac $rbac failed (3)"
+	wait_nm_sync c0 rbac
+
+	#  as root, capabilities are kept even without local_admin
+	chmod g+x $testfile || error "root chmod failed (2)"
+	# and setquota/lfs project is permitted
+	$LFS setquota -p $((projid+offset_start)) -b 3G -B 3G $DIR/$tdir ||
+		error "setquota failed (2)"
+	$LFS project -p $((projid+offset_start)) -s $DIR/$tdir ||
+		error "setting projid failed (2)"
+}
+run_test 64h "Nodemap enforces local_admin RBAC roles"
 
 look_for_files() {
 	local pattern=$1
@@ -6779,23 +7103,52 @@ test_71() {
 }
 run_test 71 "encryption does not remove project flag"
 
-test_72() {
+dyn_nm_helper() {
+	local facet=$1
 	local mgsnm=mgsnm
 	local mgsnids=1.1.0.[1-100]@tcp
 	local mgsnids2=1.0.0.[1-100]@tcp
 	local mgsclid=600
 	local mgsfsid=2000
-	local nm=nm_test71
+	local nm=nm_test72
 	local nids=1.1.1.[1-100]@tcp
 	local startnid=1.1.1.1@tcp
 	local endnid=1.1.1.100@tcp
+	local subnids1=1.1.1.[2-50]@tcp
+	local subnids2=1.1.1.[51-100]@tcp
+	local subnids3=1.1.1.[2-25]@tcp
+	local subnids4=1.1.1.[51-52]@tcp
+	local subnids5=1.1.1.[26-60]@tcp
+	local subnids6=1.1.1.[1-60]@tcp
+	local clid=500
+	local fsid=1000
+	local properties="audit_mode deny_unknown forbid_encryption \
+			  readonly_mount"
+	local sepol="1:mls:31:40afb76d077c441b69af58cccaaa2ca63641ed6e21b0a887dc21a684f508b78f"
+	local rbac_val
+	local raise
 	local val
 
-	(( OST1_VERSION >= $(version_code 2.15.64) )) ||
-		skip "Need MDS >= 2.15.64 dynamic nodemaps"
+	activedefault=$(do_facet mgs $LCTL get_param -n nodemap.active)
+	if [[ "$activedefault" != "1" ]]; then
+		do_facet mgs $LCTL nodemap_activate 1
+		wait_nm_sync active
+		stack_trap cleanup_active EXIT
+	fi
 
-	[[ "$(facet_active_host mgs)" != "$(facet_active_host ost1)" ]] ||
-		skip "Need servers on different hosts"
+	do_facet mgs $LCTL nodemap_set_fileset --name default \
+		--fileset "/deffset" ||
+			error "setting fileset on default failed"
+	raise=$(do_facet mgs $LCTL get_param -n \
+		nodemap.default.child_raise_privileges)
+	if [[ -n "$raise" ]]; then
+		do_facet mgs $LCTL nodemap_modify --name default \
+		    --property child_raise_privileges --value all ||
+		       error "modify raise_privileges for default on MGS failed"
+		wait_nm_sync default child_raise_privileges
+		stack_trap "do_facet mgs $LCTL nodemap_modify --name default \
+			--property child_raise_privileges --value $raise" EXIT
+	fi
 
 	do_facet mgs $LCTL nodemap_add $mgsnm ||
 		error "adding $mgsnm on MGS failed"
@@ -6805,55 +7158,351 @@ test_72() {
 	do_facet mgs $LCTL nodemap_add_idmap --name $mgsnm --idtype uid \
 		--idmap $mgsclid:$mgsfsid ||
 		error "add_idmap for $mgsnm on MGS failed"
-	wait_nm_sync $mgsnm idmap '' inactive
+	wait_nm_sync $mgsnm idmap
 
-	stack_trap "do_facet ost1 $LCTL nodemap_del $nm || true" EXIT
-	do_facet ost1 $LCTL nodemap_add $nm &&
-		error "static nodemap on server should fail"
-	do_facet ost1 $LCTL nodemap_add -d $nm ||
+	rbac_val=$(do_facet mgs $LCTL get_param -n nodemap.$mgsnm.rbac)
+
+	stack_trap "do_facet $facet $LCTL nodemap_del $nm || true" EXIT
+	if [[ "$(facet_active_host mgs)" != \
+			"$(facet_active_host $facet)" ]]; then
+		do_facet $facet $LCTL nodemap_add $nm &&
+			error "static nodemap on server should fail"
+	fi
+	do_facet $facet $LCTL nodemap_add -d $nm &&
+		error "dynamic nodemap without parent should fail"
+	do_facet $facet $LCTL nodemap_add -d -p default $nm ||
 		error "dynamic nodemap on server failed"
-	val=$(do_facet ost1 $LCTL get_param -n nodemap.$nm.id)
-	if [[ "x$val" == "x" ]] || [[ "x$val" == "x0" ]]; then
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.id)
+	if [[ -z "$val" || "$val" == "0" ]]; then
 		error "dynamic nodemap wrong id $val"
 	fi
 
-	do_facet ost1 $LCTL nodemap_add_range --name $nm --range $nids ||
+	do_facet $facet $LCTL nodemap_add_range --name $nm --range $nids ||
 		error "dynamic add_range on server failed"
-	val=$(do_facet ost1 $LCTL get_param nodemap.$nm.ranges |
+	val=$(do_facet $facet $LCTL get_param nodemap.$nm.ranges |
 		awk 'BEGIN{RS=", "} $1=="start_nid:"{print $2 ; exit}')
-	if [[ "x$val" != "x$startnid" ]]; then
+	[[ "$val" == "$startnid" ]] ||
 		error "dynamic nodemap wrong start nid range $val"
-	fi
-	val=$(do_facet ost1 $LCTL get_param nodemap.$nm.ranges |
+	val=$(do_facet $facet $LCTL get_param nodemap.$nm.ranges |
 		awk 'BEGIN{RS=", "} $1=="end_nid:"{print $2 ; exit}')
-	if [[ "x$val" != "x$endnid" ]]; then
+	[[ "$val" == "$endnid" ]] ||
 		error "dynamic nodemap wrong end nid range $val"
-	fi
 
-	do_facet ost1 $LCTL nodemap_del_range --name $nm --range $nids ||
+	do_facet $facet $LCTL nodemap_add_idmap --name $nm --idtype uid \
+		--idmap $clid:$fsid ||
+			error "dynamic add_idmap on server failed"
+	val=$(do_facet $facet $LCTL get_param nodemap.$nm.idmap |
+		awk 'BEGIN{RS=", "} $1=="client_id:"{print $2 ; exit}')
+	(( val == clid )) || error "dynamic nodemap wrong client id $val"
+	val=$(do_facet $facet $LCTL get_param nodemap.$nm.idmap |
+		awk 'BEGIN{RS=", "} $1=="fs_id:"{print $2 ; exit}')
+	(( val == fsid )) || error "dynamic nodemap wrong fs id $val"
+
+	for prop in $properties; do
+		do_facet $facet $LCTL nodemap_modify --name $nm \
+			--property $prop --value 1 ||
+				error "dynamic modify of $prop failed"
+		val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop)
+		(( val == 1 )) || error "incorrect $prop $val"
+	done
+	prop=admin
+	do_facet $facet $LCTL nodemap_modify --name $nm \
+		--property $prop --value 1 ||
+			error "dynamic modify of $prop failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.admin_nodemap)
+	(( val == 1 )) || error "incorrect $prop $val"
+	prop=trusted
+	do_facet $facet $LCTL nodemap_modify --name $nm \
+		--property $prop --value 0 ||
+			error "dynamic modify of $prop failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.trusted_nodemap)
+	(( val == 0 )) || error "incorrect $prop $val"
+	prop=map_mode
+	do_facet $facet $LCTL nodemap_modify --name $nm \
+		--property $prop --value uid ||
+			error "dynamic modify of $prop failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop)
+	[[ "$val" == "uid" ]] || error "incorrect $prop $val"
+	prop=rbac
+	do_facet $facet $LCTL nodemap_modify --name $nm \
+		--property $prop --value file_perms ||
+			error "dynamic modify of $prop failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop)
+	[[ "$val" == "file_perms" ]] || error "incorrect $prop $val"
+	do_facet $facet $LCTL nodemap_modify --name $nm \
+		--property $prop --value all ||
+			error "dynamic modify of $prop failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop)
+	[[ "$val" == "$rbac_val" ]] || error "incorrect $prop $val"
+	prop=squash_uid
+	do_facet $facet $LCTL nodemap_modify --name $nm \
+		--property $prop --value 77 ||
+			error "dynamic modify of $prop failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop)
+	(( val == 77 )) || error "incorrect $prop $val"
+	prop=squash_gid
+	do_facet $facet $LCTL nodemap_modify --name $nm \
+		--property $prop --value 77 ||
+			error "dynamic modify of $prop failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop)
+	(( val == 77 )) || error "incorrect $prop $val"
+	prop=squash_projid
+	do_facet $facet $LCTL nodemap_modify --name $nm \
+		--property $prop --value 77 ||
+			error "dynamic modify of $prop failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop)
+	(( val == 77 )) || error "incorrect $prop $val"
+	prop=fileset
+	do_facet $facet $LCTL nodemap_set_fileset --name $nm \
+		--fileset "/tmp" &&
+			error "dynamic modify of $prop should fail"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop)
+	[[ "$val" == "/deffset" ]] || error "incorrect $prop $val"
+	prop=sepol
+	do_facet $facet $LCTL nodemap_set_sepol --name $nm \
+		--sepol $sepol ||
+			error "dynamic modify of $prop failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop)
+	[[ "$val" == "$sepol" ]] || error "incorrect $prop $val"
+
+	prop=offset
+	do_facet $facet $LCTL nodemap_add_offset --name $nm \
+		--offset 100000 --limit 200000 ||
+			error "dynamic modify of $prop failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop |
+		awk '$1 == "start_uid:" {print $2}' | sed s+,++)
+	(( val == 100000 )) || error "incorrect $prop start_uid $val"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop |
+		awk '$1 == "limit_uid:" {print $2}' | sed s+,++)
+	(( val == 200000 )) || error "incorrect $prop limit_uid $val"
+	do_facet $facet $LCTL nodemap_del_offset --name $nm ||
+			error "dynamic del of $prop failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop |
+		awk '$1 == "start_uid:" {print $2}' | sed s+,++)
+	(( val == 0 )) || error "incorrect $prop start_uid $val"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.$nm.$prop |
+		awk '$1 == "limit_uid:" {print $2}' | sed s+,++)
+	(( val == 0 )) || error "incorrect $prop limit_uid $val"
+
+	val=$(do_facet $facet $LCTL nodemap_test_id --nid $startnid \
+		--idtype uid --id $clid)
+	(( val == fsid )) || error "dynamic test_id on server failed"
+
+	do_facet $facet $LCTL nodemap_del_idmap --name $nm --idtype uid \
+		--idmap $clid:$fsid ||
+			error "dynamic del_idmap on server failed"
+	val=$(do_facet $facet $LCTL get_param nodemap.$nm.idmap |
+		awk 'BEGIN{RS=", "} $1=="client_id:"{print $2 ; exit}')
+	[[ -z "$val" ]] || error "idmap should be empty, got $val"
+
+	val=$(do_facet $facet $LCTL nodemap_test_nid $startnid)
+	[[ "$val" == "$nm" ]] || error "dynamic test_nid on server failed"
+
+	do_facet $facet $LCTL nodemap_add -d -p $nm ${nm}_1 ||
+		error "nodemap add ${nm}_1 on server failed"
+	stack_trap "do_facet $facet $LCTL nodemap_del ${nm}_1 || true" EXIT
+	do_facet $facet $LCTL nodemap_add_range --name ${nm}_1 \
+		--range $subnids1 ||
+			error "add_range for ${nm}_1 failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.${nm}_1.parent)
+	[[ "$val" == "$nm" ]] ||
+		error "parent of ${nm}_1 should be $nm, got $val"
+
+	do_facet $facet $LCTL nodemap_add -d -p $nm ${nm}_2 ||
+		error "nodemap add ${nm}_2 on server failed"
+	stack_trap "do_facet $facet $LCTL nodemap_del ${nm}_2 || true" EXIT
+	do_facet $facet $LCTL nodemap_add_range --name ${nm}_2 \
+		--range $subnids2 ||
+			error "add_range for ${nm}_2 failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.${nm}_2.parent)
+	[[ "$val" == "$nm" ]] ||
+		error "parent of ${nm}_2 should be $nm, got $val"
+
+	do_facet $facet $LCTL nodemap_add -d -p ${nm}_1 ${nm}_3 ||
+		error "nodemap add ${nm}_3 on server failed"
+	stack_trap "do_facet $facet $LCTL nodemap_del ${nm}_3 || true" EXIT
+	do_facet $facet $LCTL nodemap_add_range --name ${nm}_3 \
+		--range $subnids4 &&
+		       error "nodemap ${nm}_3 should not accept range $subnids4"
+	do_facet $facet $LCTL nodemap_add_range --name ${nm}_3 \
+		--range $subnids5 &&
+		       error "nodemap ${nm}_3 should not accept range $subnids5"
+	do_facet $facet $LCTL nodemap_add_range --name ${nm}_3 \
+		--range $subnids6 &&
+		       error "nodemap ${nm}_3 should not accept range $subnids6"
+	do_facet $facet $LCTL nodemap_add_range --name ${nm}_3 \
+		--range $subnids3 ||
+			error "add_range $subnids3 for ${nm}_3 failed"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.${nm}_3.parent)
+	[[ "$val" == "${nm}_1" ]] ||
+		error "parent of ${nm}_3 should be ${nm}_1, got $val"
+	val=$(do_facet $facet $LCTL get_param -n nodemap.${nm}_3.squash_projid)
+	(( val == 77 )) || error "squash_projid should be inherited, got $val"
+
+	do_facet $facet $LCTL nodemap_del_range --name $nm --range $nids ||
 		error "dynamic del_range on server failed"
-	val=$(do_facet ost1 $LCTL get_param nodemap.$nm.ranges |
+	val=$(do_facet $facet $LCTL get_param nodemap.$nm.ranges |
 		awk 'BEGIN{RS=", "} $1=="start_nid:"{print $2 ; exit}')
-	if [[ "x$val" != "x" ]]; then
-		error "nid range should be empty, got $val"
-	fi
+	[[ -z "$val" ]] || error "nid range should be empty, got $val"
 
-	do_facet ost1 $LCTL nodemap_del $nm ||
+	do_facet $facet $LCTL nodemap_del $nm ||
 		error "dynamic nodemap del on server failed"
-	val=$(do_facet ost1 $LCTL get_param nodemap.$nm.id)
-	if [[ "x$val" != "x" ]]; then
-		error "nodemap should be gone, got $val"
-	fi
+	val=$(do_facet $facet $LCTL get_param nodemap.$nm.id)
+	[[ -z "$val" ]] || error "nodemap should be gone, got $val"
 
-	do_facet ost1 $LCTL nodemap_add_range --name $mgsnm --range $mgsnids2 &&
-			error "add_range $mgsnm on server should fail"
-	do_facet ost1 $LCTL nodemap_del_range --name $mgsnm --range $mgsnids &&
-		error "del_range $mgsnm on server should fail"
-	do_facet ost1 $LCTL nodemap_del $mgsnm &&
-		error "nodemap del $mgsnm on server should fail"
-	do_facet ost1 $LCTL get_param -R 'nodemap.*'
+	if [[ "$(facet_active_host mgs)" != \
+			"$(facet_active_host $facet)" ]]; then
+		do_facet $facet $LCTL nodemap_add_range --name $mgsnm \
+			--range $mgsnids2 &&
+				error "add_range $mgsnm on server should fail"
+		do_facet $facet $LCTL nodemap_del_range --name $mgsnm \
+			--range $mgsnids &&
+				error "del_range $mgsnm on server should fail"
+		do_facet $facet $LCTL nodemap_add_idmap --name $mgsnm \
+			--idtype gid --idmap $mgsclid:$mgsfsid &&
+				error "add_idmap $mgsnm on server should fail"
+		do_facet $facet $LCTL nodemap_del_idmap --name $mgsnm \
+			--idtype uid --idmap $mgsclid:$mgsfsid &&
+				error "del_idmap $mgsnm on server should fail"
+		do_facet $facet $LCTL nodemap_modify --name $mgsnm \
+			--property squash_projid --value 77 &&
+				error "modify $mgsnm on server should fail"
+		do_facet $facet $LCTL nodemap_del $mgsnm &&
+			error "nodemap del $mgsnm on server should fail"
+	fi
+	do_facet $facet $LCTL get_param -R 'nodemap.*'
 }
-run_test 72 "dynamic nodemap properties"
+
+test_72a() {
+	(( OST1_VERSION >= $(version_code 2.15.64) )) ||
+		skip "Need MDS >= 2.15.64 dynamic nodemaps"
+
+	[[ "$(facet_active_host mgs)" != "$(facet_active_host ost1)" ]] ||
+		skip "Need servers on different hosts"
+
+	dyn_nm_helper ost1
+}
+run_test 72a "dynamic nodemap properties on OSS"
+
+test_72b() {
+	(( MDS1_VERSION >= $(version_code 2.15.64) )) ||
+		skip "Need MDS >= 2.15.64 dynamic nodemaps"
+
+	dyn_nm_helper mds1
+}
+run_test 72b "dynamic nodemap properties on MDS"
+
+test_72c() {
+	local mgsnm=mgsnm
+	local nm=nm_test72c
+	local val
+
+	(( MDS1_VERSION >= $(version_code 2.16.52) )) ||
+		skip "Need MDS >= 2.16.52 dynamic nodemaps"
+
+	do_facet mgs $LCTL nodemap_add $mgsnm ||
+		error "adding $mgsnm on MGS failed"
+	stack_trap "do_facet mgs $LCTL nodemap_del $mgsnm" EXIT
+
+	do_facet mgs $LCTL nodemap_modify --name $mgsnm \
+		--property child_raise_privileges --value trusted ||
+		error "modify raise_privileges for $mgsnm on MGS failed (1)"
+	do_facet mgs $LCTL nodemap_modify --name $mgsnm \
+		--property admin --value 0 ||
+		error "modify admin for $mgsnm on MGS failed"
+	do_facet mgs $LCTL nodemap_modify --name $mgsnm \
+		--property trusted --value 0 ||
+		error "modify trusted for $mgsnm on MGS failed"
+	do_facet mgs $LCTL nodemap_modify --name $mgsnm \
+		--property deny_unknown --value 0 ||
+		error "modify deny_unknown for $mgsnm on MGS failed"
+	do_facet mgs $LCTL nodemap_modify --name $mgsnm \
+		--property readonly_mount --value 0 ||
+		error "modify readonly_mount for $mgsnm on MGS failed"
+	do_facet mgs $LCTL nodemap_modify --name $mgsnm \
+		--property rbac --value file_perms,quota_ops,byfid_ops ||
+		error "modify rbac for $mgsnm on MGS failed"
+	wait_nm_sync $mgsnm rbac '' inactive
+
+	do_facet mds1 $LCTL nodemap_add -d -p $mgsnm $nm ||
+		error "dynamic nodemap on server failed (1)"
+	stack_trap "do_facet mds1 $LCTL nodemap_del $nm || true" EXIT
+	val=$(do_facet mds1 $LCTL get_param -n nodemap.$nm.id)
+	if [[ -z "$val" || "$val" == "0" ]]; then
+		error "dynamic nodemap wrong id $val (1)"
+	fi
+	val=$(do_facet mds1 $LCTL get_param -n \
+		nodemap.$nm.child_raise_privileges)
+	[[ $val == "trusted" ]] ||
+		error "dyn nodemap should inherit child_raise_privileges"
+	do_facet mds1 $LCTL nodemap_modify --name $nm \
+		--property admin --value 1 &&
+		error "modify admin for $nm on mds1 should fail"
+	do_facet mds1 $LCTL nodemap_modify --name $nm \
+		--property trusted --value 1 ||
+		error "modify trusted for $nm on mds1 failed"
+	do_facet mds1 $LCTL nodemap_modify --name $nm \
+		--property deny_unknown --value 1 ||
+		error "modify deny_unknown for $nm on mds1 failed"
+	do_facet mds1 $LCTL nodemap_modify --name $nm \
+		--property readonly_mount --value 1 ||
+		error "modify readonly_mount for $nm on mds1 failed"
+	do_facet mds1 $LCTL nodemap_modify --name $nm \
+	       --property rbac --value file_perms,quota_ops,byfid_ops,dne_ops &&
+		error "modify rbac for $nm on mds1 should fail"
+	do_facet mds1 $LCTL nodemap_modify --name $nm \
+		--property rbac --value file_perms ||
+		error "modify rbac for $nm on mds1 failed (1)"
+	do_facet mds1 $LCTL nodemap_modify --name $nm \
+	       --property child_raise_privileges \
+	       --value trusted,admin &&
+	    error "modify nm.child_raise_privileges for $nm on mds1 should fail"
+
+	do_facet mds1 $LCTL nodemap_del $nm ||
+		error "failed to delete dynamic nodemap $nm"
+
+	do_facet mgs $LCTL nodemap_modify --name $mgsnm \
+		--property child_raise_privileges --value trusted,dne_ops ||
+		error "modify raise_privileges for $mgsnm on MGS failed (2)"
+	wait_nm_sync $mgsnm child_raise_privileges '' inactive
+
+	do_facet mds1 $LCTL nodemap_add -d -p $mgsnm $nm ||
+		error "dynamic nodemap on server failed (2)"
+	val=$(do_facet mds1 $LCTL get_param -n nodemap.$nm.id)
+	if [[ -z "$val" || "$val" == "0" ]]; then
+		error "dynamic nodemap wrong id $val (2)"
+	fi
+	do_facet mds1 $LCTL nodemap_modify --name $nm \
+	       --property rbac --value file_perms,quota_ops,byfid_ops,dne_ops ||
+		error "modify rbac for $nm on mds1 failed (2)"
+	do_facet mds1 $LCTL nodemap_modify --name $nm \
+	       --property child_raise_privileges \
+	       --value trusted ||
+	    error "modify nm.child_raise_privileges for $nm on mds1 failed (1)"
+
+	do_facet mds1 $LCTL nodemap_del $nm ||
+		error "failed to delete dynamic nodemap $nm"
+
+	do_facet mgs $LCTL nodemap_modify --name $mgsnm \
+		--property child_raise_privileges \
+		--value child_raise_privs,trusted,dne_ops ||
+		error "modify raise_privileges for $mgsnm on MGS failed (3)"
+	wait_nm_sync $mgsnm child_raise_privileges '' inactive
+
+	do_facet mds1 $LCTL nodemap_add -d -p $mgsnm $nm ||
+		error "dynamic nodemap on server failed (3)"
+	val=$(do_facet mds1 $LCTL get_param -n nodemap.$nm.id)
+	if [[ -z "$val" || "$val" == "0" ]]; then
+		error "dynamic nodemap wrong id $val (3)"
+	fi
+	do_facet mds1 $LCTL nodemap_modify --name $nm \
+	       --property child_raise_privileges \
+	       --value child_raise_privs,trusted,dne_ops,admin ||
+	    error "modify nm.child_raise_privileges for $nm on mds1 failed (2)"
+
+	do_facet mds1 $LCTL get_param -R nodemap.*
+}
+run_test 72c "child_raise_privileges nodemap property"
 
 test_73() {
 	local vaultdir1=$DIR/$tdir/vault1
@@ -6995,6 +7644,259 @@ test_73() {
 		error "name $diglong2 in RENME is not $diglong1"
 }
 run_test 73 "encrypted names in changelogs"
+
+test_74() {
+	local testfile="${DIR}/${tdir}/$tfile"
+	local deny_mount
+
+	# check that deny_mount flag exists
+	deny_mount=$(do_facet mgs \
+			$LCTL get_param -n nodemap.default.deny_mount)
+	[[ -n "$deny_mount" ]] ||
+		skip "Server does not have the deny_mount nodemap flag"
+
+	stack_trap cleanup_local_client_nodemap EXIT
+
+	umount_client $MOUNT || error "umount $MOUNT failed (1)"
+
+	# setup privileged nodemap for c0
+	setup_local_client_nodemap "c0" 1 1
+
+	# check default deny_mount flags
+	(( $deny_mount == 0 )) ||
+		error "wrong default for deny_mount flag on default nodemap"
+	deny_mount=$(do_facet mgs \
+			$LCTL get_param -n nodemap.c0.deny_mount)
+	(( $deny_mount == 0 )) ||
+		error "wrong default value for deny_mount on nodemap c0"
+
+	# mount client with active nodemap
+	zconf_mount_clients $HOSTNAME $MOUNT ${MOUNT_OPTS} ||
+		error "re-mount failed (1)"
+	wait_ssk
+
+	# simple access test
+	$LFS mkdir -c 1 "${DIR}/$tdir" || error "mkdir ${DIR}/$tdir failed"
+	$LFS setstripe -c 1 $testfile || error "setstripe $testfile failed"
+	echo -n "a" > $testfile || error "(1) write $testfile failed"
+
+	# set deny_mount flag. Access should still work for existing clients
+	do_facet mgs $LCTL nodemap_modify --name c0 \
+		--property deny_mount --value 1
+	wait_nm_sync c0 deny_mount
+	echo -n "b" >> $testfile || error "(2) write $testfile failed"
+	cat $testfile > /dev/null || error "read $testfile failed"
+	# unmount client
+	umount_client $MOUNT || error "umount $MOUNT failed (2)"
+
+	# mount client should fail (nodemap is deny_mount)
+	zconf_mount_clients $HOSTNAME $MOUNT ${MOUNT_OPTS} &&
+		error "mount should have failed. deny_mount flag is not honored"
+
+	# set active flag for c0. Access should work again
+	do_facet mgs $LCTL nodemap_modify --name c0 \
+		--property deny_mount --value 0
+	wait_nm_sync c0 deny_mount
+
+	zconf_mount_clients $HOSTNAME $MOUNT ${MOUNT_OPTS} ||
+		error "re-mount failed (2)"
+	wait_ssk
+
+	# check access
+	echo -n "c" >> $testfile || error "(3) write $testfile failed"
+	[[ $(cat $testfile) == "abc" ]] ||
+		error "read access test for $testfile failed"
+}
+run_test 74 "Set nodemap deny_mount flag"
+
+check_ost_object_ids() {
+	local file=$1
+	local expected_uid=$2
+	local expected_gid=$3
+	local expected_projid=$4
+	local objdump=$DIR/$tdir/objdump
+
+	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
+
+	# Get the OST object path. We assume the file has one stripe on ost1
+	local fids=($($LFS getstripe $file | grep 0x))
+	local fid="${fids[3]}:${fids[2]}:0"
+	local objpath=$(ost_fid2_objpath ost1 $fid)
+
+	do_facet ost1 "$DEBUGFS -c -R 'stat $objpath' $(ostdevname 1)" |
+		grep "Project" > $objdump
+	local obj_uid=$(awk '{print $2}' $objdump)
+	local obj_gid=$(awk '{print $4}' $objdump)
+	local obj_projid=$(awk '{print $6}' $objdump)
+	echo "OST object ids and size for file '$file': $(cat $objdump)"
+
+	[[ "$obj_uid" == "$expected_uid" ]] ||
+		error "uid is not set to expected value $expected_uid"
+	[[ "$obj_gid" == "$expected_gid" ]] ||
+		error "gid is not set to expected value $expected_gid"
+	[[ "$obj_projid" == "$expected_projid" ]] ||
+		error "projid is not set to expected value $expected_projid"
+}
+
+check_mdt_inode_ids() {
+	local file=${1#${MOUNT}}
+	local expected_uid=$2
+	local expected_gid=$3
+	local expected_projid=$4
+	local objdump=$DIR/$tdir/objdump
+
+	if (( $MDSCOUNT != 1 )); then
+		echo "DNE not supported; checking IDs on MDT assumes a single MDT only"
+		return 0
+	fi
+
+	mkdir -p $DIR/$tdir || error "mkdir $DIR/$tdir failed"
+
+	do_facet mds1 "$DEBUGFS -c -R 'stat ROOT${file}' $(mdsdevname 1)" |
+		grep "Project" > $objdump
+
+	local obj_uid=$(awk '{print $2}' $objdump)
+	local obj_gid=$(awk '{print $4}' $objdump)
+	local obj_projid=$(awk '{print $6}' $objdump)
+	echo "MDT inode ids and size for file '$file': $(cat $objdump)"
+
+	[[ "$obj_uid" == "$expected_uid" ]] ||
+		error "uid is not set to expected value $expected_uid"
+	[[ "$obj_gid" == "$expected_gid" ]] ||
+		error "gid is not set to expected value $expected_gid"
+	[[ "$obj_projid" == "$expected_projid" ]] ||
+		error "projid is not set to expected value $expected_projid"
+}
+
+check_ids_sync() {
+	sync
+	# wait for asynchronous MDS-OST sync and force flush to OST
+	sync_all_data
+	wait_mds_ost_sync || error "wait_mds_ost_sync failed"
+	# drop_caches to flush inode cache so ID updates from chown or
+	# lfs project are visible through debugfs on the OST objects
+	do_facet ost1 "sync; sync; echo 3 > /proc/sys/vm/drop_caches"
+	# drop_caches to flush dentry cache so namespace updates from "mv"
+	# operations are visible through debugfs on the MDT
+	do_facet mds "sync; sync; echo 3 > /proc/sys/vm/drop_caches"
+}
+
+test_75() {
+	local testdir="${DIR}/${tdir}"
+	local projdir="${testdir}/projdir"
+	local tfile_write=${projdir}/${tfile}_write
+	local tfile_trunc=${projdir}/${tfile}_trunc
+	local tfile_creat=${projdir}/${tfile}_creat
+	local tfile_falloc=${projdir}/${tfile}_falloc
+	local tfile_write2=${testdir}/${tfile}_write2
+	local testdir_projid=42
+	local testfile_projid=43
+	local have_ost_punch_ids=false
+
+	# prior to 2.16.53 OST_PUNCH did not set OST IDs
+	(( $OST1_VERSION >= $(version_code 2.16.53) &&
+		$CLIENT_VERSION >= $(version_code 2.16.53) )) &&
+		have_ost_punch_ids=true
+
+	[[ "$ost1_FSTYPE" == ldiskfs ]] ||
+		skip "ldiskfs only test (using debugfs)"
+
+	# setup
+	mkdir -p $projdir || error "mkdir $projdir failed"
+	stack_trap "rm -rf $DIR/$tdir" EXIT
+
+	$LFS project -s -p $testdir_projid $projdir ||
+		error "lfs project failed"
+	chown -R $USER0 $DIR/$tdir || error "chown Failed"
+
+	# setstripe is primarily used to force data being created on ost1
+
+	# OST_WRITE RPC (dd) - in projdir
+	$RUNAS_CMD -u $ID0 $LFS setstripe -c 1 -i 0 $tfile_write ||
+		error "setstripe for file $tfile_write failed"
+	$RUNAS_CMD -u $ID0 dd if=/dev/urandom of=$tfile_write bs=1M count=1 ||
+		error "dd for file $tfile_write failed"
+
+	# OST_WRITE RPC (dd) - not in projdir
+	$RUNAS_CMD -u $ID0 $LFS setstripe -c 1 -i 0 $tfile_write2 ||
+		error "setstripe for file $tfile_write2 failed"
+	$RUNAS_CMD -u $ID0 \
+		dd if=/dev/urandom of=$tfile_write2 bs=1M count=1 ||
+		error "dd for file $tfile_write2 failed"
+
+	if $have_ost_punch_ids; then
+		# OST_PUNCH RPC (truncate)
+		$RUNAS_CMD -u $ID0 $LFS setstripe -c 1 -i 0 $tfile_trunc ||
+			error "setstripe for file $tfile_trunc failed"
+		$RUNAS_CMD -u $ID0 $TRUNCATE $tfile_trunc 1048576 ||
+			error "truncate for file $tfile_trunc failed"
+	fi
+
+	# LDLM_ENQUEUE RPC (IT_CREAT intent) (setstripe)
+	$RUNAS_CMD -u $ID0 $LFS setstripe -c 1 -i 0 $tfile_creat ||
+		error "setstripe for file $tfile_creat failed"
+
+	# OST_FALLOCATE RPC (fallocate)
+	$RUNAS_CMD -u $ID0 $LFS setstripe -c 1 -i 0 $tfile_falloc ||
+		error "setstripe for file $tfile_falloc failed"
+	$RUNAS_CMD -u $ID0 fallocate -l 1M $tfile_falloc ||
+		error "fallocate for file $tfile_falloc failed"
+
+	check_ids_sync
+
+	# check IDs are set correctly
+	check_mdt_inode_ids $tfile_write $ID0 $ID0 $testdir_projid
+	check_ost_object_ids $tfile_write $ID0 $ID0 $testdir_projid
+
+	check_mdt_inode_ids $tfile_write2 $ID0 $ID0 0
+	check_ost_object_ids $tfile_write2 $ID0 $ID0 0
+
+	if $have_ost_punch_ids; then
+		check_mdt_inode_ids $tfile_trunc $ID0 $ID0 $testdir_projid
+		check_ost_object_ids $tfile_trunc $ID0 $ID0 $testdir_projid
+	fi
+
+	check_mdt_inode_ids $tfile_falloc $ID0 $ID0 $testdir_projid
+	check_ost_object_ids $tfile_falloc $ID0 $ID0 $testdir_projid
+
+	check_mdt_inode_ids $tfile_creat $ID0 $ID0 $testdir_projid
+
+	# move file to projdir should set PROJID from directory
+	# MDS_REINT RPC Client->MDS; OST_SETATTR RPC MDS->OST
+	mv $tfile_write ${testdir}/ || error "mv $tfile_write failed"
+	tfile_write=$testdir/${tfile}_write
+
+	# set explicit PROJID outside of projdir
+	# MDS_REINT RPC Client->MDS; OST_SETATTR RPC MDS->OST
+	$LFS project -p $testfile_projid $tfile_write2 ||
+		error "lfs project failed"
+
+	check_ids_sync
+
+	check_mdt_inode_ids $tfile_write $ID0 $ID0 $testdir_projid
+	check_ost_object_ids $tfile_write $ID0 $ID0 $testdir_projid
+
+	check_mdt_inode_ids $tfile_write2 $ID0 $ID0 $testfile_projid
+	check_ost_object_ids $tfile_write2 $ID0 $ID0 $testfile_projid
+
+	# move file to projdir should set new PROJID from directory
+	# MDS_REINT RPC Client->MDS; OST_SETATTR RPC MDS->OST
+	mv $tfile_write2 $projdir || error "mv $tfile_write2 failed"
+	tfile_write2=$projdir/${tfile}_write2
+
+	# chown should set new UID/GID
+	# MDS_REINT RPC Client->MDS; OST_SETATTR RPC MDS->OST
+	chown $ID1:$ID1 $tfile_write || error "chown $tfile_write failed"
+
+	check_ids_sync
+
+	check_mdt_inode_ids $tfile_write2 $ID0 $ID0 $testdir_projid
+	check_ost_object_ids $tfile_write2 $ID0 $ID0 $testdir_projid
+
+	check_mdt_inode_ids $tfile_write $ID1 $ID1 $testdir_projid
+	check_ost_object_ids $tfile_write $ID1 $ID1 $testdir_projid
+}
+run_test 75 "check uid/gid/projid are set on OST and MDT for various RPCs"
 
 log "cleanup: ======================================================"
 

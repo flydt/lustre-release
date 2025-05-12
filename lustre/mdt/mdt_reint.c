@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/mdt/mdt_reint.c
  *
  * Lustre Metadata Target (mdt) reintegration routines
  *
@@ -252,7 +232,7 @@ static int mdt_stripes_unlock(struct mdt_thread_info *mti,
  * will be stored in einfo->ei_cbdata.
  **/
 static int mdt_stripes_lock(struct mdt_thread_info *mti, struct mdt_object *obj,
-			    enum ldlm_mode mode, __u64 ibits,
+			    enum ldlm_mode mode, enum mds_ibits_locks ibits,
 			    struct ldlm_enqueue_info *einfo)
 {
 	union ldlm_policy_data *policy = &mti->mti_policy;
@@ -294,7 +274,8 @@ int mdt_object_stripes_lock(struct mdt_thread_info *info,
 			    struct mdt_object *parent,
 			    struct mdt_object *child,
 			    struct mdt_lock_handle *lh,
-			    struct ldlm_enqueue_info *einfo, __u64 ibits,
+			    struct ldlm_enqueue_info *einfo,
+			    enum mds_ibits_locks ibits,
 			    enum ldlm_mode mode)
 {
 	int rc;
@@ -505,7 +486,8 @@ static int mdt_create(struct mdt_thread_info *info, struct mdt_lock_handle *lhc)
 	ENTRY;
 	DEBUG_REQ(D_INODE, mdt_info_req(info),
 		  "Create ("DNAME"->"DFID") in "DFID,
-		  PNAME(&rr->rr_name), PFID(rr->rr_fid2), PFID(rr->rr_fid1));
+		  encode_fn_luname(&rr->rr_name), PFID(rr->rr_fid2),
+		  PFID(rr->rr_fid1));
 
 	if (!fid_is_md_operative(rr->rr_fid1))
 		RETURN(-EPERM);
@@ -821,7 +803,7 @@ static int mdt_attr_set(struct mdt_thread_info *info, struct mdt_object *mo,
 	struct mdt_lock_handle  *lh;
 	int do_vbr = ma->ma_attr.la_valid &
 			(LA_MODE | LA_UID | LA_GID | LA_PROJID | LA_FLAGS);
-	__u64 lockpart = MDS_INODELOCK_UPDATE;
+	enum mds_ibits_locks lockpart = MDS_INODELOCK_UPDATE;
 	struct ldlm_enqueue_info *einfo = &info->mti_einfo;
 	int rc;
 
@@ -1208,7 +1190,7 @@ static int mdt_reint_unlink(struct mdt_thread_info *info,
 
 	ENTRY;
 	DEBUG_REQ(D_INODE, req, "unlink "DFID"/"DNAME"", PFID(rr->rr_fid1),
-		  PNAME(&rr->rr_name));
+		  encode_fn_luname(&rr->rr_name));
 
 	if (info->mti_dlm_req)
 		ldlm_request_cancel(req, info->mti_dlm_req, 0, LATF_SKIP);
@@ -1313,12 +1295,14 @@ static int mdt_reint_unlink(struct mdt_thread_info *info,
 		if (!fid_is_zero(rr->rr_fid2)) {
 			CDEBUG(D_INFO, "%s: name "DNAME" cannot find "DFID"\n",
 			       mdt_obd_name(info->mti_mdt),
-			       PNAME(&rr->rr_name), PFID(mdt_object_fid(mc)));
+			       encode_fn_luname(&rr->rr_name),
+			       PFID(mdt_object_fid(mc)));
 			GOTO(put_child, rc = -ENOENT);
 		}
 		CDEBUG(D_INFO, "%s: name "DNAME": "DFID" is on another MDT\n",
 		       mdt_obd_name(info->mti_mdt),
-		       PNAME(&rr->rr_name), PFID(mdt_object_fid(mc)));
+		       encode_fn_luname(&rr->rr_name),
+		       PFID(mdt_object_fid(mc)));
 
 		if (!mdt_is_dne_client(req->rq_export))
 			/* Return -ENOTSUPP for old client */
@@ -1439,7 +1423,8 @@ static int mdt_reint_link(struct mdt_thread_info *info,
 
 	ENTRY;
 	DEBUG_REQ(D_INODE, req, "link "DFID" to "DFID"/"DNAME,
-		  PFID(rr->rr_fid1), PFID(rr->rr_fid2), PNAME(&rr->rr_name));
+		  PFID(rr->rr_fid1), PFID(rr->rr_fid2),
+		  encode_fn_luname(&rr->rr_name));
 
 	if (CFS_FAIL_CHECK(OBD_FAIL_MDS_REINT_LINK))
 		RETURN(err_serious(-ENOENT));
@@ -1521,7 +1506,7 @@ static int mdt_reint_link(struct mdt_thread_info *info,
 	if (!req_is_replay(mdt_info_req(info))) {
 		if (rc != -ENOENT) {
 			CDEBUG(D_INFO, "link target "DNAME" existed!\n",
-			       PNAME(&rr->rr_name));
+			       encode_fn_luname(&rr->rr_name));
 			GOTO(unlock_source, rc = -EEXIST);
 		}
 		info->mti_ver[2] = ENOENT_VERSION;
@@ -1553,9 +1538,9 @@ put_parent:
 static int mdt_rename_lock(struct mdt_thread_info *info,
 			   struct mdt_lock_handle *lh)
 {
+	enum mds_ibits_locks ibits = MDS_INODELOCK_UPDATE;
 	struct lu_fid *fid = &info->mti_tmp_fid1;
 	struct mdt_object *obj;
-	__u64 ibits = MDS_INODELOCK_UPDATE;
 	int rc;
 
 	ENTRY;
@@ -1623,7 +1608,7 @@ static int mdt_rename_source_lock(struct mdt_thread_info *info,
 				  struct mdt_object *child,
 				  struct mdt_lock_handle *lh,
 				  struct mdt_lock_handle *lh_lookup,
-				  __u64 ibits)
+				  enum mds_ibits_locks ibits)
 {
 	int rc;
 
@@ -1722,7 +1707,7 @@ static int mdt_migrate_link_parent_lock(struct mdt_thread_info *info,
 	const struct lu_fid *fid = mdt_object_fid(lnkp);
 	struct mdt_lock_handle *lhl = &info->mti_lh[MDT_LH_LOCAL];
 	struct mdt_link_lock *entry;
-	__u64 ibits = 0;
+	enum mds_ibits_locks ibits = MDS_INODELOCK_NONE;
 	int rc;
 
 	ENTRY;
@@ -1756,7 +1741,7 @@ static int mdt_migrate_link_parent_lock(struct mdt_thread_info *info,
 			lock = ldlm_handle2lock(&lhl->mlh_rreg_lh);
 			LASSERT(lock != NULL);
 			lock_res_and_lock(lock);
-			ldlm_set_atomic_cb(lock);
+			(lock->l_flags |= LDLM_FL_ATOMIC_CB);
 			unlock_res_and_lock(lock);
 			ldlm_lock_put(lock);
 		}
@@ -1907,7 +1892,7 @@ static int mdt_migrate_links_lock(struct mdt_thread_info *info,
 		if (lu_fid_eq(mdt_object_fid(spobj), &fid)) {
 			CDEBUG(D_INFO,
 			       "skip lock on source parent "DFID"/"DNAME"\n",
-			       PFID(&fid), PNAME(lname));
+			       PFID(&fid), encode_fn_luname(lname));
 			continue;
 		}
 
@@ -1915,7 +1900,7 @@ static int mdt_migrate_links_lock(struct mdt_thread_info *info,
 		if (tpobj != spobj && lu_fid_eq(mdt_object_fid(tpobj), &fid)) {
 			CDEBUG(D_INFO,
 			       "skip lock on target parent "DFID"/"DNAME"\n",
-			       PFID(&fid), PNAME(lname));
+			       PFID(&fid), encode_fn_luname(lname));
 			continue;
 		}
 
@@ -1928,7 +1913,7 @@ static int mdt_migrate_links_lock(struct mdt_thread_info *info,
 
 		if (!mdt_object_exists(lnkp)) {
 			CDEBUG(D_INFO, DFID" doesn't exist, skip "DNAME"\n",
-			       PFID(&fid), PNAME(lname));
+			       PFID(&fid), encode_fn_luname(lname));
 			mdt_object_put(info->mti_env, lnkp);
 			continue;
 		}
@@ -2148,7 +2133,7 @@ static int mdd_migrate_close(struct mdt_thread_info *info,
 
 	/* check if the lease was already canceled */
 	lock_res_and_lock(lease);
-	rc = ldlm_is_cancel(lease);
+	rc = (lease->l_flags & LDLM_FL_CANCEL);
 	unlock_res_and_lock(lease);
 
 	if (rc) {
@@ -2227,7 +2212,7 @@ int mdt_reint_migrate(struct mdt_thread_info *info,
 
 	ENTRY;
 	CDEBUG(D_INODE, "migrate "DFID"/"DNAME" to "DFID"\n", PFID(rr->rr_fid1),
-	       PNAME(&rr->rr_name), PFID(rr->rr_fid2));
+	       encode_fn_luname(&rr->rr_name), PFID(rr->rr_fid2));
 
 	if (info->mti_dlm_req)
 		ldlm_request_cancel(req, info->mti_dlm_req, 0, LATF_SKIP);
@@ -2450,15 +2435,20 @@ lock_parent:
 	if (info->mti_spec.sp_migrate_close) {
 		/* try to hold open_sem so that nobody else can open the file */
 		if (!down_write_trylock(&sobj->mot_open_sem)) {
-			/* close anyway */
-			mdd_migrate_close(info, sobj);
-			GOTO(unlock_source, rc = -EBUSY);
+			/* migrate only dentry */
+			if (!info->mti_spec.sp_migrate_nsonly)
+				CWARN("%s: "DFID"/%s is open, migrate only dentry\n",
+				      mdt2obd_dev(mdt)->obd_name,
+				      PFID(mdt_object_fid(spobj)),
+				      rr->rr_name.ln_name);
+			info->mti_spec.sp_migrate_nsonly = 1;
+
 		} else {
 			open_sem_locked = true;
-			rc = mdd_migrate_close(info, sobj);
-			if (rc && rc != -ESTALE)
-				GOTO(unlock_open_sem, rc);
 		}
+		rc = mdd_migrate_close(info, sobj);
+		if (rc && rc != -ESTALE)
+			GOTO(unlock_open_sem, rc);
 	}
 
 	tobj = mdt_object_find(env, mdt, rr->rr_fid2);
@@ -2527,10 +2517,10 @@ put_parent:
 unlock_rename:
 	mdt_rename_unlock(info, rename_lh);
 
-	if (rc)
+	if (rc && rc != -EALREADY)
 		CERROR("%s: migrate "DFID"/"DNAME" failed: rc = %d\n",
 		       mdt_obd_name(info->mti_mdt), PFID(rr->rr_fid1),
-		       PNAME(&rr->rr_name), rc);
+		       encode_fn_luname(&rr->rr_name), rc);
 
 	return rc;
 }
@@ -2697,8 +2687,8 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 
 	ENTRY;
 	DEBUG_REQ(D_INODE, req, "rename "DFID"/"DNAME" to "DFID"/"DNAME,
-		  PFID(rr->rr_fid1), PNAME(&rr->rr_name),
-		  PFID(rr->rr_fid2), PNAME(&rr->rr_tgt_name));
+		  PFID(rr->rr_fid1), encode_fn_luname(&rr->rr_name),
+		  PFID(rr->rr_fid2), encode_fn_luname(&rr->rr_tgt_name));
 
 	if (info->mti_dlm_req)
 		ldlm_request_cancel(req, info->mti_dlm_req, 0, LATF_SKIP);
@@ -2780,7 +2770,8 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 			       mdt_obd_name(mdt),
 			       msrcdir == mtgtdir ? "samedir" : "crossdir",
 			       S_ISDIR(ma->ma_attr.la_mode) ? "dir" : "file",
-			       PFID(rr->rr_fid1), PNAME(&rr->rr_name));
+			       PFID(rr->rr_fid1),
+			       encode_fn_luname(&rr->rr_name));
 		}
 	}
 
@@ -3120,7 +3111,7 @@ static int mdt_reint_resync(struct mdt_thread_info *info,
 		GOTO(out_put_lease, rc = -EBUSY);
 
 	lock_res_and_lock(lease);
-	lease_broken = ldlm_is_cancel(lease);
+	lease_broken = (lease->l_flags & LDLM_FL_CANCEL);
 	unlock_res_and_lock(lease);
 	if (lease_broken)
 		GOTO(out_unlock, rc = -EBUSY);

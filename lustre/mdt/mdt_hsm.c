@@ -1,24 +1,5 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License version 2 for more details.  A copy is
- * included in the COPYING file that accompanied this code.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2011, 2012 Commissariat a l'energie atomique et aux energies
  *                          alternatives
@@ -26,9 +7,8 @@
  *
  * Copyright (c) 2012, 2015, Intel Corporation.
  */
+
 /*
- * lustre/mdt/mdt_hsm.c
- *
  * Lustre Metadata Target (mdt) request handler
  *
  * Author: Aurelien Degremont <aurelien.degremont@cea.fr>
@@ -92,6 +72,8 @@ static inline bool mdt_hsm_is_admin(struct mdt_thread_info *info)
 		return false;
 
 	is_admin = cap_raised(mdt_ucred(info)->uc_cap, CAP_SYS_ADMIN);
+	if (!mdt_ucred(info)->uc_rbac_hsm_ops)
+		is_admin = false;
 
 	mdt_exit_ucred(info);
 
@@ -298,6 +280,8 @@ int mdt_hsm_state_set(struct tgt_session_info *tsi)
 	rc = mdt_init_ucred(info, (struct mdt_body *)info->mti_body);
 	if (rc < 0)
 		GOTO(out, rc = err_serious(rc));
+	if (!mdt_ucred(info)->uc_rbac_hsm_ops)
+		GOTO(out_ucred, rc = -EACCES);
 
 	lh = &info->mti_lh[MDT_LH_CHILD];
 	rc = mdt_object_lock(info, obj, lh, MDS_INODELOCK_LOOKUP |
@@ -600,6 +584,9 @@ int mdt_hsm_request(struct tgt_session_info *tsi)
 	rc = mdt_init_ucred(info, (struct mdt_body *)info->mti_body);
 	if (rc)
 		GOTO(out, rc);
+
+	if (!mdt_ucred(info)->uc_rbac_hsm_ops)
+		GOTO(out_ucred, rc = -EACCES);
 
 	switch (hr->hr_action) {
 	/* code to be removed in hsm1_merge and final patch */

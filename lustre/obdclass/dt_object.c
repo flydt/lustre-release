@@ -37,6 +37,7 @@ struct lu_context_key dt_key = {
 	.lct_init = dt_global_key_init,
 	.lct_fini = dt_global_key_fini
 };
+EXPORT_SYMBOL(dt_key);
 
 /*
  * no lock is necessary to protect the list, because call-backs
@@ -255,133 +256,6 @@ struct dt_object *dt_locate_at(const struct lu_env *env,
 	return ERR_PTR(-ENOENT);
 }
 EXPORT_SYMBOL(dt_locate_at);
-
-/**
- * find an object named \a entry in given \a dfh->dfh_o directory.
- */
-static int dt_find_entry(const struct lu_env *env, const char *entry,
-			 void *data)
-{
-	struct dt_find_hint *dfh = data;
-	struct dt_device *dt = dfh->dfh_dt;
-	struct lu_fid *fid = dfh->dfh_fid;
-	struct dt_object *obj = dfh->dfh_o;
-	int rc;
-
-	rc = dt_lookup_dir(env, obj, entry, fid);
-	dt_object_put(env, obj);
-	if (rc == 0) {
-		obj = dt_locate(env, dt, fid);
-		if (IS_ERR(obj))
-			rc = PTR_ERR(obj);
-	}
-	dfh->dfh_o = obj;
-
-	return rc;
-}
-
-/**
- * Abstract function which parses path name. This function feeds
- * path component to \a entry_func.
- */
-int dt_path_parser(const struct lu_env *env,
-		   char *path, dt_entry_func_t entry_func,
-		   void *data)
-{
-	char *e;
-	int rc = 0;
-
-	while (1) {
-		e = strsep(&path, "/");
-		if (e == NULL)
-			break;
-
-		if (e[0] == 0) {
-			if (!path || path[0] == '\0')
-				break;
-			continue;
-		}
-		rc = entry_func(env, e, data);
-		if (rc)
-			break;
-	}
-
-	return rc;
-}
-
-struct dt_object *
-dt_store_resolve(const struct lu_env *env, struct dt_device *dt,
-		 const char *path, struct lu_fid *fid)
-{
-	struct dt_thread_info *info = dt_info(env);
-	struct dt_find_hint *dfh = &info->dti_dfh;
-	struct dt_object *obj;
-	int result;
-
-
-	dfh->dfh_dt = dt;
-	dfh->dfh_fid = fid;
-
-	strscpy(info->dti_buf, path, sizeof(info->dti_buf));
-
-	result = dt->dd_ops->dt_root_get(env, dt, fid);
-	if (result == 0) {
-		obj = dt_locate(env, dt, fid);
-		if (!IS_ERR(obj)) {
-			dfh->dfh_o = obj;
-			result = dt_path_parser(env, info->dti_buf,
-						dt_find_entry, dfh);
-			if (result != 0)
-				obj = ERR_PTR(result);
-			else
-				obj = dfh->dfh_o;
-		}
-	} else {
-		obj = ERR_PTR(result);
-	}
-	return obj;
-}
-
-static struct dt_object *dt_reg_open(const struct lu_env *env,
-				     struct dt_device *dt,
-				     struct dt_object *p,
-				     const char *name,
-				     struct lu_fid *fid)
-{
-	struct dt_object *o;
-	int result;
-
-	result = dt_lookup_dir(env, p, name, fid);
-	if (result == 0)
-		o = dt_locate(env, dt, fid);
-	else
-		o = ERR_PTR(result);
-
-	return o;
-}
-
-/**
- * Open dt object named \a filename from \a dirname directory.
- *      \param  dt      dt device
- *      \param  fid     on success, object fid is stored in *fid
- */
-struct dt_object *dt_store_open(const struct lu_env *env, struct dt_device *dt,
-				const char *dirname, const char *filename,
-				struct lu_fid *fid)
-{
-	struct dt_object *file;
-	struct dt_object *dir;
-
-	dir = dt_store_resolve(env, dt, dirname, fid);
-	if (!IS_ERR(dir)) {
-		file = dt_reg_open(env, dt, dir, filename, fid);
-		dt_object_put(env, dir);
-	} else {
-		file = dir;
-	}
-
-	return file;
-}
 
 struct dt_object *dt_find_or_create(const struct lu_env *env,
 				    struct dt_device *dt,
@@ -920,6 +794,26 @@ out:
 }
 
 
+/* for dt_index*/
+void *rdpg_page_get(const struct lu_rdpg *rdpg, unsigned int index)
+{
+	if (rdpg->rp_npages) {
+		LASSERT(index < rdpg->rp_npages);
+		return kmap(rdpg->rp_pages[index]);
+	}
+	LASSERT(index * PAGE_SIZE  < rdpg->rp_count);
+
+	return rdpg->rp_data + index * PAGE_SIZE;
+}
+EXPORT_SYMBOL(rdpg_page_get);
+
+void rdpg_page_put(const struct lu_rdpg *rdpg, unsigned int index)
+{
+	if (rdpg->rp_npages)
+		kunmap(rdpg->rp_pages[index]);
+}
+EXPORT_SYMBOL(rdpg_page_put);
+
 /*
  * Walk index and fill lu_page containers with key/record pairs
  *
@@ -995,9 +889,7 @@ int dt_index_walk(const struct lu_env *env, struct dt_object *obj,
 		union lu_page	*lp;
 		int		 i;
 
-		LASSERT(pageidx < rdpg->rp_npages);
-		lp = kmap(rdpg->rp_pages[pageidx]);
-
+		lp = rdpg_page_get(rdpg, pageidx);
 		/* fill lu pages */
 		for (i = 0; i < LU_PAGE_COUNT; i++, lp++, bytes-=LU_PAGE_SIZE) {
 			rc = filler(env, obj, lp,
@@ -1011,7 +903,7 @@ int dt_index_walk(const struct lu_env *env, struct dt_object *obj,
 				/* end of index */
 				break;
 		}
-		kunmap(rdpg->rp_pages[pageidx]);
+		rdpg_page_put(rdpg, pageidx);
 	}
 
 out:
@@ -1165,102 +1057,6 @@ void dt_index_page_adjust(struct page **pages, const u32 npages,
 #endif
 EXPORT_SYMBOL(dt_index_page_adjust);
 
-#ifdef CONFIG_PROC_FS
-int lprocfs_dt_blksize_seq_show(struct seq_file *m, void *v)
-{
-	struct dt_device *dt = m->private;
-	struct obd_statfs osfs;
-
-	int rc = dt_statfs(NULL, dt, &osfs);
-	if (rc == 0)
-		seq_printf(m, "%u\n", (unsigned) osfs.os_bsize);
-	return rc;
-}
-EXPORT_SYMBOL(lprocfs_dt_blksize_seq_show);
-
-int lprocfs_dt_kbytestotal_seq_show(struct seq_file *m, void *v)
-{
-	struct dt_device *dt = m->private;
-	struct obd_statfs osfs;
-
-	int rc = dt_statfs(NULL, dt, &osfs);
-	if (rc == 0) {
-		__u32 blk_size = osfs.os_bsize >> 10;
-		__u64 result = osfs.os_blocks;
-
-		while (blk_size >>= 1)
-			result <<= 1;
-
-		seq_printf(m, "%llu\n", result);
-	}
-	return rc;
-}
-EXPORT_SYMBOL(lprocfs_dt_kbytestotal_seq_show);
-
-int lprocfs_dt_kbytesfree_seq_show(struct seq_file *m, void *v)
-{
-	struct dt_device *dt = m->private;
-	struct obd_statfs osfs;
-
-	int rc = dt_statfs(NULL, dt, &osfs);
-	if (rc == 0) {
-		__u32 blk_size = osfs.os_bsize >> 10;
-		__u64 result = osfs.os_bfree;
-
-		while (blk_size >>= 1)
-			result <<= 1;
-
-		seq_printf(m, "%llu\n", result);
-	}
-	return rc;
-}
-EXPORT_SYMBOL(lprocfs_dt_kbytesfree_seq_show);
-
-int lprocfs_dt_kbytesavail_seq_show(struct seq_file *m, void *v)
-{
-	struct dt_device *dt = m->private;
-	struct obd_statfs osfs;
-
-	int rc = dt_statfs(NULL, dt, &osfs);
-	if (rc == 0) {
-		__u32 blk_size = osfs.os_bsize >> 10;
-		__u64 result = osfs.os_bavail;
-
-		while (blk_size >>= 1)
-			result <<= 1;
-
-		seq_printf(m, "%llu\n", result);
-	}
-	return rc;
-}
-EXPORT_SYMBOL(lprocfs_dt_kbytesavail_seq_show);
-
-int lprocfs_dt_filestotal_seq_show(struct seq_file *m, void *v)
-{
-	struct dt_device *dt = m->private;
-	struct obd_statfs osfs;
-
-	int rc = dt_statfs(NULL, dt, &osfs);
-	if (rc == 0)
-		seq_printf(m, "%llu\n", osfs.os_files);
-	return rc;
-}
-EXPORT_SYMBOL(lprocfs_dt_filestotal_seq_show);
-
-int lprocfs_dt_filesfree_seq_show(struct seq_file *m, void *v)
-{
-	struct dt_device *dt = m->private;
-	struct obd_statfs osfs;
-
-	int rc = dt_statfs(NULL, dt, &osfs);
-	if (rc == 0)
-		seq_printf(m, "%llu\n", osfs.os_ffree);
-	return rc;
-}
-EXPORT_SYMBOL(lprocfs_dt_filesfree_seq_show);
-
-#endif /* CONFIG_PROC_FS */
-
 static ssize_t uuid_show(struct kobject *kobj, struct attribute *attr,
 			 char *buf)
 {
@@ -1271,7 +1067,7 @@ static ssize_t uuid_show(struct kobject *kobj, struct attribute *attr,
 	if (!lu->ld_obd)
 		return -ENODEV;
 
-	return sprintf(buf, "%s\n", lu->ld_obd->obd_uuid.uuid);
+	return scnprintf(buf, PAGE_SIZE, "%s\n", lu->ld_obd->obd_uuid.uuid);
 }
 LUSTRE_RO_ATTR(uuid);
 
@@ -1287,7 +1083,7 @@ static ssize_t blocksize_show(struct kobject *kobj, struct attribute *attr,
 	if (rc)
 		return rc;
 
-	return sprintf(buf, "%u\n", (unsigned) osfs.os_bsize);
+	return scnprintf(buf, PAGE_SIZE, "%u\n", osfs.os_bsize);
 }
 LUSTRE_RO_ATTR(blocksize);
 
@@ -1311,7 +1107,7 @@ static ssize_t kbytestotal_show(struct kobject *kobj, struct attribute *attr,
 	while (blk_size >>= 1)
 		result <<= 1;
 
-	return sprintf(buf, "%llu\n", result);
+	return scnprintf(buf, PAGE_SIZE, "%llu\n", result);
 }
 LUSTRE_RO_ATTR(kbytestotal);
 
@@ -1335,7 +1131,7 @@ static ssize_t kbytesfree_show(struct kobject *kobj, struct attribute *attr,
 	while (blk_size >>= 1)
 		result <<= 1;
 
-	return sprintf(buf, "%llu\n", result);
+	return scnprintf(buf, PAGE_SIZE, "%llu\n", result);
 }
 LUSTRE_RO_ATTR(kbytesfree);
 
@@ -1359,7 +1155,7 @@ static ssize_t kbytesavail_show(struct kobject *kobj, struct attribute *attr,
 	while (blk_size >>= 1)
 		result <<= 1;
 
-	return sprintf(buf, "%llu\n", result);
+	return scnprintf(buf, PAGE_SIZE, "%llu\n", result);
 }
 LUSTRE_RO_ATTR(kbytesavail);
 
@@ -1375,7 +1171,7 @@ static ssize_t filestotal_show(struct kobject *kobj, struct attribute *attr,
 	if (rc)
 		return rc;
 
-	return sprintf(buf, "%llu\n", osfs.os_files);
+	return scnprintf(buf, PAGE_SIZE, "%llu\n", osfs.os_files);
 }
 LUSTRE_RO_ATTR(filestotal);
 
@@ -1391,18 +1187,69 @@ static ssize_t filesfree_show(struct kobject *kobj, struct attribute *attr,
 	if (rc)
 		return rc;
 
-	return sprintf(buf, "%llu\n", osfs.os_ffree);
+	return scnprintf(buf, PAGE_SIZE, "%llu\n", osfs.os_ffree);
 }
 LUSTRE_RO_ATTR(filesfree);
 
+static ssize_t maxbytes_show(struct kobject *kobj, struct attribute *attr,
+			     char *buf)
+{
+	struct dt_device *dt = container_of(kobj, struct dt_device,
+					    dd_kobj);
+	struct obd_statfs osfs;
+	int rc;
+
+	rc = dt_statfs(NULL, dt, &osfs);
+	if (rc)
+		return rc;
+
+	return scnprintf(buf, PAGE_SIZE, "%llu\n", osfs.os_maxbytes);
+}
+LUSTRE_RO_ATTR(maxbytes);
+
+static ssize_t namelen_max_show(struct kobject *kobj, struct attribute *attr,
+				char *buf)
+{
+	struct dt_device *dt = container_of(kobj, struct dt_device,
+					    dd_kobj);
+	struct obd_statfs osfs;
+	int rc;
+
+	rc = dt_statfs(NULL, dt, &osfs);
+	if (rc)
+		return rc;
+
+	return scnprintf(buf, PAGE_SIZE, "%u\n", osfs.os_namelen);
+}
+LUSTRE_RO_ATTR(namelen_max);
+
+static ssize_t statfs_state_show(struct kobject *kobj, struct attribute *attr,
+				 char *buf)
+{
+	struct dt_device *dt = container_of(kobj, struct dt_device,
+					    dd_kobj);
+	struct obd_statfs osfs;
+	int rc;
+
+	rc = dt_statfs(NULL, dt, &osfs);
+	if (rc)
+		return rc;
+
+	return lprocfs_statfs_state(buf, PAGE_SIZE, osfs.os_state);
+}
+LUSTRE_RO_ATTR(statfs_state);
+
 static const struct attribute *dt_def_attrs[] = {
-	&lustre_attr_uuid.attr,
 	&lustre_attr_blocksize.attr,
+	&lustre_attr_filestotal.attr,
+	&lustre_attr_filesfree.attr,
 	&lustre_attr_kbytestotal.attr,
 	&lustre_attr_kbytesfree.attr,
 	&lustre_attr_kbytesavail.attr,
-	&lustre_attr_filestotal.attr,
-	&lustre_attr_filesfree.attr,
+	&lustre_attr_maxbytes.attr,
+	&lustre_attr_namelen_max.attr,
+	&lustre_attr_statfs_state.attr,
+	&lustre_attr_uuid.attr,
 	NULL,
 };
 

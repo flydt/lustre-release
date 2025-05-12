@@ -45,7 +45,7 @@ int osc_enqueue_base(struct obd_export *exp, struct ldlm_res_id *res_id,
 		     struct ost_lvb *lvb, osc_enqueue_upcall_f upcall,
 		     void *cookie, struct ldlm_enqueue_info *einfo,
 		     struct ptlrpc_request_set *rqset, int async,
-		     bool speculative);
+		     bool speculative, __u32 projid);
 
 int osc_match_base(const struct lu_env *env, struct obd_export *exp,
 		   struct ldlm_res_id *res_id, enum ldlm_type type,
@@ -83,22 +83,12 @@ int osc_tunables_init(struct obd_device *obd);
 
 extern struct lu_device_type osc_device_type;
 
-static inline struct cl_io *osc_env_thread_io(const struct lu_env *env)
+static inline struct cl_io *osc_env_new_io(const struct lu_env *env)
 {
 	struct cl_io *io = &osc_env_info(env)->oti_io;
 
 	memset(io, 0, sizeof(*io));
 	return io;
-}
-
-static inline int osc_is_object(const struct lu_object *obj)
-{
-	return obj->lo_dev->ld_type == &osc_device_type;
-}
-
-static inline struct osc_lock *osc_lock_at(const struct cl_lock *lock)
-{
-	return cl2osc_lock(cl_lock_at(lock, &osc_device_type));
 }
 
 int osc_lock_init(const struct lu_env *env, struct cl_object *obj,

@@ -58,8 +58,6 @@ EXPORT_SYMBOL(ldlm_timeout);
 unsigned int ping_interval = (OBD_TIMEOUT_DEFAULT > 4) ?
 			     (OBD_TIMEOUT_DEFAULT / 4) : 1;
 EXPORT_SYMBOL(ping_interval);
-unsigned int ping_evict_timeout_multiplier = 6;
-EXPORT_SYMBOL(ping_evict_timeout_multiplier);
 unsigned int obd_timeout_set;
 EXPORT_SYMBOL(obd_timeout_set);
 unsigned int ldlm_timeout_set;
@@ -283,17 +281,17 @@ int obd_ioctl_getdata(struct obd_ioctl_data **datap, int *len, void __user *arg)
 
 	if (data->ioc_inllen1) {
 		data->ioc_inlbuf1 = &data->ioc_bulk[0];
-		offset += round_up(data->ioc_inllen1, 8);
+		offset += ALIGN(data->ioc_inllen1, 8);
 	}
 
 	if (data->ioc_inllen2) {
 		data->ioc_inlbuf2 = &data->ioc_bulk[0] + offset;
-		offset += round_up(data->ioc_inllen2, 8);
+		offset += ALIGN(data->ioc_inllen2, 8);
 	}
 
 	if (data->ioc_inllen3) {
 		data->ioc_inlbuf3 = &data->ioc_bulk[0] + offset;
-		offset += round_up(data->ioc_inllen3, 8);
+		offset += ALIGN(data->ioc_inllen3, 8);
 	}
 
 	if (data->ioc_inllen4)
@@ -339,12 +337,14 @@ int class_handle_ioctl(unsigned int cmd, void __user *uarg)
 		OBD_ALLOC(lcfg, data->ioc_plen1);
 		if (lcfg == NULL)
 			GOTO(out, rc = -ENOMEM);
-		rc = copy_from_user(lcfg, data->ioc_pbuf1, data->ioc_plen1);
-		if (!rc)
-			rc = lustre_cfg_sanity_check(lcfg, data->ioc_plen1);
-		if (!rc)
-			rc = class_process_config(lcfg);
+		if (copy_from_user(lcfg, data->ioc_pbuf1, data->ioc_plen1))
+			GOTO(out_lcfg, rc = -EFAULT);
+		rc = lustre_cfg_sanity_check(lcfg, data->ioc_plen1);
+		if (rc)
+			GOTO(out_lcfg, rc);
+		rc = class_process_config(lcfg, NULL);
 
+out_lcfg:
 		OBD_FREE(lcfg, data->ioc_plen1);
 		GOTO(out, rc);
 	}
@@ -850,10 +850,13 @@ static int __init obdclass_init(void)
 	if (err)
 		goto cleanup_llog_info;
 
+	err = cfs_hash_init();
+	if (err)
+		goto cleanup_obd_pool;
 #ifdef HAVE_SERVER_SUPPORT
 	err = dt_global_init();
 	if (err != 0)
-		goto cleanup_obd_pool;
+		goto cleanup_cfs_hash;
 
 	err = lu_ucred_global_init();
 	if (err != 0)
@@ -877,8 +880,10 @@ cleanup_all:
 cleanup_dt_global:
 	dt_global_fini();
 
-cleanup_obd_pool:
+cleanup_cfs_hash:
 #endif /* HAVE_SERVER_SUPPORT */
+	cfs_hash_fini();
+cleanup_obd_pool:
 	obd_pool_fini();
 
 cleanup_llog_info:
@@ -952,6 +957,7 @@ static void __exit obdclass_exit(void)
 	lu_ucred_global_fini();
 	dt_global_fini();
 #endif /* HAVE_SERVER_SUPPORT */
+	cfs_hash_fini();
 	obd_pool_fini();
 	llog_info_fini();
 	cl_global_fini();

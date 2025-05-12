@@ -379,12 +379,12 @@ reprocess:
 				lock->l_flags |= LDLM_FL_AST_SENT;
 				ldlm_resource_unlink_lock(lock);
 				ldlm_add_ast_work_item(lock, NULL, &rpc_list);
-				LDLM_LOCK_GET(lock);
+				ldlm_lock_get(lock);
 				unlock_res_and_lock(req);
 				ldlm_run_ast_work(ns, &rpc_list,
 						  LDLM_WORK_CP_AST);
 				ldlm_lock_cancel(lock);
-				LDLM_LOCK_RELEASE(lock);
+				ldlm_lock_put(lock);
 				lock_res_and_lock(req);
 				break;
 			}
@@ -554,7 +554,8 @@ reprocess:
 			continue;
 		}
 		if (LAST(new) >= LAST(lock)) {
-			ldlm_flock_range_update(lock, START(lock), LAST(new) - 1);
+			ldlm_flock_range_update(lock, START(lock),
+						START(new) - 1);
 			continue;
 		}
 
@@ -791,7 +792,6 @@ int
 ldlm_flock_completion_ast(struct ldlm_lock *lock, __u64 flags, void *data)
 {
 	struct ldlm_flock_info *args;
-	struct obd_device *obd;
 	enum ldlm_error err;
 	int rc = 0;
 
@@ -825,7 +825,6 @@ ldlm_flock_completion_ast(struct ldlm_lock *lock, __u64 flags, void *data)
 
 	LDLM_DEBUG(lock,
 		   "client-side enqueue returned a blocked lock, sleeping");
-	obd = class_exp2obd(lock->l_conn_export);
 
 	/* Go to sleep until the lock is granted. */
 	rc = l_wait_event_abortable(lock->l_waitq,

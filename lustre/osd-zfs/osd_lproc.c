@@ -73,12 +73,14 @@ out:
 
 static int osd_stats_init(struct osd_device *osd)
 {
+	char param[MAX_OBD_NAME * 4];
 	int result = -ENOMEM;
 
 	ENTRY;
-	osd->od_stats = ldebugfs_stats_alloc(LPROC_OSD_LAST, "stats",
+	scnprintf(param, sizeof(param), "osd-zfs.%s.stats", osd_name(osd));
+	osd->od_stats = ldebugfs_stats_alloc(LPROC_OSD_LAST, param,
 					     osd->od_dt_dev.dd_debugfs_entry,
-					     &osd->od_dt_dev.dd_kobj, 0);
+					     0);
 	if (osd->od_stats) {
 		lprocfs_counter_init(osd->od_stats, LPROC_OSD_GET_PAGE,
 				LPROCFS_CNTR_AVGMINMAX | LPROCFS_CNTR_STDDEV |
@@ -327,26 +329,29 @@ static ssize_t index_backup_store(struct kobject *kobj, struct attribute *attr,
 }
 LUSTRE_RW_ATTR(index_backup);
 
-static int zfs_osd_readcache_seq_show(struct seq_file *m, void *data)
+static ssize_t readcache_max_filesize_show(struct kobject *kobj,
+					   struct attribute *attr,
+					   char *buf)
 {
-	struct osd_device *osd = osd_dt_dev((struct dt_device *)m->private);
+	struct dt_device *dt = container_of(kobj, struct dt_device,
+					    dd_kobj);
+	struct osd_device *osd = osd_dt_dev(dt);
 
 	LASSERT(osd != NULL);
 	if (unlikely(osd->od_os == NULL))
 		return -EINPROGRESS;
 
-	seq_printf(m, "%llu\n", osd->od_readcache_max_filesize);
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%llu\n",
+			 osd->od_readcache_max_filesize);
 }
 
-static ssize_t
-zfs_osd_readcache_seq_write(struct file *file, const char __user *buffer,
-			    size_t count, loff_t *off)
+static ssize_t readcache_max_filesize_store(struct kobject *kobj,
+					    struct attribute *attr,
+					    const char *buffer, size_t count)
 {
-	struct seq_file *m = file->private_data;
-	struct dt_device *dt = m->private;
+	struct dt_device *dt = container_of(kobj, struct dt_device,
+					    dd_kobj);
 	struct osd_device *osd = osd_dt_dev(dt);
-	char kernbuf[22] = "";
 	u64 val;
 	int rc;
 
@@ -354,14 +359,7 @@ zfs_osd_readcache_seq_write(struct file *file, const char __user *buffer,
 	if (unlikely(osd->od_os == NULL))
 		return -EINPROGRESS;
 
-	if (count >= sizeof(kernbuf))
-		return -EINVAL;
-
-	if (copy_from_user(kernbuf, buffer, count))
-		return -EFAULT;
-	kernbuf[count] = 0;
-
-	rc = sysfs_memparse(kernbuf, count, &val, "B");
+	rc = sysfs_memparse(buffer, count, &val, "B");
 	if (rc < 0)
 		return rc;
 
@@ -369,7 +367,7 @@ zfs_osd_readcache_seq_write(struct file *file, const char __user *buffer,
 					 OSD_MAX_CACHE_SIZE : val;
 	return count;
 }
-LDEBUGFS_SEQ_FOPS(zfs_osd_readcache);
+LUSTRE_RW_ATTR(readcache_max_filesize);
 
 static struct attribute *zfs_attrs[] = {
 	&lustre_attr_fstype.attr,
@@ -379,14 +377,13 @@ static struct attribute *zfs_attrs[] = {
 	&lustre_attr_index_backup.attr,
 	&lustre_attr_auto_scrub.attr,
 	&lustre_attr_sync_on_lseek.attr,
+	&lustre_attr_readcache_max_filesize.attr,
 	NULL,
 };
 
 struct ldebugfs_vars ldebugfs_osd_obd_vars[] = {
 	{ .name	=	"oi_scrub",
 	  .fops	=	&zfs_osd_oi_scrub_fops		},
-	{ .name =	"readcache_max_filesize",
-	  .fops =	&zfs_osd_readcache_fops		},
 	{ 0 }
 };
 

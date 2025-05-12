@@ -53,6 +53,9 @@
 bool obd_enable_health_write;
 EXPORT_SYMBOL(obd_enable_health_write);
 
+bool obd_enable_fname_encoding = false;
+EXPORT_SYMBOL(obd_enable_fname_encoding);
+
 struct static_lustre_uintvalue_attr {
 	struct {
 		struct attribute attr;
@@ -107,7 +110,6 @@ LUSTRE_STATIC_UINT_ATTR(at_unhealthy_factor, &at_unhealthy_factor);
 LUSTRE_STATIC_UINT_ATTR(enable_stats_header, &obd_enable_stats_header);
 LUSTRE_STATIC_UINT_ATTR(lbug_on_eviction, &obd_lbug_on_eviction);
 LUSTRE_STATIC_UINT_ATTR(ping_interval, &ping_interval);
-LUSTRE_STATIC_UINT_ATTR(evict_multiplier, &ping_evict_timeout_multiplier);
 
 #ifdef HAVE_SERVER_SUPPORT
 LUSTRE_STATIC_UINT_ATTR(ldlm_timeout, &ldlm_timeout);
@@ -276,6 +278,28 @@ static ssize_t enable_health_write_store(struct kobject *kobj,
 }
 LUSTRE_RW_ATTR(enable_health_write);
 #endif /* HAVE_SERVER_SUPPORT */
+
+static ssize_t enable_fname_encoding_show(struct kobject *kobj,
+					struct attribute *attr,
+					char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%u\n",
+			 obd_enable_fname_encoding);
+}
+
+static ssize_t enable_fname_encoding_store(struct kobject *kobj,
+					 struct attribute *attr,
+					 const char *buf, size_t count)
+{
+	int rc = 0;
+
+	rc = kstrtobool(buf, &obd_enable_fname_encoding);
+	if (rc)
+		return rc;
+
+	return count;
+}
+LUSTRE_RW_ATTR(enable_fname_encoding);
 
 static ssize_t jobid_var_show(struct kobject *kobj, struct attribute *attr,
 			      char *buf)
@@ -488,9 +512,9 @@ static struct attribute *lustre_attrs[] = {
 	&lustre_sattr_bulk_timeout.u.attr,
 	&lustre_attr_no_transno.attr,
 #endif
+	&lustre_attr_enable_fname_encoding.attr,
 	&lustre_sattr_lbug_on_eviction.u.attr,
 	&lustre_sattr_ping_interval.u.attr,
-	&lustre_sattr_evict_multiplier.u.attr,
 	NULL,
 };
 
@@ -785,3 +809,40 @@ int class_procfs_clean(void)
 
 	RETURN(0);
 }
+
+/* filename encoding */
+#define ENCODE_FN_LEN	BASE64URL_CHARS(sizeof(__u64)) + 2
+#define FN_COUNT 64 /* must be power-of-two value */
+const char *encode_fn_len(const char *fname, size_t namelen)
+{
+	static char fn_array[FN_COUNT][ENCODE_FN_LEN];
+	static atomic_t fn_index;
+	char *new_fn = NULL;
+	char *tmp;
+	int encode_len = ENCODE_FN_LEN;
+	int rc;
+	__u64 hash;
+
+	CDEBUG(D_TRACE, "Process filename at %p\n", &fname);
+	if (!fname || !namelen || !obd_enable_fname_encoding)
+		return fname;
+	if (unlikely(namelen > NAME_MAX))
+		namelen = NAME_MAX;
+
+	hash = lustre_hash_fnv_1a_64(fname, namelen);
+	new_fn = fn_array[atomic_inc_return(&fn_index) & (FN_COUNT - 1)];
+	tmp = new_fn;
+	rc = gss_base64url_encode(&tmp, &encode_len, (__u8 *)&hash,
+				  sizeof(hash));
+	if (rc < 0) {
+		if (encode_len == -1)
+			CERROR("Encode buffer size(%d) is too small: rc = %d\n",
+			       (int)ENCODE_FN_LEN, rc);
+		else
+			CERROR("Failed to encode name(%zu): rc = %d\n",
+			       namelen, rc);
+	}
+
+	return new_fn;
+}
+EXPORT_SYMBOL(encode_fn_len);

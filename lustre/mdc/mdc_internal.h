@@ -19,7 +19,8 @@
 int mdc_tunables_init(struct obd_device *obd);
 
 void mdc_pack_body(struct req_capsule *pill, const struct lu_fid *fid,
-		   u64 valid, size_t ea_size, u32 suppgid, u32 flags);
+		   u64 valid, size_t ea_size, u32 suppgid, u32 flags,
+		   u32 projid);
 void mdc_swap_layouts_pack(struct req_capsule *pill,
 			   struct md_op_data *op_data);
 void mdc_readdir_pack(struct req_capsule *pill, __u64 pgoff, size_t size,
@@ -57,7 +58,7 @@ void mdc_close_pack(struct req_capsule *pill, struct md_op_data *op_data);
 /* mdc/mdc_locks.c */
 int mdc_set_lock_data(struct obd_export *exp,
 		      const struct lustre_handle *lockh,
-		      void *data, __u64 *bits);
+		      void *data, enum mds_ibits_locks *bits);
 
 int mdc_null_inode(struct obd_export *exp, const struct lu_fid *fid);
 
@@ -119,7 +120,7 @@ int mdc_cancel_unused(struct obd_export *exp, const struct lu_fid *fid,
 		      enum ldlm_cancel_flags flags, void *opaque);
 
 int mdc_revalidate_lock(struct obd_export *exp, struct lookup_intent *it,
-                        struct lu_fid *fid, __u64 *bits);
+			struct lu_fid *fid, enum mds_ibits_locks *bits);
 
 int mdc_intent_getattr_async(struct obd_export *exp, struct md_op_item *item);
 
@@ -170,14 +171,6 @@ static inline void mdc_body2lvb(struct mdt_body *body, struct ost_lvb *lvb)
 	lvb->lvb_ctime = body->mbo_ctime;
 	lvb->lvb_blocks = body->mbo_dom_blocks;
 	lvb->lvb_size = body->mbo_dom_size;
-}
-
-static inline unsigned long hash_x_index(__u64 hash, int hash64)
-{
-	if (BITS_PER_LONG == 32 && hash64)
-		hash >>= 32;
-	/* save hash 0 with hash 1 */
-	return ~0UL - (hash + !hash);
 }
 
 /* mdc_dev.c */

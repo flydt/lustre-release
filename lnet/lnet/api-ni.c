@@ -11,7 +11,7 @@
 #define DEBUG_SUBSYSTEM S_LNET
 
 #include <linux/ctype.h>
-#include <linux/generic-radix-tree.h>
+#include <lustre_compat/linux/generic-radix-tree.h>
 #include <linux/log2.h>
 #include <linux/ktime.h>
 #include <linux/moduleparam.h>
@@ -1139,14 +1139,15 @@ static char *
 lnet_res_type2str(int type)
 {
 	switch (type) {
-	default:
-		LBUG();
 	case LNET_COOKIE_TYPE_MD:
 		return "MD";
 	case LNET_COOKIE_TYPE_ME:
 		return "ME";
 	case LNET_COOKIE_TYPE_EQ:
 		return "EQ";
+	default:
+		LBUG();
+		return NULL;
 	}
 }
 
@@ -2606,21 +2607,24 @@ static const struct lnet_lnd *lnet_load_lnd(u32 lnd_type)
 	mutex_lock(&the_lnet.ln_lnd_mutex);
 	lnd = lnet_find_lnd_by_type(lnd_type);
 	if (!lnd) {
+#ifdef HAVE_MODULE_LOADING_SUPPORT
 		mutex_unlock(&the_lnet.ln_lnd_mutex);
 		rc = request_module("%s", libcfs_lnd2modname(lnd_type));
 		mutex_lock(&the_lnet.ln_lnd_mutex);
 
 		lnd = lnet_find_lnd_by_type(lnd_type);
 		if (!lnd) {
-			mutex_unlock(&the_lnet.ln_lnd_mutex);
 			CERROR("Can't load LND %s, module %s, rc=%d\n",
 			libcfs_lnd2str(lnd_type),
 			libcfs_lnd2modname(lnd_type), rc);
-#ifndef HAVE_MODULE_LOADING_SUPPORT
-			LCONSOLE_ERROR("Your kernel must be compiled with kernel module loading support.");
-#endif
-			return ERR_PTR(-EINVAL);
+			if (rc >= 0)
+				rc = -EINVAL;
+			lnd = ERR_PTR(rc);
 		}
+#else
+		LCONSOLE_ERROR("Your kernel must be compiled with kernel module loading support.");
+		lnd = ERR_PTR(-EINVAL);
+#endif
 	}
 	mutex_unlock(&the_lnet.ln_lnd_mutex);
 
@@ -2700,7 +2704,11 @@ lnet_startup_lndnet(struct lnet_net *net, struct lnet_lnd_tunables *tun)
 		    !lnet_ni_unique_net(&net_l->net_ni_list,
 					ni->ni_interface)) {
 			rc = -EEXIST;
-			goto failed1;
+			/* In case of not unique net. Simply return with
+			 * errno code and the cleanup will happen under
+			 * lnet_dyn_add_ni()
+			 */
+			return rc;
 		}
 
 		/* adjust the pointer the parent network, just in case it
@@ -2838,6 +2846,7 @@ static int lnet_genl_parse_list(struct sk_buff *msg,
 
 	for (count = 1; count <= list->lkl_maxattr; count++) {
 		struct nlattr *key = nla_nest_start(msg, count);
+		int end, start = msg->len;
 
 		if (!key)
 			return -EMSGSIZE;
@@ -2864,7 +2873,8 @@ static int lnet_genl_parse_list(struct sk_buff *msg,
 			idx = rc;
 		}
 
-		nla_nest_end(msg, key);
+		end = nla_nest_end(msg, key);
+		CDEBUG(D_INFO, "nest attr[%d] length = %d\n", count, end - start);
 	}
 
 	nla_nest_end(msg, node);
@@ -3279,6 +3289,7 @@ lnet_fill_ni_info(struct lnet_ni *ni, struct lnet_ioctl_config_ni *cfg_ni,
 {
 	size_t min_size = 0;
 	int i;
+	const struct lnet_lnd *net_lnd;
 
 	if (!ni || !cfg_ni || !tun || !nid_is_nid4(&ni->ni_nid))
 		return;
@@ -3302,6 +3313,27 @@ lnet_fill_ni_info(struct lnet_ni *ni, struct lnet_ioctl_config_ni *cfg_ni,
 						       LNET_STATS_TYPE_RECV);
 		stats->iel_drop_count = lnet_sum_stats(&ni->ni_stats,
 						       LNET_STATS_TYPE_DROP);
+	}
+
+	/* Update the tunables timeout value from the dynamic timeout API */
+	net_lnd = ni->ni_net->net_lnd;
+
+	switch (net_lnd->lnd_type) {
+	case SOCKLND:
+		ni->ni_lnd_tunables.lnd_tun_u.lnd_sock.lnd_timeout =
+			net_lnd->lnd_get_timeout();
+		break;
+	case O2IBLND:
+		ni->ni_lnd_tunables.lnd_tun_u.lnd_o2ib.lnd_timeout =
+			net_lnd->lnd_get_timeout();
+		break;
+	case KFILND:
+		ni->ni_lnd_tunables.lnd_tun_u.lnd_kfi.lnd_timeout =
+			net_lnd->lnd_get_timeout();
+		break;
+	case GNILND:
+		ni->ni_lnd_tunables.lnd_tun_u.lnd_gni.lnd_timeout =
+			net_lnd->lnd_get_timeout();
 	}
 
 	/*
@@ -3777,8 +3809,10 @@ int lnet_dyn_add_ni(struct lnet_ioctl_config_ni *conf, u32 net_id,
 	mutex_unlock(&the_lnet.ln_api_mutex);
 
 	/* If NI already exist delete this new unused copy */
-	if (rc == -EEXIST)
+	if (rc == -EEXIST) {
 		lnet_ni_free(ni);
+		lnet_net_free(net);
+	}
 
 	return rc;
 }
@@ -5739,15 +5773,7 @@ skip_udsp:
 				if (gnlh->version < 2)
 					goto skip_msg_stats;
 
-				msg_stats.im_idx = idx - 1;
-				rc = lnet_get_ni_stats(&msg_stats);
-				if (rc < 0) {
-					NL_SET_ERR_MSG(extack,
-						       "failed to get msg stats");
-					genlmsg_cancel(msg, hdr);
-					GOTO(net_unlock, rc = -ENOMEM);
-				}
-
+				lnet_usr_translate_stats(&msg_stats, &ni->ni_stats);
 				send_stats = nla_nest_start(msg, LNET_NET_LOCAL_NI_ATTR_SEND_STATS);
 				send_attr = nla_nest_start(msg, 0);
 				nla_put_u32(msg, LNET_NET_LOCAL_NI_MSG_STATS_ATTR_GET_COUNT,
@@ -6282,11 +6308,11 @@ lnet_genl_parse_local_ni(struct nlattr *entry, struct genl_info *info,
 			GENL_SET_ERR_MSG(info,
 					 "invalid CPT set");
 			break;
+		case 0:
+			break;
 		default:
 			GENL_SET_ERR_MSG(info,
 					 "cannot add LNet NI");
-		case 0:
-			break;
 		}
 	} else if (info->nlhdr->nlmsg_flags & NLM_F_REPLACE && healthv != -1) {
 		lnet_ni_set_healthv(&nid, healthv);

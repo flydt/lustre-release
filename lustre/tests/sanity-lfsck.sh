@@ -1483,7 +1483,7 @@ test_12a() {
 	[ $MDSCOUNT -lt 2 ] && skip "needs >= 2 MDTs"
 	(( $MDS1_VERSION > $(version_code 2.5.55) )) ||
 		skip "MDS older than 2.5.55, LU-3950"
-	if (( $MDS1_VERSION >= $(version_code 2.15.65) )); then
+	if (( $MDS1_VERSION >= $(version_code 2.15.90) )); then
 		lfsck_start="lfsck start"
 		lfsck_stop="lfsck stop"
 	else
@@ -4813,7 +4813,21 @@ test_29c()
 		error "(2) Fail to hard link"
 
 	cancel_lru_locks mdc
-	if [ $MDSCOUNT -ge 2 ]; then
+
+	local linked_file_migrate=false
+	(( $MDS1_VERSION >= $(version_code 2.16.50) )) &&
+		linked_file_migrate=true
+
+	if (( $MDSCOUNT >= 2 )) && $linked_file_migrate; then
+		$LFS migrate -m 1 $DIR/$tdir/guard 2>/dev/null ||
+			error "(3.1) Migrate should succeed"
+
+		echo "The object with linkEA overflow should NOT be migrated"
+		local newfid=$($LFS path2fid $DIR/$tdir/guard/f0)
+		[ "$newfid" == "$oldfid" ] ||
+			error "(3.2) The file with overflowed LinkEA should not migrate: $newfid != $oldfid"
+	fi
+	if (( $MDSCOUNT >= 2 )) && ! $linked_file_migrate; then
 		$LFS migrate -m 1 $DIR/$tdir/guard 2>/dev/null &&
 			error "(3.1) Migrate should fail"
 
@@ -4828,7 +4842,18 @@ test_29c()
 	echo "Remove 100 hard links to save space for the missed linkEA entries"
 	unlinkmany $DIR/$tdir/foo/ttttttttttt 100 || error "(4) Fail to unlink"
 
-	if [ $MDSCOUNT -ge 2 ]; then
+	if (( $MDSCOUNT >= 2 )) && $linked_file_migrate; then
+		$LFS migrate -m 1 $DIR/$tdir/guard 2>/dev/null ||
+			error "(5.1) Migrate should succeed"
+
+		# The overflow timestamp is still there, so migration
+		# should not migrate the file with LinkEA overflow timestamp
+		# but migrate only name
+		local newfid=$($LFS path2fid $DIR/$tdir/guard/f0)
+		[ "$newfid" == "$oldfid" ] ||
+			error "(5.2) The file should not migrate: $newfid != $oldfid"
+	fi
+	if (( $MDSCOUNT >= 2 )) && ! $linked_file_migrate; then
 		$LFS migrate -m 1 $DIR/$tdir/guard 2>/dev/null &&
 			error "(5.1) Migrate should fail"
 
@@ -6302,6 +6327,28 @@ test_42() {
 }
 run_test 42 "LFSCK can repair inconsistent MDT-object/OST-object encryption flags"
 
+test_43()
+{
+	[[ $mds1_FSTYPE == ldiskfs ]] || skip "only ldiskfs uses iterate_dir"
+	[[ $MDSCOUNT -lt 2 ]] && skip "needs >= 2 MDTs"
+
+	$LFS mkdir -i 1 -c 2 $DIR/$tdir-{1..10} || error "(1) Fail to mkdir"
+
+	remount_facet mds2 "-o abort_recov"
+
+	#define OBD_FAIL_OFD_IGET_FAIL_TO_START                        0x1e2
+	do_facet mds2 $LCTL set_param fail_loc=0x1e2
+	do_facet mds2 $LCTL lfsck_start -M ${FSNAME}-MDT0001 -t namespace
+
+	wait_update_facet mds2 \
+		"$LCTL get_param -n mdd.$(facet_svc mds2).lfsck_namespace |
+		awk '/^status/ { print \\\$2 }'" "completed" 32 || {
+		error "(5) mds2 is not the expected 'completed'"
+	}
+	wait_osp_import mds1 mds2 FULL
+}
+run_test 43 "LFSCK does not loop endlessly on iget failure in scanning-phase1"
+
 test_44() {
 	lfsck_prep 3 3
 
@@ -6310,16 +6357,16 @@ test_44() {
 	$START_NAMESPACE -r || error "(31) Fail to start LFSCK for namespace!"
 	$STOP_LFSCK &
 	sleep 1
-	$STOP_LFSCK && error "(32) LFSCK_STOP had to fail"
 	stop $SINGLEMDS
 	do_facet $SINGLEMDS $LCTL set_param fail_val=0 fail_loc=0
 	start_facet $SINGLEMDS
 	wait
-	wait_update_facet $SINGLEMDS "$LCTL get_param -n \
-		mdd.${MDT_DEV}.lfsck_namespace |
-		awk '/^status/ { print \\\$2 }'" "completed" 32 || {
+	local status=$(do_facet mds1 $LCTL get_param \
+			-n mdd.${MDT_DEV}.lfsck_namespace |
+			awk '/^status/ { print $2 }')
+	[ $status == "stopped" ] || {
 		$SHOW_NAMESPACE
-		error "(33) unexpected status"
+		error "(32) unexpected status"
 	}
 }
 run_test 44 "umount while lfsck is stopping"

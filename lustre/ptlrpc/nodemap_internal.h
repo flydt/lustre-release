@@ -1,24 +1,5 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (C) 2013, Trustees of Indiana University
  *
@@ -30,6 +11,7 @@
 #ifndef _NODEMAP_INTERNAL_H
 #define _NODEMAP_INTERNAL_H
 
+#include <cfs_hash.h>
 #include <lustre_nodemap.h>
 #include <lustre_disk.h>
 #include <linux/rbtree.h>
@@ -71,6 +53,8 @@ struct lu_nid_range {
 	 */
 	struct list_head	 rn_nidlist;
 	struct rb_node		 rn_rb;
+	/* sub ranges included in this NID range */
+	struct nodemap_range_tree rn_subtree;
 };
 
 struct lu_idmap {
@@ -82,6 +66,28 @@ struct lu_idmap {
 	struct rb_node	id_client_to_fs;
 	/* tree mappung filesystem to client */
 	struct rb_node	id_fs_to_client;
+};
+
+struct lu_nodemap_fileset_info {
+	/* nodemap id */
+	__u32		nfi_nm_id;
+	/* starting subid of the fileset in the IAM */
+	__u32		nfi_subid;
+	/* number of fileset fragments */
+	__u32		nfi_fragment_cnt;
+	/* the fileset */
+	const char	*nfi_fileset;
+};
+
+struct lu_fileset_alt {
+	/* alt fileset id */
+	__u32		nfa_id;
+	/* fileset path */
+	char		*nfa_path;
+	/* fileset path size */
+	__u32		nfa_path_size;
+	/* rb tree node */
+	struct rb_node	nfa_rb;
 };
 
 static inline enum nodemap_idx_type nm_idx_get_type(unsigned int id)
@@ -97,7 +103,7 @@ static inline __u32 nm_idx_set_type(unsigned int id, enum nodemap_idx_type t)
 void nodemap_config_set_active(struct nodemap_config *config);
 struct lu_nodemap *nodemap_create(const char *name,
 				  struct nodemap_config *config,
-				  bool is_default);
+				  bool is_default, bool dynamic);
 void nodemap_putref(struct lu_nodemap *nodemap);
 struct lu_nodemap *nodemap_lookup(const char *name);
 
@@ -112,7 +118,8 @@ struct lu_nid_range *range_create(struct nodemap_config *config,
 				  u8 netmask, struct lu_nodemap *nodemap,
 				  unsigned int range_id);
 void range_destroy(struct lu_nid_range *range);
-int range_insert(struct nodemap_config *config, struct lu_nid_range *data);
+int range_insert(struct nodemap_config *config, struct lu_nid_range *range,
+		 struct lu_nid_range **parent_range, bool dynamic);
 void range_delete(struct nodemap_config *config, struct lu_nid_range *data);
 struct lu_nid_range *range_search(struct nodemap_config *config,
 				  struct lnet_nid *nid);
@@ -128,10 +135,23 @@ struct lu_idmap *idmap_insert(enum nodemap_id_type id_type,
 void idmap_delete(enum nodemap_id_type id_type,  struct lu_idmap *idmap,
 		  struct lu_nodemap *nodemap);
 void idmap_delete_tree(struct lu_nodemap *nodemap);
+int idmap_copy_tree(struct lu_nodemap *dst, struct lu_nodemap *src);
 struct lu_idmap *idmap_search(struct lu_nodemap *nodemap,
 			      enum nodemap_tree_type,
 			      enum nodemap_id_type id_type,
 			      __u32 id);
+struct lu_fileset_alt *fileset_alt_init(unsigned int fileset_size);
+struct lu_fileset_alt *fileset_alt_create(const char *fileset_path);
+void fileset_alt_destroy(struct lu_fileset_alt *fileset);
+void fileset_alt_destroy_tree(struct rb_root *root);
+int fileset_alt_add(struct rb_root *root, struct lu_fileset_alt *fileset);
+int fileset_alt_delete(struct rb_root *root, struct lu_fileset_alt *fileset);
+struct lu_fileset_alt *fileset_alt_search_id(struct rb_root *root,
+					 unsigned int fileset_id);
+struct lu_fileset_alt *fileset_alt_search_path(struct rb_root *root,
+					   const char *fileset_path);
+bool fileset_alt_path_exists(struct rb_root *root, const char *path);
+void fileset_alt_resize(struct rb_root *root);
 int nm_member_add(struct lu_nodemap *nodemap, struct obd_export *exp);
 void nm_member_del(struct lu_nodemap *nodemap, struct obd_export *exp);
 void nm_member_delete_list(struct lu_nodemap *nodemap);
@@ -168,14 +188,24 @@ int nodemap_idx_cluster_roles_update(const struct lu_nodemap *nodemap);
 int nodemap_idx_cluster_roles_del(const struct lu_nodemap *nodemap);
 int nodemap_idx_offset_add(const struct lu_nodemap *nodemap);
 int nodemap_idx_offset_del(const struct lu_nodemap *nodemap);
+int nodemap_idx_fileset_add(const struct lu_nodemap *nodemap,
+			    const char *fileset, unsigned int fileset_id);
+int nodemap_idx_fileset_update(const struct lu_nodemap *nodemap,
+			       const char *old_fileset, const char *new_fileset,
+			       unsigned int fileset_id);
+int nodemap_idx_fileset_del(const struct lu_nodemap *nodemap,
+			    const char *fileset, unsigned int fileset_id);
+int nodemap_idx_fileset_clear(const struct lu_nodemap *nodemap);
 int nodemap_idx_idmap_add(const struct lu_nodemap *nodemap,
 			  enum nodemap_id_type id_type,
 			  const __u32 map[2]);
 int nodemap_idx_idmap_del(const struct lu_nodemap *nodemap,
 			  enum nodemap_id_type id_type,
 			  const __u32 map[2]);
-int nodemap_idx_range_add(const struct lu_nid_range *range);
-int nodemap_idx_range_del(const struct lu_nid_range *range);
+int nodemap_idx_range_add(struct lu_nodemap *nodemap,
+			  const struct lu_nid_range *range);
+int nodemap_idx_range_del(struct lu_nodemap *nodemap,
+			  const struct lu_nid_range *range);
 int nodemap_idx_nodemap_activate(bool value);
 int nodemap_index_read(struct lu_env *env, struct nm_config_file *ncf,
 		       struct idx_info *ii, const struct lu_rdpg *rdpg);

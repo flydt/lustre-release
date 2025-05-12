@@ -13,16 +13,19 @@
 SUBDIRS := @LDISKFS_SUBDIR@ \
 	. \
 	@LUSTREIOKIT_SUBDIR@ \
+	Documentation \
+	lustre_compat \
 	libcfs \
 	lnet \
 	lustre
 
 DIST_SUBDIRS := ldiskfs \
 	lustre-iokit \
+	Documentation \
+	lustre_compat \
 	libcfs \
 	lnet \
 	lustre \
-	cc-plugins \
 	config
 
 AUTOMAKE_OPTIONS = foreign
@@ -143,16 +146,16 @@ modules: undef.h ldiskfs-sources
 	$(MAKE) DEQUOTE_CC_VERSION_TEXT=$(DEQUOTE) \
 	KBUILD_EXTRA_SYMBOLS="@INT_O2IB_SYMBOLS@ @EXTRA_SYMBOLS@ $(KBUILD_EXTRA_SYMBOLS)" \
 	LDFLAGS= CC="$(CC)" -C $(LINUX_OBJ) \
-	-f $(PWD)/build/Makefile LUSTRE_LINUX_CONFIG=$(LINUX_CONFIG) \
-	LINUXINCLUDE='-I$$(srctree)/arch/$$(SRCARCH)/include -Iarch/$$(SRCARCH)/include/generated -Iinclude $$(if $$(KBUILD_SRC)$$(building_out_of_srctree),-Iinclude2 -I$$(srctree)/include) -I$$(srctree)/arch/$$(SRCARCH)/include/uapi -Iarch/$$(SRCARCH)/include/generated/uapi -I$$(srctree)/include/uapi -Iinclude/generated/uapi -include $(CONFIG_INCLUDE)' \
+	-f $(PWD)/config/Kbuild LUSTRE_LINUX_CONFIG=$(LINUX_CONFIG) \
+	LINUXINCLUDE='-I$$(srctree)/include -I$$(srctree)/arch/$$(SRCARCH)/include -Iarch/$$(SRCARCH)/include/generated -Iinclude $$(if $$(KBUILD_SRC)$$(building_out_of_srctree),-Iinclude2 -I$$(srctree)/include) -I$$(srctree)/arch/$$(SRCARCH)/include/uapi -Iarch/$$(SRCARCH)/include/generated/uapi -I$$(srctree)/include/uapi -Iinclude/generated/uapi -I$$(srctree)/arch/$$(SRCARCH)/include/generated -I$$(srctree)/arch/$$(SRCARCH)/include/generated/uapi -I$$(srctree)/include/generated -I$$(srctree)/include/generated/uapi -include $(CONFIG_INCLUDE)' \
 	$(MODULE_TARGET)=$(PWD) -o tmp_include_depends -o scripts -o \
 	include/config/MARKER $@
 if EXTERNAL_KO2IBLND
 	$(MAKE) DEQUOTE_CC_VERSION_TEXT=$(DEQUOTE) BUILD_EXT_O2IB=yes \
 	KBUILD_EXTRA_SYMBOLS="$(PWD)/Module.symvers @EXT_O2IB_SYMBOLS@ @EXTRA_SYMBOLS@" \
 	LDFLAGS= CC="$(CC)" -C $(LINUX_OBJ) \
-	-f $(PWD)/build/Makefile LUSTRE_LINUX_CONFIG=$(LINUX_CONFIG) \
-	LINUXINCLUDE='-I$$(srctree)/arch/$$(SRCARCH)/include -Iarch/$$(SRCARCH)/include/generated -Iinclude $$(if $$(KBUILD_SRC)$$(building_out_of_srctree),-Iinclude2 -I$$(srctree)/include) -I$$(srctree)/arch/$$(SRCARCH)/include/uapi -Iarch/$$(SRCARCH)/include/generated/uapi -I$$(srctree)/include/uapi -Iinclude/generated/uapi -include $(CONFIG_INCLUDE)' \
+	-f $(PWD)/config/Kbuild LUSTRE_LINUX_CONFIG=$(LINUX_CONFIG) \
+	LINUXINCLUDE='-I$$(srctree)/include -I$$(srctree)/arch/$$(SRCARCH)/include -Iarch/$$(SRCARCH)/include/generated -Iinclude $$(if $$(KBUILD_SRC)$$(building_out_of_srctree),-Iinclude2 -I$$(srctree)/include) -I$$(srctree)/arch/$$(SRCARCH)/include/uapi -Iarch/$$(SRCARCH)/include/generated/uapi -I$$(srctree)/include/uapi -Iinclude/generated/uapi -I$$(srctree)/arch/$$(SRCARCH)/include/generated -I$$(srctree)/arch/$$(SRCARCH)/include/generated/uapi -I$$(srctree)/include/generated -I$$(srctree)/include/generated/uapi -include $(CONFIG_INCLUDE)' \
 	$(MODULE_TARGET)=$(PWD)/lnet/klnds/o2iblnd -o tmp_include_depends -o scripts -o \
 	include/config/MARKER $@
 endif # EXTERNAL_KO2IBLND
@@ -167,7 +170,7 @@ all: plugins
 # system
 plugins: undef.h
 if CC_PLUGINS
-	$(MAKE) all -C cc-plugins
+	$(MAKE) all -C contrib/cc-plugins
 endif # CC_PLUGINS
 
 undef.h: config.h.in
@@ -181,8 +184,8 @@ dist-hook: undef.h
 			-name .#* -exec rm -rf {} \;
 
 EXTRA_DIST = @PACKAGE_TARNAME@.spec	\
-	build/Makefile 			\
-	build/Rules.in			\
+	config/Kbuild 			\
+	config/Rules.in			\
 	config.h.in			\
 	lustre-dkms_pre-build.sh	\
 	lustre-dkms_post-build.sh	\
@@ -588,6 +591,10 @@ dkms-debs: undef.h debs_common
 	export DEB_BUILD_PROFILES="client"; \
 	export KERNEL_OBJ="$(LINUX_OBJ)"; \
 	export KERNEL_SRC="$(LINUX)"; \
+	if test "x@systemdsystemunitdir@" != "x"; then \
+		export DEB_BUILD_PROFILES="$${DEB_BUILD_PROFILES} systemd"; \
+		export SYSTEMD_OPTIONS="--with-systemdsystemunitdir=@systemdsystemunitdir@"; \
+	fi; \
 	echo "Enabled Build Profiles: $${DEB_BUILD_PROFILES}"; \
 	tmpprofiles=`tr ' ' ',' <<< $$DEB_BUILD_PROFILES`; \
 	echo "Kernel Source: $${KERNEL_SRC}"; \

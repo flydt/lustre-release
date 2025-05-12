@@ -28,6 +28,7 @@
 # define __USE_GNU      1
 # define __USE_XOPEN2K8  1
 # define FILEID_LUSTRE 0x97 /* for name_to_handle_at() (and llapi_fd2fid()) */
+# define U32_MAX	UINT32_MAX
 #endif /* !__KERNEL__ */
 
 #include <linux/fs.h>
@@ -273,6 +274,53 @@ enum obd_statfs_state {
 	OS_STATFS_ENOINO	= 0x00000040, /**< not enough inodes */
 	OS_STATFS_SUM		= 0x00000100, /**< aggregated for all tagrets */
 	OS_STATFS_NONROT	= 0x00000200, /**< non-rotational device */
+	OS_STATFS_DOWNGRADE	= OS_STATFS_DEGRADED | OS_STATFS_READONLY |
+				  OS_STATFS_NOCREATE | OS_STATFS_ENOSPC |
+				  OS_STATFS_ENOINO,
+	OS_STATFS_UPGRADE	= OS_STATFS_NONROT,
+};
+
+struct obd_statfs_state_name {
+	enum obd_statfs_state	osn_state;
+	const char		osn_name;
+	bool			osn_err;
+};
+
+/*
+ * Return the obd_statfs state info that matches the first set bit in @state.
+ *
+ * This is to identify various states returned by the OST_STATFS RPC.
+ *
+ * If .osn_err = true, then this is an error state indicating the target
+ * is degraded, read-only, full, or should otherwise not be used.
+ * If .osn_err = false, then this is an informational state and uses a
+ * lower-case name to distinguish it from error conditions.
+ *
+ * The UNUSED[12] bits were part of os_state=EROFS=30=0x1e until Lustre 1.6.
+ */
+static inline const
+struct obd_statfs_state_name *obd_statfs_state_name_find(__u32 state)
+{
+	static struct obd_statfs_state_name oss_names[] = {
+	  { .osn_state = OS_STATFS_DEGRADED, .osn_name = 'D', .osn_err = true },
+	  { .osn_state = OS_STATFS_READONLY, .osn_name = 'R', .osn_err = true },
+	  { .osn_state = OS_STATFS_NOCREATE, .osn_name = 'N', .osn_err = true },
+	  { .osn_state = OS_STATFS_UNUSED1,  .osn_name = '?', .osn_err = true },
+	  { .osn_state = OS_STATFS_UNUSED2,  .osn_name = '?', .osn_err = true },
+	  { .osn_state = OS_STATFS_ENOSPC,   .osn_name = 'S', .osn_err = true },
+	  { .osn_state = OS_STATFS_ENOINO,   .osn_name = 'I', .osn_err = true },
+	  { .osn_state = OS_STATFS_SUM,      .osn_name = 'a', /* aggregate */ },
+	  { .osn_state = OS_STATFS_NONROT,   .osn_name = 'f', /* flash */     },
+	  { .osn_state = 0, }
+	};
+	int i;
+
+	for (i = 0; oss_names[i].osn_state; i++) {
+		if (state & oss_names[i].osn_state)
+			return &oss_names[i];
+	}
+
+	return NULL;
 };
 #if LUSTRE_VERSION_CODE < OBD_OCD_VERSION(2, 20, 53, 0)
 #define OS_STATFS_NOPRECREATE OS_STATFS_NOCREATE
@@ -675,6 +723,9 @@ struct fsxattr {
 #define FS_XFLAG_PROJINHERIT		0x00000200
 #endif
 
+#define MDT_INVALID_UID		U32_MAX
+#define MDT_INVALID_GID		U32_MAX
+#define MDT_INVALID_PROJID	U32_MAX
 
 #define LL_STATFS_LMV		1
 #define LL_STATFS_LOV		2
@@ -700,13 +751,13 @@ struct fsxattr {
 /* To be compatible with old statically linked binary we keep the check for
  * the older 0100000000 flag.  This is already removed upstream.  LU-812.
  */
-#define O_LOV_DELAY_CREATE_1_8	0100000000 /* FMODE_NONOTIFY masked in 2.6.36 */
 #ifndef FASYNC
 #define FASYNC			00020000   /* fcntl, for BSD compatibility */
 #endif
-#define O_LOV_DELAY_CREATE_MASK	(O_NOCTTY | FASYNC)
-#define O_LOV_DELAY_CREATE		(O_LOV_DELAY_CREATE_1_8 | \
-					 O_LOV_DELAY_CREATE_MASK)
+/* This is Lustre-specific flag that defines O_LOV_DELAY_CREATE. There is no
+ * clash anywhere with these value and can be used safely
+ */
+#define O_LOV_DELAY_CREATE		(O_NOCTTY | FASYNC)
 /* O_CIPHERTEXT principle is similar to O_LOV_DELAY_CREATE above,
  * for access to encrypted files without the encryption key.
  */
@@ -821,6 +872,7 @@ static inline bool lov_pool_is_reserved(const char *pool)
 #define LOV_V1_INSANE_STRIPE_COUNT LOV_V1_INSANE_STRIPE_INDEX /* deprecated */
 
 #define XATTR_LUSTRE_PREFIX	"lustre."
+#define XATTR_LUSTRE_PIN	XATTR_LUSTRE_PREFIX"pin"
 #define XATTR_LUSTRE_LOV	XATTR_LUSTRE_PREFIX"lov"
 
 /* Please update if XATTR_LUSTRE_LOV".set" groks more flags in the future */
@@ -1554,6 +1606,17 @@ struct sepol_downcall_data {
 
 #endif /* !__KERNEL__ */
 
+/* these are not defined in the kernel */
+#ifndef QIF_BSOFTLIMIT
+#define QIF_BSOFTLIMIT	1024
+#define QIF_BHARDLIMIT	QIF_BLIMITS
+#define QIF_ISOFTLIMIT	2048
+#define QIF_IHARDLIMIT	QIF_ILIMITS
+#define QIF_FILESYSTEM	4096
+#define QIF_ALL_DETAIL	(QIF_ALL | QIF_BSOFTLIMIT | QIF_ISOFTLIMIT | \
+QIF_FILESYSTEM)
+#endif
+
 /* lustre volatile file support
  * file name header: ".^L^S^T^R:volatile"
  */
@@ -1669,15 +1732,25 @@ enum mds_open_flags {
 	MDS_FMODE_CLOSED	=	          00000000,
 	MDS_FMODE_READ		=	          00000001,
 	MDS_FMODE_WRITE		=	          00000002,
+	/* MAY_EXEC checks for permission eg inode_permission(). Different from
+	 * MDS_FMODE_EXECUTE which is permission check via execve
+	 */
 	MDS_FMODE_EXEC		=	          00000004,
 	MDS_OPEN_CREATED	=	          00000010,
 /*	MDS_OPEN_CROSS		=	          00000020, obsolete in 2.12, internal use only */
+	/* open for execution via execve */
+	MDS_FMODE_EXECUTE	=	          00000020,
 	MDS_OPEN_CREAT		=	          00000100,
 	MDS_OPEN_EXCL		=	          00000200,
+	MDS_OPEN_NOCTTY		=	          00000400,
 	MDS_OPEN_TRUNC		=	          00001000,
 	MDS_OPEN_APPEND		=	          00002000,
+	MDS_OPEN_NONBLOCK	=	          00004000,
 	MDS_OPEN_SYNC		=	          00010000,
+	MDS_OPEN_FASYNC		=	          00020000,
+	MDS_OPEN_LARGEFILE	=	          00100000,
 	MDS_OPEN_DIRECTORY	=	          00200000,
+	MDS_OPEN_NOFOLLOW	=	          00400000,
 /*	MDS_FMODE_EPOCH		=	          01000000, obsolete in 2.8.0 */
 /*	MDS_FMODE_TRUNC		=	          02000000, obsolete in 2.8.0 */
 /*	MDS_FMODE_SOM		=	          04000000, obsolete in 2.8.0 */
@@ -1963,7 +2036,7 @@ struct changelog_ext_nid {
 
 /* Changelog extra extension to include low 32 bits of MDS_OPEN_* flags. */
 struct changelog_ext_openmode {
-	__u32 cr_openflags;
+	__u32 cr_openflags; /* enum mds_open_flags */
 };
 
 /* Changelog extra extension to include xattr */

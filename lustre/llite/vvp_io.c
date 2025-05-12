@@ -1,37 +1,19 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  *
  * Implementation of cl_io for VVP layer.
  *
- *   Author: Nikita Danilov <nikita.danilov@sun.com>
- *   Author: Jinshan Xiong <jinshan.xiong@whamcloud.com>
+ * Author: Nikita Danilov <nikita.danilov@sun.com>
+ * Author: Jinshan Xiong <jinshan.xiong@whamcloud.com>
  */
 
 #define DEBUG_SUBSYSTEM S_LLITE
@@ -82,8 +64,10 @@ static bool can_populate_pages(const struct lu_env *env, struct cl_io *io,
 			io->ci_continue = 0;
 			rc = false;
 		}
+		fallthrough;
 	case CIT_FAULT:
 		/* fault is okay because we've already had a page. */
+		fallthrough;
 	default:
 		break;
 	}
@@ -122,7 +106,7 @@ static int vvp_prep_size(const struct lu_env *env, struct cl_object *obj,
 			 struct cl_io *io, loff_t start, size_t bytes,
 			 int *exceed)
 {
-	struct cl_attr *attr  = vvp_env_thread_attr(env);
+	struct cl_attr *attr  = vvp_env_new_attr(env);
 	struct inode *inode = vvp_object_inode(obj);
 	loff_t pos = start + bytes - 1;
 	loff_t kms;
@@ -703,9 +687,9 @@ static int vvp_io_setattr_time(const struct lu_env *env,
 {
 	struct cl_io *io    = ios->cis_io;
 	struct cl_object *obj   = io->ci_obj;
-	struct cl_attr *attr  = vvp_env_thread_attr(env);
+	struct cl_attr *attr  = vvp_env_new_attr(env);
 	int result;
-	unsigned int valid = CAT_CTIME;
+	enum cl_attr_valid valid = CAT_CTIME;
 
 	cl_object_attr_lock(obj);
 	attr->cat_ctime = io->u.ci_setattr.sa_attr.lvb_ctime;
@@ -835,9 +819,8 @@ static int vvp_io_read_start(const struct lu_env *env,
 
 	CLOBINVRNT(env, obj, vvp_object_invariant(obj));
 
-	CDEBUG(D_VFSTRACE, "%s: read [%llu, %llu)\n",
-		file_dentry(file)->d_name.name,
-		pos, pos + crw_bytes);
+	CDEBUG(D_VFSTRACE, DNAME": read [%llu, %llu)\n",
+	       encode_fn_file(file), pos, pos + crw_bytes);
 
 	trunc_sem_down_read(&lli->lli_trunc_sem);
 
@@ -1322,8 +1305,8 @@ static int vvp_io_write_start(const struct lu_env *env,
 			 pos, pos + crw_bytes);
 	}
 
-	CDEBUG(D_VFSTRACE, "%s: write [%llu, %llu)\n",
-	       file_dentry(file)->d_name.name, pos, pos + crw_bytes);
+	CDEBUG(D_VFSTRACE, DNAME": write [%llu, %llu)\n",
+	       encode_fn_file(file), pos, pos + crw_bytes);
 
 	/* The maximum Lustre file size is variable, based on the OST maximum
 	 * object size and number of stripes.  This needs another check in
@@ -1400,9 +1383,8 @@ static int vvp_io_write_start(const struct lu_env *env,
 		}
 		if (vio->u.readwrite.vui_written > 0) {
 			result = vio->u.readwrite.vui_written;
-			CDEBUG(D_VFSTRACE, "%s: write bytes %zd, result: %zd\n",
-				file_dentry(file)->d_name.name,
-				io->ci_bytes, result);
+			CDEBUG(D_VFSTRACE, DNAME": write bytes %zd, result: %zd\n",
+			       encode_fn_file(file), io->ci_bytes, result);
 			io->ci_bytes += result;
 		} else {
 			io->ci_continue = 0;
@@ -1410,10 +1392,10 @@ static int vvp_io_write_start(const struct lu_env *env,
 	}
 	if (vio->vui_iocb->ki_pos != (pos + io->ci_bytes - ci_bytes)) {
 		CDEBUG(D_VFSTRACE,
-		       "%s: write position mismatch: ki_pos %lld vs. pos %lld, written %zd, commit %ld: rc = %zd\n",
-		       file_dentry(file)->d_name.name,
-		       vio->vui_iocb->ki_pos, pos + io->ci_bytes - ci_bytes,
-		       written, io->ci_bytes - ci_bytes, result);
+		       DNAME": write position mismatch: ki_pos %lld vs. pos %lld, written %zd, commit %ld: rc = %zd\n",
+		       encode_fn_file(file), vio->vui_iocb->ki_pos,
+		       pos + io->ci_bytes - ci_bytes, written,
+		       io->ci_bytes - ci_bytes, result);
 		/*
 		 * Rewind ki_pos and vui_iter to where it has
 		 * successfully committed.

@@ -211,7 +211,7 @@ EXPORT_SYMBOL(cl_object_attr_get);
  * to top.
  */
 int cl_object_attr_update(const struct lu_env *env, struct cl_object *top,
-			  const struct cl_attr *attr, unsigned v)
+			  const struct cl_attr *attr, enum cl_attr_valid v)
 {
 	struct cl_object *obj;
 	int result = 0;
@@ -447,6 +447,21 @@ int cl_object_inode_ops(const struct lu_env *env, struct cl_object *top,
 	RETURN(rc);
 }
 EXPORT_SYMBOL(cl_object_inode_ops);
+
+void cl_req_projid_set(const struct lu_env *env, struct cl_object *top,
+		       __u32 *projid)
+{
+	struct cl_object *obj;
+
+	ENTRY;
+
+	cl_object_for_each(obj, top) {
+		if (obj->co_ops->coo_req_projid_set)
+			obj->co_ops->coo_req_projid_set(env, obj, projid);
+	}
+	EXIT;
+}
+EXPORT_SYMBOL(cl_req_projid_set);
 
 /**
  * Helper function removing all object locks, and marking object for

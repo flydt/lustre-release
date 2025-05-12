@@ -153,7 +153,7 @@ static int do_lcfg(char *cfgname, lnet_nid_t nid, int cmd,
 		return -ENOMEM;
 	lustre_cfg_init(lcfg, cmd, &bufs);
 	lcfg->lcfg_nid = nid;
-	rc = class_process_config(lcfg);
+	rc = class_process_config(lcfg, NULL);
 	OBD_FREE(lcfg, lustre_cfg_len(lcfg->lcfg_bufcount, lcfg->lcfg_buflens));
 	return rc;
 }
@@ -456,7 +456,7 @@ int lustre_start_mgc(struct super_block *sb)
 	/* Start the MGC */
 	rc = lustre_start_simple(mgcname, LUSTRE_MGC_NAME,
 				 (char *)uuid->uuid, LUSTRE_MGS_OBDNAME,
-				 niduuid, NULL, NULL);
+				 niduuid, NULL, lsi->lsi_lmd->lmd_nidnet);
 	if (rc)
 		GOTO(out_free, rc);
 
@@ -743,85 +743,6 @@ int lustre_put_lsi(struct super_block *sb)
 }
 EXPORT_SYMBOL(lustre_put_lsi);
 
-/*
- * The goal of this function is to extract the file system name
- * from the OBD name. This can come in two flavors. One is
- * fsname-MDTXXXX or fsname-XXXXXXX were X is a hexadecimal
- * number. In both cases we should return fsname. If it is
- * not a valid OBD name it is assumed to be the file system
- * name itself.
- */
-void obdname2fsname(const char *tgt, char *fsname, size_t buflen)
-{
-	const char *ptr;
-	const char *tmp;
-	size_t len = 0;
-
-	/*
-	 * First we have to see if the @tgt has '-' at all. It is
-	 * valid for the user to request something like
-	 * lctl set_param -P llite.lustre*.xattr_cache=0
-	 */
-	ptr = strrchr(tgt, '-');
-	if (!ptr) {
-		/* No '-' means it could end in '*' */
-		ptr = strchr(tgt, '*');
-		if (!ptr) {
-			/* No '*' either. Assume tgt = fsname */
-			len = strlen(tgt);
-			goto valid_obd_name;
-		}
-		len = ptr - tgt;
-		goto valid_obd_name;
-	}
-
-	/* tgt format fsname-MDT0000-* */
-	if ((!strncmp(ptr, "-MDT", 4) ||
-	     !strncmp(ptr, "-OST", 4)) &&
-	     (isxdigit(ptr[4]) && isxdigit(ptr[5]) &&
-	      isxdigit(ptr[6]) && isxdigit(ptr[7]))) {
-		len = ptr - tgt;
-		goto valid_obd_name;
-	}
-
-	/*
-	 * tgt_format fsname-cli'dev'-'uuid' except for the llite case
-	 * which are named fsname-'uuid'. Examples:
-	 *
-	 * lustre-clilov-ffff88104db5b800
-	 * lustre-ffff88104db5b800  (for llite device)
-	 *
-	 * The length of the OBD uuid can vary on different platforms.
-	 * This test if any invalid characters are in string. Allow
-	 * wildcards with '*' character.
-	 */
-	ptr++;
-	if (!strspn(ptr, "0123456789abcdefABCDEF*")) {
-		len = 0;
-		goto no_fsname;
-	}
-
-	/*
-	 * Now that we validated the device name lets extract the
-	 * file system name. Most of the names in this class will
-	 * have '-cli' in its name which needs to be dropped. If
-	 * it doesn't have '-cli' then its a llite device which
-	 * ptr already points to the start of the uuid string.
-	 */
-	tmp = strstr(tgt, "-cli");
-	if (tmp)
-		ptr = tmp;
-	else
-		ptr--;
-	len = ptr - tgt;
-valid_obd_name:
-	len = min_t(size_t, len, LUSTRE_MAXFSNAME);
-	snprintf(fsname, buflen, "%.*s", (int)len, tgt);
-no_fsname:
-	fsname[len] = '\0';
-}
-EXPORT_SYMBOL(obdname2fsname);
-
 /**
  * SERVER NAME ***
  * <FSNAME><SEPARATOR><TYPE><INDEX>
@@ -889,29 +810,6 @@ int server_name2svname(const char *label, char *svname, const char **endptr,
 	return 0;
 }
 EXPORT_SYMBOL(server_name2svname);
-#endif /* HAVE_SERVER_SUPPORT */
-
-#ifdef HAVE_SERVER_SUPPORT
-/**
- * check server name is OST.
- **/
-int server_name_is_ost(const char *svname)
-{
-	const char *dash;
-	int rc;
-
-	/* We use server_name2fsname() just for parsing */
-	rc = server_name2fsname(svname, NULL, &dash);
-	if (rc != 0)
-		return rc;
-
-	dash++;
-
-	if (strncmp(dash, "OST", 3) == 0)
-		return 1;
-	return 0;
-}
-EXPORT_SYMBOL(server_name_is_ost);
 #endif /* HAVE_SERVER_SUPPORT */
 
 /**
@@ -1182,17 +1080,19 @@ static int lmd_parse_network(struct lustre_mount_data *lmd, char *ptr)
 
 static int lmd_parse_string(char **handle, char *ptr)
 {
+	int len;
+
 	if (!handle || !ptr)
 		return -EINVAL;
 
 	OBD_FREE(*handle, strlen(*handle) + 1);
 	*handle = NULL;
 
-	*handle = kstrdup(ptr, GFP_NOFS);
+	len = strlen(ptr);
+	OBD_ALLOC(*handle, len + 1);
 	if (!*handle)
 		return -ENOMEM;
-
-	OBD_ALLOC_POST(*handle, strlen(ptr) + 1, "kmalloced");
+	memcpy(*handle, ptr, len + 1);
 
 	return 0;
 }
@@ -1741,17 +1641,6 @@ bad_string:
 			if (!lmd->lmd_fileset)
 				GOTO(invalid, rc = -ENOMEM);
 			strncat(lmd->lmd_fileset, s1, s2 - s1 + 1);
-		}
-	} else {
-		/* server mount */
-		if (lmd->lmd_nidnet != NULL) {
-			/* 'network=' mount option forbidden for server */
-			OBD_FREE(lmd->lmd_nidnet, strlen(lmd->lmd_nidnet) + 1);
-			lmd->lmd_nidnet = NULL;
-			rc = -EINVAL;
-			CERROR("%s: option 'network=' not allowed for Lustre servers: rc = %d\n",
-			       devname, rc);
-			GOTO(invalid, rc);
 		}
 	}
 

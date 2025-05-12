@@ -331,7 +331,8 @@ static int tgt_request_preprocess(struct tgt_session_info *tsi,
 			if (unlikely(dlm_req->lock_desc.l_resource.lr_type ==
 				     LDLM_IBITS &&
 				     (policy->l_inodebits.bits |
-				      policy->l_inodebits.try_bits) == 0)) {
+				      policy->l_inodebits.try_bits) ==
+						MDS_INODELOCK_NONE)) {
 				/*
 				 * Lock without inodebits makes no sense and
 				 * will oops later in ldlm. If client miss to
@@ -1364,7 +1365,7 @@ int tgt_blocking_ast(struct ldlm_lock *lock, struct ldlm_lock_desc *desc,
 	    (lock->l_granted_mode & (LCK_EX | LCK_PW | LCK_GROUP)) &&
 	    (tgt->lut_sync_lock_cancel == SYNC_LOCK_CANCEL_ALWAYS ||
 	     (tgt->lut_sync_lock_cancel == SYNC_LOCK_CANCEL_BLOCKING &&
-	      ldlm_is_cbpending(lock))) &&
+	      (lock->l_flags & LDLM_FL_CBPENDING))) &&
 	    ((exp_connect_flags(lock->l_export) & OBD_CONNECT_MDS_MDS) ||
 	     lock->l_resource->lr_type == LDLM_EXTENT)) {
 		__u64 start = 0;
@@ -1823,10 +1824,10 @@ static int tgt_checksum_niobuf(struct lu_target *tgt,
 				 int opc, enum cksum_types cksum_type,
 				 __u32 *cksum)
 {
-	struct ahash_request	       *req;
-	unsigned int			bufsize;
-	int				i, err;
-	unsigned char			cfs_alg = cksum_obd2cfs(cksum_type);
+	unsigned char cfs_alg = cksum_obd2cfs(cksum_type);
+	struct ahash_request *req;
+	unsigned int bufsize;
+	int i;
 
 	req = cfs_crypto_hash_init(cfs_alg, NULL, 0);
 	if (IS_ERR(req)) {
@@ -1900,25 +1901,28 @@ static int tgt_checksum_niobuf(struct lu_target *tgt,
 	}
 
 	bufsize = sizeof(*cksum);
-	err = cfs_crypto_hash_final(req, (unsigned char *)cksum, &bufsize);
+	cfs_crypto_hash_final(req, (unsigned char *)cksum, &bufsize);
 
 	return 0;
 }
-
-char dbgcksum_file_name[PATH_MAX];
 
 static void dump_all_bulk_pages(struct obdo *oa, int count,
 				struct niobuf_local *local_nb,
 				__u32 server_cksum, __u32 client_cksum)
 {
+	char *dbgcksum_file_name;
 	struct file *filp;
 	int rc, i;
 	unsigned int len;
 	char *buf;
 
+	OBD_ALLOC(dbgcksum_file_name, PATH_MAX);
+	if (!dbgcksum_file_name)
+		return;
+
 	/* will only keep dump of pages on first error for the same range in
 	 * file/fid, not during the resends/retries. */
-	snprintf(dbgcksum_file_name, sizeof(dbgcksum_file_name),
+	snprintf(dbgcksum_file_name, PATH_MAX,
 		 "%s-checksum_dump-ost-"DFID":[%llu-%llu]-%x-%x",
 		 (strncmp(libcfs_debug_file_path, "NONE", 4) != 0 ?
 		  libcfs_debug_file_path : LIBCFS_DEBUG_FILE_PATH_DEFAULT),
@@ -1940,6 +1944,7 @@ static void dump_all_bulk_pages(struct obdo *oa, int count,
 		else
 			CERROR("%s: can't open to dump pages with checksum "
 			       "error: rc = %d\n", dbgcksum_file_name, rc);
+		OBD_FREE(dbgcksum_file_name, PATH_MAX);
 		return;
 	}
 
@@ -1965,6 +1970,7 @@ static void dump_all_bulk_pages(struct obdo *oa, int count,
 	filp_close(filp, NULL);
 
 	libcfs_debug_dumplog();
+	OBD_FREE(dbgcksum_file_name, PATH_MAX);
 }
 
 static int check_read_checksum(struct niobuf_local *local_nb, int npages,
@@ -2420,6 +2426,10 @@ int tgt_brw_read(struct tgt_session_info *tsi)
 		nob += page_rc;
 		if (page_rc != 0 && desc != NULL) { /* some data! */
 			LASSERT(local_nb[i].lnb_page != NULL);
+			CDEBUG(D_INODE,
+			       "lnb %d, at offset %llu, hole %d\n", i,
+			       local_nb[i].lnb_file_offset,
+			       local_nb[i].lnb_hole);
 			desc->bd_frag_ops->add_kiov_frag
 			  (desc, local_nb[i].lnb_page,
 			   local_nb[i].lnb_page_offset & ~PAGE_MASK,

@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0 */
+
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -229,17 +211,17 @@ static inline struct ofd_device *ofd_obj2dev(const struct ofd_object *fo)
 static inline void ofd_read_lock(const struct lu_env *env,
 				 struct ofd_object *fo)
 {
-	struct dt_object  *next = ofd_object_child(fo);
+	struct dt_object *next = ofd_object_child(fo);
 
-	next->do_ops->do_read_lock(env, next, 0);
+	dt_read_lock(env, next, 0);
 }
 
 static inline void ofd_read_unlock(const struct lu_env *env,
 				   struct ofd_object *fo)
 {
-	struct dt_object  *next = ofd_object_child(fo);
+	struct dt_object *next = ofd_object_child(fo);
 
-	next->do_ops->do_read_unlock(env, next);
+	dt_read_unlock(env, next);
 }
 
 static inline void ofd_write_lock(const struct lu_env *env,
@@ -247,15 +229,15 @@ static inline void ofd_write_lock(const struct lu_env *env,
 {
 	struct dt_object *next = ofd_object_child(fo);
 
-	next->do_ops->do_write_lock(env, next, 0);
+	dt_write_lock(env, next, 0);
 }
 
 static inline void ofd_write_unlock(const struct lu_env *env,
 				    struct ofd_object *fo)
 {
-	struct dt_object  *next = ofd_object_child(fo);
+	struct dt_object *next = ofd_object_child(fo);
 
-	next->do_ops->do_write_unlock(env, next);
+	dt_write_unlock(env, next);
 }
 
 /*
@@ -386,7 +368,8 @@ ofd_stats_counter_init(struct lprocfs_stats *stats,
 struct ofd_object *ofd_object_find(const struct lu_env *env,
 				   struct ofd_device *ofd,
 				   const struct lu_fid *fid);
-int ofd_object_ff_load(const struct lu_env *env, struct ofd_object *fo);
+int ofd_object_ff_load(const struct lu_env *env, struct ofd_object *fo,
+		       bool force);
 int ofd_object_ff_update(const struct lu_env *env, struct ofd_object *fo,
 			 const struct obdo *oa, struct filter_fid *ff);
 int ofd_precreate_objects(const struct lu_env *env, struct ofd_device *ofd,

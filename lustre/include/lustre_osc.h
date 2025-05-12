@@ -26,6 +26,7 @@
 
 #include <libcfs/libcfs.h>
 #include <obd.h>
+#include <cfs_hash.h>
 #include <cl_object.h>
 #include <lustre_crypto.h>
 
@@ -234,11 +235,7 @@ struct osc_object_operations {
 struct osc_object {
 	struct cl_object	oo_cl;
 	struct lov_oinfo	*oo_oinfo;
-	/**
-	 * True if locking against this stripe got -EUSERS.
-	 */
-	int			oo_contended;
-	ktime_t			oo_contention_time;
+
 #ifdef CONFIG_LUSTRE_DEBUG_EXPENSIVE_CHECK
 	/**
 	 * IO context used for invariant checks in osc_lock_has_pages().
@@ -315,11 +312,6 @@ static inline void osc_object_lock(struct osc_object *obj)
 	spin_lock(&obj->oo_lock);
 }
 
-static inline int osc_object_trylock(struct osc_object *obj)
-{
-	return spin_trylock(&obj->oo_lock);
-}
-
 static inline void osc_object_unlock(struct osc_object *obj)
 {
 	spin_unlock(&obj->oo_lock);
@@ -327,18 +319,6 @@ static inline void osc_object_unlock(struct osc_object *obj)
 
 #define assert_osc_object_is_locked(obj)	\
 	assert_spin_locked(&obj->oo_lock)
-
-static inline void osc_object_set_contended(struct osc_object *obj)
-{
-	obj->oo_contention_time = ktime_get();
-	/* mb(); */
-	obj->oo_contended = 1;
-}
-
-static inline void osc_object_clear_contended(struct osc_object *obj)
-{
-	obj->oo_contended = 0;
-}
 
 /*
  * Lock "micro-states" for osc layer.
@@ -376,7 +356,7 @@ enum osc_lock_state {
  *
  * - When reply is received from the server (osc_enqueue_interpret())
  *      - ldlm_cli_enqueue_fini()
- *          - LDLM_LOCK_PUT(): releases caller reference acquired by
+ *          - ldlm_lock_put(): releases caller reference acquired by
  *            ldlm_lock_new().
  *          - if (rc != 0)
  *                ldlm_lock_decref(): error case: matches ldlm_cli_enqueue().
@@ -384,7 +364,7 @@ enum osc_lock_state {
  *
  * - When lock is being cancelled (ldlm_lock_cancel())
  *      - ldlm_lock_destroy()
- *          - LDLM_LOCK_PUT(): releases hash-table reference acquired by
+ *          - ldlm_lock_put(): releases hash-table reference acquired by
  *            ldlm_lock_new().
  *
  * osc_lock is detached from ldlm_lock by osc_lock_detach() that is called
@@ -630,7 +610,7 @@ int osc_object_print(const struct lu_env *env, void *cookie,
 int osc_attr_get(const struct lu_env *env, struct cl_object *obj,
 		 struct cl_attr *attr);
 int osc_attr_update(const struct lu_env *env, struct cl_object *obj,
-		    const struct cl_attr *attr, unsigned int valid);
+		    const struct cl_attr *attr, enum cl_attr_valid valid);
 int osc_object_glimpse(const struct lu_env *env, const struct cl_object *obj,
 		       struct ost_lvb *lvb);
 int osc_object_invalidate(const struct lu_env *env, struct osc_object *osc);

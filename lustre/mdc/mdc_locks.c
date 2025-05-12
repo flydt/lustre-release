@@ -86,7 +86,7 @@ EXPORT_SYMBOL(it_open_error);
 
 /* this must be called on a lockh that is known to have a referenced lock */
 int mdc_set_lock_data(struct obd_export *exp, const struct lustre_handle *lockh,
-		      void *data, __u64 *bits)
+		      void *data, enum mds_ibits_locks *bits)
 {
 	struct ldlm_lock *lock;
 	struct inode *new_inode = data;
@@ -109,7 +109,7 @@ int mdc_set_lock_data(struct obd_export *exp, const struct lustre_handle *lockh,
 		LASSERTF(old_inode->i_state & I_FREEING,
 			 "Found existing inode %px/%lu/%u state %lu in lock: setting data to %px/%lu/%u\n",
 			 old_inode, old_inode->i_ino, old_inode->i_generation,
-			 old_inode->i_state,
+			 (unsigned long)old_inode->i_state,
 			 new_inode, new_inode->i_ino, new_inode->i_generation);
 	}
 	lock->l_resource->lr_lvb_inode = new_inode;
@@ -365,9 +365,8 @@ mdc_intent_open_pack(struct obd_export *exp, struct lookup_intent *it,
 				     RCL_SERVER,
 				     obd->u.cli.cl_max_mds_easize);
 
-		CDEBUG(D_SEC, "packed '%.*s' as security xattr name\n",
-		       op_data->op_file_secctx_name_size,
-		       op_data->op_file_secctx_name);
+		CDEBUG(D_SEC, "packed '"DNAME"' as security xattr name\n",
+		       encode_fn_opdata(op_data));
 
 	} else {
 		req_capsule_set_size(&req->rq_pill, &RMF_FILE_SECCTX,
@@ -422,7 +421,10 @@ mdc_intent_open_pack(struct obd_export *exp, struct lookup_intent *it,
 	 * Such estimation is safe. Though the final allocated buffer might
 	 * be even larger, it is not possible to know that at this point.
 	 */
-	req->rq_reqmsg->lm_repsize = repsize;
+	if ((op_data->op_cli_flags & CLI_READ_ON_OPEN) != 0)
+		req->rq_reqmsg->lm_repsize = repsize;
+	else
+		req->rq_reqmsg->lm_repsize = 0;
 	RETURN(req);
 
 err_put_sepol:
@@ -574,7 +576,7 @@ mdc_intent_getxattr_pack(struct obd_export *exp, struct lookup_intent *it,
 
 	/* pack the intended request */
 	mdc_pack_body(&req->rq_pill, &op_data->op_fid1, op_data->op_valid,
-		      ea_vals_buf_size, -1, 0);
+		      ea_vals_buf_size, -1, 0, op_data->op_projid);
 
 	/* get SELinux policy info if any */
 	mdc_file_sepol_pack(&req->rq_pill, sepol);
@@ -672,9 +674,8 @@ mdc_intent_getattr_pack(struct obd_export *exp, struct lookup_intent *it,
 		req_capsule_set_size(&req->rq_pill, &RMF_FILE_SECCTX,
 				     RCL_SERVER, easize);
 
-		CDEBUG(D_SEC, "packed '%.*s' as security xattr name\n",
-		       op_data->op_file_secctx_name_size,
-		       op_data->op_file_secctx_name);
+		CDEBUG(D_SEC, "packed '"DNAME"' as security xattr name\n",
+		       encode_fn_opdata(op_data));
 	} else {
 		req_capsule_set_size(&req->rq_pill, &RMF_FILE_SECCTX,
 				     RCL_SERVER, 0);
@@ -1079,6 +1080,8 @@ resend:
 	if (IS_ERR(req))
 		RETURN(PTR_ERR(req));
 
+	lustre_msg_set_projid(req->rq_reqmsg, op_data->op_projid);
+
 	if (resends) {
 		req->rq_generation_set = 1;
 		req->rq_import_generation = generation;
@@ -1212,7 +1215,7 @@ static int mdc_enqueue_async_interpret(const struct lu_env *env,
 	rc = ldlm_cli_enqueue_fini(exp, &req->rq_pill, &einfo, 1,
 				  &mea->mea_flags, NULL, 0, &lockh, rc, true);
 	if (rc == -ENOLCK)
-		LDLM_LOCK_RELEASE(lock);
+		ldlm_lock_put(lock);
 
 	/* we expect failed_lock_cleanup() to destroy lock */
 	if (rc != 0)
@@ -1221,7 +1224,7 @@ static int mdc_enqueue_async_interpret(const struct lu_env *env,
 	if (mea->mea_upcall != NULL)
 		mea->mea_upcall(lock, rc);
 
-	LDLM_LOCK_PUT(lock);
+	ldlm_lock_put(lock);
 
 	RETURN(rc);
 }
@@ -1380,15 +1383,15 @@ static int mdc_finish_intent_lock(struct obd_export *exp,
 	EXIT;
 out:
 	CDEBUG(D_DENTRY,
-	       "D_IT dentry=%.*s intent=%s status=%d disp=%x: rc = %d\n",
-		(int)op_data->op_namelen, op_data->op_name,
-		ldlm_it2str(it->it_op), it->it_status, it->it_disposition, rc);
+	       "D_IT dentry="DNAME" intent=%s status=%d disp=%x: rc = %d\n",
+	       encode_fn_opdata(op_data), ldlm_it2str(it->it_op),
+	       it->it_status, it->it_disposition, rc);
 
 	return rc;
 }
 
 int mdc_revalidate_lock(struct obd_export *exp, struct lookup_intent *it,
-			struct lu_fid *fid, __u64 *bits)
+			struct lu_fid *fid, enum mds_ibits_locks *bits)
 {
 	/* We could just return 1 immediately, but as we should only be called
 	 * in revalidate_it if we already have a lock, let's verify that.
@@ -1496,11 +1499,11 @@ int mdc_intent_lock(struct obd_export *exp, struct md_op_data *op_data,
 
 	ENTRY;
 	LASSERT(it);
-	CDEBUG(D_DLMTRACE, "(name: %.*s,"DFID") in obj "DFID
-		", intent: %s flags %#lo\n", (int)op_data->op_namelen,
-		op_data->op_name, PFID(&op_data->op_fid2),
-		PFID(&op_data->op_fid1), ldlm_it2str(it->it_op),
-		it->it_open_flags);
+	CDEBUG(D_DLMTRACE,
+	       "(name: "DNAME","DFID") in obj "DFID", intent: %s flags %#lo\n",
+	       encode_fn_opdata(op_data), PFID(&op_data->op_fid2),
+	       PFID(&op_data->op_fid1), ldlm_it2str(it->it_op),
+	       it->it_open_flags);
 
 	lockh.cookie = 0;
 	/* MDS_FID_OP is not a revalidate case */
@@ -1602,10 +1605,9 @@ int mdc_intent_getattr_async(struct obd_export *exp,
 
 	ENTRY;
 	CDEBUG(D_DLMTRACE,
-	       "name: %.*s in inode "DFID", intent: %s flags %#lo\n",
-	       (int)op_data->op_namelen, op_data->op_name,
-	       PFID(&op_data->op_fid1), ldlm_it2str(it->it_op),
-	       it->it_open_flags);
+	       "name: "DNAME" in inode "DFID", intent: %s flags %#lo\n",
+	       encode_fn_opdata(op_data), PFID(&op_data->op_fid1),
+	       ldlm_it2str(it->it_op), it->it_open_flags);
 
 	fid_build_reg_res_name(&op_data->op_fid1, &res_id);
 	/* If the MDT return -ERANGE because of large ACL, then the sponsor

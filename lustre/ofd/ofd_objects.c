@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2009, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/ofd/ofd_objects.c
  *
  * This file contains OSD API methods related to OBD Filter Device (OFD)
  * object operations.
@@ -133,19 +113,21 @@ struct ofd_object *ofd_object_find(const struct lu_env *env,
  *
  * \param[in] env	execution environment
  * \param[in] fo	OFD object
+ * \param[in] force	force to read EA XATTR_NAME_FID
  *
  * \retval		0 if successful
  * \retval		-ENODATA if there is no such xattr
  * \retval		negative value on error
  */
-int ofd_object_ff_load(const struct lu_env *env, struct ofd_object *fo)
+int ofd_object_ff_load(const struct lu_env *env, struct ofd_object *fo,
+		       bool force)
 {
 	struct ofd_thread_info *info = ofd_info(env);
 	struct filter_fid *ff = &fo->ofo_ff;
 	struct lu_buf *buf = &info->fti_buf;
 	int rc = 0;
 
-	if (fid_is_sane(&ff->ff_parent))
+	if (fid_is_sane(&ff->ff_parent) && !force)
 		return 0;
 
 	buf->lb_buf = ff;
@@ -545,7 +527,10 @@ int ofd_attr_handle_id(const struct lu_env *env, struct ofd_object *fo,
 			la->la_valid &= ~LA_UID;
 		if (!(ln->la_mode & S_ISGID))
 			la->la_valid &= ~LA_GID;
-		if (!(ln->la_mode & S_ISVTX))
+		/* LU-16265: also update the PROJID if it's 0 and
+		 * the PROJID of the incoming request isn't 0 */
+		if (!(ln->la_mode & S_ISVTX) &&
+		    (ln->la_projid != 0 || la->la_projid == 0))
 			la->la_valid &= ~LA_PROJID;
 	}
 
@@ -584,13 +569,14 @@ int ofd_object_ff_update(const struct lu_env *env, struct ofd_object *fo,
 			 const struct obdo *oa, struct filter_fid *ff)
 {
 	int rc = 0;
+
 	ENTRY;
 
 	if (!(oa->o_valid &
 	      (OBD_MD_FLFID | OBD_MD_FLOSTLAYOUT | OBD_MD_LAYOUT_VERSION)))
 		RETURN(0);
 
-	rc = ofd_object_ff_load(env, fo);
+	rc = ofd_object_ff_load(env, fo, true);
 	if (rc < 0 && rc != -ENODATA)
 		RETURN(rc);
 
@@ -617,12 +603,14 @@ int ofd_object_ff_update(const struct lu_env *env, struct ofd_object *fo,
 		ff->ff_layout = oa->o_layout;
 
 	if (oa->o_valid & OBD_MD_LAYOUT_VERSION) {
-		CDEBUG(D_INODE, DFID": OST("DFID") layout version %u -> %u\n",
+		CDEBUG(D_INODE,
+		       "%s:"DFID":"DFID" layout version %#x -> %#x, oa_valid %#llx\n",
+		       ofd_name(ofd_obj2dev(fo)),
 		       PFID(&fo->ofo_ff.ff_parent),
 		       PFID(lu_object_fid(&fo->ofo_obj.do_lu)),
-		       ff->ff_layout_version, oa->o_layout_version);
-
-		/**
+		       ff->ff_layout_version, oa->o_layout_version,
+		       oa->o_valid);
+		/*
 		 * resync write from client on non-primary objects and
 		 * resync start from MDS on primary objects will contain
 		 * LU_LAYOUT_RESYNC flag in the @oa.
@@ -694,6 +682,11 @@ int ofd_attr_set(const struct lu_env *env, struct ofd_object *fo,
 
 	if (!ofd_object_exists(fo))
 		GOTO(out, rc = -ENOENT);
+
+
+	if (la->la_valid & LA_PROJID &&
+	    CFS_FAIL_CHECK(OBD_FAIL_OUT_DROP_PROJID_SET))
+		la->la_valid &= ~LA_PROJID;
 
 	/* VBR: version recovery check */
 	rc = ofd_version_get_check(info, fo);
@@ -811,7 +804,7 @@ int ofd_object_fallocate(const struct lu_env *env, struct ofd_object *fo,
 		RETURN(rc);
 
 	if (ff != NULL) {
-		rc = ofd_object_ff_load(env, fo);
+		rc = ofd_object_ff_load(env, fo, false);
 		if (rc == -ENODATA)
 			ff_needed = true;
 		else if (rc < 0)

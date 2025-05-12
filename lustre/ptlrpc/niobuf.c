@@ -1,30 +1,12 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  */
@@ -38,6 +20,18 @@
 #include <obd_class.h>
 #include "ptlrpc_internal.h"
 #include <lnet/lib-lnet.h> /* for CFS_FAIL_PTLRPC_OST_BULK_CB2 */
+
+/* whether we should use PM-QoS to lower CPUs resume latency during I/O */
+bool ptlrpc_enable_pmqos = true;
+
+/* max CPUs power resume latency to be used during I/O */
+int ptlrpc_pmqos_latency_max_usec = CPU_MAX_RESUME_LATENCY_US;
+
+/* default timeout to end CPUs resume latency constraint */
+u64 ptlrpc_pmqos_default_duration_usec = DEFAULT_CPU_LATENCY_TIMEOUT_US;
+
+/* whether we should use OBD stats to determine best low latency duration */
+bool ptlrpc_pmqos_use_stats_for_duration = true;
 
 /**
  * Helper function. Sends \a len bytes from \a base at offset \a offset
@@ -575,6 +569,105 @@ static void ptlrpc_at_set_reply(struct ptlrpc_request *req, int flags)
 	}
 }
 
+/* lower CPU latency on all logical CPUs in the cpt partition that will
+ * handle replies from the target NID server
+ */
+static void kick_cpu_latency(struct ptlrpc_connection *conn,
+			     struct obd_device *obd)
+{
+	cpumask_t *cpt_cpumask;
+	int cpu;
+	struct cpu_latency_qos *latency_qos;
+	u64 time = 0;
+
+	if (unlikely(ptlrpc_enable_pmqos == false) ||
+	    unlikely(cpus_latency_qos == NULL))
+		return;
+
+#ifdef CONFIG_PROC_FS
+	if (ptlrpc_pmqos_use_stats_for_duration == true && obd != NULL &&
+	    obd->obd_svc_stats != NULL) {
+		struct lprocfs_counter ret;
+
+		lprocfs_stats_collect(obd->obd_svc_stats,
+				      PTLRPC_REQWAIT_CNTR, &ret);
+		/* use 125% of average wait time (lc_sum/lc_count)
+		 * instead of lc_max
+		 */
+		if (ret.lc_count != 0)
+			time = (ret.lc_sum / ret.lc_count) * 5 / 4;
+		CDEBUG(D_INFO, "%s: using a timeout of %llu usecs (%lu jiffies)\n",
+		       obd->obd_name, time, usecs_to_jiffies(time));
+	}
+#endif
+
+	cpt_cpumask = *cfs_cpt_cpumask(lnet_cpt_table(),
+				       lnet_cpt_of_nid(lnet_nid_to_nid4(&conn->c_peer.nid),
+				       NULL));
+	for_each_cpu(cpu, cpt_cpumask) {
+		u64 this_cpu_time, new_deadline;
+		bool new_work = true;
+
+		latency_qos = &cpus_latency_qos[cpu];
+
+		if (ptlrpc_pmqos_use_stats_for_duration == false) {
+			/* XXX should we use latency_qos->max_time if greater ? */
+			this_cpu_time = ptlrpc_pmqos_default_duration_usec;
+		} else if (time == 0) {
+			this_cpu_time = latency_qos->max_time;
+		} else {
+			this_cpu_time = time;
+			if (time > latency_qos->max_time)
+				latency_qos->max_time = time;
+		}
+
+		new_deadline = jiffies_64 + usecs_to_jiffies(this_cpu_time);
+		CDEBUG(D_TRACE, "%s: PM QoS new deadline estimation for cpu %d is %llu\n",
+		       obd->obd_name, cpu, new_deadline);
+		mutex_lock(&latency_qos->lock);
+		if (latency_qos->pm_qos_req == NULL) {
+			OBD_ALLOC_PTR(latency_qos->pm_qos_req);
+			if (latency_qos->pm_qos_req == NULL) {
+				CWARN("%s: Failed to allocate a PM-QoS request for cpu %d\n",
+				      obd->obd_name, cpu);
+				return;
+			}
+			dev_pm_qos_add_request(get_cpu_device(cpu),
+					       latency_qos->pm_qos_req,
+					       DEV_PM_QOS_RESUME_LATENCY,
+					       ptlrpc_pmqos_latency_max_usec);
+			latency_qos->deadline = new_deadline;
+			CDEBUG(D_TRACE, "%s: PM QoS request now active for cpu %d\n",
+			       obd->obd_name, cpu);
+		} else if (dev_pm_qos_request_active(latency_qos->pm_qos_req)) {
+			if (new_deadline > latency_qos->deadline) {
+				cancel_delayed_work(&latency_qos->delayed_work);
+				CDEBUG(D_TRACE,
+				       "%s: PM QoS request active for cpu %d, simply extend its deadline from %llu\n",
+				       obd->obd_name, cpu,
+				       latency_qos->deadline);
+				latency_qos->deadline = new_deadline;
+			} else {
+				new_work = false;
+				CDEBUG(D_TRACE,
+				       "%s: PM QoS request active for cpu %d, keep current deadline %llu\n",
+				       obd->obd_name, cpu,
+				       latency_qos->deadline);
+			}
+		} else {
+			/* should not happen ? */
+			CDEBUG(D_INFO,
+			       "%s: Inactive PM QoS request for cpu %d, has been found unexpectedly...\n",
+			       obd->obd_name, cpu);
+		}
+		if (new_work == true)
+			schedule_delayed_work_on(cpu,
+						 &latency_qos->delayed_work,
+						 usecs_to_jiffies(this_cpu_time));
+		mutex_unlock(&latency_qos->lock);
+	}
+}
+
 /**
  * Send request reply from request \a req reply buffer.
  * \a flags defines reply types
@@ -636,7 +729,7 @@ int ptlrpc_send_reply(struct ptlrpc_request *req, int flags)
 		CERROR("not replying on NULL connection\n"); /* bug 9635 */
 		return -ENOTCONN;
 	}
-	ptlrpc_rs_addref(rs);  /* +1 ref for the network */
+	kref_get(&rs->rs_refcount); /* +1 ref for the network */
 
 	rc = sptlrpc_svc_wrap_reply(req);
 	if (unlikely(rc))
@@ -725,8 +818,10 @@ int ptl_send_rpc(struct ptlrpc_request *request, int noreply)
 
 	LNetInvalidateMDHandle(&bulk_cookie);
 
-	if (CFS_FAIL_CHECK(OBD_FAIL_PTLRPC_DROP_RPC))
+	if (CFS_FAIL_CHECK(OBD_FAIL_PTLRPC_DROP_RPC)) {
+		request->rq_sent = ktime_get_real_seconds();
 		RETURN(0);
+	}
 
 	if (unlikely(CFS_FAIL_CHECK(OBD_FAIL_PTLRPC_DELAY_RECOV) &&
 		     lustre_msg_get_opc(request->rq_reqmsg) == MDS_CONNECT &&
@@ -985,8 +1080,11 @@ int ptl_send_rpc(struct ptlrpc_request *request, int noreply)
 			  &connection->c_peer,
 			  request->rq_request_portal,
 			  request->rq_xid, 0, &bulk_cookie);
-	if (likely(rc == 0))
+	if (likely(rc == 0)) {
+		/* lower CPU latency when in-flight RPCs */
+		kick_cpu_latency(connection, obd);
 		GOTO(out, rc);
+	}
 
 skip_send:
 	request->rq_req_unlinked = 1;

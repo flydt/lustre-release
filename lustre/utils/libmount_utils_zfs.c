@@ -636,6 +636,12 @@ static int zfs_create_vdev(struct mkfs_opts *mop, char *vdev)
 
 	return ret;
 }
+/* interop will break if we change MAX_NAME from 255 */
+#ifdef ZAP_MAXNAMELEN_NEW
+#define ZFS_LONGNAME_FEATURE	" -o feature@longname=disabled"
+#else
+#define ZFS_LONGNAME_FEATURE	""
+#endif
 
 int zfs_make_lustre(struct mkfs_opts *mop)
 {
@@ -713,7 +719,8 @@ int zfs_make_lustre(struct mkfs_opts *mop)
 
 		memset(mkfs_cmd, 0, PATH_MAX);
 		snprintf(mkfs_cmd, PATH_MAX,
-			"zpool create -f -O canmount=off %s", pool);
+			"zpool create%s -f -O canmount=off %s",
+			ZFS_LONGNAME_FEATURE, pool);
 
 		/* Append the vdev config and create file vdevs as required */
 		while (*mop->mo_pool_vdevs != NULL) {
@@ -779,6 +786,7 @@ int zfs_make_lustre(struct mkfs_opts *mop)
 	 * zfs 0.6.1 - system attribute based xattrs
 	 * zfs 0.6.5 - large block support
 	 * zfs 0.7.0 - large dnode support
+	 * zfs 2.2.6 - compression handling
 	 *
 	 * Check if zhp is NULL as a defensive measure. Any dataset
 	 * validation errors that would cause zfs_open() to fail
@@ -786,6 +794,8 @@ int zfs_make_lustre(struct mkfs_opts *mop)
 	 */
 	zhp = zfs_open(g_zfs, ds, ZFS_TYPE_FILESYSTEM);
 	if (zhp) {
+		char *opt;
+
 		/* zfs 0.6.1 - system attribute based xattrs */
 		if (!strstr(mop->mo_mkfsopts, "xattr="))
 			zfs_set_prop_str(zhp, "xattr", "sa");
@@ -800,6 +810,24 @@ int zfs_make_lustre(struct mkfs_opts *mop)
 			if (!strstr(mop->mo_mkfsopts, "recordsize=") &&
 			    !strstr(mop->mo_mkfsopts, "recsize="))
 				zfs_set_prop_str(zhp, "recordsize", "1M");
+		}
+
+		/* zfs 2.2.6 - compression handling */
+		opt = strstr(mop->mo_mkfsopts, "compression=");
+		if (opt) {
+			char *end = index(opt, ',');
+			size_t len = strlen(opt);
+
+			if (end) {
+				len = end - opt;
+				end = strndup(opt, len);
+			}
+			zfs_set_prop_str(zhp, "compression", end ? end : opt);
+			if (end)
+				free(end);
+		} else {
+			/* By default turn off compression */
+			zfs_set_prop_str(zhp, "compression", "off");
 		}
 
 		zfs_close(zhp);
@@ -957,7 +985,9 @@ int zfs_init(void)
 	if (ret == 0)
 		osd_zfs_setup = 1;
 	else
-		fprintf(stderr, "Failed to initialize ZFS library: %d\n", ret);
+		fprintf(stderr,
+			"Failed to initialize ZFS library. Are the ZFS packages and modules correctly installed? (%d)\n",
+			ret);
 
 	return ret;
 }

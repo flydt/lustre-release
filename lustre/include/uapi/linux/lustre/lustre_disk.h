@@ -25,6 +25,7 @@
 #include <linux/types.h>
 #include <linux/uuid.h>
 #include <linux/lnet/lnet-types.h> /* for lnet_nid_t */
+#include <linux/lustre/lustre_param.h>   /* for LDD_PARAM_LEN */
 
 /****************** on-disk files ********************/
 
@@ -76,7 +77,7 @@ struct lustre_disk_data {
 	char  ldd_userdata[1024 - 200];	/* arbitrary user string '200' */
 	__u8  ldd_padding[4096 - 1024];	/* 1024 */
 	char  ldd_mount_opts[4096];	/* target fs mount opts '4096' */
-	char  ldd_params[4096];		/* key=value pairs '8192' */
+	char  ldd_params[LDD_PARAM_LEN];/* key=value pairs '8192' */
 };
 
 /****************** persistent mount data *********************/
@@ -257,6 +258,8 @@ enum nm_flag_bits {
 
 enum nm_flag2_bits {
 	NM_FL2_READONLY_MOUNT = 0x1,
+	NM_FL2_DENY_MOUNT = 0x2,
+	NM_FL2_FILESET_USE_IAM = 0x4,
 };
 
 /* Nodemap records, uses 32 byte record length.
@@ -314,9 +317,9 @@ struct nodemap_global_rec {
 
 struct nodemap_cluster_roles_rec {
 	__u64 ncrr_roles;		/* enum nodemap_rbac_roles */
-	__u64 ncrr_padding1;		/* zeroed since 2.16 (always) */
-	__u64 ncrr_padding2;		/* zeroed since 2.16 (always) */
-	__u64 ncrr_padding3;		/* zeroed since 2.16 (always) */
+	__u64 ncrr_privs;		/* enum nodemap_raise_privs */
+	__u64 ncrr_roles_raise;		/* enum nodemap_rbac_roles */
+	__u64 ncrr_unused1;		/* zeroed since 2.16 (always) */
 };
 
 struct nodemap_offset_rec {
@@ -330,6 +333,21 @@ struct nodemap_offset_rec {
 	__u32 nor_padding2;
 };
 
+/* fileset fragment length for each nodemap record: 28 bytes for fragments */
+#define LUSTRE_NODEMAP_FILESET_FRAGMENT_SIZE \
+	(sizeof(struct nodemap_cluster_rec) - (2 * sizeof(__u16)))
+/* fileset subid range to support a PATH_MAX characters fileset and header */
+#define LUSTRE_NODEMAP_FILESET_SUBID_RANGE 256
+/* max number of filesets per nodemap */
+#define LUSTRE_NODEMAP_FILESET_NUM_MAX 256
+
+struct nodemap_fileset_rec {
+	/* 28 bytes for fileset path fragment */
+	char	nfr_path_fragment[LUSTRE_NODEMAP_FILESET_FRAGMENT_SIZE];
+	__u16	nfr_fragment_id;	/* fileset fragment id */
+	__u16	nfr_padding1;		/* zeroed since 2.16 (always) */
+};
+
 union nodemap_rec {
 	struct nodemap_cluster_rec ncr;
 	struct nodemap_range_rec nrr;
@@ -338,6 +356,7 @@ union nodemap_rec {
 	struct nodemap_global_rec ngr;
 	struct nodemap_cluster_roles_rec ncrr;
 	struct nodemap_offset_rec nor;
+	struct nodemap_fileset_rec nfr;
 };
 
 /* sub-keys for records of type NODEMAP_CLUSTER_IDX */
@@ -345,6 +364,16 @@ enum nodemap_cluster_rec_subid {
 	NODEMAP_CLUSTER_REC = 0,   /* nodemap_cluster_rec */
 	NODEMAP_CLUSTER_ROLES = 1, /* nodemap_cluster_roles_rec */
 	NODEMAP_CLUSTER_OFFSET = 2, /* UID/GID/PROJID offset for a nm cluster */
+	/*
+	 * A fileset may not fit in a single nodemap_fileset_rec and uses at max
+	 * 256 fragments. The first subid (512) is currently unused and reserved
+	 * for a future fileset header.
+	 */
+	NODEMAP_FILESET = 512,
+	/*
+	 * Depending on its length, its fragments may use several subids
+	 * in the range of 512 to 66,047 (assuming max 256 filesets).
+	 */
 };
 
 /* first 4 bits of the nodemap_id is the index type */

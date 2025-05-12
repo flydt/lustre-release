@@ -476,7 +476,7 @@ check_ptlrpc_body(void)
 	CHECK_MEMBER(ptlrpc_body, pb_last_xid);
 	CHECK_MEMBER(ptlrpc_body, pb_tag);
 	CHECK_MEMBER(ptlrpc_body, pb_padding0);
-	CHECK_MEMBER(ptlrpc_body, pb_padding1);
+	CHECK_MEMBER(ptlrpc_body, pb_projid);
 	CHECK_MEMBER(ptlrpc_body, pb_last_committed);
 	CHECK_MEMBER(ptlrpc_body, pb_transno);
 	CHECK_MEMBER(ptlrpc_body, pb_flags);
@@ -504,7 +504,7 @@ check_ptlrpc_body(void)
 	CHECK_MEMBER_SAME(ptlrpc_body_v3, ptlrpc_body_v2, pb_last_xid);
 	CHECK_MEMBER_SAME(ptlrpc_body_v3, ptlrpc_body_v2, pb_tag);
 	CHECK_MEMBER_SAME(ptlrpc_body_v3, ptlrpc_body_v2, pb_padding0);
-	CHECK_MEMBER_SAME(ptlrpc_body_v3, ptlrpc_body_v2, pb_padding1);
+	CHECK_MEMBER_SAME(ptlrpc_body_v3, ptlrpc_body_v2, pb_projid);
 	CHECK_MEMBER_SAME(ptlrpc_body_v3, ptlrpc_body_v2, pb_last_committed);
 	CHECK_MEMBER_SAME(ptlrpc_body_v3, ptlrpc_body_v2, pb_transno);
 	CHECK_MEMBER_SAME(ptlrpc_body_v3, ptlrpc_body_v2, pb_flags);
@@ -2550,6 +2550,31 @@ static void check_layout_intent(void)
 	CHECK_VALUE(LAIF_INCOMPRESSIBLE);
 }
 
+static void check_swap_layout(void)
+{
+	BLANK_LINE();
+	CHECK_STRUCT(lustre_swap_layouts);
+	CHECK_MEMBER(lustre_swap_layouts, sl_flags);
+	CHECK_MEMBER(lustre_swap_layouts, sl_fd);
+	CHECK_MEMBER(lustre_swap_layouts, sl_gid);
+	CHECK_MEMBER(lustre_swap_layouts, sl_dv1);
+	CHECK_MEMBER(lustre_swap_layouts, sl_dv2);
+
+	BLANK_LINE();
+	CHECK_STRUCT(mdc_swap_layouts);
+	CHECK_MEMBER(mdc_swap_layouts, msl_flags);
+
+	BLANK_LINE();
+	COMMENT("Checks for mdc_swap_layouts::msl_flags");
+	CHECK_VALUE(SWAP_LAYOUTS_CHECK_DV1);
+	CHECK_VALUE(SWAP_LAYOUTS_CHECK_DV2);
+	CHECK_VALUE(SWAP_LAYOUTS_KEEP_MTIME);
+	CHECK_VALUE(SWAP_LAYOUTS_KEEP_ATIME);
+	CHECK_VALUE(SWAP_LAYOUTS_CLOSE);
+	CHECK_VALUE(SWAP_LAYOUTS_MDS_RELEASE);
+
+}
+
 static void check_hsm_state_set(void)
 {
 	BLANK_LINE();
@@ -2991,9 +3016,19 @@ static void check_nodemap_cluster_roles_rec(void)
 	BLANK_LINE();
 	CHECK_STRUCT(nodemap_cluster_roles_rec);
 	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_roles);
-	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_padding1);
-	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_padding2);
-	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_padding3);
+	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_privs);
+	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_roles_raise);
+	CHECK_MEMBER(nodemap_cluster_roles_rec, ncrr_unused1);
+}
+
+static void check_nodemap_fileset_rec(void)
+{
+	BLANK_LINE();
+	CHECK_STRUCT(nodemap_fileset_rec);
+	CHECK_CDEFINE(LUSTRE_NODEMAP_FILESET_FRAGMENT_SIZE);
+	CHECK_MEMBER(nodemap_fileset_rec, nfr_path_fragment[LUSTRE_NODEMAP_FILESET_FRAGMENT_SIZE]);
+	CHECK_MEMBER(nodemap_fileset_rec, nfr_fragment_id);
+	CHECK_MEMBER(nodemap_fileset_rec, nfr_padding1);
 }
 
 static void check_nodemap_rec(void)
@@ -3036,6 +3071,8 @@ static void check_nodemap_key(void)
 	CHECK_VALUE_X(NM_FL_FORBID_ENCRYPT);
 	CHECK_VALUE_X(NM_FL_MAP_PROJID);
 	CHECK_VALUE_X(NM_FL2_READONLY_MOUNT);
+	CHECK_VALUE_X(NM_FL2_DENY_MOUNT);
+	CHECK_VALUE_X(NM_FL2_FILESET_USE_IAM);
 
 	CHECK_VALUE(NODEMAP_UID);
 	CHECK_VALUE(NODEMAP_GID);
@@ -3058,8 +3095,21 @@ static void check_nodemap_key(void)
 	CHECK_VALUE_X(NODEMAP_RBAC_CHLG_OPS);
 	CHECK_VALUE_X(NODEMAP_RBAC_FSCRYPT_ADMIN);
 	CHECK_VALUE_X(NODEMAP_RBAC_SERVER_UPCALL);
+	CHECK_VALUE_X(NODEMAP_RBAC_IGN_ROOT_PRJQUOTA);
+	CHECK_VALUE_X(NODEMAP_RBAC_HSM_OPS);
+	CHECK_VALUE_X(NODEMAP_RBAC_LOCAL_ADMIN);
 	CHECK_VALUE_X(NODEMAP_RBAC_NONE);
 	CHECK_VALUE_X(NODEMAP_RBAC_ALL);
+
+	CHECK_VALUE_X(NODEMAP_RAISE_PRIV_RAISE);
+	CHECK_VALUE_X(NODEMAP_RAISE_PRIV_ADMIN);
+	CHECK_VALUE_X(NODEMAP_RAISE_PRIV_TRUSTED);
+	CHECK_VALUE_X(NODEMAP_RAISE_PRIV_DENY_UNKN);
+	CHECK_VALUE_X(NODEMAP_RAISE_PRIV_RO);
+	CHECK_VALUE_X(NODEMAP_RAISE_PRIV_RBAC);
+	CHECK_VALUE_X(NODEMAP_RAISE_PRIV_FORBID_ENC);
+	CHECK_VALUE_X(NODEMAP_RAISE_PRIV_NONE);
+	CHECK_VALUE_X(NODEMAP_RAISE_PRIV_ALL);
 }
 
 static void check_scrub_file(void)
@@ -3320,6 +3370,8 @@ check_lustre_cfg(void)
 	CHECK_VALUE_X(LCFG_NODEMAP_SQUASH_PROJID);
 	CHECK_VALUE_X(LCFG_NODEMAP_READONLY_MOUNT);
 	CHECK_VALUE_X(LCFG_NODEMAP_RBAC);
+	CHECK_VALUE_X(LCFG_NODEMAP_DENY_MOUNT);
+	CHECK_VALUE_X(LCFG_NODEMAP_RAISE_PRIVS);
 	printf("#endif /* HAVE_SERVER_SUPPORT */\n");
 #endif /* !HAVE_NATIVE_LINUX_CLIENT */
 	CHECK_VALUE(PORTALS_CFG_TYPE);
@@ -3526,7 +3578,7 @@ main(int argc, char **argv)
 	CHECK_VALUE(LDLM_SET_INFO);
 	CHECK_VALUE(LDLM_LAST_OPC);
 
-	CHECK_VALUE(LCK_MINMODE);
+	CHECK_VALUE(LCK_MODE_MIN);
 	CHECK_VALUE(LCK_EX);
 	CHECK_VALUE(LCK_PW);
 	CHECK_VALUE(LCK_PR);
@@ -3536,14 +3588,14 @@ main(int argc, char **argv)
 	CHECK_VALUE(LCK_GROUP);
 	CHECK_VALUE(LCK_COS);
 	CHECK_VALUE(LCK_TXN);
-	CHECK_VALUE(LCK_MAXMODE);
+	CHECK_VALUE(LCK_MODE_END);
 	CHECK_VALUE(LCK_MODE_NUM);
 
 	CHECK_CVALUE(LDLM_PLAIN);
 	CHECK_CVALUE(LDLM_EXTENT);
 	CHECK_CVALUE(LDLM_FLOCK);
 	CHECK_CVALUE(LDLM_IBITS);
-	CHECK_CVALUE(LDLM_MAX_TYPE);
+	CHECK_CVALUE(LDLM_TYPE_END);
 
 	CHECK_CVALUE(LUSTRE_RES_ID_SEQ_OFF);
 	CHECK_CVALUE(LUSTRE_RES_ID_VER_OID_OFF);
@@ -3737,6 +3789,7 @@ main(int argc, char **argv)
 	check_hsm_progress_kernel();
 	check_hsm_user_item();
 	check_hsm_user_state();
+	check_swap_layout();
 	check_hsm_state_set();
 	check_hsm_current_action();
 	check_hsm_request();
@@ -3773,6 +3826,7 @@ main(int argc, char **argv)
 	check_nodemap_offset_rec();
 	check_nodemap_global_rec();
 	check_nodemap_cluster_roles_rec();
+	check_nodemap_fileset_rec();
 	check_nodemap_rec();
 	check_nodemap_key();
 

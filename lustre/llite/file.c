@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/llite/file.c
  *
  * Author: Peter Braam <braam@clusterfs.com>
  * Author: Phil Schwan <phil@clusterfs.com>
@@ -116,7 +96,7 @@ static void ll_prepare_close(struct inode *inode, struct md_op_data *op_data,
 	 * stored into lli_lazysize in ll_merge_attr(), so set proper file size
 	 * now that we are closing.
 	 */
-	if (ll_require_key(inode) == -ENOKEY &&
+	if (IS_ENCRYPTED(inode) && !ll_has_encryption_key(inode) &&
 	    ll_i2info(inode)->lli_attr_valid & OBD_MD_FLLAZYSIZE) {
 		op_data->op_attr.ia_size = ll_i2info(inode)->lli_lazysize;
 		if (IS_PCCCOPY(inode)) {
@@ -292,7 +272,17 @@ out:
 	return rc;
 }
 
-int ll_md_real_close(struct inode *inode, fmode_t fmode)
+/**
+ * ll_md_real_close() - called when file is closed. Called from ll_file_release
+ *
+ * @inode: inode which is getting closed
+ * @fd_open_mode: MDS flags passed from client
+ *
+ * Return:
+ * * 0 on success
+ * * <0 on error
+ */
+int ll_md_real_close(struct inode *inode, enum mds_open_flags fd_open_mode)
 {
 	struct ll_inode_info *lli = ll_i2info(inode);
 	struct obd_client_handle **och_p;
@@ -301,14 +291,14 @@ int ll_md_real_close(struct inode *inode, fmode_t fmode)
 	int rc = 0;
 
 	ENTRY;
-	if (fmode & FMODE_WRITE) {
+	if (fd_open_mode & MDS_FMODE_WRITE) {
 		och_p = &lli->lli_mds_write_och;
 		och_usecount = &lli->lli_open_fd_write_count;
-	} else if (fmode & FMODE_EXEC) {
+	} else if (fd_open_mode & MDS_FMODE_EXEC) {
 		och_p = &lli->lli_mds_exec_och;
 		och_usecount = &lli->lli_open_fd_exec_count;
 	} else {
-		LASSERT(fmode & FMODE_READ);
+		LASSERT(fd_open_mode & MDS_FMODE_READ);
 		och_p = &lli->lli_mds_read_och;
 		och_usecount = &lli->lli_open_fd_read_count;
 	}
@@ -384,11 +374,11 @@ static int ll_md_close(struct inode *inode, struct file *file)
 	/* Let's see if we have good enough OPEN lock on the file and if we can
 	 * skip talking to MDS
 	 */
-	if (lfd->fd_omode & FMODE_WRITE) {
+	if (lfd->fd_open_mode & MDS_FMODE_WRITE) {
 		lockmode = LCK_CW;
 		LASSERT(lli->lli_open_fd_write_count);
 		lli->lli_open_fd_write_count--;
-	} else if (lfd->fd_omode & FMODE_EXEC) {
+	} else if (lfd->fd_open_mode & MDS_FMODE_EXEC) {
 		lockmode = LCK_PR;
 		LASSERT(lli->lli_open_fd_exec_count);
 		lli->lli_open_fd_exec_count--;
@@ -403,7 +393,7 @@ static int ll_md_close(struct inode *inode, struct file *file)
 	if ((lockmode == LCK_CW && inode->i_mode & 0111) ||
 	    !md_lock_match(ll_i2mdexp(inode), flags, ll_inode2fid(inode),
 			   LDLM_IBITS, &policy, lockmode, 0, &lockh))
-		rc = ll_md_real_close(inode, lfd->fd_omode);
+		rc = ll_md_real_close(inode, lfd->fd_open_mode);
 
 out:
 	file->private_data = NULL;
@@ -427,9 +417,9 @@ int ll_file_release(struct inode *inode, struct file *file)
 
 	ENTRY;
 	CDEBUG(D_VFSTRACE|D_IOTRACE,
-	       "START file %s:"DFID"(%p), flags %o\n",
-	       file_dentry(file)->d_name.name,
-	       PFID(ll_inode2fid(file_inode(file))), inode, file->f_flags);
+	       "START file "DNAME":"DFID"(%p), flags %o\n",
+	       encode_fn_file(file), PFID(ll_inode2fid(file_inode(file))),
+	       inode, file->f_flags);
 
 	lfd = file->private_data;
 	LASSERT(lfd != NULL);
@@ -467,10 +457,9 @@ out:
 		ll_stats_ops_tally(sbi, LPROC_LL_RELEASE,
 				   ktime_us_delta(ktime_get(), kstart));
 	CDEBUG(D_IOTRACE,
-	       "COMPLETED file %s:"DFID"(%p), flags %o, rc = %d\n",
-	       file_dentry(file)->d_name.name,
-	       PFID(ll_inode2fid(file_inode(file))), inode, file->f_flags,
-	       rc);
+	       "COMPLETED file "DNAME":"DFID"(%p), flags %o, rc = %d\n",
+	       encode_fn_file(file), PFID(ll_inode2fid(file_inode(file))),
+	       inode, file->f_flags, rc);
 
 	RETURN(rc);
 }
@@ -588,7 +577,7 @@ void ll_dom_finish_open(struct inode *inode, struct ptlrpc_request *req)
 	env = cl_env_get(&refcheck);
 	if (IS_ERR(env))
 		RETURN_EXIT;
-	io = vvp_env_thread_io(env);
+	io = vvp_env_new_io(env);
 	io->ci_obj = obj;
 	rc = cl_io_init(env, io, CIT_MISC, obj);
 	if (rc)
@@ -650,6 +639,67 @@ out_io:
 
 	EXIT;
 }
+void ll_dir_finish_open(struct inode *inode, struct ptlrpc_request *req)
+{
+	struct obd_export *exp = ll_i2mdexp(inode);
+	void *data;
+	struct page *page;
+	struct lu_dirpage *dp;
+	int is_hash64;
+	int rc;
+	unsigned long	offset;
+	__u64		hash;
+	unsigned int i;
+	unsigned int npages;
+
+	ENTRY;
+
+	if (!exp_connect_open_readdir(exp))
+		RETURN_EXIT;
+
+	if (!req_capsule_field_present(&req->rq_pill, &RMF_NIOBUF_INLINE,
+				       RCL_SERVER))
+		RETURN_EXIT;
+
+	data = req_capsule_server_get(&req->rq_pill, &RMF_NIOBUF_INLINE);
+	if (data == NULL)
+		RETURN_EXIT;
+
+	npages = req_capsule_get_size(&req->rq_pill, &RMF_NIOBUF_INLINE,
+				      RCL_SERVER);
+	if (npages < sizeof(*dp))
+		RETURN_EXIT;
+
+	/* div rou*/
+	npages = DIV_ROUND_UP(npages, PAGE_SIZE);
+	is_hash64 = test_bit(LL_SBI_64BIT_HASH, ll_i2sbi(inode)->ll_flags);
+
+	for (i = 0; i < npages; i++) {
+		page = __page_cache_alloc(mapping_gfp_mask(inode->i_mapping));
+		if (!page)
+			continue;
+
+		lock_page(page);
+		SetPageUptodate(page);
+
+		dp = kmap_atomic(page);
+		memcpy(dp, data, PAGE_SIZE);
+		hash = le64_to_cpu(dp->ldp_hash_start);
+		kunmap_atomic(dp);
+
+		offset = hash_x_index(hash, is_hash64);
+
+		prefetchw(&page->flags);
+		rc = add_to_page_cache_lru(page, inode->i_mapping, offset,
+				   GFP_KERNEL);
+		if (rc == 0)
+			unlock_page(page);
+
+		put_page(page);
+	}
+	EXIT;
+}
+
 
 static int ll_intent_file_open(struct dentry *de, void *lmm, ssize_t lmmsize,
 				struct lookup_intent *itp)
@@ -703,6 +753,9 @@ retry:
 	op_data->op_data = lmm;
 	op_data->op_data_size = lmmsize;
 
+	if (!sbi->ll_dir_open_read && S_ISDIR(de->d_inode->i_mode))
+		op_data->op_cli_flags &= ~CLI_READ_ON_OPEN;
+
 	CFS_FAIL_TIMEOUT(OBD_FAIL_LLITE_OPEN_DELAY, cfs_fail_val);
 
 	rc = ll_intent_lock(sbi->ll_md_exp, op_data, itp, &req,
@@ -732,7 +785,7 @@ retry:
 	rc = ll_prep_inode(&de->d_inode, &req->rq_pill, NULL, itp);
 
 	if (!rc && itp->it_lock_mode) {
-		__u64 bits = 0;
+		enum mds_ibits_locks bits = MDS_INODELOCK_NONE;
 
 		/* if DoM bit returned along with LAYOUT bit then there
 		 * can be read-on-open data returned.
@@ -740,6 +793,8 @@ retry:
 		ll_set_lock_data(sbi->ll_md_exp, de->d_inode, itp, &bits);
 		if (bits & MDS_INODELOCK_DOM && bits & MDS_INODELOCK_LAYOUT)
 			ll_dom_finish_open(de->d_inode, req);
+		if (bits & MDS_INODELOCK_UPDATE && S_ISDIR(de->d_inode->i_mode))
+			ll_dir_finish_open(de->d_inode, req);
 	}
 	/* open may not fetch LOOKUP lock, update dir depth and default LMV
 	 * anyway.
@@ -786,6 +841,73 @@ static int ll_och_fill(struct obd_export *md_exp, struct lookup_intent *it,
 	return md_set_open_replay_data(md_exp, och, it);
 }
 
+/**
+ * ll_kernel_to_mds_open_flags() - Convert kernel flags to MDS flags (Access
+ *				   mode)
+ *
+ * @kernel_open_flags: kernel input (struct file.f_flags)
+ *
+ * Returns:
+ * * mds_open_flags
+ */
+enum mds_open_flags ll_kernel_to_mds_open_flags(unsigned int kernel_open_flags)
+{
+	enum mds_open_flags mds_open_flags = MDS_FMODE_CLOSED;
+
+	if (kernel_open_flags & FMODE_READ)
+		mds_open_flags |= MDS_FMODE_READ;
+
+	if (kernel_open_flags & FMODE_WRITE)
+		mds_open_flags |= MDS_FMODE_WRITE;
+
+	if (kernel_open_flags & O_CREAT)
+		mds_open_flags |= MDS_OPEN_CREAT;
+
+	if (kernel_open_flags & O_EXCL)
+		mds_open_flags |= MDS_OPEN_EXCL;
+
+	if (kernel_open_flags & O_TRUNC)
+		mds_open_flags |= MDS_OPEN_TRUNC;
+
+	if (kernel_open_flags & O_APPEND)
+		mds_open_flags |= MDS_OPEN_APPEND;
+
+	if (kernel_open_flags & O_SYNC)
+		mds_open_flags |= MDS_OPEN_SYNC;
+
+	if (kernel_open_flags & O_DIRECTORY)
+		mds_open_flags |= MDS_OPEN_DIRECTORY;
+
+	/* FMODE_EXEC is only valid with fmode_t, use __FMODE_EXEC instead
+	 * which indicates file is opened for execution with sys_execve
+	 */
+	if (kernel_open_flags & __FMODE_EXEC)
+		mds_open_flags |= MDS_FMODE_EXECUTE;
+
+	if (ll_lov_delay_create_is_set(kernel_open_flags))
+		mds_open_flags |= O_LOV_DELAY_CREATE;
+
+	if (kernel_open_flags & O_LARGEFILE)
+		mds_open_flags |= MDS_OPEN_LARGEFILE;
+
+	if (kernel_open_flags & O_NONBLOCK)
+		mds_open_flags |= MDS_OPEN_NORESTORE;
+
+	if (kernel_open_flags & O_NOCTTY)
+		mds_open_flags |= MDS_OPEN_NOCTTY;
+
+	if (kernel_open_flags & O_NONBLOCK)
+		mds_open_flags |= MDS_OPEN_NONBLOCK;
+
+	if (kernel_open_flags & O_NOFOLLOW)
+		mds_open_flags |= MDS_OPEN_NOFOLLOW;
+
+	if (kernel_open_flags & FASYNC)
+		mds_open_flags |= MDS_OPEN_FASYNC;
+
+	return mds_open_flags;
+}
+
 static int ll_local_open(struct file *file, struct lookup_intent *it,
 			 struct ll_file_data *lfd,
 			 struct obd_client_handle *och)
@@ -807,8 +929,9 @@ static int ll_local_open(struct file *file, struct lookup_intent *it,
 
 	file->private_data = lfd;
 	ll_readahead_init(inode, &lfd->fd_ras);
-	lfd->fd_omode = it->it_open_flags & (FMODE_READ | FMODE_WRITE |
-					     FMODE_EXEC);
+	lfd->fd_open_mode = it->it_open_flags & (MDS_FMODE_READ |
+						 MDS_FMODE_WRITE |
+						 MDS_FMODE_EXEC);
 
 	RETURN(0);
 }
@@ -836,7 +959,12 @@ void ll_track_file_opens(struct inode *inode)
 			   lli->lli_open_fd_count);
 }
 
-/* Open a file, and (for the very first open) create objects on the OSTs at
+/**
+ * ll_file_open() - setup and handle file open
+ * @inode: inode of the file being opened
+ * @file: Open file pointer in the kernel
+ *
+ * Open a file, and (for the very first open) create objects on the OSTs at
  * this time.  If opened with O_LOV_DELAY_CREATE, then we don't do the object
  * creation or open until ll_lov_setstripe() ioctl is called.
  *
@@ -848,6 +976,10 @@ void ll_track_file_opens(struct inode *inode)
  * used.  We might be able to avoid races of that sort by getting lli_open_sem
  * before returning in the O_LOV_DELAY_CREATE case and dropping it here
  * or in ll_file_release(), but I'm not sure that is desirable/necessary.
+ *
+ *  Return:
+ * * %0: Success
+ * * %-ERRNO: Failure
  */
 int ll_file_open(struct inode *inode, struct file *file)
 {
@@ -862,9 +994,9 @@ int ll_file_open(struct inode *inode, struct file *file)
 
 	ENTRY;
 	CDEBUG(D_VFSTRACE|D_IOTRACE,
-	       "START file %s:"DFID"(%p), flags %o\n",
-	       file_dentry(file)->d_name.name,
-	       PFID(ll_inode2fid(file_inode(file))), inode, file->f_flags);
+	       "START file "DNAME":"DFID"(%p), flags %o\n",
+	       encode_fn_file(file), PFID(ll_inode2fid(file_inode(file))),
+	       inode, file->f_flags);
 
 	it = file->private_data; /* XXX: compat macro */
 	file->private_data = NULL; /* prevent ll_local_open assertion */
@@ -893,32 +1025,37 @@ int ll_file_open(struct inode *inode, struct file *file)
 	}
 
 	if (!it || !it->it_disposition) {
+		unsigned int kernel_flags = file->f_flags;
+
 		/* Convert f_flags into access mode. We cannot use file->f_mode,
 		 * because everything but O_ACCMODE mask was stripped from there
 		 */
-		if ((oit.it_open_flags + 1) & O_ACCMODE)
-			oit.it_open_flags++;
+		if ((oit.it_open_flags + MDS_FMODE_READ) & O_ACCMODE)
+			kernel_flags++;
+
+		oit.it_open_flags = ll_kernel_to_mds_open_flags(kernel_flags);
+
 		if (file->f_flags & O_TRUNC)
-			oit.it_open_flags |= FMODE_WRITE;
+			oit.it_open_flags |= MDS_FMODE_WRITE;
 
 		/* kernel only call f_op->open in dentry_open.  filp_open calls
 		 * dentry_open after call to open_namei that checks permissions.
 		 * Only nfsd_open call dentry_open directly without checking
 		 * permissions and because of that this code below is safe.
 		 */
-		if (oit.it_open_flags & (FMODE_WRITE | FMODE_READ))
+		if (oit.it_open_flags & (MDS_FMODE_WRITE | MDS_FMODE_READ))
 			oit.it_open_flags |= MDS_OPEN_OWNEROVERRIDE;
 
 		/* We do not want O_EXCL here, presumably we opened the file
 		 * already? XXX - NFS implications?
 		 */
-		oit.it_open_flags &= ~O_EXCL;
+		oit.it_open_flags &= ~MDS_OPEN_EXCL;
 
 		/* bug20584, if "it_open_flags" contains O_CREAT, file will be
 		 * created if necessary, then "IT_CREAT" should be set to keep
 		 * consistent with it
 		 */
-		if (oit.it_open_flags & O_CREAT)
+		if (oit.it_open_flags & MDS_OPEN_CREAT)
 			oit.it_op |= IT_CREAT;
 
 		it = &oit;
@@ -926,10 +1063,10 @@ int ll_file_open(struct inode *inode, struct file *file)
 
 restart:
 	/* Let's see if we have file open on MDS already. */
-	if (it->it_open_flags & FMODE_WRITE) {
+	if (it->it_open_flags & MDS_FMODE_WRITE) {
 		och_p = &lli->lli_mds_write_och;
 		och_usecount = &lli->lli_open_fd_write_count;
-	} else if (it->it_open_flags & FMODE_EXEC) {
+	} else if (it->it_open_flags & MDS_FMODE_EXEC) {
 		och_p = &lli->lli_mds_exec_och;
 		och_usecount = &lli->lli_open_fd_exec_count;
 	} else {
@@ -1096,10 +1233,9 @@ out_nofiledata:
 	}
 
 	CDEBUG(D_IOTRACE,
-	       "COMPLETED file %s:"DFID"(%p), flags %o, rc = %d\n",
-	       file_dentry(file)->d_name.name,
-	       PFID(ll_inode2fid(file_inode(file))), inode, file->f_flags,
-	       rc);
+	       "COMPLETED file "DNAME":"DFID"(%p), flags %o, rc = %d\n",
+	       encode_fn_file(file), PFID(ll_inode2fid(file_inode(file))),
+	       inode, file->f_flags, rc);
 
 	return rc;
 }
@@ -1214,10 +1350,21 @@ static int ll_lease_och_release(struct inode *inode, struct file *file)
 	RETURN(rc);
 }
 
-/* Acquire a lease and open the file.  */
+/**
+ * ll_lease_open() - Acquire a lease(block other open() call on this file)
+ *		     and open the file.
+ *
+ * @inode: mount point
+ * @file: file to open
+ * @fmode: Kernel mode open flag pass to open() (permissions)
+ * @open_flags: MDS flags passed from client
+ *
+ * Return:
+ * * populate obd_client_handle object on success
+ */
 static struct obd_client_handle *
 ll_lease_open(struct inode *inode, struct file *file, fmode_t fmode,
-	      __u64 open_flags)
+	      enum mds_open_flags open_flags)
 {
 	struct lookup_intent it = { .it_op = IT_OPEN };
 	struct ll_sb_info *sbi = ll_i2sbi(inode);
@@ -1292,7 +1439,7 @@ ll_lease_open(struct inode *inode, struct file *file, fmode_t fmode,
 	    !(it.it_lock_bits & MDS_INODELOCK_OPEN)) {
 		/* open lock must return for lease */
 		rc = -EPROTO;
-		CERROR("%s: "DFID" lease granted but no open lock, %d/%llu: rc = %d\n",
+		CERROR("%s: "DFID" lease granted but no open lock, %d/%lu: rc = %d\n",
 		       sbi->ll_fsname, PFID(ll_inode2fid(inode)),
 		       it.it_lock_mode, it.it_lock_bits, rc);
 		GOTO(out_close, rc);
@@ -1321,14 +1468,15 @@ out:
 	RETURN(ERR_PTR(rc));
 }
 
-/*
- * Check whether a layout swap can be done between two inodes.
+/**
+ * ll_check_swap_layouts_validity() - Check whether a layout swap can be done
+ * between two inodes.
+ * @inode1:  First inode to check
+ * @inode2:  Second inode to check
  *
- * \param[in] inode1  First inode to check
- * \param[in] inode2  Second inode to check
- *
- * \retval 0 on success, layout swap can be performed between both inodes
- * \retval negative error code if requirements are not met
+ * Return:
+ * * %0 on success, layout swap can be performed between both inodes
+ * * %negative error code if requirements are not met
  */
 static int ll_check_swap_layouts_validity(struct inode *inode1,
 					  struct inode *inode2)
@@ -1476,7 +1624,7 @@ static int ll_merge_attr_nolock(const struct lu_env *env, struct inode *inode)
 {
 	struct ll_inode_info *lli = ll_i2info(inode);
 	struct cl_object *obj = lli->lli_clob;
-	struct cl_attr *attr = vvp_env_thread_attr(env);
+	struct cl_attr *attr = vvp_env_new_attr(env);
 	s64 atime;
 	s64 mtime;
 	s64 ctime;
@@ -1535,7 +1683,7 @@ static int ll_merge_attr_nolock(const struct lu_env *env, struct inode *inode)
 	CDEBUG(D_VFSTRACE, DFID" updating i_size %llu i_blocks %llu\n",
 	       PFID(&lli->lli_fid), attr->cat_size, attr->cat_blocks);
 
-	if (ll_require_key(inode) == -ENOKEY) {
+	if (IS_ENCRYPTED(inode) && !ll_has_encryption_key(inode)) {
 		/* Without the key, round up encrypted file size to next
 		 * LUSTRE_ENCRYPTION_UNIT_SIZE. Clear text size is put in
 		 * lli_lazysize for proper file size setting at close time.
@@ -1605,8 +1753,8 @@ void ll_io_set_mirror(struct cl_io *io, const struct file *file)
 		io->ci_layout_version = lfd->fd_layout_version;
 	}
 
-	CDEBUG(D_VFSTRACE, "%s: desiginated mirror: %d\n",
-	       file->f_path.dentry->d_name.name, io->ci_designated_mirror);
+	CDEBUG(D_VFSTRACE, DNAME": desiginated mirror: %d\n",
+	       encode_fn_file(file), io->ci_designated_mirror);
 }
 
 /* This is relatime_need_update() from Linux 5.17, which is not exported */
@@ -1676,7 +1824,7 @@ void ll_io_init(struct cl_io *io, struct file *file, enum cl_io_type iot,
 	int flags = vvp_io_args_flags(file, args);
 
 	io->u.ci_rw.crw_nonblock = file->f_flags & O_NONBLOCK;
-	io->ci_lock_no_expand = lfd->ll_lock_no_expand;
+	io->ci_lock_no_expand = lfd->lfd_lock_no_expand;
 
 	if (iot == CIT_WRITE) {
 		io->u.ci_wr.wr_append = iocb_ki_flags_check(flags, APPEND);
@@ -1826,14 +1974,14 @@ ll_file_io_generic(const struct lu_env *env, struct vvp_io_args *args,
 	int rc = 0;
 
 	ENTRY;
-	CDEBUG(D_VFSTRACE, "%s: %s ppos: %llu, bytes: %zu\n",
-		file_dentry(file)->d_name.name,
-		iot == CIT_READ ? "read" : "write", *ppos, bytes);
+	CDEBUG(D_VFSTRACE, DNAME": %s ppos: %llu, bytes: %zu\n",
+	       encode_fn_file(file),
+	       iot == CIT_READ ? "read" : "write", *ppos, bytes);
 
 	max_io_bytes = min_t(size_t, PTLRPC_MAX_BRW_PAGES * OBD_MAX_RIF_DEFAULT,
 			     sbi->ll_cache->ccc_lru_max >> 2) << PAGE_SHIFT;
 
-	io = vvp_env_thread_io(env);
+	io = vvp_env_new_io(env);
 	if (iocb_ki_flags_check(flags, DIRECT)) {
 		if (iocb_ki_flags_check(flags, APPEND))
 			dio_lock = true;
@@ -1871,7 +2019,7 @@ restart:
 		per_bytes = max_io_bytes;
 		partial_io = true;
 	}
-	io = vvp_env_thread_io(env);
+	io = vvp_env_new_io(env);
 	ll_io_init(io, file, iot, args);
 	io->ci_dio_aio = ci_dio_aio;
 	io->ci_dio_lock = dio_lock;
@@ -1964,16 +2112,14 @@ out:
 	cl_io_fini(env, io);
 
 	CDEBUG(D_VFSTRACE,
-	       "%s: %d io complete with rc: %d, result: %zd, restart: %d\n",
-	       file->f_path.dentry->d_name.name,
-	       iot, rc, result, io->ci_need_restart);
+	       DNAME": %d io complete with rc: %d, result: %zd, restart: %d\n",
+	       encode_fn_file(file), iot, rc, result, io->ci_need_restart);
 
 	if ((!rc || rc == -ENODATA || rc == -ENOLCK || rc == -EIOCBQUEUED) &&
 	    bytes > 0 && io->ci_need_restart && retries-- > 0) {
 		CDEBUG(D_VFSTRACE,
-		       "%s: restart %s from ppos=%lld bytes=%zu retries=%u ret=%zd: rc = %d\n",
-		       file_dentry(file)->d_name.name,
-		       iot == CIT_READ ? "read" : "write",
+		       DNAME": restart %s from ppos=%lld bytes=%zu retries=%u ret=%zd: rc = %d\n",
+		       encode_fn_file(file), iot == CIT_READ ? "read" : "write",
 		       *ppos, bytes, retries, result, rc);
 		/* preserve the tried count for FLR */
 		retried = io->ci_ndelay_tried;
@@ -2027,13 +2173,20 @@ out:
 	}
 
 	if (iot == CIT_READ) {
-		if (result > 0)
+		if (result > 0) {
 			ll_stats_ops_tally(ll_i2sbi(inode),
 					   LPROC_LL_READ_BYTES, result);
+			if (args->via_hybrid_switched)
+				ll_stats_ops_tally(ll_i2sbi(inode),
+						   LPROC_LL_HIO_READ, result);
+		}
 	} else if (iot == CIT_WRITE) {
 		if (result > 0) {
 			ll_stats_ops_tally(ll_i2sbi(inode),
 					   LPROC_LL_WRITE_BYTES, result);
+			if (args->via_hybrid_switched)
+				ll_stats_ops_tally(ll_i2sbi(inode),
+						   LPROC_LL_HIO_WRITE, result);
 			lfd->fd_write_failed = false;
 		} else if (result == 0 && rc == 0) {
 			rc = io->ci_result;
@@ -2054,6 +2207,10 @@ out:
 }
 
 /**
+ * ll_do_fast_read() - read data directly from the page cache
+ * @iocb: kiocb from kernel
+ * @iter: user space buffers where the data will be copied
+ *
  * The purpose of fast read is to overcome per I/O overhead and improve IOPS
  * especially for small I/O.
  *
@@ -2082,11 +2239,7 @@ out:
  * doesn't make the situation worse on single node but it may interleave write
  * results from multiple nodes due to short read handling in ll_file_aio_read().
  *
- * \param env - lu_env
- * \param iocb - kiocb from kernel
- * \param iter - user space buffers where the data will be copied
- *
- * \retval - number of bytes have been read, or error code if error occurred.
+ * Returns number of bytes have been read, or error code if error occurred.
  */
 static ssize_t
 ll_do_fast_read(struct kiocb *iocb, struct iov_iter *iter)
@@ -2130,20 +2283,21 @@ ll_do_fast_read(struct kiocb *iocb, struct iov_iter *iter)
 }
 
 /**
- * Confine read iter lest read beyond the EOF
+ * file_read_confine_iter() - Confine read iter lest read beyond the EOF
+ * @env: execution environment for this thread
+ * @iocb: kernel iocb
+ * @to: reader iov_iter
  *
- * \param iocb [in]	kernel iocb
- * \param to [in]	reader iov_iter
- *
- * \retval <0	failure
- * \retval 0	success
- * \retval >0	@iocb->ki_pos has passed the EOF
+ * Returns:
+ * * %0 success
+ * * <0 failure
+ * * >0 @iocb->ki_pos has passed the EOF
  */
 static int file_read_confine_iter(struct lu_env *env, struct kiocb *iocb,
 				  struct iov_iter *to)
 {
 	struct cl_io *io;
-	struct cl_attr *attr = vvp_env_thread_attr(env);
+	struct cl_attr *attr = vvp_env_new_attr(env);
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file_inode(file);
 	struct ll_inode_info *lli = ll_i2info(inode);
@@ -2157,7 +2311,7 @@ static int file_read_confine_iter(struct lu_env *env, struct kiocb *iocb,
 	if (!obj)
 		RETURN(rc);
 
-	io = vvp_env_thread_io(env);
+	io = vvp_env_new_io(env);
 	io->ci_obj = obj;
 	rc = cl_io_init(env, io, CIT_MISC, obj);
 	if (rc < 0)
@@ -2182,9 +2336,9 @@ fini_io:
 		size = i_size_read(inode);
 		if (iocb->ki_pos >= size || read_end > size) {
 			CDEBUG(D_VFSTRACE,
-			       "%s: read [%llu, %llu] over eof, kms %llu, file_size %llu.\n",
-			       file_dentry(file)->d_name.name,
-			       iocb->ki_pos, read_end, kms, size);
+			       DNAME": read [%llu, %llu] over eof, kms %llu, file_size %llu.\n",
+			       encode_fn_file(file), iocb->ki_pos, read_end,
+			       kms, size);
 
 			if (iocb->ki_pos >= size)
 				RETURN(1);
@@ -2289,10 +2443,9 @@ static ssize_t do_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 
 	ENTRY;
 	CDEBUG(D_VFSTRACE|D_IOTRACE,
-	       "START file %s:"DFID", ppos: %lld, count: %zu\n",
-	       file_dentry(file)->d_name.name,
-	       PFID(ll_inode2fid(file_inode(file))), iocb->ki_pos,
-	       iov_iter_count(to));
+	       "START file "DNAME":"DFID", ppos: %lld, count: %zu\n",
+	       encode_fn_file(file), PFID(ll_inode2fid(file_inode(file))),
+	       iocb->ki_pos, iov_iter_count(to));
 
 	if (!iov_iter_count(to))
 		RETURN(0);
@@ -2373,10 +2526,9 @@ out:
 	}
 
 	CDEBUG(D_IOTRACE,
-	       "COMPLETED: file %s:"DFID", ppos: %lld, count: %zu, rc = %zu\n",
-	       file_dentry(file)->d_name.name,
-	       PFID(ll_inode2fid(file_inode(file))), iocb->ki_pos,
-	       iov_iter_count(to), result);
+	       "COMPLETED: file "DNAME":"DFID", ppos: %lld, count: %zu, rc = %zu\n",
+	       encode_fn_file(file), PFID(ll_inode2fid(file_inode(file))),
+	       iocb->ki_pos, iov_iter_count(to), result);
 
 	RETURN(result);
 }
@@ -2448,7 +2600,7 @@ static ssize_t ll_do_tiny_write(struct kiocb *iocb, struct iov_iter *iter)
 	RETURN(result);
 }
 
-/* Write to a file (through the page cache). */
+/* Write to a file (through the page cache).*/
 static ssize_t do_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct file *file = iocb->ki_filp;
@@ -2465,10 +2617,9 @@ static ssize_t do_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 
 	ENTRY;
 	CDEBUG(D_VFSTRACE|D_IOTRACE,
-	       "START file %s:"DFID", ppos: %lld, count: %zu\n",
-	       file_dentry(file)->d_name.name,
-	       PFID(ll_inode2fid(file_inode(file))), iocb->ki_pos,
-	       iov_iter_count(from));
+	       "START file "DNAME":"DFID", ppos: %lld, count: %zu\n",
+	       encode_fn_file(file), PFID(ll_inode2fid(file_inode(file))),
+	       iocb->ki_pos, iov_iter_count(from));
 
 	if (!iov_iter_count(from))
 		GOTO(out, rc_normal = 0);
@@ -2546,10 +2697,9 @@ out:
 	}
 
 	CDEBUG(D_IOTRACE,
-	       "COMPLETED: file %s:"DFID", ppos: %lld, count: %zu, rc = %zu\n",
-	       file_dentry(file)->d_name.name,
-	       PFID(ll_inode2fid(file_inode(file))), iocb->ki_pos,
-	       iov_iter_count(from), rc_normal);
+	       "COMPLETED: file "DNAME":"DFID", ppos: %lld, count: %zu, rc = %zu\n",
+	       encode_fn_file(file), PFID(ll_inode2fid(file_inode(file))),
+	       iocb->ki_pos, iov_iter_count(from), rc_normal);
 
 	RETURN(rc_normal);
 }
@@ -2729,15 +2879,16 @@ int ll_lov_getstripe_ea_info(struct inode *inode, const char *filename,
 	struct ptlrpc_request *req = NULL;
 	struct md_op_data *op_data;
 	int rc, lmmsize;
+	int namesize;
 
 	ENTRY;
 	rc = ll_get_default_mdsize(sbi, &lmmsize);
 	if (rc)
 		RETURN(rc);
 
-	op_data = ll_prep_md_op_data(NULL, inode, NULL, filename,
-				     strlen(filename), lmmsize,
-				     LUSTRE_OPC_ANY, NULL);
+	namesize = filename ? strlen(filename) : 0;
+	op_data = ll_prep_md_op_data(NULL, inode, NULL, filename, namesize,
+				     lmmsize, LUSTRE_OPC_ANY, NULL);
 	if (IS_ERR(op_data))
 		RETURN(PTR_ERR(op_data));
 
@@ -2746,7 +2897,7 @@ int ll_lov_getstripe_ea_info(struct inode *inode, const char *filename,
 	ll_finish_md_op_data(op_data);
 	if (rc < 0) {
 		CDEBUG(D_INFO, "md_getattr_name failed on %s: rc %d\n",
-		       filename, rc);
+		       encode_fn_len(filename, namesize), rc);
 		GOTO(out, rc);
 	}
 
@@ -2945,8 +3096,8 @@ static ssize_t ll_lov_setstripe(struct inode *inode, struct file *file,
 		    ll_i2info(inode)->lli_clob) {
 			struct iattr attr = { 0 };
 
-			rc = cl_setattr_ost(ll_i2info(inode)->lli_clob, &attr,
-					    OP_XVALID_FLAGS, LUSTRE_ENCRYPT_FL);
+			rc = cl_setattr_ost(inode, &attr, OP_XVALID_FLAGS,
+					    LUSTRE_ENCRYPT_FL);
 		}
 	}
 	cl_lov_delay_create_clear(&file->f_flags);
@@ -3096,13 +3247,13 @@ out:
 }
 
 /**
- * Close inode open handle
+ * ll_release_openhandle() - Close inode open handle
+ * @dentry: dentry which contains the inode
+ * @it: [in,out] intent which contains open info and result
  *
- * \param dentry [in]     dentry which contains the inode
- * \param it     [in,out] intent which contains open info and result
- *
- * \retval 0     success
- * \retval <0    failure
+ * Return:
+ * * %0: Success
+ * * <0: Failure
  */
 int ll_release_openhandle(struct dentry *dentry, struct lookup_intent *it)
 {
@@ -3429,7 +3580,7 @@ ll_ioc_data_version(struct inode *inode, struct ioc_data_version *ioc)
 	if (IS_ERR(env))
 		RETURN(PTR_ERR(env));
 
-	io = vvp_env_thread_io(env);
+	io = vvp_env_new_io(env);
 	io->ci_obj = obj;
 	io->u.ci_data_version.dv_data_version = 0;
 	io->u.ci_data_version.dv_layout_version = UINT_MAX;
@@ -3453,16 +3604,21 @@ restart:
 	RETURN(result);
 }
 
-/*
- * Read the data_version for inode.
+/**
+ * ll_data_version() - retrieve the data version of a file
+ * @inode: inode of the file for which the data version is being queried
+ * @data_version: store the retrieved data version
+ * @flags:  if do sync on the OST side;
+ *		0: no sync
+ *		LL_DV_RD_FLUSH: flush dirty pages, LCK_PR on OSTs
+ *		LL_DV_WR_FLUSH: drop all caching pages, LCK_PW on OSTs
  *
  * This value is computed using stripe object version on OST.
  * Version is computed using server side locking.
  *
- * @param flags if do sync on the OST side;
- *		0: no sync
- *		LL_DV_RD_FLUSH: flush dirty pages, LCK_PR on OSTs
- *		LL_DV_WR_FLUSH: drop all caching pages, LCK_PW on OSTs
+ * Return:
+ * * %0: Success
+ * * %<0: Failure
  */
 int ll_data_version(struct inode *inode, __u64 *data_version, int flags)
 {
@@ -3766,10 +3922,11 @@ out:
 	RETURN(rc);
 }
 
-static inline long ll_lease_type_from_fmode(fmode_t fmode)
+static inline long ll_lease_type_from_open_flags(enum mds_open_flags
+						 fd_open_mode)
 {
-	return ((fmode & FMODE_READ) ? LL_LEASE_RDLCK : 0) |
-	       ((fmode & FMODE_WRITE) ? LL_LEASE_WRLCK : 0);
+	return ((fd_open_mode & MDS_FMODE_READ) ? LL_LEASE_RDLCK : 0) |
+	       ((fd_open_mode & MDS_FMODE_WRITE) ? LL_LEASE_WRLCK : 0);
 }
 
 static int ll_file_futimes_3(struct file *file, const struct ll_futimes_3 *lfu)
@@ -3824,20 +3981,23 @@ static enum cl_lock_mode cl_mode_user_to_kernel(enum lock_mode_user mode)
 
 static const char *const user_lockname[] = LOCK_MODE_NAMES;
 
-/* Used to allow the upper layers of the client to request an LDLM lock
+/**
+ * ll_file_lock_ahead() -
+ * @file: file this ladvise lock request is on
+ * @ladvise: ladvise struct describing this lock request
+ *
+ * Used to allow the upper layers of the client to request an LDLM lock
  * without doing an actual read or write.
  *
  * Used for ladvise lockahead to manually request specific locks.
  *
- * \param[in] file	file this ladvise lock request is on
- * \param[in] ladvise	ladvise struct describing this lock request
- *
- * \retval 0		success, no detailed result available (sync requests
- *			and requests sent to the server [not handled locally]
- *			cannot return detailed results)
- * \retval LLA_RESULT_{SAME,DIFFERENT} - detailed result of the lock request,
+ * Return:
+ * * %0: success, no detailed result available (sync requests
+ *       and requests sent to the server [not handled locally]
+ *       cannot return detailed results)
+ * * %<0: negative errno on error
+ * * LLA_RESULT_{SAME,DIFFERENT} - detailed result of the lock request,
  *					 see definitions for details.
- * \retval negative	negative errno on error
  */
 int ll_file_lock_ahead(struct file *file, struct llapi_lu_ladvise *ladvise)
 {
@@ -3855,8 +4015,8 @@ int ll_file_lock_ahead(struct file *file, struct llapi_lu_ladvise *ladvise)
 
 	ENTRY;
 	CDEBUG(D_VFSTRACE,
-	       "Lock request: file=%pd, inode=%p, mode=%s start=%llu, end=%llu\n",
-	       dentry, dentry->d_inode,
+	       "Lock request: file="DNAME", inode=%p, mode=%s start=%llu, end=%llu\n",
+	       encode_fn_dentry(dentry), dentry->d_inode,
 	       user_lockname[ladvise->lla_lockahead_mode], (__u64) start,
 	       (__u64) end);
 
@@ -3877,7 +4037,7 @@ int ll_file_lock_ahead(struct file *file, struct llapi_lu_ladvise *ladvise)
 		 */
 		result = io->ci_result;
 	} else if (result == 0) {
-		lock = vvp_env_lock(env);
+		lock = vvp_env_new_lock(env);
 		descr = &lock->cll_descr;
 
 		descr->cld_obj   = io->ci_obj;
@@ -4021,7 +4181,7 @@ static int ll_ladvise(struct inode *inode, struct file *file, __u64 flags,
 	if (IS_ERR(env))
 		RETURN(PTR_ERR(env));
 
-	io = vvp_env_thread_io(env);
+	io = vvp_env_new_io(env);
 	io->ci_obj = ll_i2info(inode)->lli_clob;
 
 	/* initialize parameters for ladvise */
@@ -4046,7 +4206,7 @@ static int ll_lock_noexpand(struct file *file, int flags)
 {
 	struct ll_file_data *lfd = file->private_data;
 
-	lfd->ll_lock_no_expand = !(flags & LF_UNSET);
+	lfd->lfd_lock_no_expand = !(flags & LF_UNSET);
 
 	return 0;
 }
@@ -4109,7 +4269,6 @@ int ll_set_project(struct inode *inode, __u32 xflags, __u32 projid)
 {
 	struct ptlrpc_request *req = NULL;
 	struct md_op_data *op_data;
-	struct cl_object *obj;
 	int rc = 0;
 
 	CDEBUG(D_QUOTA, DFID" xflags=%x projid=%u\n",
@@ -4139,11 +4298,10 @@ int ll_set_project(struct inode *inode, __u32 xflags, __u32 projid)
 	if (xflags == 0 || xflags == FS_XFLAG_PROJINHERIT)
 		GOTO(out_fsxattr, rc);
 
-	obj = ll_i2info(inode)->lli_clob;
-	if (obj) {
+	if (ll_i2info(inode)->lli_clob) {
 		struct iattr attr = { 0 };
 
-		rc = cl_setattr_ost(obj, &attr, OP_XVALID_FLAGS, xflags);
+		rc = cl_setattr_ost(inode, &attr, OP_XVALID_FLAGS, xflags);
 	}
 
 out_fsxattr:
@@ -4235,7 +4393,7 @@ static long ll_file_unlock_lease(struct file *file, struct ll_ioc_lease *ioc,
 	struct split_param sp;
 	struct pcc_param param;
 	bool lease_broken = false;
-	fmode_t fmode = 0;
+	enum mds_open_flags open_flags = MDS_FMODE_CLOSED;
 	enum mds_op_bias bias = 0;
 	__u32 fdv;
 	struct file *layout_file = NULL;
@@ -4255,7 +4413,7 @@ static long ll_file_unlock_lease(struct file *file, struct ll_ioc_lease *ioc,
 	if (och == NULL)
 		RETURN(-ENOLCK);
 
-	fmode = och->och_flags;
+	open_flags = och->och_flags;
 
 	switch (ioc->lil_flags) {
 	case LL_LEASE_RESYNC_DONE:
@@ -4359,7 +4517,7 @@ out_lease_close:
 		GOTO(out, rc);
 
 	if (lease_broken)
-		fmode = 0;
+		open_flags = MDS_FMODE_CLOSED;
 	EXIT;
 
 out:
@@ -4381,7 +4539,7 @@ out:
 	ll_layout_refresh(inode, &lfd->fd_layout_version);
 
 	if (!rc)
-		rc = ll_lease_type_from_fmode(fmode);
+		rc = ll_lease_type_from_open_flags(open_flags);
 	RETURN(rc);
 }
 
@@ -4392,9 +4550,9 @@ static long ll_file_set_lease(struct file *file, struct ll_ioc_lease *ioc,
 	struct ll_inode_info *lli = ll_i2info(inode);
 	struct ll_file_data *lfd = file->private_data;
 	struct obd_client_handle *och = NULL;
-	__u64 open_flags = 0;
+	enum mds_open_flags open_flags = MDS_FMODE_CLOSED;
 	bool lease_broken;
-	fmode_t fmode;
+	fmode_t fmode; /* kernel permissions */
 	long rc;
 
 	ENTRY;
@@ -4743,7 +4901,7 @@ skip_copy:
 	case LL_IOC_GET_LEASE: {
 		struct ll_inode_info *lli = ll_i2info(inode);
 		struct ldlm_lock *lock = NULL;
-		fmode_t fmode = 0;
+		enum mds_open_flags open_flags = MDS_FMODE_CLOSED;
 
 		mutex_lock(&lli->lli_och_mutex);
 		if (lfd->fd_lease_och != NULL) {
@@ -4753,7 +4911,7 @@ skip_copy:
 			if (lock != NULL) {
 				lock_res_and_lock(lock);
 				if (!ldlm_is_cancel(lock))
-					fmode = och->och_flags;
+					open_flags = och->och_flags;
 
 				unlock_res_and_lock(lock);
 				ldlm_lock_put(lock);
@@ -4761,7 +4919,7 @@ skip_copy:
 		}
 		mutex_unlock(&lli->lli_och_mutex);
 
-		RETURN(ll_lease_type_from_fmode(fmode));
+		RETURN(ll_lease_type_from_open_flags(open_flags));
 	}
 	case LL_IOC_HSM_IMPORT: {
 		struct hsm_user_import *hui;
@@ -5009,7 +5167,7 @@ static loff_t ll_lseek(struct file *file, loff_t offset, int whence)
 	if (IS_ERR(env))
 		RETURN(PTR_ERR(env));
 
-	io = vvp_env_thread_io(env);
+	io = vvp_env_new_io(env);
 	io->ci_obj = ll_i2info(inode)->lli_clob;
 	ll_io_set_mirror(io, file);
 
@@ -5037,7 +5195,8 @@ static loff_t ll_lseek(struct file *file, loff_t offset, int whence)
 	/* Without the key, SEEK_HOLE return value has to be
 	 * rounded up to next LUSTRE_ENCRYPTION_UNIT_SIZE.
 	 */
-	if (ll_require_key(inode) == -ENOKEY && whence == SEEK_HOLE)
+	if (IS_ENCRYPTED(inode) && !ll_has_encryption_key(inode) &&
+	    whence == SEEK_HOLE)
 		retval = round_up(retval, LUSTRE_ENCRYPTION_UNIT_SIZE);
 
 	RETURN(retval);
@@ -5060,10 +5219,9 @@ static loff_t ll_file_seek(struct file *file, loff_t offset, int origin)
 
 	ENTRY;
 	CDEBUG(D_VFSTRACE|D_IOTRACE,
-	       "START file %s:"DFID", offset: %lld, type: %s\n",
-	       file_dentry(file)->d_name.name,
-	       PFID(ll_inode2fid(file_inode(file))), offset,
-	       ll_seek_names[origin]);
+	       "START file "DNAME":"DFID", offset: %lld, type: %s\n",
+	       encode_fn_file(file), PFID(ll_inode2fid(file_inode(file))),
+	       offset, ll_seek_names[origin]);
 
 	if (origin == SEEK_END) {
 		retval = ll_glimpse_size(inode);
@@ -5092,10 +5250,9 @@ static loff_t ll_file_seek(struct file *file, loff_t offset, int origin)
 		ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_LLSEEK,
 				   ktime_us_delta(ktime_get(), kstart));
 	CDEBUG(D_VFSTRACE|D_IOTRACE,
-	       "COMPLETED file %s:"DFID", offset: %lld, type: %s, rc = %lld\n",
-	       file_dentry(file)->d_name.name,
-	       PFID(ll_inode2fid(file_inode(file))), offset,
-	       ll_seek_names[origin], retval);
+	       "COMPLETED file "DNAME":"DFID", offset: %lld, type: %s, rc = %lld\n",
+	       encode_fn_file(file), PFID(ll_inode2fid(file_inode(file))),
+	       offset, ll_seek_names[origin], retval);
 
 	RETURN(retval);
 }
@@ -5153,7 +5310,7 @@ int cl_sync_file_range(struct inode *inode, loff_t start, loff_t end,
 	if (IS_ERR(env))
 		RETURN(PTR_ERR(env));
 
-	io = vvp_env_thread_io(env);
+	io = vvp_env_new_io(env);
 	io->ci_obj = ll_i2info(inode)->lli_clob;
 	cl_object_get(io->ci_obj);
 	io->ci_ignore_layout = ignore_layout;
@@ -5184,7 +5341,6 @@ int cl_sync_file_range(struct inode *inode, loff_t start, loff_t end,
  * null and dentry must be used directly rather than pulled from
  * file_dentry() as is done otherwise.
  */
-
 int ll_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	struct dentry *dentry = file_dentry(file);
@@ -5648,12 +5804,14 @@ out:
 
 	if (rc == 0 && (flags & LDLM_FL_TEST_LOCK) &&
 	    file_lock->C_FLC_TYPE != F_UNLCK) {
-		struct file_lock flbuf;
+		struct file_lock flbuf = { .fl_ops = NULL, };
+		/* The parallel-scale-nfs test_2 checks this line */
+		char __maybe_unused *str = "Invoke locks_copy_lock for NFSv3";
 
 		/* Take a extra reference for lockowner while
 		 * working with lockd.
 		 */
-		locks_copy_conflock(&flbuf, file_lock);
+		locks_copy_lock(&flbuf, file_lock);
 	}
 
 	if (!rc)
@@ -5714,7 +5872,7 @@ int ll_migrate(struct inode *parent, struct file *file, struct lmv_user_md *lum,
 
 	ENTRY;
 	CDEBUG(D_VFSTRACE, "migrate "DFID"/%s to MDT%04x stripe count %d\n",
-	       PFID(ll_inode2fid(parent)), name,
+	       PFID(ll_inode2fid(parent)), encode_fn_len(name, namelen),
 	       lum->lum_stripe_offset, lum->lum_stripe_count);
 
 	if (lum->lum_magic != cpu_to_le32(LMV_USER_MAGIC) &&
@@ -5899,7 +6057,7 @@ int ll_have_md_lock(struct obd_export *exp, struct inode *inode,
 {
 	struct lustre_handle lockh;
 	union ldlm_policy_data policy;
-	enum ldlm_mode mode = (l_req_mode == LCK_MINMODE) ?
+	enum ldlm_mode mode = (l_req_mode == LCK_MODE_MIN) ?
 			      (LCK_CR | LCK_CW | LCK_PR | LCK_PW) : l_req_mode;
 	struct lu_fid *fid;
 	__u64 flags;
@@ -5916,7 +6074,7 @@ int ll_have_md_lock(struct obd_export *exp, struct inode *inode,
 	flags = LDLM_FL_BLOCK_GRANTED | LDLM_FL_CBPENDING | LDLM_FL_TEST_LOCK;
 	for (i = 0; i < MDS_INODELOCK_NUMBITS && *bits != 0; i++) {
 		policy.l_inodebits.bits = *bits & BIT(i);
-		if (policy.l_inodebits.bits == 0)
+		if (policy.l_inodebits.bits == MDS_INODELOCK_NONE)
 			continue;
 
 		if (md_lock_match(exp, flags, fid, LDLM_IBITS, &policy, mode,
@@ -5999,8 +6157,8 @@ static int ll_inode_revalidate(struct dentry *dentry, enum ldlm_intent_flags op)
 	int rc = 0;
 
 	ENTRY;
-	CDEBUG(D_VFSTRACE, "VFS Op:inode="DFID"(%p),name=%s\n",
-	       PFID(ll_inode2fid(inode)), inode, dentry->d_name.name);
+	CDEBUG(D_VFSTRACE, "VFS Op:inode="DFID"(%p),name="DNAME"\n",
+	       PFID(ll_inode2fid(inode)), inode, encode_fn_dentry(dentry));
 
 	/* Call getattr by fid */
 	if ((exp_connect_flags2(exp) & OBD_CONNECT2_GETATTR_PFID) &&
@@ -6103,8 +6261,8 @@ int ll_getattr_dentry(struct dentry *de, struct kstat *stat, u32 request_mask,
 	int rc;
 
 	CDEBUG(D_VFSTRACE|D_IOTRACE,
-	       "START file %s:"DFID"(%p), request_mask %d, flags %u, foreign %d\n",
-	       de->d_name.name, PFID(ll_inode2fid(inode)), inode,
+	       "START file "DNAME":"DFID"(%p), request_mask %d, flags %u, foreign %d\n",
+	       encode_fn_dentry(de), PFID(ll_inode2fid(inode)), inode,
 	       request_mask, flags, foreign);
 
 	/* The OST object(s) determine the file size, blocks and mtime. */
@@ -6281,8 +6439,8 @@ fill_attr:
 			   ktime_us_delta(ktime_get(), kstart));
 
 	CDEBUG(D_IOTRACE,
-	       "COMPLETED file %s:"DFID"(%p), request_mask %d, flags %u, foreign %d\n",
-	       de->d_name.name, PFID(ll_inode2fid(inode)), inode,
+	       "COMPLETED file "DNAME":"DFID"(%p), request_mask %d, flags %u, foreign %d\n",
+	       encode_fn_dentry(de), PFID(ll_inode2fid(inode)), inode,
 	       request_mask, flags, foreign);
 
 	return 0;
@@ -6317,7 +6475,7 @@ static int cl_falloc(struct file *file, struct inode *inode, int mode,
 	if (IS_ERR(env))
 		RETURN(PTR_ERR(env));
 
-	io = vvp_env_thread_io(env);
+	io = vvp_env_new_io(env);
 	io->ci_obj = ll_i2info(inode)->lli_clob;
 	ll_io_set_mirror(io, file);
 
@@ -6333,9 +6491,9 @@ static int cl_falloc(struct file *file, struct inode *inode, int mode,
 	       from_kgid(&init_user_ns, inode->i_gid),
 	       ll_i2info(inode)->lli_projid);
 
-	io->u.ci_setattr.sa_falloc_uid = from_kuid(&init_user_ns, inode->i_uid);
-	io->u.ci_setattr.sa_falloc_gid = from_kgid(&init_user_ns, inode->i_gid);
-	io->u.ci_setattr.sa_falloc_projid = ll_i2info(inode)->lli_projid;
+	io->u.ci_setattr.sa_attr_uid = from_kuid(&init_user_ns, inode->i_uid);
+	io->u.ci_setattr.sa_attr_gid = from_kgid(&init_user_ns, inode->i_gid);
+	io->u.ci_setattr.sa_attr_projid = ll_i2info(inode)->lli_projid;
 
 	if (io->u.ci_setattr.sa_falloc_end > size) {
 		loff_t newsize = io->u.ci_setattr.sa_falloc_end;
@@ -6389,7 +6547,8 @@ static long ll_fallocate(struct file *filp, int mode, loff_t offset, loff_t len)
 	 * mode == 0 (which is standard prealloc) and PUNCH is supported
 	 * Rest of mode options are not supported yet.
 	 */
-	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
+	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE |
+		     FALLOC_FL_ZERO_RANGE))
 		RETURN(-EOPNOTSUPP);
 
 	ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_FALLOCATE, 1);
@@ -6703,7 +6862,6 @@ out:
 
 /* Fetch layout from MDT with getxattr request, if it's not ready yet */
 static int ll_layout_fetch(struct inode *inode, struct ldlm_lock *lock)
-
 {
 	struct ll_sb_info *sbi = ll_i2sbi(inode);
 	struct ptlrpc_request *req;
@@ -6731,7 +6889,7 @@ static int ll_layout_fetch(struct inode *inode, struct ldlm_lock *lock)
 		RETURN(rc);
 
 	rc = md_getxattr(sbi->ll_md_exp, ll_inode2fid(inode), OBD_MD_FLXATTR,
-			 XATTR_NAME_LOV, lmmsize, &req);
+			 XATTR_NAME_LOV, lmmsize, ll_i2projid(inode), &req);
 	if (rc < 0) {
 		if (rc == -ENODATA)
 			GOTO(out, rc = 0); /* empty layout */
@@ -6879,12 +7037,13 @@ out:
 }
 
 /**
- * Issue layout intent RPC to MDS.
- * \param inode [in]	file inode
- * \param intent [in]	layout intent
+ * ll_layout_intent() - Issue layout intent RPC to MDS.
+ * @inode: file inode
+ * @intent: layout intent
  *
- * \retval 0	on success
- * \retval < 0	error code
+ * Return:
+ * * %0  on success
+ * * %<0 error code
  */
 static int ll_layout_intent(struct inode *inode, struct layout_intent *intent)
 {
@@ -6910,7 +7069,7 @@ static int ll_layout_intent(struct inode *inode, struct layout_intent *intent)
 	    intent->lai_opc == LAYOUT_INTENT_TRUNC ||
 	    intent->lai_opc == LAYOUT_INTENT_PCCRO_SET ||
 	    intent->lai_opc == LAYOUT_INTENT_PCCRO_CLEAR)
-		it.it_open_flags = FMODE_WRITE;
+		it.it_open_flags = MDS_FMODE_WRITE;
 
 	LDLM_DEBUG_NOLOCK("%s: requeue layout lock for file "DFID"(%p)",
 			  sbi->ll_fsname, PFID(&lli->lli_fid), inode);
@@ -6997,15 +7156,16 @@ int ll_layout_refresh(struct inode *inode, __u32 *gen)
 }
 
 /**
- * Issue layout intent RPC indicating where in a file an IO is about to write.
+ * ll_layout_write_intent() - Issue layout intent RPC indicating where in a file
+ * an IO is about to write.
+ * @inode: file inode.
+ * @opc: type of layout operation being requested
+ * @ext: write range with start offset of fille in bytes where an IO is
+ * about to write, and exclusive end offset in bytes.
  *
- * \param[in] inode	file inode.
- * \param[in] ext	write range with start offset of fille in bytes where
- *			an IO is about to write, and exclusive end offset in
- *			bytes.
- *
- * \retval 0	on success
- * \retval < 0	error code
+ * Return:
+ * * %0 on success
+ * * <0 error code
  */
 int ll_layout_write_intent(struct inode *inode, enum layout_intent_opc opc,
 			   struct lu_extent *ext)

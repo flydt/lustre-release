@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/llite/dir.c
  *
  * Directory code for lustre client.
  */
@@ -59,7 +39,9 @@
 
 #include "llite_internal.h"
 
-/*
+/**
+ * ll_get_dir_page() - Get directory page for a given directory inode
+ *
  * (new) readdir implementation overview.
  *
  * Original lustre readdir implementation cached exact copy of raw directory
@@ -140,14 +122,33 @@
  * lu_dirpage for this integrated page will be adjusted. See
  * mdc_adjust_dirpages().
  *
+ *
+ * @dir: pointer to the directory(inode) for which page is being fetched
+ * @op_data: pointer to the md operation structure
+ * @offset: Offset witchin page
+ * @partial_readdir_rc: Used only on partial reads
+ *
+ * Return:
+ * * %Success - pointer to the page structure
+ * * %Failure - Error pointer (pointed by rc)
  */
 struct page *ll_get_dir_page(struct inode *dir, struct md_op_data *op_data,
-			     __u64 offset, int *partial_readdir_rc)
+			     __u64 offset, bool hash64, int *partial_readdir_rc)
 {
 	struct md_readdir_info mrinfo = {
 					.mr_blocking_ast = ll_md_blocking_ast };
 	struct page *page;
+	unsigned long idx = hash_x_index(offset, hash64);
 	int rc;
+
+	/* check page first */
+	page = find_get_page(dir->i_mapping, idx);
+	if (page) {
+		wait_on_page_locked(page);
+		if (PageUptodate(page))
+			RETURN(page);
+		put_page(page);
+	}
 
 	rc = md_read_page(ll_i2mdexp(dir), op_data, &mrinfo, offset, &page);
 	if (rc != 0)
@@ -207,7 +208,8 @@ int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
 			RETURN(rc);
 	}
 
-	page = ll_get_dir_page(inode, op_data, pos, partial_readdir_rc);
+	page = ll_get_dir_page(inode, op_data, pos, is_hash64,
+				partial_readdir_rc);
 
 	while (rc == 0 && !done) {
 		struct lu_dirpage *dp;
@@ -300,7 +302,7 @@ int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
 					LDF_COLLIDE);
 			next = pos;
 			page = ll_get_dir_page(inode, op_data, pos,
-					       partial_readdir_rc);
+					       is_hash64, partial_readdir_rc);
 		}
 	}
 #ifdef HAVE_DIR_CONTEXT
@@ -360,7 +362,7 @@ static int ll_readdir(struct file *filp, void *cookie, filldir_t filldir)
 			struct obd_export *exp = ll_i2mdexp(i_dir);
 			enum mds_ibits_locks ibits = MDS_INODELOCK_LOOKUP;
 
-			if (ll_have_md_lock(exp, i_dir, &ibits, LCK_MINMODE, 0))
+			if (ll_have_md_lock(exp, i_dir, &ibits, LCK_MODE_MIN,0))
 				pfid = *ll_inode2fid(i_dir);
 		}
 		dput(parent);
@@ -422,16 +424,19 @@ out:
 	RETURN(rc);
 }
 
-/*
- * Create striped directory with specified stripe(@lump)
+/**
+ * ll_dir_setdirstripe() - Create striped directory with specified stripe(@lump)
  *
- * \param[in] dparent	the parent of the directory.
- * \param[in] lump	the specified stripes.
- * \param[in] dirname	the name of the directory.
- * \param[in] mode	the specified mode of the directory.
+ * @dparent: the parent of the directory.
+ * @lump: the specified stripes.
+ * @len: length of @lump
+ * @dirname: the name of the directory.
+ * @mode: the specified mode of the directory.
+ * @createonly: if true, setstripe create only, don't restripe if target exists
  *
- * \retval		=0 if striped directory is being created successfully.
- *                      <0 if the creation is failed.
+ * Return:
+ * * %0 if striped directory is being created successfully or <0 if the
+ * creation is failed
  */
 static int ll_dir_setdirstripe(struct dentry *dparent, struct lmv_user_md *lump,
 			       size_t len, const char *dirname, umode_t mode,
@@ -462,17 +467,18 @@ static int ll_dir_setdirstripe(struct dentry *dparent, struct lmv_user_md *lump,
 
 	if (lump->lum_magic != LMV_MAGIC_FOREIGN) {
 		CDEBUG(D_VFSTRACE,
-		       "VFS Op:inode="DFID"(%p) name=%s stripe_offset=%d stripe_count=%u, hash_type=%x\n",
-		       PFID(ll_inode2fid(parent)), parent, dirname,
-		       (int)lump->lum_stripe_offset, lump->lum_stripe_count,
-		       lump->lum_hash_type);
+		       "VFS Op:inode="DFID"(%p) name="DNAME" stripe_offset=%d stripe_count=%u, hash_type=%x\n",
+		       PFID(ll_inode2fid(parent)), parent,
+		       encode_fn_dentry(&dentry), (int)lump->lum_stripe_offset,
+		       lump->lum_stripe_count, lump->lum_hash_type);
 	} else {
 		struct lmv_foreign_md *lfm = (struct lmv_foreign_md *)lump;
 
 		CDEBUG(D_VFSTRACE,
-		       "VFS Op:inode="DFID"(%p) name %s foreign, length %u, value '%.*s'\n",
-		       PFID(ll_inode2fid(parent)), parent, dirname,
-		       lfm->lfm_length, lfm->lfm_length, lfm->lfm_value);
+		       "VFS Op:inode="DFID"(%p) name "DNAME" foreign, length %u, value '"DNAME"'\n",
+		       PFID(ll_inode2fid(parent)), parent,
+		       encode_fn_dentry(&dentry), lfm->lfm_length,
+		       lfm->lfm_length, lfm->lfm_value);
 	}
 
 	if (lump->lum_stripe_count > 1 &&
@@ -834,7 +840,10 @@ out:
 	return rc;
 }
 
-/*
+/**
+ * ll_dir_getstripe_default() - Get default layout (striping information) for
+ * directory
+ *
  * This function will be used to get default LOV/LMV/Default LMV
  * @valid will be used to indicate which stripe it will retrieve.
  * If the directory does not have its own default layout, then the
@@ -843,7 +852,19 @@ out:
  *	OBD_MD_DEFAULT_MEA	Default LMV stripe EA
  *	otherwise		Default LOV EA.
  * Each time, it can only retrieve 1 stripe EA
- **/
+ *
+ * @inode: inode for which layout is to be get
+ * @plmm: Returns address of valid layout metadata (struct lov_mds_md)
+ * @plmm_size: Returns size of the layout metadata
+ * @request: Returns ptlrpc_request struct which gets the layout
+ * @root_request: Returns ptlrpc_request struct which get the layout (for root
+ * access)
+ * @valid: indicate which stripe it will retrieve
+ *
+ * Return:
+ * * %0: Success
+ * * %-ERRNO: Failure
+ */
 int ll_dir_getstripe_default(struct inode *inode, void **plmm, int *plmm_size,
 			     struct ptlrpc_request **request,
 			     struct ptlrpc_request **root_request,
@@ -876,14 +897,26 @@ int ll_dir_getstripe_default(struct inode *inode, void **plmm, int *plmm_size,
 	RETURN(rc);
 }
 
-/*
+/**
+ * ll_dir_getstripe() - Wrapper function to ll_dir_get_default_layout
+ *
  * This function will be used to get default LOV/LMV/Default LMV
  * @valid will be used to indicate which stripe it will retrieve
  *	OBD_MD_MEA		LMV stripe EA
  *	OBD_MD_DEFAULT_MEA	Default LMV stripe EA
  *	otherwise		Default LOV EA.
  * Each time, it can only retrieve 1 stripe EA
- **/
+ *
+ * @inode: inode for which layout is to be get
+ * @plmm: Returns address of valid layout metadata (struct lov_mds_md)
+ * @plmm_size: Returns size of the layout metadata
+ * @request: Returns ptlrpc_request struct which gets the layout
+ * @valid: indicate which stripe it will retrieve
+ *
+ * Return:
+ * * %0: Success
+ * * %-ERRNO: Failure
+ */
 int ll_dir_getstripe(struct inode *inode, void **plmm, int *plmm_size,
 		     struct ptlrpc_request **request, u64 valid)
 {
@@ -934,7 +967,7 @@ int ll_get_mdt_idx(struct inode *inode)
 }
 
 /*
- * Generic handler to do any pre-copy work.
+ * ll_ioc_copy_start() - Generic handler to do any pre-copy work.
  *
  * It sends a first hsm_progress (with extent length == 0) to coordinator as a
  * first information for it that real work has started.
@@ -942,7 +975,8 @@ int ll_get_mdt_idx(struct inode *inode)
  * Moreover, for a ARCHIVE request, it will sample the file data version and
  * store it in \a copy.
  *
- * \return 0 on success.
+ * Return:
+ * * %0 On success or <0 on failure
  */
 static int ll_ioc_copy_start(struct super_block *sb, struct hsm_copy *copy)
 {
@@ -1010,7 +1044,7 @@ progress:
 }
 
 /*
- * Generic handler to do any post-copy work.
+ * ll_ioc_copy_end() - Generic handler to do any post-copy work.
  *
  * It will send the last hsm_progress update to coordinator to inform it
  * that copy is finished and whether it was successful or not.
@@ -1022,7 +1056,8 @@ progress:
  * - for RESTORE request, it will sample the file data version and send it to
  *   coordinator which is useful if the file was imported as 'released'.
  *
- * \return 0 on success.
+ * Return:
+ * * %0 On success or <0 on failure
  */
 static int ll_ioc_copy_end(struct super_block *sb, struct hsm_copy *copy)
 {
@@ -1427,7 +1462,7 @@ static int quotactl_iter_glb(struct list_head *quota_list, void *buffer,
 
 /* iterate the quota setting from QMT and all QSDs to get the quota information
  * for all users or groups
- **/
+ */
 static int quotactl_iter(struct ll_sb_info *sbi, struct if_quotactl *qctl)
 {
 	struct list_head iter_quota_glb_list;
@@ -1462,21 +1497,21 @@ static int quotactl_iter(struct ll_sb_info *sbi, struct if_quotactl *qctl)
 		GOTO(out, rc = -ENOMEM);
 
 	QCTL_COPY(oqctl, qctl);
-	oqctl->qc_iter_list = (__u64)&iter_quota_glb_list;
+	oqctl->qc_iter_list = (uintptr_t)&iter_quota_glb_list;
 	rc = obd_quotactl(sbi->ll_md_exp, oqctl);
 	if (rc)
 		GOTO(cleanup, rc);
 
 	QCTL_COPY(oqctl, qctl);
 	oqctl->qc_cmd = LUSTRE_Q_ITEROQUOTA;
-	oqctl->qc_iter_list = (__u64)&iter_obd_quota_md_list;
+	oqctl->qc_iter_list = (uintptr_t)&iter_obd_quota_md_list;
 	rc = obd_quotactl(sbi->ll_md_exp, oqctl);
 	if (rc)
 		GOTO(cleanup, rc);
 
 	QCTL_COPY(oqctl, qctl);
 	oqctl->qc_cmd = LUSTRE_Q_ITEROQUOTA;
-	oqctl->qc_iter_list = (__u64)&iter_obd_quota_dt_list;
+	oqctl->qc_iter_list = (uintptr_t)&iter_obd_quota_dt_list;
 	rc = obd_quotactl(sbi->ll_dt_exp, oqctl);
 	if (rc)
 		GOTO(cleanup, rc);
@@ -1990,8 +2025,9 @@ static long ll_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 		rc = ll_get_fid_by_name(inode, filename, namelen, NULL, NULL);
 		if (rc < 0) {
-			CERROR("%s: lookup %.*s failed: rc = %d\n",
-			       sbi->ll_fsname, namelen, filename, rc);
+			CERROR("%s: lookup "DNAME" failed: rc = %d\n",
+			       sbi->ll_fsname,
+			       encode_fn_dname(namelen, filename), rc);
 			GOTO(out_free, rc);
 		}
 out_free:
@@ -2027,7 +2063,8 @@ out_free:
 		lumlen = data->ioc_inllen2;
 
 		if (!lmv_user_magic_supported(lum->lum_magic)) {
-			CERROR("%s: wrong lum magic %x : rc = %d\n", filename,
+			CERROR("%s: wrong lum magic %x : rc = %d\n",
+			       encode_fn_len(filename, namelen),
 			       lum->lum_magic, -EINVAL);
 			GOTO(lmv_out_free, rc = -EINVAL);
 		}
@@ -2036,14 +2073,16 @@ out_free:
 		     lum->lum_magic == LMV_USER_MAGIC_SPECIFIC) &&
 		    lumlen < sizeof(*lum)) {
 			CERROR("%s: wrong lum size %d for magic %x : rc = %d\n",
-			       filename, lumlen, lum->lum_magic, -EINVAL);
+			       encode_fn_len(filename, namelen), lumlen,
+			       lum->lum_magic, -EINVAL);
 			GOTO(lmv_out_free, rc = -EINVAL);
 		}
 
 		if (lum->lum_magic == LMV_MAGIC_FOREIGN &&
 		    lumlen < sizeof(struct lmv_foreign_md)) {
 			CERROR("%s: wrong lum magic %x or size %d: rc = %d\n",
-			       filename, lum->lum_magic, lumlen, -EFAULT);
+			       encode_fn_len(filename, namelen),
+			       lum->lum_magic, lumlen, -EFAULT);
 			GOTO(lmv_out_free, rc = -EINVAL);
 		}
 
@@ -2381,7 +2420,8 @@ out_rmdir:
 			st.st_uid	= body->mbo_uid;
 			st.st_gid	= body->mbo_gid;
 			st.st_rdev	= body->mbo_rdev;
-			if (ll_require_key(inode) == -ENOKEY)
+			if (IS_ENCRYPTED(inode) &&
+			    !ll_has_encryption_key(inode))
 				st.st_size = round_up(st.st_size,
 						   LUSTRE_ENCRYPTION_UNIT_SIZE);
 			else
@@ -2408,7 +2448,8 @@ out_rmdir:
 			stx.stx_mode = body->mbo_mode;
 			stx.stx_ino = cl_fid_build_ino(&body->mbo_fid1,
 						       api32);
-			if (ll_require_key(inode) == -ENOKEY)
+			if (IS_ENCRYPTED(inode) &&
+			    !ll_has_encryption_key(inode))
 				stx.stx_size = round_up(stx.stx_size,
 						   LUSTRE_ENCRYPTION_UNIT_SIZE);
 			else
@@ -2704,7 +2745,8 @@ out_hur:
 		    lum->lum_magic != LMV_USER_MAGIC_SPECIFIC) {
 			rc = -EINVAL;
 			CERROR("%s: wrong lum magic %x: rc = %d\n",
-			       filename, lum->lum_magic, rc);
+			       encode_fn_len(filename, namelen),
+			       lum->lum_magic, rc);
 			GOTO(migrate_free, rc);
 		}
 
@@ -2782,7 +2824,7 @@ out_ladvise:
 			RETURN(-ENOMEM);
 
 		if (copy_from_user(state, ustate, sizeof(*state)))
-			GOTO(out_free, rc = -EFAULT);
+			GOTO(out_state_free, rc = -EFAULT);
 
 		name = state->pccs_path;
 		namelen = strlen(name);
@@ -2932,7 +2974,9 @@ static loff_t ll_dir_seek(struct file *file, loff_t offset, int origin)
 			else
 				lfd->lfd_pos = offset;
 			file->f_pos = offset;
+#ifdef HAVE_STRUCT_FILE_F_VERSION
 			file->f_version = 0;
+#endif
 		}
 		ret = offset;
 	}

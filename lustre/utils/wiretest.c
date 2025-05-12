@@ -342,8 +342,8 @@ void lustre_assert_wire_constants(void)
 		 (long long)LDLM_SET_INFO);
 	LASSERTF(LDLM_LAST_OPC == 108, "found %lld\n",
 		 (long long)LDLM_LAST_OPC);
-	LASSERTF(LCK_MINMODE == 0, "found %lld\n",
-		 (long long)LCK_MINMODE);
+	LASSERTF(LCK_MODE_MIN == 0, "found %lld\n",
+		 (long long)LCK_MODE_MIN);
 	LASSERTF(LCK_EX == 1, "found %lld\n",
 		 (long long)LCK_EX);
 	LASSERTF(LCK_PW == 2, "found %lld\n",
@@ -362,15 +362,15 @@ void lustre_assert_wire_constants(void)
 		 (long long)LCK_COS);
 	LASSERTF(LCK_TXN == 256, "found %lld\n",
 		 (long long)LCK_TXN);
-	LASSERTF(LCK_MAXMODE == 257, "found %lld\n",
-		 (long long)LCK_MAXMODE);
+	LASSERTF(LCK_MODE_END == 257, "found %lld\n",
+		 (long long)LCK_MODE_END);
 	LASSERTF(LCK_MODE_NUM == 9, "found %lld\n",
 		 (long long)LCK_MODE_NUM);
 	BUILD_BUG_ON(LDLM_PLAIN != 10);
 	BUILD_BUG_ON(LDLM_EXTENT != 11);
 	BUILD_BUG_ON(LDLM_FLOCK != 12);
 	BUILD_BUG_ON(LDLM_IBITS != 13);
-	BUILD_BUG_ON(LDLM_MAX_TYPE != 14);
+	BUILD_BUG_ON(LDLM_TYPE_END != 14);
 	BUILD_BUG_ON(LUSTRE_RES_ID_SEQ_OFF != 0);
 	BUILD_BUG_ON(LUSTRE_RES_ID_VER_OID_OFF != 1);
 	BUILD_BUG_ON(LUSTRE_RES_ID_QUOTA_SEQ_OFF != 2);
@@ -934,10 +934,10 @@ void lustre_assert_wire_constants(void)
 		 (long long)(int)offsetof(struct ptlrpc_body_v3, pb_padding0));
 	LASSERTF((int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_padding0) == 2, "found %lld\n",
 		 (long long)(int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_padding0));
-	LASSERTF((int)offsetof(struct ptlrpc_body_v3, pb_padding1) == 36, "found %lld\n",
-		 (long long)(int)offsetof(struct ptlrpc_body_v3, pb_padding1));
-	LASSERTF((int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_padding1) == 4, "found %lld\n",
-		 (long long)(int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_padding1));
+	LASSERTF((int)offsetof(struct ptlrpc_body_v3, pb_projid) == 36, "found %lld\n",
+		 (long long)(int)offsetof(struct ptlrpc_body_v3, pb_projid));
+	LASSERTF((int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_projid) == 4, "found %lld\n",
+		 (long long)(int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_projid));
 	LASSERTF((int)offsetof(struct ptlrpc_body_v3, pb_last_committed) == 40, "found %lld\n",
 		 (long long)(int)offsetof(struct ptlrpc_body_v3, pb_last_committed));
 	LASSERTF((int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_last_committed) == 8, "found %lld\n",
@@ -1036,10 +1036,10 @@ void lustre_assert_wire_constants(void)
 		 (int)offsetof(struct ptlrpc_body_v3, pb_padding0), (int)offsetof(struct ptlrpc_body_v2, pb_padding0));
 	LASSERTF((int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_padding0) == (int)sizeof(((struct ptlrpc_body_v2 *)0)->pb_padding0), "%d != %d\n",
 		 (int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_padding0), (int)sizeof(((struct ptlrpc_body_v2 *)0)->pb_padding0));
-	LASSERTF((int)offsetof(struct ptlrpc_body_v3, pb_padding1) == (int)offsetof(struct ptlrpc_body_v2, pb_padding1), "%d != %d\n",
-		 (int)offsetof(struct ptlrpc_body_v3, pb_padding1), (int)offsetof(struct ptlrpc_body_v2, pb_padding1));
-	LASSERTF((int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_padding1) == (int)sizeof(((struct ptlrpc_body_v2 *)0)->pb_padding1), "%d != %d\n",
-		 (int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_padding1), (int)sizeof(((struct ptlrpc_body_v2 *)0)->pb_padding1));
+	LASSERTF((int)offsetof(struct ptlrpc_body_v3, pb_projid) == (int)offsetof(struct ptlrpc_body_v2, pb_projid), "%d != %d\n",
+		 (int)offsetof(struct ptlrpc_body_v3, pb_projid), (int)offsetof(struct ptlrpc_body_v2, pb_projid));
+	LASSERTF((int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_projid) == (int)sizeof(((struct ptlrpc_body_v2 *)0)->pb_projid), "%d != %d\n",
+		 (int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_projid), (int)sizeof(((struct ptlrpc_body_v2 *)0)->pb_projid));
 	LASSERTF((int)offsetof(struct ptlrpc_body_v3, pb_last_committed) == (int)offsetof(struct ptlrpc_body_v2, pb_last_committed), "%d != %d\n",
 		 (int)offsetof(struct ptlrpc_body_v3, pb_last_committed), (int)offsetof(struct ptlrpc_body_v2, pb_last_committed));
 	LASSERTF((int)sizeof(((struct ptlrpc_body_v3 *)0)->pb_last_committed) == (int)sizeof(((struct ptlrpc_body_v2 *)0)->pb_last_committed), "%d != %d\n",
@@ -5383,6 +5383,50 @@ void lustre_assert_wire_constants(void)
 	LASSERTF((int)sizeof(((struct hsm_user_state *)0)->hus_in_progress_location) == 16, "found %lld\n",
 		 (long long)(int)sizeof(((struct hsm_user_state *)0)->hus_in_progress_location));
 
+	/* Checks for struct lustre_swap_layouts */
+	LASSERTF((int)sizeof(struct lustre_swap_layouts) == 32, "found %lld\n",
+		 (long long)(int)sizeof(struct lustre_swap_layouts));
+	LASSERTF((int)offsetof(struct lustre_swap_layouts, sl_flags) == 0, "found %lld\n",
+		 (long long)(int)offsetof(struct lustre_swap_layouts, sl_flags));
+	LASSERTF((int)sizeof(((struct lustre_swap_layouts *)0)->sl_flags) == 8, "found %lld\n",
+		 (long long)(int)sizeof(((struct lustre_swap_layouts *)0)->sl_flags));
+	LASSERTF((int)offsetof(struct lustre_swap_layouts, sl_fd) == 8, "found %lld\n",
+		 (long long)(int)offsetof(struct lustre_swap_layouts, sl_fd));
+	LASSERTF((int)sizeof(((struct lustre_swap_layouts *)0)->sl_fd) == 4, "found %lld\n",
+		 (long long)(int)sizeof(((struct lustre_swap_layouts *)0)->sl_fd));
+	LASSERTF((int)offsetof(struct lustre_swap_layouts, sl_gid) == 12, "found %lld\n",
+		 (long long)(int)offsetof(struct lustre_swap_layouts, sl_gid));
+	LASSERTF((int)sizeof(((struct lustre_swap_layouts *)0)->sl_gid) == 4, "found %lld\n",
+		 (long long)(int)sizeof(((struct lustre_swap_layouts *)0)->sl_gid));
+	LASSERTF((int)offsetof(struct lustre_swap_layouts, sl_dv1) == 16, "found %lld\n",
+		 (long long)(int)offsetof(struct lustre_swap_layouts, sl_dv1));
+	LASSERTF((int)sizeof(((struct lustre_swap_layouts *)0)->sl_dv1) == 8, "found %lld\n",
+		 (long long)(int)sizeof(((struct lustre_swap_layouts *)0)->sl_dv1));
+	LASSERTF((int)offsetof(struct lustre_swap_layouts, sl_dv2) == 24, "found %lld\n",
+		 (long long)(int)offsetof(struct lustre_swap_layouts, sl_dv2));
+	LASSERTF((int)sizeof(((struct lustre_swap_layouts *)0)->sl_dv2) == 8, "found %lld\n",
+		 (long long)(int)sizeof(((struct lustre_swap_layouts *)0)->sl_dv2));
+
+	/* Checks for struct mdc_swap_layouts */
+	LASSERTF((int)sizeof(struct mdc_swap_layouts) == 8, "found %lld\n",
+		 (long long)(int)sizeof(struct mdc_swap_layouts));
+	LASSERTF((int)offsetof(struct mdc_swap_layouts, msl_flags) == 0, "found %lld\n",
+		 (long long)(int)offsetof(struct mdc_swap_layouts, msl_flags));
+	LASSERTF((int)sizeof(((struct mdc_swap_layouts *)0)->msl_flags) == 8, "found %lld\n",
+		 (long long)(int)sizeof(((struct mdc_swap_layouts *)0)->msl_flags));
+
+	/* Checks for mdc_swap_layouts::msl_flags */
+	LASSERTF(SWAP_LAYOUTS_CHECK_DV1 == 1, "found %lld\n",
+		 (long long)SWAP_LAYOUTS_CHECK_DV1);
+	LASSERTF(SWAP_LAYOUTS_CHECK_DV2 == 2, "found %lld\n",
+		 (long long)SWAP_LAYOUTS_CHECK_DV2);
+	LASSERTF(SWAP_LAYOUTS_KEEP_MTIME == 4, "found %lld\n",
+		 (long long)SWAP_LAYOUTS_KEEP_MTIME);
+	LASSERTF(SWAP_LAYOUTS_KEEP_ATIME == 8, "found %lld\n",
+		 (long long)SWAP_LAYOUTS_KEEP_ATIME);
+	LASSERTF(SWAP_LAYOUTS_CLOSE == 16, "found %lld\n",
+		 (long long)SWAP_LAYOUTS_CLOSE);
+
 	/* Checks for struct hsm_state_set */
 	LASSERTF((int)sizeof(struct hsm_state_set) == 24, "found %lld\n",
 		 (long long)(int)sizeof(struct hsm_state_set));
@@ -6368,18 +6412,18 @@ void lustre_assert_wire_constants(void)
 		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_roles));
 	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_roles) == 8, "found %lld\n",
 		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_roles));
-	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding1) == 8, "found %lld\n",
-		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding1));
-	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding1) == 8, "found %lld\n",
-		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding1));
-	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding2) == 16, "found %lld\n",
-		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding2));
-	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding2) == 8, "found %lld\n",
-		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding2));
-	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding3) == 24, "found %lld\n",
-		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_padding3));
-	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding3) == 8, "found %lld\n",
-		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_padding3));
+	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_privs) == 8, "found %lld\n",
+		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_privs));
+	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_privs) == 8, "found %lld\n",
+		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_privs));
+	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_roles_raise) == 16, "found %lld\n",
+		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_roles_raise));
+	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_roles_raise) == 8, "found %lld\n",
+		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_roles_raise));
+	LASSERTF((int)offsetof(struct nodemap_cluster_roles_rec, ncrr_unused1) == 24, "found %lld\n",
+		 (long long)(int)offsetof(struct nodemap_cluster_roles_rec, ncrr_unused1));
+	LASSERTF((int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_unused1) == 8, "found %lld\n",
+		 (long long)(int)sizeof(((struct nodemap_cluster_roles_rec *)0)->ncrr_unused1));
 
 	/* Checks for struct nodemap_offset_rec */
 	LASSERTF((int)sizeof(struct nodemap_offset_rec) == 32, "found %lld\n",
@@ -6416,6 +6460,23 @@ void lustre_assert_wire_constants(void)
 		 (long long)(int)offsetof(struct nodemap_offset_rec, nor_padding2));
 	LASSERTF((int)sizeof(((struct nodemap_offset_rec *)0)->nor_padding2) == 4, "found %lld\n",
 		 (long long)(int)sizeof(((struct nodemap_offset_rec *)0)->nor_padding2));
+
+	/* Checks for struct nodemap_fileset_rec */
+	LASSERTF((int)sizeof(struct nodemap_fileset_rec) == 32, "found %lld\n",
+		 (long long)(int)sizeof(struct nodemap_fileset_rec));
+	BUILD_BUG_ON(LUSTRE_NODEMAP_FILESET_FRAGMENT_SIZE != 28);
+	LASSERTF((int)offsetof(struct nodemap_fileset_rec, nfr_path_fragment[28]) == 28, "found %lld\n",
+		 (long long)(int)offsetof(struct nodemap_fileset_rec, nfr_path_fragment[28]));
+	LASSERTF((int)sizeof(((struct nodemap_fileset_rec *)0)->nfr_path_fragment[28]) == 1, "found %lld\n",
+		 (long long)(int)sizeof(((struct nodemap_fileset_rec *)0)->nfr_path_fragment[28]));
+	LASSERTF((int)offsetof(struct nodemap_fileset_rec, nfr_fragment_id) == 28, "found %lld\n",
+		 (long long)(int)offsetof(struct nodemap_fileset_rec, nfr_fragment_id));
+	LASSERTF((int)sizeof(((struct nodemap_fileset_rec *)0)->nfr_fragment_id) == 2, "found %lld\n",
+		 (long long)(int)sizeof(((struct nodemap_fileset_rec *)0)->nfr_fragment_id));
+	LASSERTF((int)offsetof(struct nodemap_fileset_rec, nfr_padding1) == 30, "found %lld\n",
+		 (long long)(int)offsetof(struct nodemap_fileset_rec, nfr_padding1));
+	LASSERTF((int)sizeof(((struct nodemap_fileset_rec *)0)->nfr_padding1) == 2, "found %lld\n",
+		 (long long)(int)sizeof(((struct nodemap_fileset_rec *)0)->nfr_padding1));
 
 	/* Checks for union nodemap_rec */
 	LASSERTF((int)sizeof(union nodemap_rec) == 32, "found %lld\n",
@@ -6486,6 +6547,10 @@ void lustre_assert_wire_constants(void)
 		(unsigned)NM_FL_MAP_PROJID);
 	LASSERTF(NM_FL2_READONLY_MOUNT == 0x00000001UL, "found 0x%.8xUL\n",
 		(unsigned)NM_FL2_READONLY_MOUNT);
+	LASSERTF(NM_FL2_DENY_MOUNT == 0x00000002UL, "found 0x%.8xUL\n",
+		(unsigned int)NM_FL2_DENY_MOUNT);
+	LASSERTF(NM_FL2_FILESET_USE_IAM == 0x00000004UL, "found 0x%.8xUL\n",
+		(unsigned)NM_FL2_FILESET_USE_IAM);
 	LASSERTF(NODEMAP_UID == 0, "found %lld\n",
 		 (long long)NODEMAP_UID);
 	LASSERTF(NODEMAP_GID == 1, "found %lld\n",
@@ -6522,10 +6587,34 @@ void lustre_assert_wire_constants(void)
 		(unsigned)NODEMAP_RBAC_FSCRYPT_ADMIN);
 	LASSERTF(NODEMAP_RBAC_SERVER_UPCALL == 0x00000040UL, "found 0x%.8xUL\n",
 		 (unsigned)NODEMAP_RBAC_SERVER_UPCALL);
-	LASSERTF(NODEMAP_RBAC_NONE == 0xffffff80UL, "found 0x%.8xUL\n",
-		(unsigned)NODEMAP_RBAC_NONE);
+	LASSERTF(NODEMAP_RBAC_IGN_ROOT_PRJQUOTA == 0x00000080UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RBAC_IGN_ROOT_PRJQUOTA);
+	LASSERTF(NODEMAP_RBAC_HSM_OPS == 0x00000100UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RBAC_HSM_OPS);
+	LASSERTF(NODEMAP_RBAC_LOCAL_ADMIN == 0x00000200UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RBAC_LOCAL_ADMIN);
+	LASSERTF(NODEMAP_RBAC_NONE == 0xfffffc00UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RBAC_NONE);
 	LASSERTF(NODEMAP_RBAC_ALL == 0xffffffffUL, "found 0x%.8xUL\n",
 		(unsigned)NODEMAP_RBAC_ALL);
+	LASSERTF(NODEMAP_RAISE_PRIV_RAISE == 0x00000001UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RAISE_PRIV_RAISE);
+	LASSERTF(NODEMAP_RAISE_PRIV_ADMIN == 0x00000002UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RAISE_PRIV_ADMIN);
+	LASSERTF(NODEMAP_RAISE_PRIV_TRUSTED == 0x00000004UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RAISE_PRIV_TRUSTED);
+	LASSERTF(NODEMAP_RAISE_PRIV_DENY_UNKN == 0x00000008UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RAISE_PRIV_DENY_UNKN);
+	LASSERTF(NODEMAP_RAISE_PRIV_RO == 0x00000010UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RAISE_PRIV_RO);
+	LASSERTF(NODEMAP_RAISE_PRIV_RBAC == 0x00000020UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RAISE_PRIV_RBAC);
+	LASSERTF(NODEMAP_RAISE_PRIV_FORBID_ENC == 0x00000040UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RAISE_PRIV_FORBID_ENC);
+	LASSERTF(NODEMAP_RAISE_PRIV_NONE == 0xffffff80UL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RAISE_PRIV_NONE);
+	LASSERTF(NODEMAP_RAISE_PRIV_ALL == 0xffffffffUL, "found 0x%.8xUL\n",
+		 (unsigned)NODEMAP_RAISE_PRIV_ALL);
 
 	/* Checks for struct scrub_file */
 	LASSERTF((int)sizeof(struct scrub_file) == 400, "found %lld\n",
@@ -7098,6 +7187,10 @@ void lustre_assert_wire_constants(void)
 		(unsigned)LCFG_NODEMAP_READONLY_MOUNT);
 	LASSERTF(LCFG_NODEMAP_RBAC == 0x000ce05fUL, "found 0x%.8xUL\n",
 		(unsigned)LCFG_NODEMAP_RBAC);
+	LASSERTF(LCFG_NODEMAP_DENY_MOUNT == 0x000ce060UL, "found 0x%.8xUL\n",
+		(unsigned int)LCFG_NODEMAP_DENY_MOUNT);
+	LASSERTF(LCFG_NODEMAP_RAISE_PRIVS == 0x000ce061UL, "found 0x%.8xUL\n",
+		 (unsigned)LCFG_NODEMAP_RAISE_PRIVS);
 #endif /* HAVE_SERVER_SUPPORT */
 	LASSERTF(PORTALS_CFG_TYPE == 1, "found %lld\n",
 		 (long long)PORTALS_CFG_TYPE);

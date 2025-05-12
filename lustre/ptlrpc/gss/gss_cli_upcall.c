@@ -1,34 +1,14 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2011, 2016, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
- *
- * lustre/ptlrpc/gss/gss_cli_upcall.c
  *
  * Author: Eric Mei <ericm@clusterfs.com>
  */
@@ -76,6 +56,13 @@ int ctx_init_pack_request(struct obd_import *imp,
 	LASSERT(msg->lm_bufcount <= 4);
 	LASSERT(req->rq_cli_ctx);
 	LASSERT(req->rq_cli_ctx->cc_sec);
+
+	if (!imp->imp_sec) {
+		CDEBUG(D_SEC,
+		       "%s: no sec on import, ctx init request is too late or too soon: rc = %d\n",
+		       imp->imp_obd->obd_name, -EINVAL);
+		return -EINVAL;
+	}
 
 	/* gss hdr */
 	ghdr = lustre_msg_buf(msg, 0, sizeof(*ghdr));

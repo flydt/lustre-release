@@ -1,36 +1,18 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0
+
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
+
 /*
  * This file is part of Lustre, http://www.lustre.org/
  *
  * cl_object implementation for VVP layer.
  *
- *   Author: Nikita Danilov <nikita.danilov@sun.com>
+ * Author: Nikita Danilov <nikita.danilov@sun.com>
  */
 
 #define DEBUG_SUBSYSTEM S_LLITE
@@ -98,7 +80,7 @@ static int vvp_attr_get(const struct lu_env *env, struct cl_object *obj,
 }
 
 static int vvp_attr_update(const struct lu_env *env, struct cl_object *obj,
-			   const struct cl_attr *attr, unsigned int valid)
+			   const struct cl_attr *attr, enum cl_attr_valid valid)
 {
 	struct inode *inode = vvp_object_inode(obj);
 
@@ -214,7 +196,7 @@ static void vvp_req_attr_set(const struct lu_env *env, struct cl_object *obj,
 
 	if (attr->cra_type == CRT_WRITE) {
 		valid_flags |= OBD_MD_FLMTIME | OBD_MD_FLCTIME;
-		obdo_set_o_projid(oa, ll_i2info(inode)->lli_projid);
+		obdo_set_o_projid(oa, lli->lli_projid);
 	} else if (attr->cra_type == CRT_READ) {
 		valid_flags |= OBD_MD_FLATIME;
 	}
@@ -223,6 +205,8 @@ static void vvp_req_attr_set(const struct lu_env *env, struct cl_object *obj,
 	if (CFS_FAIL_CHECK(OBD_FAIL_LFSCK_INVALID_PFID))
 		oa->o_parent_oid++;
 
+	/* Store ProjID any way for server-side TBF schedule. */
+	oa->o_projid = lli->lli_projid;
 	lli_jobinfo_cpy(lli, &attr->cra_jobinfo);
 }
 
@@ -267,6 +251,14 @@ static int vvp_inode_ops(const struct lu_env *env, struct cl_object *obj,
 	RETURN(rc);
 }
 
+static void vvp_req_projid_set(const struct lu_env *env, struct cl_object *obj,
+			       __u32 *projid)
+{
+	struct inode *inode = vvp_object_inode(obj);
+
+	*projid = ll_i2projid(inode);
+}
+
 static const struct cl_object_operations vvp_ops = {
 	.coo_page_init    = vvp_page_init,
 	.coo_io_init      = vvp_io_init,
@@ -278,6 +270,7 @@ static const struct cl_object_operations vvp_ops = {
 	.coo_glimpse      = vvp_object_glimpse,
 	.coo_req_attr_set = vvp_req_attr_set,
 	.coo_inode_ops    = vvp_inode_ops,
+	.coo_req_projid_set = vvp_req_projid_set,
 };
 
 static int vvp_object_init0(const struct lu_env *env,

@@ -358,7 +358,7 @@ out_unlock:
 	dt_read_unlock(env, obj);
 
 	CDEBUG(D_INFO, "lookup "DFID" %s get "DFID" rc %d\n",
-	       PFID(lu_object_fid(&obj->do_lu)), name,
+	       PFID(lu_object_fid(&obj->do_lu)), encode_fn(name),
 	       PFID(&tti->tti_fid1), rc);
 
 	CDEBUG(D_INFO, "%s: insert lookup reply %p index %d: rc = %d\n",
@@ -556,7 +556,7 @@ static int out_index_insert(struct tgt_session_info *tsi)
 
 	CDEBUG(D_INFO, "%s: "DFID" index insert %s: rc = %d\n",
 	       tgt_name(tsi->tsi_tgt), PFID(lu_object_fid(&obj->do_lu)),
-	       name, rc);
+	       encode_fn(name), rc);
 
 	RETURN(rc);
 }
@@ -906,9 +906,9 @@ static int out_tx_end(const struct lu_env *env, struct thandle_exec_args *ta,
 		rc = ta->ta_args[i]->exec_fn(env, ta->ta_handle,
 					     ta->ta_args[i]);
 		if (unlikely(rc != 0)) {
-			CDEBUG(D_INFO, "error during execution of #%u from"
-			       " %s:%d: rc = %d\n", i, ta->ta_args[i]->file,
-			       ta->ta_args[i]->line, rc);
+			CWARN("%s: error during execution of #%u from %s:%d: rc = %d\n",
+			      dt_obd_name(ta->ta_handle->th_dev), i,
+			      ta->ta_args[i]->file, ta->ta_args[i]->line, rc);
 			while (--i >= 0) {
 				if (ta->ta_args[i]->undo_fn != NULL)
 					ta->ta_args[i]->undo_fn(env,

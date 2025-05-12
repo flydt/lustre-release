@@ -33,12 +33,28 @@ static const struct nodemap_rbac_name {
 	{ NODEMAP_RBAC_CHLG_OPS,	"chlg_ops"	},
 	{ NODEMAP_RBAC_FSCRYPT_ADMIN,   "fscrypt_admin"	},
 	{ NODEMAP_RBAC_SERVER_UPCALL,	"server_upcall"	},
+	{ NODEMAP_RBAC_IGN_ROOT_PRJQUOTA,	"ignore_root_prjquota"	},
+	{ NODEMAP_RBAC_HSM_OPS,		"hsm_ops"	},
+	{ NODEMAP_RBAC_LOCAL_ADMIN,	"local_admin"	},
 };
 
 struct nodemap_pde {
 	char			 npe_name[LUSTRE_NODEMAP_NAME_LENGTH + 1];
-	struct proc_dir_entry	*npe_proc_entry;
+	struct dentry		*npe_debugfs_entry;
 	struct list_head	 npe_list_member;
+};
+
+static const struct nodemap_priv_name {
+	enum nodemap_raise_privs	npn_priv;
+	const char		       *npn_name;
+} nodemap_priv_names[] = {
+	{ NODEMAP_RAISE_PRIV_RAISE,		"child_raise_privs"	},
+	{ NODEMAP_RAISE_PRIV_ADMIN,		"admin"			},
+	{ NODEMAP_RAISE_PRIV_TRUSTED,		"trusted"		},
+	{ NODEMAP_RAISE_PRIV_DENY_UNKN,		"deny_unknown"		},
+	{ NODEMAP_RAISE_PRIV_RO,		"readonly_mount"	},
+	/* NODEMAP_RAISE_PRIV_RBAC uses the rbac roles directly */
+	{ NODEMAP_RAISE_PRIV_FORBID_ENC,	"forbid_encryption"	},
 };
 
 /** The nodemap id 0 will be the default nodemap. It will have a configuration
@@ -55,15 +71,21 @@ struct lu_nodemap {
 				 nmf_allow_root_access:1,
 				 nmf_enable_audit:1,
 				 nmf_forbid_encryption:1,
-				 nmf_readonly_mount:1;
+				 nmf_readonly_mount:1,
+				 nmf_deny_mount:1,
+				 nmf_fileset_use_iam:1;
 	/* bitmap for mapping type */
 	enum nodemap_mapping_modes nmf_map_mode;
 	/* bitmap for rbac, enum nodemap_rbac_roles */
 	enum nodemap_rbac_roles	 nmf_rbac;
+	/* bitmap for privilege raise, enum nodemap_raise_privs */
+	enum nodemap_raise_privs nmf_raise_privs;
+	/* bitmap for rbac raise, enum nodemap_rbac_roles */
+	enum nodemap_rbac_roles nmf_rbac_raise;
 	/* unique ID set by MGS */
 	unsigned int		 nm_id;
 	/* nodemap ref counter */
-	atomic_t		 nm_refcount;
+	refcount_t		 nm_refcount;
 	/* UID to squash unmapped UIDs */
 	uid_t			 nm_squash_uid;
 	/* GID to squash unmapped GIDs */
@@ -92,8 +114,13 @@ struct lu_nodemap {
 	/* access by nodemap name */
 	struct hlist_node	 nm_hash;
 	struct nodemap_pde	*nm_pde_data;
-	/* fileset the nodes of this nodemap are restricted to */
-	char			 nm_fileset[PATH_MAX+1];
+	/* primary fileset this nodemap is restricted to */
+	char			 *nm_prim_fileset;
+	unsigned int		 nm_prim_fileset_size;
+	/* lock for fileset red/black tree */
+	struct rw_semaphore	 nm_fileset_alt_lock;
+	/* alternate fileset map */
+	struct rb_root		 nm_fileset_alt;
 	/* information about the expected SELinux policy on the nodes */
 	char			 nm_sepol[LUSTRE_NODEMAP_SEPOL_LENGTH + 1];
 
@@ -113,6 +140,12 @@ struct lu_nodemap {
 	unsigned int		 nm_offset_start_projid;
 	/* number of values allocated to PROJID offset */
 	unsigned int		 nm_offset_limit_projid;
+	/* list of sub-nodemaps */
+	struct list_head	 nm_subnodemaps;
+	/* list entry for parent nodemap */
+	struct list_head	 nm_parent_entry;
+	/* link to parent nodemap */
+	struct lu_nodemap	*nm_parent_nm;
 };
 
 /* Store handles to local MGC storage to save config locally. In future
@@ -125,7 +158,7 @@ struct nm_config_file {
 	struct list_head		 ncf_list;
 };
 
-void nodemap_activate(const bool value);
+int nodemap_activate(const bool value);
 int nodemap_add(const char *nodemap_name, bool dynamic);
 int nodemap_del(const char *nodemap_name);
 int nodemap_add_member(struct lnet_nid *nid, struct obd_export *exp);
@@ -151,13 +184,17 @@ int nodemap_set_squash_gid(const char *name, gid_t gid);
 int nodemap_set_squash_projid(const char *name, projid_t projid);
 int nodemap_set_audit_mode(const char *name, bool enable_audit);
 int nodemap_set_forbid_encryption(const char *name, bool forbid_encryption);
+int nodemap_set_raise_privs(const char *name, enum nodemap_raise_privs privs,
+			    enum nodemap_rbac_roles rbac_raise);
 int nodemap_set_readonly_mount(const char *name, bool readonly_mount);
+int nodemap_set_deny_mount(const char *name, bool deny_mount);
 bool nodemap_can_setquota(struct lu_nodemap *nodemap, __u32 qc_type, __u32 id);
 int nodemap_add_idmap(const char *nodemap_name, enum nodemap_id_type id_type,
 		      const __u32 map[2]);
 int nodemap_del_idmap(const char *nodemap_name, enum nodemap_id_type id_type,
 		      const __u32 map[2]);
-int nodemap_set_fileset(const char *name, const char *fileset, bool checkperm);
+int nodemap_set_fileset(const char *name, const char *fileset, bool checkperm,
+			bool ioctl_op);
 char *nodemap_get_fileset(const struct lu_nodemap *nodemap);
 int nodemap_set_sepol(const char *name, const char *sepol, bool checkperm);
 const char *nodemap_get_sepol(const struct lu_nodemap *nodemap);
@@ -242,4 +279,32 @@ static inline int nodemap_process_idx_pages(void *config,
 
 int nodemap_get_config_req(struct obd_device *mgs_obd,
 			   struct ptlrpc_request *req);
+
+/* Return true if id corresponds to local root */
+static inline bool is_local_root(__u32 id, struct lu_nodemap *nodemap)
+{
+	/* Plain root is also local root */
+	if (id == 0)
+		return true;
+
+	/* id is not mapped root (0):
+	 * just a regular mapped user
+	 */
+	if (id != nodemap_map_id(nodemap, NODEMAP_UID,
+				 NODEMAP_CLIENT_TO_FS, 0))
+		return false;
+
+	/* id is mapped root, but root is squashed:
+	 * not considered a local admin
+	 */
+	if (id == nodemap_map_id(nodemap, NODEMAP_UID, NODEMAP_CLIENT_TO_FS,
+				 nodemap->nm_squash_uid))
+		return false;
+
+	/* id is mapped root and not squashed:
+	 * rely on the local_admin rbac role
+	 */
+	return nodemap->nmf_rbac & NODEMAP_RBAC_LOCAL_ADMIN;
+}
+
 #endif	/* _LUSTRE_NODEMAP_H */

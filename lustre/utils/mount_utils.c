@@ -120,10 +120,12 @@ int run_command(char *cmd, int cmdsz)
 	return rc;
 }
 
+#define MAXNIDSTR (LDD_PARAM_LEN - 256)
+
 #ifdef HAVE_SERVER_SUPPORT
 int add_param(char *buf, char *key, char *val)
 {
-	int end = sizeof(((struct lustre_disk_data *)0)->ldd_params);
+	int end = MAXNIDSTR;
 	int start = strlen(buf);
 	int keylen = 0;
 
@@ -139,32 +141,11 @@ int add_param(char *buf, char *key, char *val)
 	return 0;
 }
 
-int get_param(char *buf, char *key, char **val)
-{
-	int i, key_len = strlen(key);
-	char *ptr;
-
-	ptr = strstr(buf, key);
-	if (ptr) {
-		*val = strdup(ptr + key_len);
-		if (!(*val))
-			return ENOMEM;
-
-		for (i = 0; i < strlen(*val); i++)
-			if (((*val)[i] == ' ') || ((*val)[i] == '\0'))
-				break;
-
-		(*val)[i] = '\0';
-		return 0;
-	}
-
-	return ENOENT;
-}
-
 int append_param(char *buf, char *key, char *val, char sep)
 {
-	int key_len, i, offset, old_val_len;
-	char *ptr = NULL, str[1024];
+	char *ptr = NULL, *next;
+	int bufsize = MAXNIDSTR;
+	int buflen = strlen(buf), vallen = strlen(val);
 
 	if (key)
 		ptr = strstr(buf, key);
@@ -173,30 +154,22 @@ int append_param(char *buf, char *key, char *val, char sep)
 	if (!ptr)
 		return add_param(buf, key, val);
 
-	key_len = strlen(key);
-
-	/* Copy previous values to str */
-	for (i = 0; i < sizeof(str); ++i) {
-		if ((ptr[i + key_len] == ' ') || (ptr[i + key_len] == '\0'))
-			break;
-		str[i] = ptr[i + key_len];
-	}
-	if (i == sizeof(str))
+	/* check extra new val + sep can fit */
+	if (bufsize <= buflen + vallen + 1) {
+		fprintf(stderr, "%s: params are too long:\n%s +%s=%s\n",
+			progname, buf, key, val);
 		return E2BIG;
-	old_val_len = i;
+	}
 
-	offset = old_val_len + key_len;
+	next = strchrnul(ptr, ' ');
+	/* shift all after 'next' further at vallen + sep */
+	memmove(next + vallen + 1, next, strlen(next) + 1);
 
-	/* Move rest of buf to overwrite previous key and value */
-	for (i = 0; ptr[i + offset] != '\0'; ++i)
-		ptr[i] = ptr[i + offset];
+	/* fill gap with sep + new values */
+	*next = sep;
+	memcpy(next + 1, val, vallen);
 
-	ptr[i] = '\0';
-
-	snprintf(str + old_val_len, sizeof(str) - old_val_len,
-		 "%c%s", sep, val);
-
-	return add_param(buf, key, str);
+	return 0;
 }
 #endif
 
@@ -528,12 +501,14 @@ int loop_format(struct mkfs_opts *mop)
 #endif /* PLUGIN_DIR */
 
 /**
- * Load plugin for a given mount_type from ${pkglibdir}/mount_osd_FSTYPE.so and
- * return struct of function pointers (will be freed in unloack_backfs_module).
+ * load_backfs_module() - Load plugin for a given mount_type
+ * @mount_type: mount type to load module for
  *
- * \param[in] mount_type	Mount type to load module for.
- * \retval Value of backfs_ops struct
- * \retval NULL if no module exists
+ * Load plugin from ${pkglibdir}/mount_osd_FSTYPE.so and
+ * return struct of function pointers (will be freed in
+ * unloack_backfs_module).
+ *
+ * Return: Value of backfs_ops struct, NULL if no module exists
  */
 struct module_backfs_ops *load_backfs_module(enum ldd_mount_type mount_type)
 {
@@ -553,7 +528,6 @@ struct module_backfs_ops *load_backfs_module(enum ldd_mount_type mount_type)
 	fsname[sizeof("osd-") - 2] = '_';
 
 	snprintf(filename, sizeof(filename), PLUGIN_DIR"/mount_%s.so", fsname);
-
 	handle = dlopen(filename, RTLD_LAZY);
 
 	/*
@@ -568,6 +542,7 @@ struct module_backfs_ops *load_backfs_module(enum ldd_mount_type mount_type)
 			snprintf(filename, sizeof(filename),
 				 "%s/utils/mount_%s.so",
 				 dirname, fsname);
+
 			handle = dlopen(filename, RTLD_LAZY);
 		}
 	}
@@ -645,21 +620,28 @@ static void unload_backfs_module(struct module_backfs_ops *ops)
 #endif
 }
 
-/* Return true if backfs_ops has operations for the given mount_type. */
-static int backfs_mount_type_okay(enum ldd_mount_type mount_type)
+bool backfs_mount_type_loaded(enum ldd_mount_type mt)
 {
-	if (mount_type >= LDD_MT_LAST || mount_type < 0) {
+	if (mt >= LDD_MT_LAST || mt < 0)
+		return false;
+
+	if (!backfs_ops[mt])
+		return false;
+
+	return true;
+}
+
+/* Return true if backfs_ops has operations for the given mount_type. */
+static bool backfs_mount_type_okay(enum ldd_mount_type mt)
+{
+	if (!backfs_mount_type_loaded(mt)) {
 		fatal();
-		fprintf(stderr, "fs type out of range %d\n", mount_type);
-		return 0;
+		fprintf(stderr, "unhandled/unloaded OSD plugin %d '%s'\n",
+			mt, mt_str(mt) ? mt_str(mt) : "INVALID");
+		return false;
 	}
-	if (!backfs_ops[mount_type]) {
-		fatal();
-		fprintf(stderr, "unhandled/unloaded fs type %d '%s'\n",
-			mount_type, mt_str(mount_type));
-		return 0;
-	}
-	return 1;
+
+	return true;
 }
 
 /* Write the server config files */
@@ -946,13 +928,12 @@ int file_create(char *path, __u64 size)
 }
 
 /* Get rid of symbolic hostnames for tcp, since kernel can't do lookups */
-#define MAXNIDSTR 1024
-
 char *convert_hostnames(char *buf, bool mount)
 {
 	char *converted, *c, *end, sep;
 	char *delimiter = buf;
-	int left = MAXNIDSTR;
+	int bufsize = MAXNIDSTR;
+	int left = bufsize;
 	struct lnet_nid nid;
 
 	converted = malloc(left);
@@ -1008,7 +989,7 @@ char *convert_hostnames(char *buf, bool mount)
 		else
 			c += scnprintf(c, left, "%s", libcfs_nidstr(&nid));
 
-		left = converted + MAXNIDSTR - c;
+		left = converted + bufsize - c;
 		buf = delimiter + 1;
 	}
 
@@ -1020,6 +1001,39 @@ out_free:
 	fprintf(stderr, "%s: Can't parse NID '%s'\n", progname, buf);
 out_bad_mnt_str:
 	free(converted);
+	return NULL;
+}
+
+char *convert_fsname(char *devname)
+{
+	char *fsname, *start, *end;
+	int len = 0;
+
+	start = strstr(devname, ":/");
+	if (!start)
+		goto out_bad_name;
+	start += 2; /* skip ":/" */
+
+	end = strchr(start, '/');
+	if (!end)
+		end = start + strlen(start);
+
+	len = end - start + 1;
+
+	fsname = calloc(len, sizeof(char));
+	if (!fsname) {
+		fprintf(stderr, "%s: cannot allocate %u bytes for MOUNT: %s\n",
+			progname, len, strerror(ENOMEM));
+		return NULL;
+	}
+
+	memcpy(fsname, start, len);
+	fsname[len - 1] = '\0';
+	return fsname;
+
+out_bad_name:
+	fprintf(stderr, "%s: Can't parse filesystem name: %s\n",
+		progname, devname);
 	return NULL;
 }
 

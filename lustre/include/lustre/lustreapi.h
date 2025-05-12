@@ -422,6 +422,7 @@ struct find_param {
 	int			 fp_bsign;
 	unsigned int		 fp_hash_inflags;
 	unsigned int		 fp_hash_exflags;
+	__u8			 fp_thread_count;
 	/* Print all information (lfs find only) */
 	char			 *fp_format_printf_str;
 	nlink_t			 fp_nlink;
@@ -466,6 +467,15 @@ int llapi_file_fget_lov_uuid(int fd, struct obd_uuid *lov_uuid);
 int llapi_file_fget_lmv_uuid(int fd, struct obd_uuid *lov_uuid);
 int llapi_lov_get_uuids(int fd, struct obd_uuid *uuidp, int *ost_count);
 int llapi_lmv_get_uuids(int fd, struct obd_uuid *uuidp, int *mdt_count);
+enum tgt_type {
+       LOV_TYPE = 1,
+       LMV_TYPE = 2,
+       CLI_TYPE = 3,
+};
+int llapi_file_get_type_uuid(const char *path, enum tgt_type type,
+			struct obd_uuid *uuid);
+int llapi_file_fget_type_uuid(int fd, enum tgt_type type,
+			struct obd_uuid *uuid);
 int llapi_is_lustre_mnttype(const char *type);
 int llapi_search_tgt(const char *fsname, const char *poolname,
 		     const char *tgtname, bool is_mdt);
@@ -747,7 +757,8 @@ int llapi_pcc_del(const char *mntpath, const char *pccpath,
 int llapi_pcc_clear(const char *mntpath, enum lu_pcc_cleanup_flags flags);
 int llapi_pcc_pin_file(const char *path, __u32 id);
 int llapi_pcc_unpin_file(const char *path, __u32 id);
-
+int llapi_pcc_backend_id_get(const char *path, enum lu_pcc_type type,
+			     __u32 *id);
 /** @} llapi */
 
 /* llapi_layout user interface */
