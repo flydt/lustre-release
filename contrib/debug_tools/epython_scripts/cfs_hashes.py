@@ -43,7 +43,7 @@ def print_thetas(name, hashtable):
 
 def print_separator(count):
     s = ""
-    for idx in xrange(count):
+    for idx in range(count):
         s += "="
     print(s)
 

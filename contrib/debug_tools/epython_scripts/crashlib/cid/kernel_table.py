@@ -68,10 +68,10 @@ class KernelInfo:
 
         # If some versions of crash or the kernel don't have all the
         # fields, this check code may need to be removed or modified.
-        if len(self.__dict__.keys()) != expected_key_count:
+        if len(list(self.__dict__.keys())) != expected_key_count:
             raise crashlib.cid.ParseError(
                 'Expected {:d}, but parsed {:d} entries.'.format(
-                    expected_key_count, len(self.__dict__.keys())))
+                    expected_key_count, len(list(self.__dict__.keys()))))
 
 # --------------------------------------------------------------------------
 

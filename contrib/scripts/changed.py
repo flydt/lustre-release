@@ -42,7 +42,7 @@ def affected_files(patch_content):
             parts = line.split()
             if len(parts) >= 4:
                 current_file = parts[2][2:]  # Remove 'a/' prefix
-                if current_file not in [f for files in changes.values() for f in files]:
+                if current_file not in [f for files in list(changes.values()) for f in files]:
                     changes['m'].append(current_file)
         elif line.startswith('new file mode'):
             if changes['m'] and current_file:

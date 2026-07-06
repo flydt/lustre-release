@@ -19,7 +19,7 @@ def UFLookup(d, key, casesensitive=False, prefixok=True):
     def _casesensitive_prefixok(d, key):
         """case sensitive, prefixes ok"""
         matches = []
-        for s in d.keys():
+        for s in list(d.keys()):
             if s == key:
                 return d[s]
             if s.startswith(key):
@@ -33,7 +33,7 @@ def UFLookup(d, key, casesensitive=False, prefixok=True):
         """case insensitive, prefixes ok"""
         matches = []
         lkey = key.lower()
-        for s in d.keys():
+        for s in list(d.keys()):
             if s.lower() == lkey:
                 return d[s]
             if s.lower().startswith(lkey):
@@ -48,7 +48,7 @@ def UFLookup(d, key, casesensitive=False, prefixok=True):
     def _caseinsensitive_noprefix(d, key):
         """case insensitive, prefixes not ok"""
         lkey = key.lower()
-        for s in d.keys():
+        for s in list(d.keys()):
             if s.lower() == lkey:
                 return d[s]
         raise KeyError("No match for {0}".format(key))

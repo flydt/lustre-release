@@ -53,7 +53,7 @@ def page_to_virt(page):
     res = exec_crash_command("ptov " + paddr)
     vaddr = res.splitlines()[1].split()[0]
     cl_trace("*>>> page_to_virt #### vaddr = %s" % vaddr)
-    return long(vaddr, 16)
+    return int(vaddr, 16)
 
 def get_config(name):
     cl_trace(">>> get_config: searching system config for %s" % name)

@@ -65,7 +65,7 @@ def print_flags(flag_dict, mask):
 
     flags = ""
     tmp = mask
-    for key, value in flag_dict.iteritems():
+    for key, value in flag_dict.items():
             if key & mask:
                 flags = flags + value + " "
                 tmp &= ~key

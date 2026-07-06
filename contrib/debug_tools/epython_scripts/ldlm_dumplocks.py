@@ -110,27 +110,27 @@ def ldlm_dump_resource(res):
     if not ll.list_empty(res_lr_granted):
         pos = 0
         print("   Granted locks: ")
-        tmp = res_lr_granted.next
+        tmp = res_lr_granted.__next__
         while(tmp != res_lr_granted):
             pos += 1
             lock = readSU('struct ldlm_lock',
                           Addr(tmp)-member_offset('struct ldlm_lock', 'l_res_link'))
             ldlm_dump_lock(lock, pos, "grnt")
             try:
-                tmp = tmp.next
+                tmp = tmp.__next__
             except (crash.error, IndexError):
                 break
     if not ll.list_empty(res_lr_waiting):
         pos = 0
         print("   Waiting locks: ")
-        tmp = res_lr_waiting.next
+        tmp = res_lr_waiting.__next__
         while(tmp != res_lr_waiting):
             pos += 1
             lock = readSU('struct ldlm_lock',
                           Addr(tmp)-member_offset('struct ldlm_lock', 'l_res_link'))
             ldlm_dump_lock(lock, pos, "wait")
             try:
-                tmp = tmp.next
+                tmp = tmp.__next__
             except (crash.error, IndexError):
                 break
 

@@ -41,7 +41,7 @@ def dump_hnodes(hs, hlist, hnode, depth=0, ruler=RULER):
     while(hnode != hlist & hnode):
         s = get_hash_object(hs, hnode)
         print("%*.*shlist_node 0x%x  %s" % (depth, depth, ruler, Addr(hnode), s))
-        hnode = hnode.next
+        hnode = hnode.__next__
 
 def dump_hlist(hs, hlist, depth=0, ruler=RULER):
     if hlist.first:

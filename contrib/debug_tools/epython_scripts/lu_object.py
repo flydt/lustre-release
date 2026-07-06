@@ -184,7 +184,7 @@ def print_object(pos, depth=0, ruler=RULER):
 
 def print_object_from_header(loh, depth=0, ruler=RULER):
     head = loh.loh_layers
-    empty = "" if (loh.loh_lru.next == loh.loh_lru) else " lru"
+    empty = "" if (loh.loh_lru.__next__ == loh.loh_lru) else " lru"
     exists = " exist" if loh.loh_attr & LOHA_EXISTS else ""
     print("%*.*slu_object_header@0x%x[fl:0x%x, rc:%d, [0x%x:0x%x:0x%x]%s%s] {" % \
          (depth, depth, ruler,

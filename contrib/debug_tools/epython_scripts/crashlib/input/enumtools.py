@@ -4,7 +4,7 @@ Routines for handling enums (or other symbolic names)
 Copyright 2015 Cray Inc.  All Rights Reserved
 """
 
-import uflookup
+from . import uflookup
 
 class NameSet:
     """Two-way translation between int values (enums, #defines) and strings.
@@ -44,7 +44,7 @@ class NameSet:
         only to the first of them.
         """
 
-        if name in self.name_to_value.keys():
+        if name in list(self.name_to_value.keys()):
             raise ValueError("Name {0} already defined (value {1})".format(
                 name, self.name_to_value[name]))
         try:
@@ -69,11 +69,11 @@ class NameSet:
 
     def addNames(self, *namelist):
         """Add a list of names, each using the respective next value"""
-        map(self.addName, namelist)
+        list(map(self.addName, namelist))
 
     def addMap(self, mapping):
         """Add the key/value pairs from a mapping type"""
-        for k, v in mapping.items():
+        for k, v in list(mapping.items()):
             self.addName(k, v)
 
     def UFLookup(self, key, **kwargs):

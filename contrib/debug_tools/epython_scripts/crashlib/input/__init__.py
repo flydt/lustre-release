@@ -79,7 +79,7 @@ def toint(string, base=default_bases, suffixes=binary_suffixes):
                 raise ValueError
 
             # Find a suffix that matches the end of the string and use it
-            for k, v in suffixes.iteritems():
+            for k, v in suffixes.items():
                 if string.endswith(k):
                     multiplier = v
                     string = string[0:-len(k)]
@@ -88,7 +88,7 @@ def toint(string, base=default_bases, suffixes=binary_suffixes):
                 raise ValueError
 
     except ValueError:
-        suffix_list = suffixes.keys()
+        suffix_list = list(suffixes.keys())
         suffix_list.sort()
         raise ValueError(
             "invalid literal '{:s}' for toint() with base {!s:s} "
@@ -104,7 +104,7 @@ def hex2int(string):
     return toint(string, base=[16, 0])
 
 
-def to_rangelist(args, default=range(0), base=[0,16],
+def to_rangelist(args, default=list(range(0)), base=[0,16],
                   suffixes=binary_suffixes):
     """Convert a bunch of range list strings into a list of ranges
 
@@ -133,16 +133,16 @@ def to_rangelist(args, default=range(0), base=[0,16],
                 fields = range_str.split('-', 1)
                 start = toint(fields[0], base, suffixes=suffixes)
                 end = toint(fields[1], base, suffixes=suffixes) + 1
-                ranges.append(range(start, end))
+                ranges.append(list(range(start, end)))
             elif "#" in range_str:
                 fields = range_str.split('#', 1)
                 start = toint(fields[0], base, suffixes=suffixes)
                 end = start + toint(fields[1], base, suffixes=suffixes)
-                ranges.append(range(start, end))
+                ranges.append(list(range(start, end)))
             else:
                 start = toint(range_str, base, suffixes=suffixes)
                 end = start + 1
-                ranges.append(range(start, end))
+                ranges.append(list(range(start, end)))
 
     return ranges
 
@@ -182,7 +182,7 @@ if __name__ == '__main__':
             self.assertEqual(toint('0x10', bases), 16)
 
         def test_suffixes(self):
-            for k, v in binary_suffixes.iteritems():
+            for k, v in binary_suffixes.items():
                 self.assertEqual(toint('0b10'+k), 0b10*v)
                 self.assertEqual(toint('0o10'+k), 0o10*v)
                 self.assertEqual(toint('10'+k), 10*v)

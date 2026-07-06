@@ -49,7 +49,7 @@ debug_flags_tbl = {
 def print_flags(flag_tbl, mask):
     flags = ""
     tmp = mask
-    for key, value in flag_tbl.iteritems():
+    for key, value in flag_tbl.items():
             if key & mask:
                flags = flags + value + " "
                tmp &= ~key

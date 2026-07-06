@@ -74,7 +74,7 @@ def str2list(string, sep=',', totype=None, choices=None):
 
     # Verify each separate value
     if choices is not None:
-        errs = filter(lambda x:x not in choices, lst)
+        errs = [x for x in lst if x not in choices]
         if errs:
             msg = "invalid choice{:s}: {!r:s} (choose from {!s:s})".format(
                 plural[len(errs) > 1], errs, choices)

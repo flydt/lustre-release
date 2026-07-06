@@ -15,7 +15,7 @@ Copyright 2015 Cray Inc.  All Rights Reserved
 ### implementation, but all the current interfaces should be ok, with
 ### new interfaces added to let users define the non-simple flags.
 
-import uflookup
+from . import uflookup
 
 
 class FlagSet:
@@ -63,10 +63,10 @@ class FlagSet:
         previously defined bit.  If multiple flags are defined to use
         the same bit, value_to_str will remember only the first."""
 
-        if s in self.str_to_value.keys():
+        if s in list(self.str_to_value.keys()):
             raise ValueError("Flag {0} already defined (value {1:x})".format(
                 s, self.str_to_value[s]))
-        if s + "_shift" in self.str_to_value.keys():
+        if s + "_shift" in list(self.str_to_value.keys()):
             raise ValueError("Flag {0} conflicts with another "
                              "flag ({1})".format(s, s + "_shift"))
 
@@ -103,11 +103,11 @@ class FlagSet:
 
     def addSimpleFlags(self, *l):
         """Adds a list of single-bit flags."""
-        map(self.addSimpleFlag, l)
+        list(map(self.addSimpleFlag, l))
 
     def addMap(self, mapping):
         """Add the key/value pairs from a mapping type"""
-        for k, v in mapping.items():
+        for k, v in list(mapping.items()):
             self.addSimpleFlag(k, v)
 
     def _EnsureSorted(self):

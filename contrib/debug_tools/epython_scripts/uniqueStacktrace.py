@@ -6,7 +6,7 @@ Utility to print unique stack traces
 
 import re
 import sys
-import StringIO
+import io
 import argparse
 from pykdump.API import exec_crash_command
 
@@ -63,7 +63,7 @@ def sortInput(swapper, input):
             if not swapper and swap.match(line):
                 line = input.readline()
 
-    sort = sorted(info.items(), key=lambda info: len(info[1]))
+    sort = sorted(list(info.items()), key=lambda info: len(info[1]))
     return sort
 
 def printRes(sort, printpid, printptr):
@@ -101,7 +101,7 @@ def main():
     com = "foreach {ts:s} bt".format(ts=" ".join(args.task_select))
 
     result = exec_crash_command(com)
-    input = StringIO.StringIO(result)
+    input = io.StringIO(result)
     printRes(sortInput(args.swapper, input), args.printpid, args.printptr)
 
 if __name__ == '__main__':

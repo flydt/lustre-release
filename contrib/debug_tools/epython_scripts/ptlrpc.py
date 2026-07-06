@@ -169,9 +169,9 @@ def print_one_request(sthread, req):
 def print_request_list(sthread, lhdr, loffset):
     try:
         for reqlnk in readStructNext(lhdr, 'next'):
-            if reqlnk.next == Addr(lhdr):
+            if reqlnk.__next__ == Addr(lhdr):
                 break
-            req = readSU('struct ptlrpc_request', reqlnk.next-loffset)
+            req = readSU('struct ptlrpc_request', reqlnk.__next__-loffset)
             print_one_request(sthread, req)
 
     except Exception as e:

@@ -82,7 +82,7 @@ def cfs_hash_get_hlist_nodes(hsh, bd_bkt, bd_offset):
     while (hnode and hnode != hlist):
         hnodes.append(hnode)
         try:
-            hnode = hnode.next
+            hnode = hnode.__next__
         except (crash.error, IndexError):
             break
     return hnodes
@@ -164,7 +164,7 @@ def obd2str(obd, partitions=2):
     return '-'.join(name)
 
 def list_empty(head):
-    return head.next == head
+    return head.__next__ == head
 
 """Red-Black"""
 
