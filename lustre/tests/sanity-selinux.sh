@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 #
 # NOTE
 # In order to be able to do the runcon commands in test_4,
@@ -550,6 +550,7 @@ create_nodemap() {
 remove_nodemap() {
 	local nm=$1
 
+	do_facet mgs $LCTL set_param -P -d nodemap.$nm.sepol
 	do_facet mgs $LCTL nodemap_del $nm
 
 	wait_update_facet --verbose mds1 \
@@ -563,8 +564,8 @@ remove_nodemap() {
 }
 
 test_21a() {
-	[ "$MDS1_VERSION" -lt $(version_code 2.11.56) ] &&
-		skip "Need MDS >= 2.11.56"
+	(( $MDS1_VERSION >= $(version_code v2_12_52-42-gdd200e5530) )) ||
+		skip "Need MDS >= 2.12.52.42 for selinux connect checks"
 
 	local sepol
 
@@ -583,16 +584,16 @@ test_21a() {
 		# update mount option with skpath
 		MOUNT_OPTS=$(add_sk_mntflag $MOUNT_OPTS)
 		export SK_UNIQUE_NM=true
+		export servers=$(all_server_nodes)
 
 		# load specific key on servers
-		do_nodes $(comma_list $(all_server_nodes)) "$LGSS_SK -t server \
-						    -l $SK_PATH/nodemap/c0.key"
+		do_nodes $servers \
+			"$LGSS_SK -t server -l $SK_PATH/nodemap/c0.key"
 
 		# set perms for per-nodemap keys else permission denied
-		do_nodes $(comma_list $(all_server_nodes)) \
-		 "keyctl show | grep lustre | cut -c1-11 |
-				sed -e 's/ //g;' |
-				xargs -IX keyctl setperm X 0x3f3f3f3f"
+		do_nodes $servers \
+		    "keyctl show | grep lustre | cut -c1-11 | sed -e 's/ //g;' |
+		     xargs -IX keyctl setperm X 0x3f3f3f3f"
 
 	fi
 
@@ -630,9 +631,37 @@ test_21a() {
 }
 run_test 21a "Send sepol at connect"
 
+cleanup_21b() {
+	local sebool=${1:-"off"}
+
+	# restore SELinux boolean value
+	if [ "$sebool" == "off" ]; then
+		setsebool -P deny_ptrace off
+	else
+		setsebool -P deny_ptrace on
+	fi
+
+	# remove nodemap
+	remove_nodemap c0
+	echo 0 > /sys/module/ptlrpc/parameters/send_sepol
+
+	if $GSS_SK; then
+		export SK_UNIQUE_NM=false
+	fi
+
+	umount_client $MOUNT || true
+	mount_client $MOUNT || error "remount failed"
+	if $GSS_SK; then
+		wait_flavor cli2mdt $SK_FLAVOR
+		wait_flavor cli2ost $SK_FLAVOR
+	fi
+}
+
 test_21b() {
-	[ "$MDS1_VERSION" -lt $(version_code 2.11.56) ] &&
-		skip "Need MDS >= 2.11.56"
+	local sebool=$(getsebool deny_ptrace | awk '{print $3}')
+
+	(( $MDS1_VERSION >= $(version_code v2_12_52-43-g0a773f04b2) )) ||
+		skip "Need MDS >= 2.12.52.43 for selinux metadata checks"
 
 	stack_trap "restore_opencache" EXIT
 	disable_opencache
@@ -667,21 +696,25 @@ test_21b() {
 	echo 3 > /proc/sys/vm/drop_caches
 
 	# create nodemap entry with sepol
+	stack_trap "cleanup_21b $sebool" EXIT
 	create_nodemap c0
 
 	if $GSS_SK; then
 		export SK_UNIQUE_NM=true
+		local servers=$(all_server_nodes)
 
 		# load specific key on servers
-		do_nodes $(comma_list $(all_server_nodes)) "$LGSS_SK -t server \
-						    -l $SK_PATH/nodemap/c0.key"
+		do_nodes $servers \
+			"$LGSS_SK -t server -l $SK_PATH/nodemap/c0.key"
 
 		# set perms for per-nodemap keys else permission denied
-		do_nodes $(comma_list $(all_server_nodes)) \
-		 "keyctl show | grep lustre | cut -c1-11 |
-				sed -e 's/ //g;' |
+		do_nodes $servers \
+		    "keyctl show | grep lustre | cut -c1-11 | sed -e 's/ //g;' |
 				xargs -IX keyctl setperm X 0x3f3f3f3f"
 
+		# Load nodemap key on client
+		$LGSS_SK -t client -l $SK_PATH/nodemap/c0.key
+		$LFS flushctx $MOUNT
 	fi
 
 	# metadata ops without sending sepol
@@ -778,7 +811,6 @@ test_21b() {
 	echo 3 > /proc/sys/vm/drop_caches
 
 	# change one SELinux boolean value
-	sebool=$(getsebool deny_ptrace | awk '{print $3}')
 	if [ "$sebool" == "off" ]; then
 		setsebool -P deny_ptrace on
 	else
@@ -827,21 +859,7 @@ test_21b() {
 	chattr -i $DIR/$tdir/toopen && error "chattr (6)"
 	ln -s $DIR/$tdir/toopen $DIR/$tdir/toopen_sl6 && error "symlink (6)"
 	ln $DIR/$tdir/toopen $DIR/$tdir/toopen_hl6 && error "hardlink (6)"
-
-	# restore SELinux boolean value
-	if [ "$sebool" == "off" ]; then
-		setsebool -P deny_ptrace off
-	else
-		setsebool -P deny_ptrace on
-	fi
-
-	# remove nodemap
-	remove_nodemap c0
-	echo 0 > /sys/module/ptlrpc/parameters/send_sepol
-
-	if $GSS_SK; then
-		export SK_UNIQUE_NM=false
-	fi
+	echo "test_21b done"
 }
 run_test 21b "Send sepol for metadata ops"
 

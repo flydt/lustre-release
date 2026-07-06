@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2015, Trustees of Indiana University
  *
@@ -48,21 +28,13 @@
 #include <openssl/err.h>
 #include <sys/types.h>
 
+#include <linux/cryptouser.h>
 #include <linux/lnet/lnet-crypto.h>
 #include "lsupport.h"
 
 #ifndef ARRAY_SIZE
 # define ARRAY_SIZE(a) ((sizeof(a)) / (sizeof((a)[0])))
 #endif /* !ARRAY_SIZE */
-
-/* LL_CRYPTO_MAX_NAME value must match value of
- * CRYPTO_MAX_ALG_NAME in include/linux/crypto.h
- */
-#ifdef HAVE_CRYPTO_MAX_ALG_NAME_128
-#define LL_CRYPTO_MAX_NAME 128
-#else
-#define LL_CRYPTO_MAX_NAME 64
-#endif
 
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
 static inline HMAC_CTX *HMAC_CTX_new(void)
@@ -141,15 +113,19 @@ static inline const BIGNUM *DH_get0_p(const DH *dh)
 #define FIPS_mode()	0
 #endif
 
-/* Some limits and defaults */
+/* Some limits and defaults.
+ * SK_MAX_KEYLEN_BYTES, SK_MAX_P_BYTES, MAX_MGSNIDS and struct sk_keyfile_config
+ * are defined in lustre_disk.h (UAPI, shared with kernel).
+ */
 #define SK_CONF_VERSION 1
 #define SK_MSG_VERSION 1
 #define SK_GENERATOR 2
 #define SK_SESSION_MAX_KEYLEN_BYTES 1024
-#define SK_MAX_KEYLEN_BYTES 128
-#define SK_MAX_P_BYTES 2048
 #define SK_NONCE_SIZE 4
-#define MAX_MGSNIDS 16
+
+/* ASCII-encoded key format constants */
+#define SK_ASCII_HEADER "Lustre SSK v1.0\n"
+#define SK_ASCII_HEADER_LEN (sizeof(SK_ASCII_HEADER) - 1)
 
 enum sk_ctx_init_buffers {
 	/* Initiator netstring buffer ordering */
@@ -171,8 +147,8 @@ enum sk_ctx_init_buffers {
 	SK_RESP_BUFFERS	= 4,
 };
 
-/* String consisting of "lustre:fsname:nodemap_hash" */
-#define SK_DESCRIPTION_SIZE (9 + MTI_NAME_MAXLEN + LUSTRE_NODEMAP_NAME_LENGTH)
+/* String consisting of "lustre:fsname:nodemap:yyyymmdd_HHMMSS_USECS" */
+#define SK_DESCRIPTION_SIZE (32 + MTI_NAME_MAXLEN + LUSTRE_NODEMAP_NAME_LENGTH)
 
 enum sk_key_type {
 	SK_TYPE_INVALID	= 0x0,
@@ -181,44 +157,12 @@ enum sk_key_type {
 	SK_TYPE_MGS	= 0x4,
 };
 
-/* This is the packed structure format of key files that are distributed.
- * The on disk format should be store in big-endian. */
-struct sk_keyfile_config {
-	/* File format version */
-	uint32_t	skc_version;
-	/* HMAC algorithm used for message integrity */
-	uint16_t	skc_hmac_alg;
-	/* Crypt algorithm used for privacy mode */
-	uint16_t	skc_crypt_alg;
-	/* Number of seconds that a context is valid after it is created from
-	 * this keyfile */
-	uint32_t	skc_expire;
-	/* Length of shared key in skc_shared_key */
-	uint32_t	skc_shared_keylen;
-	/* Length of the prime used in the DHKE */
-	uint32_t	skc_prime_bits;
-	/* Key type */
-	uint8_t		skc_type;
-	/* Array of MGS NIDs to load key's for.  This is for the client since
-	 * the upcall only knows the target name which is MGC<IP>@<NET>
-	 * Only needed when mounting with mgssec */
-	lnet_nid_t	skc_mgsnids[MAX_MGSNIDS];
-	/* File system name for this key.  It can be unused for MGS only keys */
-	char		skc_fsname[MTI_NAME_MAXLEN + 1];
-	/* Nodemap name for this key.  Used by the server side to verify the
-	 * client is in the correct nodemap */
-	char		skc_nodemap[LUSTRE_NODEMAP_NAME_LENGTH + 1];
-	/* Shared key */
-	unsigned char	skc_shared_key[SK_MAX_KEYLEN_BYTES];
-	/* Prime (p) for DHKE */
-	unsigned char	skc_p[SK_MAX_P_BYTES];
-} __attribute__((packed));
-
-/* Format passed to the kernel from userspace */
+/* Format passed to the kernel from userspace
+ * Internally to the kernel alg name is expected to be 128 */
 struct sk_kernel_ctx {
 	uint32_t	skc_version;
-	char		skc_hmac_alg[LL_CRYPTO_MAX_NAME];
-	char		skc_crypt_alg[LL_CRYPTO_MAX_NAME];
+	char		skc_hmac_alg[CRYPTO_MAX_NAME * 2];
+	char		skc_crypt_alg[CRYPTO_MAX_NAME * 2];
 	uint32_t	skc_expire;
 	uint32_t	skc_host_random;
 	uint32_t	skc_peer_random;
@@ -442,16 +386,27 @@ static inline const char *sk_primebits2name(int primebits)
 	return NULL;
 }
 
+extern int fips_mode;
 void sk_init_logging(char *program, int verbose, int fg);
+int gen_ssk_prime(struct sk_keyfile_config *config);
+int write_config_file(char *output_file, struct sk_keyfile_config *config,
+		      bool overwrite, bool ascii_format);
 struct sk_keyfile_config *sk_read_file(char *filename);
-int sk_load_keyfile(char *path);
+int sk_load_keyfile(char *path, bool client, bool randomize, char *mntdir,
+		    bool suffix, int timeout);
+int sk_remove_keyfile(char *path);
 void sk_config_disk_to_cpu(struct sk_keyfile_config *config);
 void sk_config_cpu_to_disk(struct sk_keyfile_config *config);
 int sk_validate_config(const struct sk_keyfile_config *config);
+int sk_is_ascii_encoded(const char *data, size_t len);
+struct sk_keyfile_config *sk_decode_ascii_key(char *ascii_data, size_t len);
+int sk_encode_ascii_key(const struct sk_keyfile_config *config,
+			char **ascii_data, size_t *ascii_len);
 uint32_t sk_verify_hash(const char *string, const EVP_MD *hash_alg,
 			const gss_buffer_desc *current_hash);
 struct sk_cred *sk_create_cred(const char *fsname, const char *cluster,
-			       const uint32_t flags);
+			       const char *uuid, const uint32_t flags,
+			       void **user_keys_p, void **key_p);
 #ifndef HAVE_OPENSSL_EVP_PKEY
 int sk_speedtest_dh_valid(unsigned int usec_check_max, pid_t *child);
 #endif

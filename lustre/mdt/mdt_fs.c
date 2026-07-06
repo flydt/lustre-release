@@ -15,8 +15,7 @@
 
 #define DEBUG_SUBSYSTEM S_MDS
 
-#include <linux/fs.h>
-#include <libcfs/linux/linux-fs.h>
+#include <lustre_compat/linux/fs.h>
 #include "mdt_internal.h"
 
 static const struct file_operations mdt_open_files_seq_fops = {
@@ -28,17 +27,17 @@ static const struct file_operations mdt_open_files_seq_fops = {
 };
 
 /**
- * Initialize MDT per-export statistics.
+ * mdt_export_stats_init() - Initialize MDT per-export statistics.
+ * @obd: OBD device
+ * @exp: OBD export
+ * @localdata: NID of client
  *
  * This function sets up procfs entries for various MDT export counters. These
  * counters are for per-client statistics tracked on the server.
  *
- * \param[in] obd	OBD device
- * \param[in] exp	OBD export
- * \param[in] localdata	NID of client
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 int mdt_export_stats_init(struct obd_device *obd, struct obd_export *exp,
 			  void *localdata)

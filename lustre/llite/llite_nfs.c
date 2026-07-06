@@ -140,12 +140,6 @@ ll_iget_for_nfs(struct super_block *sb, struct lu_fid *fid, struct lu_fid *paren
 				RETURN(ERR_PTR(-ENOMEM));
 			}
 
-			if (!ll_d_setup(dot, true)) {
-				inode_unlock(d_inode(sb->s_root));
-				obf = ERR_PTR(-ENOMEM);
-				goto free_dot;
-			}
-
 			/* We are requesting OBF fid then locate inode of
 			 * .lustre FID
 			 */
@@ -178,13 +172,6 @@ ll_iget_for_nfs(struct super_block *sb, struct lu_fid *fid, struct lu_fid *paren
 					obf = ERR_PTR(-ENOMEM);
 					goto free_dot;
 				}
-
-				if (!ll_d_setup(obf, true)) {
-					dput(obf);
-					inode_unlock(d_inode(dot));
-					obf = ERR_PTR(-ENOMEM);
-					goto free_dot;
-				}
 				d_add(obf, inode);
 			}
 			inode_unlock(d_inode(dot));
@@ -204,21 +191,27 @@ free_dot:
 	if (IS_ERR(result))
 		RETURN(result);
 
-	if (!ll_d_setup(result, true))
-		RETURN(ERR_PTR(-ENOMEM));
+	if ((current->flags & PF_KTHREAD) && !strcmp(current->comm, "nfsd")) {
+		struct ll_sb_info *sbi = ll_i2sbi(inode);
+
+		/* knfsd uses this from kernel, disable splice(). LU-19255 */
+		if (S_ISREG(inode->i_mode)) {
+			inode->i_fop = ll_select_file_operations(sbi, false);
+			LASSERT(inode->i_fop->splice_read == NULL);
+		}
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 5, 0)
-	/* If we are called by nfsd kthread set lli_open_thrsh_count
-	 * to one. This will force caching the open lock. To be
-	 * removed once oldest supported Linux kernel is 5.5
-	 */
-	if ((current->flags & PF_KTHREAD) &&
-	    strcmp(current->comm, "nfsd") == 0) {
-		struct ll_inode_info *lli = ll_i2info(inode);
+		/* If we are called by nfsd kthread set lli_open_thrsh_count
+		 * to one. This will force caching the open lock. To be
+		 * removed once oldest supported Linux kernel is 5.5
+		 */
+		{
+			struct ll_inode_info *lli = ll_i2info(inode);
 
-		lli->lli_open_thrsh_count = 1;
-	}
+			lli->lli_open_thrsh_count = 1;
+		}
 #endif
+	}
 	RETURN(result);
 }
 
@@ -297,36 +290,21 @@ do_nfs_get_name_filldir(struct ll_getname_data *lgd, const char *name,
 	return lgd->lgd_found;
 }
 
+static FILLDIR_TYPE
+ll_nfs_get_name_filldir(struct dir_context *ctx, const char *name, int namelen,
+			loff_t hash, u64 ino, unsigned int type)
+{
+	struct ll_getname_data *lgd =
+		container_of(ctx, struct ll_getname_data, ctx);
+	int err;
+
+	err = do_nfs_get_name_filldir(lgd, name, namelen, hash, ino, type);
 #ifdef HAVE_FILLDIR_USE_CTX_RETURN_BOOL
-static bool
-ll_nfs_get_name_filldir(struct dir_context *ctx, const char *name, int namelen,
-			loff_t hash, u64 ino, unsigned int type)
-{
-	struct ll_getname_data *lgd =
-		container_of(ctx, struct ll_getname_data, ctx);
-	int err = do_nfs_get_name_filldir(lgd, name, namelen, hash, ino, type);
-
 	return err == 0;
-}
-#elif defined(HAVE_FILLDIR_USE_CTX)
-static int
-ll_nfs_get_name_filldir(struct dir_context *ctx, const char *name, int namelen,
-			loff_t hash, u64 ino, unsigned int type)
-{
-	struct ll_getname_data *lgd =
-		container_of(ctx, struct ll_getname_data, ctx);
-
-	return do_nfs_get_name_filldir(lgd, name, namelen, hash, ino, type);
-}
 #else
-static int ll_nfs_get_name_filldir(void *cookie, const char *name, int namelen,
-				   loff_t hash, u64 ino, unsigned int type)
-{
-	struct ll_getname_data *lgd = cookie;
-
-	return do_nfs_get_name_filldir(lgd, name, namelen, hash, ino, type);
+	return err;
+#endif
 }
-#endif /* HAVE_FILLDIR_USE_CTX */
 
 static int ll_get_name(struct dentry *dentry, char *name, struct dentry *child)
 {
@@ -334,9 +312,7 @@ static int ll_get_name(struct dentry *dentry, char *name, struct dentry *child)
 	struct ll_getname_data lgd = {
 		.lgd_name = name,
 		.lgd_fid = ll_i2info(child->d_inode)->lli_fid,
-#ifdef HAVE_DIR_CONTEXT
 		.ctx.actor = (filldir_t)ll_nfs_get_name_filldir,
-#endif
 		.lgd_found = 0,
 	};
 	struct md_op_data *op_data;
@@ -356,14 +332,9 @@ static int ll_get_name(struct dentry *dentry, char *name, struct dentry *child)
 	if (IS_ERR(op_data))
 		GOTO(out, rc = PTR_ERR(op_data));
 
-	ll_inode_lock(dir);
-#ifdef HAVE_DIR_CONTEXT
+	inode_lock(dir);
 	rc = ll_dir_read(dir, &pos, op_data, &lgd.ctx, NULL);
-#else
-	rc = ll_dir_read(dir, &pos, op_data, &lgd, ll_nfs_get_name_filldir,
-			 NULL);
-#endif
-	ll_inode_unlock(dir);
+	inode_unlock(dir);
 	ll_finish_md_op_data(op_data);
 	if (!rc && !lgd.lgd_found)
 		rc = -ENOENT;

@@ -13,6 +13,7 @@
 
 #ifndef LLITE_INTERNAL_H
 #define LLITE_INTERNAL_H
+
 #include <obd.h>
 #include <lustre_disk.h>  /* for s2sbi */
 #include <lustre_linkea.h>
@@ -34,18 +35,6 @@
 #include "pcc.h"
 #include "foreign_symlink.h"
 
-#ifndef FMODE_EXEC
-#define FMODE_EXEC 0
-#endif
-
-#ifndef HAVE_VM_FAULT_RETRY
-#define VM_FAULT_RETRY 0
-#endif
-
-#ifdef HAVE_DENTRY_D_U_D_ALIAS
-#define d_alias			d_u.d_alias
-#endif
-
 /** Only used on client-side for indicating the tail of dir hash/offset. */
 #define LL_DIR_END_OFF          0x7fffffffffffffffULL
 #define LL_DIR_END_OFF_32BIT    0x7fffffffUL
@@ -55,7 +44,8 @@
 
 #define LL_IT2STR(it) ((it) ? ldlm_it2str((it)->it_op) : "0")
 
-#define TIMES_SET_FLAGS (ATTR_MTIME_SET | ATTR_ATIME_SET | ATTR_TIMES_SET)
+#define TIMES_SET_FLAGS (ATTR_MTIME_SET | ATTR_ATIME_SET | ATTR_CTIME_SET | \
+			 ATTR_TIMES_SET)
 
 struct ll_dentry_data {
 	unsigned int			lld_sa_generation;
@@ -80,9 +70,7 @@ static inline void set_lld_invalid(struct dentry *de, int flag)
 #define LLI_INODE_DEAD                  0xdeadd00d
 
 struct ll_getname_data {
-#ifdef HAVE_DIR_CONTEXT
 	struct dir_context	ctx;
-#endif
 	char		*lgd_name;	/* points to buf with NAME_MAX+1 size */
 	struct lu_fid	lgd_fid;	/* target fid we are looking for */
 	int		lgd_found;	/* inode matched? */
@@ -141,6 +129,7 @@ struct ll_inode_info {
 
 	__u32				lli_projid;   /* project id */
 
+	/* BIT(enum ll_file_internal_flags) */
 	volatile unsigned long		lli_flags;
 	struct posix_acl		*lli_posix_acl;
 
@@ -242,11 +231,10 @@ struct ll_inode_info {
 
 		/* for non-directory */
 		struct {
+			struct range_lock_tree	lli_write_tree;
 			struct mutex		lli_size_mutex;
-			struct task_struct	*lli_size_lock_owner;
 			char			*lli_symlink_name;
 			struct ll_trunc_sem	lli_trunc_sem;
-			struct range_lock_tree	lli_write_tree;
 			struct mutex		lli_setattr_mutex;
 
 			struct rw_semaphore	lli_glimpse_sem;
@@ -329,7 +317,6 @@ struct ll_inode_info {
 
 	/* mutex to request for layout lock exclusively. */
 	struct mutex			lli_layout_mutex;
-	struct task_struct		*lli_layout_lock_owner;
 	/* Layout version, protected by lli_layout_lock */
 	__u32				lli_layout_gen;
 	spinlock_t			lli_layout_lock;
@@ -339,8 +326,6 @@ struct ll_inode_info {
 	struct list_head		lli_xattrs; /* ll_xattr_entry->xe_list*/
 	struct list_head		lli_lccs; /* list of ll_cl_context */
 	seqlock_t			lli_page_inv_lock;
-
-	struct task_struct		*lli_inode_lock_owner;
 };
 
 static inline void lli_jobinfo_cpy(const struct ll_inode_info *lli,
@@ -359,24 +344,17 @@ static inline void lli_jobinfo_cpy(const struct ll_inode_info *lli,
 #define generic_permission(ns, inode, mask)	generic_permission(inode, mask)
 #define simple_setattr(ns, de, iattr)		simple_setattr(de, iattr)
 #define ll_setattr(ns, de, attr)		ll_setattr(de, attr)
-#ifdef HAVE_STRUCT_POSIX_ACL_XATTR
 #define setattr_prepare(ns, de, at)		setattr_prepare(de, at)
-#else
-#define setattr_prepare(ns, de, at)		inode_change_ok(de->d_inode, at)
-#endif
 #define ll_inode_permission(ns, inode, mask)	ll_inode_permission(inode, mask)
-#ifdef HAVE_INODEOPS_ENHANCED_GETATTR
 #define ll_getattr(ns, path, stat, mask, fl)	ll_getattr(path, stat, mask, fl)
-#endif /* HAVE_INODEOPS_ENHANCED_GETATTR */
 #endif
 
-#ifdef IOCB_APPEND
-#define iocb_ki_flags_check(flag, name) (!!((flag) & IOCB_ ## name))
-#define ki_flag(name) IOCB_ ## name
-#else
-#define iocb_ki_flags_check(flag, name) (!!((flag) & O_ ## name))
-#define ki_flag(name) O_ ## name
-#endif
+/* This function checks if any flag is set, not all the flags are set */
+static inline bool iocb_ki_flags_check(const struct kiocb *iocb,
+				       unsigned int flags)
+{
+	return iocb ? iocb->ki_flags & flags : 0;
+}
 
 static inline void ll_trunc_sem_init(struct ll_trunc_sem *sem)
 {
@@ -461,39 +439,6 @@ static inline void trunc_sem_up_write(struct ll_trunc_sem *sem)
 	wake_up_var(&sem->ll_trunc_readers);
 }
 
-#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
-static inline void lli_clear_acl(struct ll_inode_info *lli)
-{
-	if (lli->lli_posix_acl) {
-		posix_acl_release(lli->lli_posix_acl);
-		lli->lli_posix_acl = NULL;
-	}
-}
-
-static inline void lli_replace_acl(struct ll_inode_info *lli,
-				   struct posix_acl *acl)
-{
-	write_lock(&lli->lli_lock);
-	if (lli->lli_posix_acl)
-		posix_acl_release(lli->lli_posix_acl);
-	lli->lli_posix_acl = acl;
-	if (!acl) {
-		forget_cached_acl(&lli->lli_vfs_inode, ACL_TYPE_ACCESS);
-		forget_cached_acl(&lli->lli_vfs_inode, ACL_TYPE_DEFAULT);
-	}
-	write_unlock(&lli->lli_lock);
-}
-#else
-static inline void lli_clear_acl(struct ll_inode_info *lli)
-{
-}
-
-static inline void lli_replace_acl(struct ll_inode_info *lli,
-				   struct posix_acl *acl)
-{
-}
-#endif
-
 static inline __u32 ll_layout_version_get(struct ll_inode_info *lli)
 {
 	__u32 gen;
@@ -512,7 +457,7 @@ static inline void ll_layout_version_set(struct ll_inode_info *lli, __u32 gen)
 	spin_unlock(&lli->lli_layout_lock);
 }
 
-enum ll_inode_flags {
+enum ll_file_internal_flags {
 	/* File data is modified. */
 	LLIF_DATA_MODIFIED      = 0,
 	/* File is being restored */
@@ -525,14 +470,63 @@ enum ll_inode_flags {
 	LLIF_UPDATE_ATIME	= 4,
 	/* foreign file/dir can be unlinked unconditionnaly */
 	LLIF_FOREIGN_REMOVABLE	= 5,
-	/* 6 is not used for now */
+	/* lli_posix_acl reflects the authoritative state (LU-17238) */
+	LLIF_ACL_VALID		= 6,
 	/* Xattr cache is filled */
 	LLIF_XATTR_CACHE_FILLED	= 7,
-
-/* New flags added to this enum potentially need to be handled in
- * ll_inode2ext_flags/ll_set_inode_flags
- */
+	/* New flags added to this enum potentially need to be handled in
+	 * ll_inode2ext_flags/ll_set_inode_flags
+	 */
 };
+
+#ifdef CONFIG_LUSTRE_FS_POSIX_ACL
+static inline void lli_clear_acl(struct ll_inode_info *lli)
+{
+	if (lli->lli_posix_acl) {
+		posix_acl_release(lli->lli_posix_acl);
+		lli->lli_posix_acl = NULL;
+	}
+	clear_bit(LLIF_ACL_VALID, &lli->lli_flags);
+}
+
+/* Install @acl into lli_posix_acl (transfers ownership; @acl may be NULL)
+ * and mark the cached state authoritative. Caller handles inode->i_acl.
+ */
+static inline void lli_install_acl(struct ll_inode_info *lli,
+				   struct posix_acl *acl)
+{
+	write_lock(&lli->lli_lock);
+	if (lli->lli_posix_acl)
+		posix_acl_release(lli->lli_posix_acl);
+	lli->lli_posix_acl = acl;
+	set_bit(LLIF_ACL_VALID, &lli->lli_flags);
+	write_unlock(&lli->lli_lock);
+}
+
+static inline void lli_replace_acl(struct ll_inode_info *lli,
+				   struct posix_acl *acl)
+{
+	lli_install_acl(lli, acl);
+	if (!acl) {
+		forget_cached_acl(&lli->lli_vfs_inode, ACL_TYPE_ACCESS);
+		forget_cached_acl(&lli->lli_vfs_inode, ACL_TYPE_DEFAULT);
+	}
+}
+#else
+static inline void lli_clear_acl(struct ll_inode_info *lli)
+{
+}
+
+static inline void lli_install_acl(struct ll_inode_info *lli,
+				   struct posix_acl *acl)
+{
+}
+
+static inline void lli_replace_acl(struct ll_inode_info *lli,
+				   struct posix_acl *acl)
+{
+}
+#endif
 
 int ll_xattr_cache_destroy(struct inode *inode);
 int ll_xattr_cache_empty(struct inode *inode);
@@ -578,7 +572,8 @@ static inline bool ll_xattr_suffix_is_seclabel(const char *suffix)
 		!strcmp(suffix, XATTR_SMACK_SUFFIX);
 }
 
-int ll_dentry_init_security(struct dentry *dentry, int mode, struct qstr *name,
+int ll_dentry_init_security(struct dentry *dentry, int mode,
+			    const struct qstr *name,
 			    const char **secctx_name, __u32 *secctx_name_size,
 			    void **secctx, __u32 *secctx_size,
 			    int *secctx_slot);
@@ -673,35 +668,6 @@ static inline struct ll_inode_info *ll_i2info(struct inode *inode)
 static inline struct pcc_inode *ll_i2pcci(struct inode *inode)
 {
 	return ll_i2info(inode)->lli_pcc_inode;
-}
-
-static inline void ll_set_inode_lock_owner(struct inode *inode)
-{
-	ll_i2info(inode)->lli_inode_lock_owner = current;
-}
-
-static inline void ll_clear_inode_lock_owner(struct inode *inode)
-{
-	ll_i2info(inode)->lli_inode_lock_owner = NULL;
-}
-
-static inline struct task_struct *ll_get_inode_lock_owner(struct inode *inode)
-{
-	return ll_i2info(inode)->lli_inode_lock_owner;
-}
-
-/* lock inode and set inode lock owener */
-static inline void ll_inode_lock(struct inode *inode)
-{
-	inode_lock(inode);
-	ll_set_inode_lock_owner(inode);
-}
-
-/* clear inode lock owner and unlock it */
-static inline void ll_inode_unlock(struct inode *inode)
-{
-	ll_clear_inode_lock_owner(inode);
-	inode_unlock(inode);
 }
 
 /* default to use at least 16M for fast read if possible */
@@ -835,11 +801,15 @@ enum stats_track_type {
 /* flags for sbi->ll_flags */
 enum ll_sbi_flags {
 	LL_SBI_32BIT_API,		/* generate 32 bit inodes. */
+	/* LOCALFLOCK and FLOCK should be 1 and 2 to minimize fops_array[]
+	 * size in ll_select_file_operations()
+	 */
+#define LL_SBI_NOFLOCK		      0 /* flock support is disabled */
+	LL_SBI_LOCALFLOCK,		/* local flocks instead of fs-wide */
+	LL_SBI_FLOCK,			/* flock enabled */
 	LL_SBI_ALWAYS_PING,		/* ping even if server suppress_pings */
 	LL_SBI_CHECKSUM,		/* checksum each page as it's written */
 	LL_SBI_ENCRYPT,			/* client side encryption */
-	LL_SBI_FLOCK,			/* flock enabled */
-	LL_SBI_LOCALFLOCK,		/* local flocks instead of fs-wide */
 	LL_SBI_FOREIGN_SYMLINK,		/* foreign fake-symlink support */
 	LL_SBI_FOREIGN_SYMLINK_UPCALL,	/* foreign fake-symlink upcall set */
 	LL_SBI_LAZYSTATFS,		/* lazystatfs mount option */
@@ -848,6 +818,7 @@ enum ll_sbi_flags {
 	LL_SBI_STATFS_PROJECT,		/* statfs returns project quota */
 	LL_SBI_TEST_DUMMY_ENCRYPTION,	/* test dummy encryption */
 	LL_SBI_USER_FID2PATH,		/* fid2path by unprivileged users */
+	LL_SBI_USER_PRINCIPAL,		/* user principal for IAM */
 	LL_SBI_USER_XATTR,		/* support user xattr */
 	LL_SBI_VERBOSE,			/* verbose mount/umount */
 	LL_SBI_NUM_MOUNT_OPT,
@@ -908,6 +879,7 @@ struct ll_sb_info {
 	unsigned int		 ll_checksum_set:1,
 				 ll_client_common_fill_super_succeeded:1,
 				 ll_dir_open_read:1,
+				 ll_enable_erasure_coding:1,
 				 ll_enable_statahead_fname:1,
 				 ll_inode_cache_enabled:1,
 				 ll_intent_mkdir_enabled:1,
@@ -1029,8 +1001,14 @@ struct ll_sb_info {
 	char *ll_secctx_name;
 	__u32 ll_secctx_name_size;
 
+	char			 *ll_user_principal;
+
 	/* LU-14535: the list of "lfs quota -a" */
 	struct list_head	 ll_all_quota_list;
+
+	struct rhashtable	 ll_proj_sfs_htable;
+	/* SSK key id */
+	int			 ll_skid;
 };
 
 #define SBI_DEFAULT_HEAT_DECAY_WEIGHT	((80 * 256 + 50) / 100)
@@ -1142,6 +1120,7 @@ struct ll_readahead_work {
 };
 
 extern struct kmem_cache *ll_file_data_slab;
+extern unsigned int llite_enable_flr_ec;
 struct lustre_handle;
 struct ll_file_data {
 	struct file			*fd_file;
@@ -1157,8 +1136,9 @@ struct ll_file_data {
 	 * false: unknown failure, should report.
 	 */
 	bool				fd_write_failed;
-	unsigned int			lfd_lock_no_expand:1;
-	__u32				fd_flags;
+	unsigned int			lfd_lock_no_expand:1,
+					lfd_hsm_agent_registered:1;
+	enum ll_file_flags		lfd_file_flags;
 	enum mds_open_flags		fd_open_mode;
 	/* striped directory may read partially if some stripe inaccessible,
 	 * -errno is saved here, and will return to user in close().
@@ -1309,6 +1289,7 @@ enum {
 	LPROC_LL_HYBRID_NOSWITCH,
 	LPROC_LL_HYBRID_WRITESIZE_SWITCH,
 	LPROC_LL_HYBRID_READSIZE_SWITCH,
+	LPROC_LL_SPLICE,
 	LPROC_LL_FILE_OPCODES
 };
 
@@ -1320,19 +1301,15 @@ enum get_default_layout_type {
 extern const struct file_operations ll_dir_operations;
 extern const struct inode_operations ll_dir_inode_operations;
 extern struct kmem_cache *quota_iter_slab;
-#ifdef HAVE_DIR_CONTEXT
 int ll_dir_read(struct inode *inode, __u64 *pos, struct md_op_data *op_data,
 		struct dir_context *ctx, int *partial_readdir_rc);
-#else
-int ll_dir_read(struct inode *inode, __u64 *pos, struct md_op_data *op_data,
-		void *cookie, filldir_t filldir, int *partial_readdir_rc);
-#endif
 int ll_get_mdt_idx(struct inode *inode);
 int ll_get_mdt_idx_by_fid(struct ll_sb_info *sbi, const struct lu_fid *fid);
-struct page *ll_get_dir_page(struct inode *dir, struct md_op_data *op_data,
-			      __u64 offset, bool is64bit,
-			      int *partial_readdir_rc);
-void ll_release_page(struct inode *inode, struct page *page, bool remove);
+struct folio *ll_get_dir_folio(struct inode *dir, struct md_op_data *op_data,
+			       __u64 offset, bool is64bit,
+			       int *partial_readdir_rc);
+void ll_release_dir_folio(struct inode *inode, struct folio *folio,
+			  bool remove);
 int quotactl_ioctl(struct super_block *sb, struct if_quotactl *qctl);
 void ll_quota_iter_check_and_cleanup(struct ll_sb_info *sbi, bool check);
 
@@ -1368,7 +1345,6 @@ int ll_intent_lock(struct obd_export *exp, struct md_op_data *op_data,
 		   bool tryagain);
 
 /* llite/rw.c */
-int ll_writepage(struct page *page, struct writeback_control *wbc);
 int ll_writepages(struct address_space *a, struct writeback_control *wbc);
 int ll_readpage(struct file *file, struct page *page);
 #ifdef HAVE_AOPS_READ_FOLIO
@@ -1377,7 +1353,8 @@ int ll_read_folio(struct file *file, struct folio *folio);
 int ll_io_read_page(const struct lu_env *env, struct cl_io *io,
 			   struct cl_page *page, struct file *file);
 void ll_readahead_init(struct inode *inode, struct ll_readahead_state *ras);
-int vvp_io_write_commit(const struct lu_env *env, struct cl_io *io);
+int vvp_io_write_commit(const struct lu_env *env, struct cl_io *io,
+			enum cl_io_priority prio);
 
 enum lcc_type;
 void ll_cl_add(struct inode *inode, const struct lu_env *env, struct cl_io *io,
@@ -1389,7 +1366,8 @@ extern const struct address_space_operations ll_aops;
 
 /* llite/file.c */
 extern const struct inode_operations ll_file_inode_operations;
-const struct file_operations *ll_select_file_operations(struct ll_sb_info *sbi);
+const struct file_operations *ll_select_file_operations(struct ll_sb_info *sbi,
+							bool with_splice);
 extern int ll_have_md_lock(struct obd_export *exp, struct inode *inode,
 			   enum mds_ibits_locks *bits,
 			   enum ldlm_mode l_req_mode,
@@ -1406,12 +1384,8 @@ void ll_track_file_opens(struct inode *inode);
 extern void ll_rw_stats_tally(struct ll_sb_info *sbi, pid_t pid,
 			      struct ll_file_data *file, loff_t pos,
 			      size_t count, int rw);
-#if defined(HAVE_USER_NAMESPACE_ARG) || defined(HAVE_INODEOPS_ENHANCED_GETATTR)
 int ll_getattr(struct mnt_idmap *, const struct path *path,
 	       struct kstat *stat, u32 request_mask, unsigned int flags);
-#else
-int ll_getattr(struct vfsmount *mnt, struct dentry *de, struct kstat *stat);
-#endif /* HAVE_USER_NAMESPACE_ARG */
 int ll_getattr_dentry(struct dentry *de, struct kstat *stat, u32 request_mask,
 		      unsigned int flags, bool foreign);
 #ifdef CONFIG_LUSTRE_FS_POSIX_ACL
@@ -1501,12 +1475,6 @@ void ll_io_set_mirror(struct cl_io *io, const struct file *file);
 /* llite/dcache.c */
 
 extern const struct dentry_operations ll_d_ops;
-#ifndef HAVE_D_INIT
-bool ll_d_setup(struct dentry *de, bool do_put);
-#else
-#define ll_d_setup(de, do_put) (true)
-#endif
-
 void ll_intent_drop_lock(struct lookup_intent *lookup);
 void ll_intent_release(struct lookup_intent *lookup);
 void ll_prune_aliases(struct inode *inode);
@@ -1515,6 +1483,7 @@ int ll_revalidate_it_finish(struct ptlrpc_request *request,
 			    struct lookup_intent *it, struct dentry *de);
 
 /* llite/llite_lib.c */
+
 extern const struct super_operations lustre_super_operations;
 
 void ll_lli_init(struct ll_inode_info *lli);
@@ -1541,15 +1510,14 @@ int ll_read_inode2(struct inode *inode, void *opaque);
 void ll_truncate_inode_pages_final(struct inode *inode);
 void ll_delete_inode(struct inode *inode);
 #ifdef HAVE_FILEATTR_GET
-int ll_fileattr_get(struct dentry *dentry, struct fileattr *fa);
+int ll_fileattr_get(struct dentry *dentry, struct file_kattr *fa);
 int ll_fileattr_set(struct mnt_idmap *mnt_userns,
-		    struct dentry *dentry, struct fileattr *fa);
+		    struct dentry *dentry, struct file_kattr *fa);
 #endif
 int ll_iocontrol(struct inode *inode, struct file *file,
 		 unsigned int cmd, void __user *uarg);
 int ll_flush_ctx(struct inode *inode);
 void ll_umount_begin(struct super_block *sb);
-int ll_remount_fs(struct super_block *sb, int *flags, char *data);
 int ll_show_options(struct seq_file *seq, struct dentry *dentry);
 void ll_dirty_page_discard_warn(struct inode *inode, int ioret);
 int ll_prep_inode(struct inode **inode, struct req_capsule *pill,
@@ -1580,6 +1548,8 @@ void ll_dir_finish_open(struct inode *inode, struct ptlrpc_request *req);
 /* Compute expected user md size when passing in a md from user space */
 static inline ssize_t ll_lov_user_md_size(const struct lov_user_md *lum)
 {
+	ssize_t lumlen;
+
 	switch (lum->lmm_magic) {
 	case LOV_USER_MAGIC_V1:
 		return sizeof(struct lov_user_md_v1);
@@ -1592,9 +1562,19 @@ static inline ssize_t ll_lov_user_md_size(const struct lov_user_md *lum)
 		return lov_user_md_size(lum->lmm_stripe_count,
 					LOV_USER_MAGIC_SPECIFIC);
 	case LOV_USER_MAGIC_COMP_V1:
-		return ((struct lov_comp_md_v1 *)lum)->lcm_size;
+		lumlen = ((struct lov_comp_md_v1 *)lum)->lcm_size;
+		if (unlikely(lumlen <= 0))
+			return -EINVAL;
+		if (unlikely(lumlen > XATTR_SIZE_MAX))
+			return -EOVERFLOW;
+		return lumlen;
 	case LOV_USER_MAGIC_FOREIGN:
-		return lov_foreign_size(lum);
+		lumlen = lov_foreign_size(lum);
+		if (unlikely(lumlen <= 0))
+			return -EINVAL;
+		if (unlikely(lumlen > XATTR_SIZE_MAX))
+			return -EOVERFLOW;
+		return lumlen;
 	}
 
 	return -EINVAL;
@@ -1620,24 +1600,8 @@ struct vvp_io_args {
 		} normal;
 	} u;
 	/* did we switch this IO from BIO to DIO using hybrid IO? */
-	int	via_hybrid_switched:1;
+	unsigned int	via_hybrid_switched:1;
 };
-
-static inline unsigned int iocb_ki_flags_get(const struct file *file,
-					     const struct kiocb *iocb)
-{
-#ifdef IOCB_APPEND
-	return iocb ? iocb->ki_flags : 0;
-#else
-	return file->f_flags;
-#endif
-}
-
-static inline unsigned int vvp_io_args_flags(const struct file *file,
-					     const struct vvp_io_args *args)
-{
-	return iocb_ki_flags_get(file, args ? args->u.normal.via_iocb : NULL);
-}
 
 enum lcc_type {
 	LCC_RW = 1,
@@ -1885,7 +1849,8 @@ struct ll_statahead_info {
 			__u8	sai_fname_zeroed_len;
 		};
 	};
-	char			sai_fname[NAME_MAX];
+	/* match array size of llapi_lu_ladvise2:lla_buf */
+	char			sai_fname[NAME_MAX + 1];
 };
 
 /* Per inode statahead information */
@@ -1908,19 +1873,19 @@ void ll_statahead_enter(struct inode *dir, struct dentry *dentry);
 /* glimpse.c */
 blkcnt_t dirty_cnt(struct inode *inode);
 
-int cl_glimpse_size0(struct inode *inode, int agl);
+int __cl_glimpse_size(struct inode *inode, int agl);
 int cl_glimpse_lock(const struct lu_env *env, struct cl_io *io,
 		    struct inode *inode, struct cl_object *clob, int agl);
 
 static inline int cl_glimpse_size(struct inode *inode)
 {
-	return cl_glimpse_size0(inode, 0);
+	return __cl_glimpse_size(inode, 0);
 }
 
 /* AGL is 'async glimpse lock',is speculative lock taken as part of statahead */
 static inline int cl_agl(struct inode *inode)
 {
-	return cl_glimpse_size0(inode, 1);
+	return __cl_glimpse_size(inode, 1);
 }
 
 int ll_file_lock_ahead(struct file *file, struct llapi_lu_ladvise *ladvise);
@@ -1999,7 +1964,8 @@ dentry_may_statahead(struct inode *dir, struct dentry *dentry)
 }
 
 int cl_sync_file_range(struct inode *inode, loff_t start, loff_t end,
-		       enum cl_fsync_mode mode, int ignore_layout);
+		       enum cl_fsync_mode mode, int ignore_layout,
+		       enum cl_io_priority prio);
 
 static inline int ll_file_nolock(const struct file *file)
 {
@@ -2007,7 +1973,7 @@ static inline int ll_file_nolock(const struct file *file)
 	struct inode *inode = file_inode((struct file *)file);
 
 	LASSERT(fd != NULL);
-	return ((fd->fd_flags & LL_FILE_IGNORE_LOCK) ||
+	return ((fd->lfd_file_flags & LL_FILE_IGNORE_LOCK) ||
 		test_bit(LL_SBI_NOLCK, ll_i2sbi(inode)->ll_flags));
 }
 
@@ -2079,7 +2045,7 @@ static inline void d_lustre_invalidate(struct dentry *dentry)
 	CDEBUG(D_DENTRY,
 	       "invalidate dentry "DNAME" (%p) parent %p inode %p refc %d\n",
 	       encode_fn_dentry(dentry), dentry, dentry->d_parent,
-	       dentry->d_inode, ll_d_count(dentry));
+	       dentry->d_inode, d_count(dentry));
 
 	spin_lock(&dentry->d_lock);
 	set_lld_invalid(dentry, 1);

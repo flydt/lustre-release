@@ -8,7 +8,7 @@
 
 #include <linux/fs.h>
 #include <linux/fs_struct.h>
-#include <libcfs/libcfs.h>
+#include <linux/mount.h>
 #include <lvfs.h>
 #include <obd_class.h>
 
@@ -31,13 +31,10 @@ static inline void ll_set_fs_pwd(struct fs_struct *fs, struct vfsmount *mnt,
 	path.mnt = mnt;
 	path.dentry = dentry;
 	path_get(&path);
-	spin_lock(&fs->lock);
-	write_seqcount_begin(&fs->seq);
+	fs_write_seqlock(fs);
 	old_pwd = fs->pwd;
 	fs->pwd = path;
-	write_seqcount_end(&fs->seq);
-	spin_unlock(&fs->lock);
-
+	fs_write_sequnlock(fs);
 	if (old_pwd.dentry)
 		path_put(&old_pwd);
 }
@@ -52,8 +49,8 @@ void push_ctxt(struct lvfs_run_ctxt *save, struct lvfs_run_ctxt *new_ctx)
 	ASSERT_CTXT_MAGIC(new_ctx->magic);
 	OBD_SET_CTXT_MAGIC(save);
 
-	LASSERT(ll_d_count(current->fs->pwd.dentry));
-	LASSERT(ll_d_count(new_ctx->pwd));
+	LASSERT(d_count(current->fs->pwd.dentry));
+	LASSERT(d_count(new_ctx->pwd));
 	save->pwd = dget(current->fs->pwd.dentry);
 	save->pwdmnt = mntget(current->fs->pwd.mnt);
 	save->umask = current_umask();

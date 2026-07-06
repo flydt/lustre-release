@@ -58,12 +58,9 @@
 
 #include "tgt_internal.h"
 
-int lbug_on_grant_miscount;
+static int lbug_on_grant_miscount;
 module_param(lbug_on_grant_miscount, int, 0644);
 MODULE_PARM_DESC(lbug_on_grant_miscount, "LBUG on grant miscount");
-
-/* Clients typically hold 2x their max_rpcs_in_flight of grant space */
-#define TGT_GRANT_SHRINK_LIMIT(exp)	(2ULL * 8 * exp_max_brw_size(exp))
 
 /* Helpers to inflate/deflate grants for clients that do not support the grant
  * parameters */
@@ -129,8 +126,8 @@ static int tgt_check_export_grants(struct obd_export *exp, u64 *dirty,
 		     ted->ted_dirty, ted->ted_pending, ted->ted_grant);
 
 	if (ted->ted_grant + ted->ted_pending > maxsize) {
-		CERROR("%s: cli %s/%p ted_grant(%ld) + ted_pending(%ld)"
-			" > maxsize(%llu)\n", exp->exp_obd->obd_name,
+		CERROR("%s: cli %s/%p ted_grant(%ld) + ted_pending(%ld) > maxsize(%llu)\n",
+			exp->exp_obd->obd_name,
 			exp->exp_client_uuid.uuid, exp, ted->ted_grant,
 			ted->ted_pending, maxsize);
 		return -EFAULT;
@@ -196,8 +193,8 @@ void tgt_grant_sanity_check(struct obd_device *obd, const char *func)
 	spin_lock(&tgd->tgd_grant_lock);
 	exp = obd->obd_self_export;
 	ted = &exp->exp_target_data;
-	CDEBUG(D_CACHE, "%s: processing self export: %ld %ld "
-	       "%ld\n", obd->obd_name, ted->ted_grant,
+	CDEBUG(D_CACHE, "%s: processing self export: %ld %ld %ld\n",
+	       obd->obd_name, ted->ted_grant,
 	       ted->ted_pending, ted->ted_dirty);
 	tot_granted += ted->ted_grant + ted->ted_pending;
 	tot_pending += ted->ted_pending;
@@ -273,6 +270,7 @@ int tgt_statfs_internal(const struct lu_env *env, struct lu_target *lut,
 {
 	struct tg_grants_data *tgd = &lut->lut_tgd;
 	int rc = 0;
+
 	ENTRY;
 
 	spin_lock(&tgd->tgd_osfs_lock);
@@ -489,6 +487,7 @@ static void tgt_grant_incoming(const struct lu_env *env, struct obd_export *exp,
 	struct obd_device	*obd = exp->exp_obd;
 	struct tg_grants_data	*tgd = &obd2obt(obd)->obt_lut->lut_tgd;
 	long long		 dirty, dropped;
+
 	ENTRY;
 
 	assert_spin_locked(&tgd->tgd_grant_lock);
@@ -513,6 +512,7 @@ static void tgt_grant_incoming(const struct lu_env *env, struct obd_export *exp,
 	/* inflate grant counters if required */
 	if (!exp_grant_param_supp(exp)) {
 		u64 tmp;
+
 		oa->o_grant	= tgt_grant_inflate(tgd, oa->o_grant);
 		oa->o_dirty	= tgt_grant_inflate(tgd, oa->o_dirty);
 		/* inflation can bump client's wish to >4GB which doesn't fit
@@ -588,8 +588,9 @@ static void tgt_grant_shrink(struct obd_export *exp, struct obdo *oa,
 
 	assert_spin_locked(&tgd->tgd_grant_lock);
 	LASSERT(exp);
-	if (left_space >= tgd->tgd_tot_granted_clients *
-			  TGT_GRANT_SHRINK_LIMIT(exp))
+
+	/* don't need to shrink grant if it uses less than 25% of left space */
+	if (tgd->tgd_tot_granted * 4 < left_space)
 		return;
 
 	grant_shrink = oa->o_grant;
@@ -724,8 +725,7 @@ static void tgt_grant_check(const struct lu_env *env, struct obd_export *exp,
 		/* Recoverable resend, grant info have already been processed as
 		 * well */
 		skip = true;
-		CDEBUG(D_CACHE, "Recoverable resend arrived, skipping "
-				"accounting\n");
+		CDEBUG(D_CACHE, "Recoverable resend arrived, skipping accounting\n");
 	} else if (exp_grant_param_supp(exp) && oa->o_grant_used > 0) {
 		/* Client supports the new grant parameters and is telling us
 		 * how much grant space it consumed for this bulk write.
@@ -779,15 +779,14 @@ static void tgt_grant_check(const struct lu_env *env, struct obd_export *exp,
 				continue;
 			}
 
-			CDEBUG(D_CACHE, "%s: cli %s/%p claims %ld+%d GRANT, "
-			       "real grant %lu idx %d\n", obd->obd_name,
+			CDEBUG(D_CACHE, "%s: cli %s/%p claims %ld+%d GRANT, real grant %lu idx %d\n",
+			       obd->obd_name,
 			       exp->exp_client_uuid.uuid, exp, granted, bytes,
 			       ted->ted_grant, i);
 		}
 
 		if (test_bit(OBDF_RECOVERING, obd->obd_flags))
-			CERROR("%s: cli %s is replaying OST_WRITE while one rnb"
-			       " hasn't OBD_BRW_FROM_GRANT set (0x%x)\n",
+			CERROR("%s: cli %s is replaying OST_WRITE while one rnb hasn't OBD_BRW_FROM_GRANT set (0x%x)\n",
 			       obd->obd_name, exp->exp_client_uuid.uuid,
 			       rnb[i].rnb_flags);
 
@@ -832,8 +831,8 @@ static void tgt_grant_check(const struct lu_env *env, struct obd_export *exp,
 	tgd->tgd_tot_pending += oa->o_grant_used;
 
 	CDEBUG(D_CACHE,
-	       "%s: cli %s/%p granted: %lu ungranted: %lu grant: %lu dirty: %lu"
-	       "\n", obd->obd_name, exp->exp_client_uuid.uuid, exp,
+	       "%s: cli %s/%p granted: %lu ungranted: %lu grant: %lu dirty: %lu\n",
+	       obd->obd_name, exp->exp_client_uuid.uuid, exp,
 	       granted, ungranted, ted->ted_grant, ted->ted_dirty);
 
 	if (test_bit(OBDF_RECOVERING, obd->obd_flags) ||
@@ -954,7 +953,6 @@ static long tgt_grant_alloc(struct obd_export *exp, u64 curgrant,
 
 	tgd->tgd_tot_granted += grant;
 	ted->ted_grant += grant;
-
 	if (unlikely(ted->ted_grant < 0 || ted->ted_grant > want + chunk)) {
 		CERROR("%s: cli %s/%p grant %ld want %llu current %llu\n",
 		       obd->obd_name, exp->exp_client_uuid.uuid, exp,
@@ -966,17 +964,47 @@ static long tgt_grant_alloc(struct obd_export *exp, u64 curgrant,
 	}
 
 	CDEBUG(D_CACHE,
-	       "%s: cli %s/%p wants: %llu current grant %llu"
-	       " granting: %llu\n", obd->obd_name, exp->exp_client_uuid.uuid,
+	       "%s: cli %s/%p wants: %llu current grant %llu granting: %llu\n",
+	       obd->obd_name, exp->exp_client_uuid.uuid,
 	       exp, want, curgrant, grant);
 	CDEBUG(D_CACHE,
-	       "%s: cli %s/%p tot cached:%llu granted:%llu"
-	       " num_exports: %d\n", obd->obd_name, exp->exp_client_uuid.uuid,
+	       "%s: cli %s/%p tot cached:%llu granted:%llu num_exports: %d\n",
+	       obd->obd_name, exp->exp_client_uuid.uuid,
 	       exp, tgd->tgd_tot_dirty, tgd->tgd_tot_granted,
 	       obd->obd_num_exports);
 
 	RETURN(grant);
 }
+
+/**
+ * Deallocate space granted to a client
+ *
+ * This is used when write RPC fails. Server needs to update grant
+ * counters as a client won't get addiitional grants.
+ *
+ * \param[in] exp		export of the client which sent the request
+ * \param[in] granted		grants allocated via tgt_grant_prepare_write
+ */
+void tgt_grant_dealloc(struct obd_export *exp, struct obdo *oa)
+{
+	struct tg_grants_data *tgd = &obd2obt(exp->exp_obd)->obt_lut->lut_tgd;
+	struct tg_export_data *ted = &exp->exp_target_data;
+	int disconnected;
+
+	if (!(oa->o_valid & OBD_MD_FLGRANT))
+		return;
+	spin_lock(&tgd->tgd_grant_lock);
+	spin_lock(&exp->exp_lock);
+	disconnected = exp->exp_disconnected;
+	spin_unlock(&exp->exp_lock);
+	if (!disconnected) {
+		tgd->tgd_tot_granted -= oa->o_grant;
+		ted->ted_grant -= oa->o_grant;
+		oa->o_grant = 0;
+	}
+	spin_unlock(&tgd->tgd_grant_lock);
+}
+EXPORT_SYMBOL(tgt_grant_dealloc);
 
 /**
  * Handle grant space allocation on client connection & reconnection.
@@ -1098,11 +1126,11 @@ void tgt_grant_discard(struct obd_export *exp)
 			ttd += e->exp_target_data.ted_dirty;
 		}
 		if (tgd->tgd_tot_granted < ted->ted_grant)
-			CERROR("%s: cli %s/%p: tot_granted %llu < ted_grant %ld, corrected to %llu",
+			CERROR("%s: cli %s/%p: tot_granted %llu < ted_grant %ld, corrected to %llu\n",
 			       obd->obd_name,  exp->exp_client_uuid.uuid, exp,
 			       tgd->tgd_tot_granted, ted->ted_grant, ttg);
 		if (tgd->tgd_tot_dirty < ted->ted_dirty)
-			CERROR("%s: cli %s/%p: tot_dirty %llu < ted_dirty %ld, corrected to %llu",
+			CERROR("%s: cli %s/%p: tot_dirty %llu < ted_dirty %ld, corrected to %llu\n",
 			       obd->obd_name, exp->exp_client_uuid.uuid, exp,
 			       tgd->tgd_tot_dirty, ted->ted_dirty, ttd);
 		tgd->tgd_tot_granted = ttg;
@@ -1334,6 +1362,7 @@ long tgt_grant_create(const struct lu_env *env, struct obd_export *exp, s64 *nr)
 	u64			 left = 0;
 	unsigned long		 wanted;
 	unsigned long		 granted;
+
 	ENTRY;
 
 	if (test_bit(OBDF_RECOVERING, exp->exp_obd->obd_flags) ||
@@ -1532,6 +1561,7 @@ int tgt_grant_commit_cb_add(struct thandle *th, struct obd_export *exp,
 	struct tgt_grant_cb	*tgc;
 	struct dt_txn_commit_cb	*dcb;
 	int			 rc;
+
 	ENTRY;
 
 	OBD_ALLOC_PTR(tgc);

@@ -16,10 +16,9 @@
  */
 
 #define DEBUG_SUBSYSTEM S_CLASS
-#define D_MOUNT (D_SUPER | D_CONFIG /* | D_WARNING */)
 
 #include <linux/types.h>
-#include <lustre_compat/linux/generic-radix-tree.h>
+#include <linux/generic-radix-tree.h>
 #ifdef HAVE_LINUX_SELINUX_IS_ENABLED
 #include <linux/selinux.h>
 #endif
@@ -27,9 +26,9 @@
 #include <linux/version.h>
 #include <linux/delay.h>
 #include <linux/file.h>
-#ifdef HAVE_FSMAP_H
+#include <lustre_compat/linux/fs.h>
 #include <linux/fsmap.h>
-#endif
+#include <linux/mount.h>
 #include <linux/uaccess.h>
 
 #include <llog_swab.h>
@@ -263,7 +262,7 @@ static int server_stop_mgs(struct super_block *sb)
 	}
 
 	/* The MGS should always stop when we say so */
-	obd->obd_force = 1;
+	set_bit(OBDF_FORCE, obd->obd_flags);
 	rc = class_manual_cleanup(obd);
 	RETURN(rc);
 }
@@ -611,9 +610,16 @@ out:
 }
 
 /**
- * lwp is used by slaves (Non-MDT0 targets) to manage the connection to MDT0,
- * or from the OSTx to MDTy.
- **/
+ * lustre_lwp_setup() - lwp is used by slaves (Non-MDT0 targets) to manage the
+ *                      connection to MDT0 or from the OSTx to MDTy
+ * @lcfg: Lustre configuration struct
+ * @lsi: Lustre superblock info(LSI) struct
+ * @idx: Used as unique LWP name
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on error
+ */
 static int lustre_lwp_setup(struct lustre_cfg *lcfg, struct lustre_sb_info *lsi,
 			    u32 idx)
 {
@@ -776,8 +782,14 @@ out:
 }
 
 /**
- * Retrieve MDT nids from the client log, then start the lwp device.
- * there are only two scenarios which would include mdt nid.
+ * client_lwp_config_process() - Retrieve MDT nids from the client log, then
+ *                               start the lwp device. there are only two
+ *                               scenarios which would include mdt nid.
+ * @env: lustre execution environment
+ * @handle: llog handle of the current llog
+ * @rec: llog record header
+ * @data: Passed as data param to class_config_parse_llog
+ *
  * 1.
  * marker   5 (flags=0x01, v2.1.54.0) lustre-MDTyyyy  'add mdc' xxx-
  * add_uuid  nid=192.168.122.162@tcp(0x20000c0a87aa2)  0:  1:192.168.122.162@tcp
@@ -792,7 +804,11 @@ out:
  * add_uuid  nid=192.168.122.2@tcp(0x20000c0a87a02)  0:  1:192.168.122.2@tcp
  * add_conn  0:lustre-MDTyyyy-mdc  1:192.168.122.2@tcp
  * marker   7 (flags=0x02, v2.1.54.0) lustre-MDTyyyy  'add failnid' xxxx-
- **/
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on error
+ */
 static int client_lwp_config_process(const struct lu_env *env,
 				     struct llog_handle *handle,
 				     struct llog_rec_hdr *rec, void *data)
@@ -1016,8 +1032,13 @@ out:
 }
 
 /**
- * Stop the lwp for an OST/MDT target.
- **/
+ * lustre_stop_lwp() - Stop the lwp for an OST/MDT target.
+ * @sb: super block for this file-system
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on error
+ */
 static int lustre_stop_lwp(struct super_block *sb)
 {
 	struct lustre_sb_info *lsi = s2lsi(sb);
@@ -1031,7 +1052,7 @@ static int lustre_stop_lwp(struct super_block *sb)
 		lwp = list_first_entry(&lsi->lsi_lwp_list, struct obd_device,
 				       obd_lwp_list);
 		list_del_init(&lwp->obd_lwp_list);
-		lwp->obd_force = 1;
+		set_bit(OBDF_FORCE, lwp->obd_flags);
 		mutex_unlock(&lsi->lsi_lwp_mutex);
 
 		rc = class_manual_cleanup(lwp);
@@ -1048,8 +1069,15 @@ static int lustre_stop_lwp(struct super_block *sb)
 }
 
 /**
+ * lustre_start_lwp() - Start the LWP
+ * @sb: super block for this file-system
+ *
  * Start the lwp(fsname-MDTyyyy-lwp-{MDT,OST}xxxx) for a MDT/OST or MDT target.
- **/
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on error
+ */
 static int lustre_start_lwp(struct super_block *sb)
 {
 	struct lustre_sb_info *lsi = s2lsi(sb);
@@ -1129,8 +1157,8 @@ static int server_stop_servers(int lsiflags)
 
 	class_put_type(type);
 	if (obd && type_last) {
-		obd->obd_force = 1;
-		/* obd_fail doesn't mean much on a server obd */
+		set_bit(OBDF_FORCE, obd->obd_flags);
+		/* OBDF_FAIL doesn't mean much on a server obd */
 		rc = class_manual_cleanup(obd);
 	}
 
@@ -1195,89 +1223,135 @@ int server_mti_print(const char *title, struct mgs_target_info *mti)
 }
 EXPORT_SYMBOL(server_mti_print);
 
+struct nid_fetch_data {
+	GENRADIX(struct lnet_nid) nfd_radix;
+	struct lustre_mount_data *nfd_lmd;
+	unsigned int nfd_pos;
+	bool nfd_skip_ipv6;
+	bool nfd_has_ipv6;
+};
+
+static int server_nid2radix(void *data, struct lnet_nid *nid)
+{
+	struct nid_fetch_data *nfd = data;
+	struct lnet_nid *tmp;
+
+	if (nid_is_lo0(nid))
+		return 0;
+
+	/* skip IPv6 NIDs for an old server */
+	if (!nid_is_nid4(nid)) {
+		if (nfd->nfd_skip_ipv6)
+			return 0;
+		nfd->nfd_has_ipv6 = true;
+	}
+
+	if (nfd->nfd_lmd &&
+	    test_bit(LMD_FLG_NO_PRIMNODE, nfd->nfd_lmd->lmd_flags) &&
+	    class_match_nid(nfd->nfd_lmd->lmd_params, PARAM_FAILNODE, nid) < 1)
+		return 0;
+
+	tmp = genradix_ptr_alloc(&nfd->nfd_radix, nfd->nfd_pos, GFP_KERNEL);
+	if (!tmp)
+		return -ENOMEM;
+	*tmp = *nid;
+	nfd->nfd_pos++;
+
+	return 0;
+}
+
 /* Generate data for registration */
-static struct mgs_target_info *server_lsi2mti(struct lustre_sb_info *lsi)
+static struct mgs_target_info *server_lsi2mti(struct lustre_sb_info *lsi,
+					      bool registration)
 {
 	size_t len = offsetof(struct mgs_target_info, mti_nidlist);
-	GENRADIX(struct lnet_processid) plist;
-	struct lnet_processid id, *tmp;
+	struct nid_fetch_data nfd;
 	struct mgs_target_info *mti;
 	bool large_nid = false;
-	int nid_count = 0;
-	int rc, i = 0;
-	int cplen = 0;
+	__u32 refnet = LNET_NET_ANY;
+	char *buf;
+	int rc, i = 0, nid_count;
+	bool mgc_no_connect;
 
 	ENTRY;
 	if (!IS_SERVER(lsi))
 		RETURN(ERR_PTR(-EINVAL));
 
+	/* MGC has no flags if it was never connected to MGS yet */
+	mgc_no_connect = !exp_connect_flags(lsi->lsi_mgc->u.cli.cl_mgc_mgsexp);
+
 	if (exp_connect_flags2(lsi->lsi_mgc->u.cli.cl_mgc_mgsexp) &
 	    OBD_CONNECT2_LARGE_NID)
 		large_nid = true;
 
-	genradix_init(&plist);
-
-	while (LNetGetId(i++, &id, large_nid) != -ENOENT) {
-		if (nid_is_lo0(&id.nid))
-			continue;
-
-		/* server use --servicenode param, only allow specified
-		 * nids be registered
-		 */
-		if (test_bit(LMD_FLG_NO_PRIMNODE, lsi->lsi_lmd->lmd_flags) &&
-		    class_match_nid(lsi->lsi_lmd->lmd_params,
-				    PARAM_FAILNODE, &id.nid) < 1)
-			continue;
-
-		if (!class_find_param(lsi->lsi_lmd->lmd_params,
-					PARAM_NETWORK, NULL)) {
-			if (LNetGetPeerDiscoveryStatus()) {
-				CERROR("LNet Dynamic Peer Discovery is enabled"
-				       " on this node. 'network' option used in"
-				       " mkfs.lustre cannot be taken into"
-				       " account.\n");
-				GOTO(free_list, mti = ERR_PTR(-EINVAL));
-			}
-		}
-
-		/* match specified network */
-		if (!class_match_net(lsi->lsi_lmd->lmd_params,
-				     PARAM_NETWORK, LNET_NID_NET(&id.nid)))
-			continue;
-
-		tmp = genradix_ptr_alloc(&plist, nid_count++, GFP_KERNEL);
-		if (!tmp)
-			GOTO(free_list, mti = ERR_PTR(-ENOMEM));
-
-		if (large_nid)
-			len += LNET_NIDSTR_SIZE;
-		*tmp = id;
+	buf = lsi->lsi_lmd->lmd_params;
+	/* The 'network' parameter is used on target to define a primary
+	 * network which target uses to communicate with others targets,
+	 * but it shouldn't restrict clients access to that target.
+	 * So upon registration network filtering is needed to produce configs
+	 * with NIDs on specified networks only, if that is needed.
+	 * Сonversely, for notification about target local NIDs it shouldn't
+	 * be applied, so IR will receive all available NIDs on target.
+	 */
+	if (registration) {
+		/* Prefer mount option value firts if provided */
+		if (lsi->lsi_lmd->lmd_nidnet)
+			refnet = libcfs_str2net(lsi->lsi_lmd->lmd_nidnet);
+		else if (!class_find_param(buf, PARAM_NETWORK, &buf))
+			class_parse_net(buf, &refnet, NULL);
 	}
 
-	if (nid_count == 0) {
+	if (refnet != LNET_NET_ANY && LNetGetPeerDiscoveryStatus()) {
+		CERROR("LNet Dynamic Peer Discovery is enabled on this node. 'network' option cannot be taken into account.\n");
+		RETURN(ERR_PTR(-EINVAL));
+	}
+
+	genradix_init(&nfd.nfd_radix);
+	/* avoid allocation inside callback */
+	genradix_prealloc(&nfd.nfd_radix, MTI_NIDS_MAX, GFP_KERNEL);
+	nfd.nfd_lmd = registration ? lsi->lsi_lmd : NULL;
+	nfd.nfd_pos = 0;
+	/* skip IPv6 NIDs if MGS reports that explicitly by finished connect */
+	nfd.nfd_skip_ipv6 = !large_nid && !mgc_no_connect;
+	nfd.nfd_has_ipv6 = false;
+
+	LNetFetchNIDs(server_nid2radix, refnet, &nfd);
+	nid_count = nfd.nfd_pos;
+	if (!nid_count) {
 		CERROR("Failed to get NID for server %s, please check whether the target is specifed with improper --servicenode or --network options.\n",
 		       lsi->lsi_svname);
-		GOTO(free_list, mti = ERR_PTR(-EINVAL));
+		GOTO(free_radix, mti = ERR_PTR(-EINVAL));
 	}
+	/* at this point large_nid is either set already or MGC is not yet
+	 * connected, but LNet reports IPv6 NIDs, so assume MGS is not too
+	 * old and aware about large NIDs
+	 */
+	large_nid |= nfd.nfd_has_ipv6;
+	if (large_nid)
+		len += NIDLIST_SIZE(nid_count);
+	else if (nid_count > MTI_NIDS_MAX)
+		nid_count = MTI_NIDS_MAX;
 
 	OBD_ALLOC(mti, len);
 	if (!mti)
-		GOTO(free_list, mti = ERR_PTR(-ENOMEM));
+		GOTO(free_radix, mti = ERR_PTR(-ENOMEM));
+
+	mti->mti_nid_count = nid_count;
+	for (i = 0; i < mti->mti_nid_count; i++) {
+		struct lnet_nid *nid;
+
+		nid = genradix_ptr(&nfd.nfd_radix, i);
+		if (large_nid)
+			libcfs_nidstr_r(nid, mti->mti_nidlist[i],
+					sizeof(mti->mti_nidlist[i]));
+		else
+			mti->mti_nids[i] = lnet_nid_to_nid4(nid);
+	}
 
 	rc = strscpy(mti->mti_svname, lsi->lsi_svname, sizeof(mti->mti_svname));
 	if (rc < 0)
 		GOTO(free_mti, rc);
 
-	mti->mti_nid_count = nid_count;
-	for (i = 0; i < mti->mti_nid_count; i++) {
-		tmp = genradix_ptr(&plist, i);
-
-		if (large_nid)
-			libcfs_nidstr_r(&tmp->nid, mti->mti_nidlist[i],
-					sizeof(mti->mti_nidlist[i]));
-		else
-			mti->mti_nids[i] = lnet_nid_to_nid4(&tmp->nid);
-	}
 	mti->mti_lustre_ver = LUSTRE_VERSION_CODE;
 	mti->mti_config_ver = 0;
 
@@ -1298,17 +1372,15 @@ static struct mgs_target_info *server_lsi2mti(struct lustre_sb_info *lsi)
 	/* use NID strings instead */
 	if (large_nid)
 		mti->mti_flags |= LDD_F_LARGE_NID;
-	cplen = strscpy(mti->mti_params, lsi->lsi_lmd->lmd_params,
-			sizeof(mti->mti_params));
-	if (cplen >= sizeof(mti->mti_params))
-		rc = -E2BIG;
+	rc = strscpy(mti->mti_params, lsi->lsi_lmd->lmd_params,
+		     sizeof(mti->mti_params));
 free_mti:
 	if (rc < 0) {
 		OBD_FREE(mti, len);
 		mti = ERR_PTR(rc);
 	}
-free_list:
-	genradix_free(&plist);
+free_radix:
+	genradix_free(&nfd.nfd_radix);
 
 	return mti;
 }
@@ -1329,12 +1401,11 @@ static int server_register_target(struct lustre_sb_info *lsi)
 
 	ENTRY;
 	LASSERT(mgc);
-	mti = server_lsi2mti(lsi);
+	mti = server_lsi2mti(lsi, true);
 	if (IS_ERR(mti))
 		GOTO(out, rc = PTR_ERR(mti));
 
-	if (exp_connect_flags2(lsi->lsi_mgc->u.cli.cl_mgc_mgsexp) &
-	    OBD_CONNECT2_LARGE_NID) {
+	if (target_supports_large_nid(mti)) {
 		nidstr = mti->mti_nidlist[0]; /* large_nid */
 	} else {
 		lnet_nid4_to_nid(mti->mti_nids[0], &nid);
@@ -1392,8 +1463,15 @@ out:
 }
 
 /**
- * Notify the MGS that this target is ready.
+ * server_notify_target() - Notify the MGS that this target is ready.
+ * @sb: super block for this file-system
+ * @obd: OBD of (MDT/OST) notifying MGS of ready state
+ *
  * Used by IR - if the MGS receives this message, it will notify clients.
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on error
  */
 static int server_notify_target(struct super_block *sb, struct obd_device *obd)
 {
@@ -1405,7 +1483,7 @@ static int server_notify_target(struct super_block *sb, struct obd_device *obd)
 
 	ENTRY;
 	LASSERT(mgc);
-	mti = server_lsi2mti(lsi);
+	mti = server_lsi2mti(lsi, false);
 	if (IS_ERR(mti))
 		GOTO(out, rc = PTR_ERR(mti));
 
@@ -1425,10 +1503,294 @@ static int server_notify_target(struct super_block *sb, struct obd_device *obd)
 	if (!rc && !(mti->mti_flags & LDD_F_ERROR) &&
 	    (mti->mti_flags & LDD_F_IR_CAPABLE))
 		lsi->lsi_flags |= LDD_F_IR_CAPABLE;
-
 	OBD_FREE(mti, mti_len);
 out:
 	RETURN(rc);
+}
+
+/* NID update motifier */
+static LIST_HEAD(tgt_nu_list);
+static DECLARE_RWSEM(tgt_nu_lock);
+static atomic_t tgt_nu_count = ATOMIC_INIT(0);
+static struct workqueue_struct *tgt_nu_wq;
+
+struct tgt_notifier_work {
+	struct delayed_work    tnw_work;
+	struct mgs_target_info tnw_mti;
+};
+
+/**
+ * tgt_nids_notify() - Notify the MGS that this target has new NIDs configured.
+ * @lsi: Lustre superblock info(LSI) struct
+ * @mti: mgs target info
+ * @set: All request in a set
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on error
+ */
+static int tgt_nids_notify(struct lustre_sb_info *lsi,
+			   struct mgs_target_info *mti,
+			   struct ptlrpc_request_set *set)
+{
+	struct obd_device *mgc = lsi->lsi_mgc, *obd;
+	int mti_len = sizeof(*mti) + NIDLIST_SIZE(mti->mti_nid_count);
+	const char *tgt;
+	int rc;
+
+	LASSERT(mgc);
+
+	rc = strscpy(mti->mti_svname, lsi->lsi_svname, sizeof(mti->mti_svname));
+	if (rc < 0)
+		return rc;
+
+	rc = server_name2fsname(lsi->lsi_svname, mti->mti_fsname, &tgt);
+	if (rc < 0) {
+		CDEBUG(D_CONFIG, "%s: can't get fsname, rc = %d\n",
+		       lsi->lsi_svname, rc);
+		return rc;
+	}
+
+	rc = target_name2index(++tgt, &mti->mti_stripe_index, NULL);
+	if (rc < 0) {
+		CDEBUG(D_CONFIG, "%s: can't get target index, rc = %d\n",
+		       lsi->lsi_svname, rc);
+		return rc;
+	}
+
+	mti->mti_flags = lsi->lsi_flags & LDD_F_SV_TYPE_MASK;
+	mti->mti_flags |= LDD_F_OPC_READY | LDD_F_LARGE_NID;
+
+	obd = class_name2obd(lsi->lsi_svname);
+	if (!obd) {
+		CDEBUG(D_CONFIG, "%s: can't find OBD by server name\n",
+		       lsi->lsi_svname);
+		return -ENXIO;
+	}
+	mti->mti_instance = obd2obt(obd)->obt_instance;
+
+	rc = obd_set_info_async(NULL, mgc->u.cli.cl_mgc_mgsexp,
+				sizeof(KEY_NID_NOTIFY), KEY_NID_NOTIFY,
+				mti_len, mti, set);
+
+	return rc;
+}
+
+/**
+ * tgt_import_update() - This function is used as an upcall-callback from MGC
+ *                       to get re-connection notification and notify MGS about
+ *                       local NIDs to rebuild NID table
+ * @ws:
+ */
+static void tgt_import_update(struct work_struct *ws)
+{
+	struct delayed_work *dw;
+	struct lustre_sb_info *lsi;
+	struct mgs_target_info *mti = NULL;
+	size_t mti_len = sizeof(*mti);
+	struct nid_fetch_data nfd;
+	struct ptlrpc_request_set *set;
+	int i;
+	int rc;
+
+	ENTRY;
+
+	dw = container_of(ws, struct delayed_work, work);
+
+	/* get local NIDs just once, it is the same for local targets.
+	 * tgt_nids_notify() fills target-specific data from lsi
+	 */
+	genradix_init(&nfd.nfd_radix);
+	/* avoid allocation inside callback */
+	genradix_prealloc(&nfd.nfd_radix, MTI_NIDS_MAX, GFP_KERNEL);
+	nfd.nfd_lmd = NULL;
+	nfd.nfd_pos = 0;
+
+	LNetFetchNIDs(server_nid2radix, LNET_NET_ANY, &nfd);
+	if (nfd.nfd_pos == 0) {
+		rc = -ENETDOWN;
+		CWARN("MGC: can't get local NIDs from LNet, rc = %d\n", rc);
+		GOTO(free_radix, rc);
+	}
+
+	mti_len += NIDLIST_SIZE(nfd.nfd_pos);
+	OBD_ALLOC(mti, mti_len);
+	if (!mti)
+		GOTO(free_radix, rc = -ENOMEM);
+	mti->mti_nid_count = nfd.nfd_pos;
+	for (i = 0; i < mti->mti_nid_count; i++) {
+		struct lnet_nid *nid = genradix_ptr(&nfd.nfd_radix, i);
+
+		libcfs_nidstr_r(nid, mti->mti_nidlist[i],
+				sizeof(mti->mti_nidlist[i]));
+		CDEBUG(D_CONFIG, "NID #%d: %s\n", i, mti->mti_nidlist[i]);
+	}
+
+	set = ptlrpc_prep_set();
+	if (!set)
+		GOTO(free_mti, rc = -ENOMEM);
+
+	down_read(&tgt_nu_lock);
+	list_for_each_entry(lsi, &tgt_nu_list, lsi_notifier_link) {
+		rc = tgt_nids_notify(lsi, mti, set);
+		CDEBUG(D_CONFIG, "%s: notify about %d NIDs, rc = %d\n",
+		       lsi->lsi_svname, mti->mti_nid_count, rc);
+	}
+	up_read(&tgt_nu_lock);
+
+	ptlrpc_set_wait(NULL, set);
+	ptlrpc_set_destroy(set);
+
+free_mti:
+	OBD_FREE(mti, mti_len);
+free_radix:
+	genradix_free(&nfd.nfd_radix);
+	OBD_FREE_PTR(dw);
+}
+
+static int tgt_import_active_cb(struct obd_device *host,
+				struct obd_device *watched,
+				enum obd_notify_event ev, void *owner)
+{
+	struct delayed_work *dw;
+
+	if (ev != OBD_NOTIFY_ACTIVE)
+		return 0;
+
+	OBD_ALLOC_PTR(dw);
+	if (!dw)
+		RETURN(-ENOMEM);
+
+	INIT_DELAYED_WORK(dw, tgt_import_update);
+	queue_delayed_work(tgt_nu_wq, dw, 0);
+
+	return 0;
+}
+
+static void tgt_nid_notifier(struct work_struct *ws)
+{
+	struct tgt_notifier_work *tnw;
+	struct lustre_sb_info *lsi;
+	int rc;
+
+	tnw = container_of(ws, struct tgt_notifier_work, tnw_work.work);
+
+	down_read(&tgt_nu_lock);
+	list_for_each_entry(lsi, &tgt_nu_list, lsi_notifier_link) {
+		rc = tgt_nids_notify(lsi, &tnw->tnw_mti, NULL);
+		CDEBUG(D_CONFIG, "%s: queue update for %d new NIDs, rc = %d\n",
+		       lsi->lsi_svname, tnw->tnw_mti.mti_nid_count, rc);
+	}
+	up_read(&tgt_nu_lock);
+
+	OBD_FREE(tnw, sizeof(*tnw) + NIDLIST_SIZE(tnw->tnw_mti.mti_nid_count));
+}
+
+static int tgt_nid_update_cb(void *data, struct nid_update_info *nui)
+{
+	struct tgt_notifier_work *tnw;
+	struct lnet_nid *tmp;
+	unsigned int i = nui->nui_count ? : 1;
+
+	OBD_ALLOC(tnw, sizeof(*tnw) + NIDLIST_SIZE(i));
+	if (!tnw)
+		RETURN(-ENOMEM);
+
+	INIT_DELAYED_WORK(&tnw->tnw_work, tgt_nid_notifier);
+
+	if (nui->nui_count) {
+		tnw->tnw_mti.mti_nid_count = nui->nui_count;
+
+		CDEBUG(D_CONFIG, "new NID update from LNet\n");
+		for (i = 0; i < nui->nui_count; i++) {
+			tmp = genradix_ptr(&nui->nui_rdx, i);
+			libcfs_nidstr_r(tmp, tnw->tnw_mti.mti_nidlist[i],
+					sizeof(tnw->tnw_mti.mti_nidlist[i]));
+			CDEBUG(D_CONFIG, "NID #%d: %s\n", i,
+			       tnw->tnw_mti.mti_nidlist[i]);
+		}
+	} else {
+		/* to delete network send string identifier in form #<net> */
+		tnw->tnw_mti.mti_nid_count = 1;
+		tnw->tnw_mti.mti_nidlist[0][0] = NETDEL_TOKEN;
+		libcfs_net2str_r(nui->nui_net, tnw->tnw_mti.mti_nidlist[0] + 1,
+				 MTN_NIDSTR_SIZE - 1);
+	}
+
+	queue_delayed_work(tgt_nu_wq, &tnw->tnw_work, 0);
+
+	return 0;
+}
+
+static int tgt_del_notifier(struct lustre_sb_info *lsi)
+{
+
+	int rc = 0;
+
+	ENTRY;
+
+	/* server_put_super() can be called before target start */
+	if (list_empty(&lsi->lsi_notifier_link))
+		return 0;
+
+	down_write(&tgt_nu_lock);
+	list_del_init(&lsi->lsi_notifier_link);
+	up_write(&tgt_nu_lock);
+
+	if (atomic_dec_and_test(&tgt_nu_count)) {
+		LASSERT(list_empty(&tgt_nu_list));
+
+		if (tgt_nu_wq) {
+			LNetUnRegisterNIDUpdates(&tgt_nu_wq);
+			lsi->lsi_mgc->obd_upcall.onu_upcall = NULL;
+			destroy_workqueue(tgt_nu_wq);
+			tgt_nu_wq = NULL;
+		}
+	}
+
+	return rc;
+}
+
+static int tgt_add_notifier(struct lustre_sb_info *lsi)
+{
+	int rc = 0;
+
+	ENTRY;
+
+	down_write(&tgt_nu_lock);
+	if (atomic_inc_return(&tgt_nu_count) == 1) {
+		tgt_nu_wq = cfs_cpt_bind_workqueue("tgt_nid_notifier",
+						   cfs_cpt_tab, 0,
+						   CFS_CPT_ANY, 1);
+		if (IS_ERR(tgt_nu_wq)) {
+			rc = PTR_ERR(tgt_nu_wq);
+			CERROR("%s: can't start notifier workqueue, rc = %d\n",
+			       lsi->lsi_svname, rc);
+			GOTO(fail_wq, rc);
+		}
+		rc = LNetRegisterNIDUpdates(tgt_nid_update_cb, &tgt_nu_wq);
+		if (rc) {
+			CWARN("%s: can't register LNet NID callback, rc = %d\n",
+			      lsi->lsi_svname, rc);
+			GOTO(fail_reg, rc);
+		}
+		lsi->lsi_mgc->obd_upcall.onu_owner = NULL;
+		lsi->lsi_mgc->obd_upcall.onu_upcall = tgt_import_active_cb;
+	}
+
+	list_add_tail(&lsi->lsi_notifier_link, &tgt_nu_list);
+	up_write(&tgt_nu_lock);
+
+	return 0;
+
+fail_reg:
+	destroy_workqueue(tgt_nu_wq);
+fail_wq:
+	tgt_nu_wq = NULL;
+	atomic_dec(&tgt_nu_count);
+	up_write(&tgt_nu_lock);
+
+	return rc;
 }
 
 /* Start server targets: MDTs and OSTs */
@@ -1456,8 +1818,11 @@ static int server_start_targets(struct super_block *sb)
 		name_service = LUSTRE_OSS_NAME;
 	}
 
-	/* make sure MDS/OSS is started */
-	mutex_lock(&server_start_lock);
+	/* make sure MDS/OSS is started, but allow mount to be killed */
+	rc = mutex_lock_interruptible(&server_start_lock);
+	if (rc)
+		RETURN(rc);
+
 	obd = class_name2obd(obd_name_service);
 	if (!obd) {
 		rc = lustre_start_simple(obd_name_service, name_service,
@@ -1566,6 +1931,9 @@ static int server_start_targets(struct super_block *sb)
 			lu_context_fini(&session_ctx);
 		}
 	}
+
+	if (rc == 0)
+		rc = tgt_add_notifier(lsi);
 
 	/* abort recovery only on the complete stack:
 	 * many devices can be involved
@@ -1697,7 +2065,9 @@ static void server_put_super(struct super_block *sb)
 
 	/* disconnect the lwp first to drain off the inflight request */
 	if (IS_OST(lsi) || IS_MDT(lsi)) {
-		int	rc;
+		int rc;
+
+		tgt_del_notifier(lsi);
 
 		rc = lustre_disconnect_lwp(sb);
 		if (rc != 0 && rc != -ETIMEDOUT && rc != -ENODEV &&
@@ -1741,11 +2111,11 @@ static void server_put_super(struct super_block *sb)
 		if (obd) {
 			CDEBUG(D_MOUNT, "stopping %s\n", obd->obd_name);
 			if (lsiflags & LSI_UMOUNT_FAILOVER)
-				obd->obd_fail = 1;
+				set_bit(OBDF_FAIL, obd->obd_flags);
 			/* We can't seem to give an error return code
 			 * to .put_super, so we better make sure we clean up!
 			 */
-			obd->obd_force = 1;
+			set_bit(OBDF_FORCE, obd->obd_flags);
 			class_manual_cleanup(obd);
 			if (CFS_FAIL_PRECHECK(OBD_FAIL_OBD_STOP_MDS_RACE)) {
 				int idx;
@@ -1797,7 +2167,7 @@ static void server_put_super(struct super_block *sb)
 		obd = class_name2obd(extraname);
 		if (obd) {
 			CWARN("Cleaning orphaned obd %s\n", extraname);
-			obd->obd_force = 1;
+			set_bit(OBDF_FORCE, obd->obd_flags);
 			class_manual_cleanup(obd);
 		}
 		OBD_FREE(extraname, strlen(extraname) + 1);
@@ -1915,6 +2285,9 @@ static int server_show_options(struct seq_file *seq, struct dentry *dentry)
 	if (test_bit(LMD_FLG_MGS, lmd->lmd_flags))
 		seq_puts(seq, ",mgs");
 
+	if (test_bit(LMD_FLG_NO_RCLNT, lmd->lmd_flags))
+		seq_puts(seq, ",noclient");
+
 	if (lmd->lmd_mgs)
 		seq_printf(seq, ",mgsnode=%s", lmd->lmd_mgs);
 
@@ -1943,26 +2316,17 @@ static const struct super_operations server_ops = {
 # define IDMAP_ARG idmap,
 #else
 # define IDMAP_ARG
-# ifdef HAVE_INODEOPS_ENHANCED_GETATTR
-#  define server_getattr(ns, path, st, rq, fl) server_getattr(path, st, rq, fl)
-# endif
+# define server_getattr(ns, path, st, rq, fl) server_getattr(path, st, rq, fl)
 #endif
 
 /*
  * inode operations for Lustre server mountpoints
  */
-#if defined(HAVE_USER_NAMESPACE_ARG) || defined(HAVE_INODEOPS_ENHANCED_GETATTR)
 static int server_getattr(struct mnt_idmap *idmap,
 			  const struct path *path, struct kstat *stat,
 			  u32 request_mask, unsigned int flags)
 {
 	struct inode *inode = d_inode(path->dentry);
-#else
-static int server_getattr(struct vfsmount *mnt, struct dentry *de,
-			  struct kstat *stat)
-{
-	struct inode *inode = de->d_inode;
-#endif
 	struct lustre_sb_info *lsi = s2lsi(inode->i_sb);
 	struct vfsmount *root_mnt;
 	struct inode *root_inode;
@@ -1984,22 +2348,6 @@ static int server_getattr(struct vfsmount *mnt, struct dentry *de,
 	return 0;
 }
 
-#ifdef HAVE_IOP_XATTR
-static ssize_t server_getxattr(struct dentry *dentry, const char *name,
-				void *buffer, size_t size)
-{
-	if (!selinux_is_enabled())
-		return -EOPNOTSUPP;
-	return -ENODATA;
-}
-
-static int server_setxattr(struct dentry *dentry, const char *name,
-			    const void *value, size_t size, int flags)
-{
-	return -EOPNOTSUPP;
-}
-#endif
-
 static ssize_t server_listxattr(struct dentry *d_entry, char *name,
 				size_t size)
 {
@@ -2015,10 +2363,12 @@ static bool is_cmd_supported(unsigned int cmd)
 		return true;
 	case LL_IOC_RESIZE_FS:
 		return true;
-#ifdef HAVE_FSMAP_H
 	case FS_IOC_GETFSMAP:
 		return true;
-#endif
+	case FS_IOC_GETFSLABEL:
+		return true;
+	case FS_IOC_SETFSLABEL:
+		return true;
 	default:
 		return false;
 	}
@@ -2090,10 +2440,6 @@ out:
 
 static const struct inode_operations server_inode_operations = {
 	.getattr	= server_getattr,
-#ifdef HAVE_IOP_XATTR
-	.setxattr       = server_setxattr,
-	.getxattr       = server_getxattr,
-#endif
 	.listxattr      = server_listxattr,
 };
 
@@ -2186,7 +2532,7 @@ static int osd_start(struct lustre_sb_info *lsi, unsigned long mflags)
 			 obd, &obd->obd_uuid, NULL, NULL);
 
 	if (rc < 0) {
-		obd->obd_force = 1;
+		set_bit(OBDF_FORCE, obd->obd_flags);
 		class_manual_cleanup(obd);
 		lsi->lsi_dt_dev = NULL;
 		RETURN(rc);
@@ -2351,13 +2697,18 @@ void server_calc_timeout(struct lustre_sb_info *lsi, struct obd_device *obd)
 }
 
 /**
- * This is the entry point for the mount call into Lustre.
- * This is called when a server target is mounted,
- * and this is where we start setting things up.
- * @param data Mount options (e.g. -o flock,abort_recov)
+ * lustre_tgt_fill_super() - Entry point for the mount call into Lustre.
+ * @sb: super block for this file-system
+ * @fc: data Mount options (e.g. -o flock,abort_recov)
+ *
+ * This is called when a server target is mounted, and this is where we start
+ * setting things up.
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on error
  */
-static int lustre_tgt_fill_super(struct super_block *sb, void *lmd2_data,
-				 int silent)
+static int lustre_tgt_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	struct lustre_mount_data *lmd;
 	struct lustre_sb_info *lsi;
@@ -2366,7 +2717,7 @@ static int lustre_tgt_fill_super(struct super_block *sb, void *lmd2_data,
 	ENTRY;
 	CDEBUG(D_MOUNT|D_VFSTRACE, "VFS Op: sb %p\n", sb);
 
-	lsi = lustre_init_lsi(sb);
+	lsi = lustre_init_lsi(fc, sb);
 	if (!lsi)
 		RETURN(-ENOMEM);
 	lmd = lsi->lsi_lmd;
@@ -2381,12 +2732,6 @@ static int lustre_tgt_fill_super(struct super_block *sb, void *lmd2_data,
 	 * LU-639: the OBD cleanup of last mount may not finish yet, wait here.
 	 */
 	obd_zombie_barrier();
-
-	/* Figure out the lmd from the mount options */
-	if (lmd_parse(lmd2_data, lmd)) {
-		lustre_put_lsi(sb);
-		GOTO(out, rc = -EINVAL);
-	}
 
 	if (lmd_is_client(lmd)) {
 		rc = -ENODEV;
@@ -2421,11 +2766,29 @@ out:
 }
 
 /***************** FS registration ******************/
-static struct dentry *lustre_tgt_mount(struct file_system_type *fs_type,
-				       int flags, const char *devname,
-				       void *data)
+static int lustre_tgt_get_tree(struct fs_context *fc)
 {
-	return mount_nodev(fs_type, flags, data, lustre_tgt_fill_super);
+	return get_tree_nodev(fc, lustre_tgt_fill_super);
+}
+
+static const struct fs_context_operations lustre_tgt_fs_context_ops = {
+	.parse_monolithic	= lustre_parse_monolithic,
+	.get_tree		= lustre_tgt_get_tree,
+	.free			= lustre_fc_free,
+};
+
+static int lustre_tgt_init_fs_context(struct fs_context *fc)
+{
+	struct lustre_mount_data *lmd;
+
+	OBD_ALLOC_PTR(lmd);
+	if (!lmd)
+		return -ENOMEM;
+
+	kref_init(&lmd->lmd_ref);
+	fc->fs_private = lmd;
+	fc->ops = &lustre_tgt_fs_context_ops;
+	return 0;
 }
 
 /* Register the "lustre_tgt" fs type.
@@ -2439,11 +2802,11 @@ static struct dentry *lustre_tgt_mount(struct file_system_type *fs_type,
  * The long-term goal is to disentangle the client and server mount code.
  */
 static struct file_system_type lustre_tgt_fstype = {
-	.owner		= THIS_MODULE,
-	.name		= "lustre_tgt",
-	.mount		= lustre_tgt_mount,
-	.kill_sb	= kill_anon_super,
-	.fs_flags	= FS_REQUIRES_DEV | FS_RENAME_DOES_D_MOVE,
+	.owner			= THIS_MODULE,
+	.name			= "lustre_tgt",
+	.init_fs_context	= lustre_tgt_init_fs_context,
+	.kill_sb		= kill_anon_super,
+	.fs_flags		= FS_REQUIRES_DEV | FS_RENAME_DOES_D_MOVE,
 };
 MODULE_ALIAS_FS("lustre_tgt");
 

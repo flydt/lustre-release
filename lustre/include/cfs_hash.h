@@ -19,8 +19,8 @@
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 #include <linux/refcount.h>
-#include <libcfs/libcfs.h>
-#include <libcfs/linux/linux-hash.h>
+#include <linux/libcfs/libcfs_debug.h>
+#include <linux/libcfs/libcfs_private.h>
 
 /* disable debug */
 #define CFS_HASH_DEBUG_NONE	0
@@ -500,13 +500,6 @@ static inline void cfs_hash_unlock(struct cfs_hash *hs, int excl)
 	hs->hs_lops->hs_unlock(&hs->hs_lock, excl);
 }
 
-static inline int cfs_hash_dec_and_lock(struct cfs_hash *hs,
-					atomic_t *condition)
-{
-	LASSERT(cfs_hash_with_no_bktlock(hs));
-	return atomic_dec_and_lock(condition, &hs->hs_lock.spin);
-}
-
 static inline void cfs_hash_bd_lock(struct cfs_hash *hs,
 				    struct cfs_hash_bd *bd, int excl)
 {
@@ -532,12 +525,6 @@ cfs_hash_bd_get_and_lock(struct cfs_hash *hs, const void *key,
 {
 	cfs_hash_bd_get(hs, key, bd);
 	cfs_hash_bd_lock(hs, bd, excl);
-}
-
-static inline unsigned
-cfs_hash_bd_index_get(struct cfs_hash *hs, struct cfs_hash_bd *bd)
-{
-	return bd->bd_offset | (bd->bd_bucket->hsb_index << hs->hs_bkt_bits);
 }
 
 static inline void
@@ -568,12 +555,6 @@ cfs_hash_bd_count_get(struct cfs_hash_bd *bd)
 {
 	/* need hold cfs_hash_bd_lock */
 	return bd->bd_bucket->hsb_count;
-}
-
-static inline int
-cfs_hash_bd_depmax_get(struct cfs_hash_bd *bd)
-{
-	return bd->bd_bucket->hsb_depmax;
 }
 
 static inline int
@@ -656,7 +637,7 @@ cfs_hash_dual_bd_finddel_locked(struct cfs_hash *hs, struct cfs_hash_bd *bds,
 
 /* Hash init/cleanup functions */
 struct cfs_hash *
-cfs_hash_create(char *name, unsigned int cur_bits, unsigned int max_bits,
+cfs_hash_create(const char *name, unsigned int cur_bits, unsigned int max_bits,
 		unsigned int bkt_bits, unsigned int extra_bytes,
 		unsigned int min_theta, unsigned int max_theta,
 		struct cfs_hash_ops *ops, unsigned int flags);
@@ -777,11 +758,6 @@ __cfs_hash_set_theta(struct cfs_hash *hs, int min, int max)
 	hs->hs_min_theta = (__u16)min;
 	hs->hs_max_theta = (__u16)max;
 }
-
-/* Generic debug formatting routines mainly for proc handler */
-struct seq_file;
-void cfs_hash_debug_header(struct seq_file *m);
-void cfs_hash_debug_str(struct cfs_hash *hs, struct seq_file *m);
 
 /* Generic djb2 hash algorithm for character arrays. */
 static inline unsigned

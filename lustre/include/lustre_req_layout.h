@@ -166,7 +166,7 @@ static inline void req_capsule_set_rep_swabbed(struct req_capsule *pill,
 
 int  req_layout_init(void);
 void req_layout_fini(void);
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 int req_check_sepol(struct req_capsule *pill);
 #else
 static inline int req_check_sepol(struct req_capsule *pill)
@@ -182,6 +182,7 @@ extern struct req_format RQF_SEC_CTX;
 extern struct req_format RQF_OBD_IDX_READ;
 /* MGS req_format */
 extern struct req_format RQF_MGS_TARGET_REG;
+extern struct req_format RQF_MGS_TARGET_REG_NIDLIST;
 extern struct req_format RQF_MGS_SET_INFO;
 extern struct req_format RQF_MGS_CONFIG_READ;
 /* fid/fld req_format */
@@ -366,6 +367,7 @@ extern struct req_msg_field RMF_LLOG_LOG_HDR;
 extern struct req_msg_field RMF_LLOGD_CONN_BODY;
 
 extern struct req_msg_field RMF_MGS_TARGET_INFO;
+extern struct req_msg_field RMF_MGS_TARGET_NIDLIST;
 extern struct req_msg_field RMF_MGS_SEND_PARAM;
 
 extern struct req_msg_field RMF_OST_BODY;

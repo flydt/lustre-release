@@ -18,8 +18,8 @@
 
 #include <asm/div64.h>
 #include <linux/random.h>
+#include <lustre_compat/linux/timer.h>
 
-#include <libcfs/libcfs.h>
 #include <uapi/linux/lustre/lustre_idl.h>
 #include <lustre_swab.h>
 #include <obd_class.h>
@@ -377,10 +377,16 @@ out:
  * all stripes or 3/4 of stripes.  The code is written this way to avoid
  * returning 0 for stripe_count < 4, like "stripe_count * 3 / 4" would do.
  *
+ * Parity components are a special case. Here we must always have the requested
+ * number of stripes
+ *
  * Returns acceptable stripecount
  */
 static int lod_stripe_count_min(__u32 stripe_count, enum lod_uses_hint flags)
 {
+	if (flags & LCME_FL_PARITY)
+		return stripe_count;
+
 	return (flags & LOD_USES_DEFAULT_STRIPE ?
 		stripe_count - (stripe_count / 4) : stripe_count);
 }
@@ -405,9 +411,9 @@ static inline int lod_qos_tgt_in_use_clear(const struct lu_env *env,
 {
 	struct lod_thread_info *info = lod_env_info(env);
 
-	if (info->lti_ea_store_size < sizeof(int) * stripes)
+	if (info->lti_ea_buf.lb_len < sizeof(int) * stripes)
 		lod_ea_store_resize(info, stripes * sizeof(int));
-	if (info->lti_ea_store_size < sizeof(int) * stripes) {
+	if (info->lti_ea_buf.lb_len < sizeof(int) * stripes) {
 		CERROR("can't allocate memory for tgt-in-use array\n");
 		return -ENOMEM;
 	}
@@ -428,9 +434,9 @@ static inline void lod_qos_tgt_in_use(const struct lu_env *env,
 				      int idx, int tgt_idx)
 {
 	struct lod_thread_info *info = lod_env_info(env);
-	int *tgts = info->lti_ea_store;
+	int *tgts = info->lti_ea_buf.lb_buf;
 
-	LASSERT(info->lti_ea_store_size >= idx * sizeof(int));
+	LASSERT(info->lti_ea_buf.lb_len >= idx * sizeof(int));
 	tgts[idx] = tgt_idx;
 }
 
@@ -451,7 +457,7 @@ static int lod_qos_is_tgt_used(const struct lu_env *env, int tgt_idx,
 			       __u32 stripes)
 {
 	struct lod_thread_info *info = lod_env_info(env);
-	int *tgts = info->lti_ea_store;
+	int *tgts = info->lti_ea_buf.lb_buf;
 	__u32 j;
 
 	for (j = 0; j < stripes; j++) {
@@ -1284,6 +1290,20 @@ repeat_find:
 		}
 	}
 	if (i == ost_count) {
+		/*
+		 * For uninitialized PFL components, the stripe offset may be
+		 * invalid (e.g., pointing to a deactivated OST). In this case,
+		 * fall back to QoS allocation instead of failing. This can
+		 * happen during migration when old layouts have deprecated
+		 * stripe offsets stored in lmm_layout_gen.
+		 */
+		if (!lod_comp_inited(lod_comp)) {
+			CDEBUG(D_LAYOUT,
+			       "Uninitialized component %d has invalid start index %d, using QoS allocation\n",
+			       comp_idx, lod_comp->llc_stripe_offset);
+			lod_comp->llc_stripe_offset = LOV_OFFSET_DEFAULT;
+			GOTO(out, rc = -EAGAIN);
+		}
 		CERROR("Start index %d not found in pool '%s'\n",
 		       lod_comp->llc_stripe_offset,
 		       lod_comp->llc_pool ? lod_comp->llc_pool : "");
@@ -1401,7 +1421,6 @@ out:
 	RETURN(rc);
 }
 
-#ifdef HAVE_DOWN_WRITE_KILLABLE
 struct semaphore_timer {
 	struct timer_list timer;
 	struct task_struct *task;
@@ -1413,7 +1432,18 @@ static void process_semaphore_timer(struct timer_list *t)
 
 	send_sig(SIGKILL, timeout->task, 1);
 }
-#endif
+
+/* Whether QoS data in pool is up-to-date and balanced. */
+static bool pool_qos_is_usable(struct lod_pool_desc *pool)
+{
+	time64_t now;
+
+	now = ktime_get_real_seconds();
+	if (pool->pool_same_space && now < pool->pool_same_space_expire)
+		return false;
+
+	return true;
+}
 
 /**
  * lod_pool_qos_penalties_calc() - Calculate penalties per-ost in a pool
@@ -1444,11 +1474,6 @@ static int lod_pool_qos_penalties_calc(struct lod_device *lod,
 
 	ENTRY;
 
-	now = ktime_get_real_seconds();
-
-	if (pool->pool_same_space && now < pool->pool_same_space_expire)
-		GOTO(out, rc = 0);
-
 	num_active = osts->op_count - 1;
 	if (num_active < 1)
 		GOTO(out, rc = -EAGAIN);
@@ -1457,6 +1482,7 @@ static int lod_pool_qos_penalties_calc(struct lod_device *lod,
 
 	ba_min = (__u64)(-1);
 	ba_max = 0;
+	now = ktime_get_real_seconds();
 
 	/* Calculate penalty per OST */
 	for (i = 0; i < osts->op_count; i++) {
@@ -1580,22 +1606,22 @@ static int lod_ost_alloc_qos(const struct lu_env *env, struct lod_object *lo,
 	if (lod_comp->llc_pool != NULL)
 		pool = lod_find_pool(lod, lod_comp->llc_pool);
 
-	if (pool != NULL) {
+	/* Detect -EAGAIN early, before expensive qos write lock is taken. */
+	if (pool) {
 		down_read(&pool_tgt_rw_sem(pool));
+		if (!pool_qos_is_usable(pool))
+			GOTO(out_nolock, rc = -EAGAIN);
 		osts = &(pool->pool_obds);
 	} else {
+		if (!ltd_qos_is_usable(&lod->lod_ost_descs))
+			GOTO(out_nolock, rc = -EAGAIN);
 		osts = &lod->lod_ost_descs.ltd_tgt_pool;
 	}
-
-	/* Detect -EAGAIN early, before expensive lock is taken. */
-	if (!ltd_qos_is_usable(&lod->lod_ost_descs))
-		GOTO(out_nolock, rc = -EAGAIN);
 
 	if (lod_comp->llc_pattern & LOV_PATTERN_OVERSTRIPING)
 		stripes_per_ost =
 			(lod_comp->llc_stripe_count - 1)/osts->op_count + 1;
 
-#ifdef HAVE_DOWN_WRITE_KILLABLE
 	if (!down_write_trylock(&lod->lod_ost_descs.ltd_qos.lq_rw_sem)) {
 		struct semaphore_timer timer;
 
@@ -1615,21 +1641,20 @@ static int lod_ost_alloc_qos(const struct lu_env *env, struct lod_object *lo,
 			GOTO(out_nolock, rc = -EAGAIN);
 		}
 	}
-#else
-	/* Do actual allocation, use write lock here. */
-	down_write(&lod->lod_ost_descs.ltd_qos.lq_rw_sem);
-#endif
+
 	/*
 	 * Check again, while we were sleeping on @lq_rw_sem things could
 	 * change.
 	 */
-	if (!ltd_qos_is_usable(&lod->lod_ost_descs))
-		GOTO(out, rc = -EAGAIN);
-
-	if (pool != NULL)
+	if (pool) {
+		if (!pool_qos_is_usable(pool))
+			GOTO(out, rc = -EAGAIN);
 		rc = lod_pool_qos_penalties_calc(lod, pool);
-	else
+	} else {
+		if (!ltd_qos_is_usable(&lod->lod_ost_descs))
+			GOTO(out, rc = -EAGAIN);
 		rc = ltd_qos_penalties_calc(&lod->lod_ost_descs);
+	}
 	if (rc)
 		GOTO(out, rc);
 
@@ -2240,22 +2265,28 @@ int lod_use_defined_striping(const struct lu_env *env,
 		lod_comp = &mo->ldo_comp_entries[i];
 
 		if (mo->ldo_is_composite) {
-			offs = le32_to_cpu(comp_v1->lcm_entries[i].lcme_offset);
+			struct lov_comp_md_entry_v1 *ent =
+						&comp_v1->lcm_entries[i];
+
+			offs = le32_to_cpu(ent->lcme_offset);
 			v1 = (struct lov_mds_md_v1 *)((char *)comp_v1 + offs);
 			v3 = (struct lov_mds_md_v3 *)v1;
 			magic = le32_to_cpu(v1->lmm_magic);
 
-			ext = &comp_v1->lcm_entries[i].lcme_extent;
+			ext = &ent->lcme_extent;
 			lod_comp->llc_extent.e_start =
 				le64_to_cpu(ext->e_start);
 			lod_comp->llc_extent.e_end = le64_to_cpu(ext->e_end);
-			lod_comp->llc_flags =
-				le32_to_cpu(comp_v1->lcm_entries[i].lcme_flags);
-			if (lod_comp->llc_flags & LCME_FL_NOSYNC)
-				lod_comp->llc_timestamp = le64_to_cpu(
-					comp_v1->lcm_entries[i].lcme_timestamp);
-			lod_comp->llc_id =
-				le32_to_cpu(comp_v1->lcm_entries[i].lcme_id);
+			lod_comp->llc_flags = le32_to_cpu(ent->lcme_flags);
+			lod_comp->llc_timestamp = lcme_timestamp_time_unpack(
+				le64_to_cpu(ent->lcme_time_and_id));
+			lod_comp->llc_mirror_link_id = lcme_timestamp_id_unpack(
+				le64_to_cpu(ent->lcme_time_and_id));
+			lod_comp->llc_dstripe_count =
+				comp_v1->lcm_entries[i].lcme_dstripe_count;
+			lod_comp->llc_cstripe_count =
+				comp_v1->lcm_entries[i].lcme_cstripe_count;
+			lod_comp->llc_id = le32_to_cpu(ent->lcme_id);
 			if (lod_comp->llc_id == LCME_ID_INVAL)
 				GOTO(out, rc = -EINVAL);
 
@@ -2285,6 +2316,10 @@ int lod_use_defined_striping(const struct lu_env *env,
 		lod_comp->llc_pattern = le32_to_cpu(v1->lmm_pattern);
 		lod_comp->llc_stripe_size = le32_to_cpu(v1->lmm_stripe_size);
 		lod_comp->llc_stripe_count = le16_to_cpu(v1->lmm_stripe_count);
+
+		/* set parity component pattern */
+		if (lod_comp->llc_flags & LCME_FL_PARITY)
+			lod_comp->llc_pattern |= LOV_PATTERN_PARITY;
 		/**
 		 * limit stripe count so that it's less than/equal to
 		 * extent_size / stripe_size.
@@ -2524,19 +2559,29 @@ int lod_qos_parse_config(const struct lu_env *env, struct lod_object *lo,
 	LASSERT(lo->ldo_comp_entries);
 
 	for (i = 0; i < comp_cnt; i++) {
-		struct lu_extent	*ext;
-		char	*pool_name;
+		struct lu_extent *ext;
+		char *pool_name;
 
 		lod_comp = &lo->ldo_comp_entries[i];
 
 		if (lo->ldo_is_composite) {
+			struct lov_comp_md_entry_v1 *ent =
+				&comp_v1->lcm_entries[i];
 			v1 = (struct lov_user_md *)((char *)comp_v1 +
-					comp_v1->lcm_entries[i].lcme_offset);
-			ext = &comp_v1->lcm_entries[i].lcme_extent;
+						    ent->lcme_offset);
+			ext = &ent->lcme_extent;
 			lod_comp->llc_extent = *ext;
-			lod_comp->llc_flags =
-				comp_v1->lcm_entries[i].lcme_flags &
-					LCME_CL_COMP_FLAGS;
+			lod_comp->llc_flags = ent->lcme_flags &
+					      LCME_CL_COMP_FLAGS;
+			lod_comp->llc_mirror_link_id =
+				lcme_timestamp_id_unpack(ent->lcme_time_and_id);
+
+			if (lod_comp->llc_flags & LCME_FL_PARITY) {
+				lod_comp->llc_dstripe_count =
+					ent->lcme_dstripe_count;
+				lod_comp->llc_cstripe_count =
+					ent->lcme_cstripe_count;
+			}
 		}
 
 		pool_name = NULL;
@@ -2562,7 +2607,7 @@ int lod_qos_parse_config(const struct lu_env *env, struct lod_object *lo,
 
 		if (v1->lmm_pattern == 0)
 			v1->lmm_pattern = LOV_PATTERN_RAID0;
-		if (!lov_pattern_supported(lov_pattern(v1->lmm_pattern))) {
+		if (!lov_pattern_available(v1->lmm_pattern)) {
 			CDEBUG(D_LAYOUT, "%s: invalid pattern: %x\n",
 			       lod2obd(d)->obd_name, v1->lmm_pattern);
 			GOTO(free_comp, rc = -EINVAL);
@@ -2584,6 +2629,9 @@ int lod_qos_parse_config(const struct lu_env *env, struct lod_object *lo,
 			       lod_comp->llc_stripe_count);
 			GOTO(free_comp, rc = -EINVAL);
 		}
+		/* set parity component pattern */
+		if (lod_comp->llc_flags & LCME_FL_PARITY)
+			lod_comp->llc_pattern |= LOV_PATTERN_PARITY;
 		/**
 		 * limit stripe count so that it's less than/equal to
 		 * extent_size / stripe_size.
@@ -2625,25 +2673,33 @@ free_comp:
 static int lod_prepare_avoidance(const struct lu_env *env,
 				 struct lod_object *lo)
 {
-	struct lod_device *lod = lu2lod_dev(lo->ldo_obj.do_lu.lo_dev);
+	struct lod_device *d = lu2lod_dev(lo->ldo_obj.do_lu.lo_dev);
 	struct lod_avoid_guide *lag = &lod_env_info(env)->lti_avoid;
 	unsigned long *bitmap = NULL;
+	__u32 new_ost_size = d->lod_ost_size;
 	__u32 *new_oss = NULL;
+	__u32 new_oss_size;
 
-	lag->lag_ost_avail = lod->lod_ost_count;
+	/*
+	 * usually there are multiple OSTs in one OSS, but we don't
+	 * know the exact OSS number, so we choose a safe option,
+	 * using OST count to allocate the array to store the OSS
+	 * id.
+	 */
+	new_oss_size = d->lod_ost_count;
 
 	/* reset OSS avoid guide array */
 	lag->lag_oaa_count = 0;
-	if (lag->lag_oss_avoid_array &&
-	    lag->lag_oaa_size < lod->lod_ost_count) {
+	if (lag->lag_oss_avoid_array && lag->lag_oaa_size < d->lod_ost_count) {
 		OBD_FREE_PTR_ARRAY(lag->lag_oss_avoid_array, lag->lag_oaa_size);
 		lag->lag_oss_avoid_array = NULL;
 		lag->lag_oaa_size = 0;
 	}
 
 	/* init OST avoid guide bitmap */
+	lag->lag_ost_avail = d->lod_ost_count;
 	if (lag->lag_ost_avoid_bitmap) {
-		if (lod->lod_ost_count <= lag->lag_ost_avoid_size) {
+		if (new_ost_size <= lag->lag_ost_avoid_size) {
 			bitmap_zero(lag->lag_ost_avoid_bitmap,
 				    lag->lag_ost_avoid_size);
 		} else {
@@ -2653,19 +2709,13 @@ static int lod_prepare_avoidance(const struct lu_env *env,
 	}
 
 	if (!lag->lag_ost_avoid_bitmap) {
-		bitmap = bitmap_zalloc(lod->lod_ost_count, GFP_KERNEL);
+		bitmap = bitmap_zalloc(new_ost_size, GFP_KERNEL);
 		if (!bitmap)
 			return -ENOMEM;
 	}
 
 	if (!lag->lag_oss_avoid_array) {
-		/**
-		 * usually there are multiple OSTs in one OSS, but we don't
-		 * know the exact OSS number, so we choose a safe option,
-		 * using OST count to allocate the array to store the OSS
-		 * id.
-		 */
-		OBD_ALLOC_PTR_ARRAY(new_oss, lod->lod_ost_count);
+		OBD_ALLOC_PTR_ARRAY(new_oss, new_oss_size);
 		if (!new_oss) {
 			bitmap_free(bitmap);
 			return -ENOMEM;
@@ -2674,11 +2724,11 @@ static int lod_prepare_avoidance(const struct lu_env *env,
 
 	if (new_oss) {
 		lag->lag_oss_avoid_array = new_oss;
-		lag->lag_oaa_size = lod->lod_ost_count;
+		lag->lag_oaa_size = new_oss_size;
 	}
 	if (bitmap) {
 		lag->lag_ost_avoid_bitmap = bitmap;
-		lag->lag_ost_avoid_size = lod->lod_ost_count;
+		lag->lag_ost_avoid_size = new_ost_size;
 	}
 
 	return 0;
@@ -2872,6 +2922,21 @@ repeat:
 			rc = lod_ost_alloc_specific(env, lo, stripe,
 						    ost_indices, flags, th,
 						    comp_idx, reserve);
+			/*
+			 * For uninitialized components with invalid stripe
+			 * offset, fall back to QoS allocation
+			 */
+			if (rc == -EAGAIN) {
+				rc = lod_ost_alloc_qos(env, lo, stripe,
+						       ost_indices, flags, th,
+						       comp_idx, reserve);
+				if (rc == -EAGAIN)
+					rc = lod_ost_alloc_rr(env, lo, stripe,
+							      ost_indices,
+							      flags, th,
+							      comp_idx,
+							      reserve);
+			}
 		}
 put_ldts:
 		lod_putref(d, &d->lod_ost_descs);
@@ -2978,6 +3043,7 @@ int lod_prepare_create(const struct lu_env *env, struct lod_object *lo,
 		lod_comp = &lo->ldo_comp_entries[i];
 		extent = &lod_comp->llc_extent;
 		CDEBUG(D_OTHER, "comp[%d] %lld "DEXT"\n", i, size, PEXT(extent));
+
 		if (!lo->ldo_is_composite || size >= extent->e_start) {
 			rc = lod_qos_prep_create(env, lo, attr, th, i, 0);
 			if (rc)

@@ -26,7 +26,6 @@
 
 #define DEBUG_SUBSYSTEM S_LDLM
 
-#include <libcfs/libcfs.h>
 #include <lustre_dlm.h>
 #include <obd_support.h>
 #include <obd.h>
@@ -58,18 +57,14 @@ static inline struct ldlm_lock *extent_prev_lock(struct ldlm_lock *lock)
 }
 
 static inline struct ldlm_lock *extent_insert_unique(
-	struct ldlm_lock *node, struct interval_tree_root *root)
+	struct ldlm_lock *node, struct rb_root_cached *root)
 {
 	struct rb_node **link, *rb_parent = NULL;
 	u64 start = START(node), last = LAST(node);
 	struct ldlm_lock *parent;
 	bool leftmost = true;
 
-#ifdef HAVE_INTERVAL_TREE_CACHED
 	link = &root->rb_root.rb_node;
-#else
-	link = &root->rb_node;
-#endif
 	while (*link) {
 		rb_parent = *link;
 		parent = rb_entry(rb_parent, struct ldlm_lock, l_rb);
@@ -94,19 +89,15 @@ static inline struct ldlm_lock *extent_insert_unique(
 
 	node->l_subtree_last = last;
 	rb_link_node(&node->l_rb, rb_parent, link);
-#ifdef HAVE_INTERVAL_TREE_CACHED
 	rb_insert_augmented_cached(&node->l_rb, root,
 				   leftmost, &extent_augment);
-#else
-	rb_insert_augmented(&node->l_rb, root,
-			    &extent_augment);
-#endif
+
 	return NULL;
 }
 
 static inline void extent_replace(struct ldlm_lock *in_tree,
 				  struct ldlm_lock *new,
-				  struct interval_tree_root *tree)
+				  struct rb_root_cached *tree)
 {
 	struct rb_node *p = rb_parent(&in_tree->l_rb);
 
@@ -122,24 +113,18 @@ static inline void extent_replace(struct ldlm_lock *in_tree,
 				    rb_color(new->l_rb.rb_right));
 	rb_set_parent_color(&new->l_rb, p, rb_color(&in_tree->l_rb));
 
-	if (!p) {
-#ifdef HAVE_INTERVAL_TREE_CACHED
+	if (!p)
 		tree->rb_root.rb_node = &new->l_rb;
-#else
-		tree->rb_node = &new->l_rb;
-#endif
-	} else if (p->rb_left == &in_tree->l_rb) {
+	else if (p->rb_left == &in_tree->l_rb)
 		p->rb_left = &new->l_rb;
-	} else {
+	else
 		p->rb_right = &new->l_rb;
-	}
-#ifdef HAVE_INTERVAL_TREE_CACHED
+
 	if (tree->rb_leftmost == &in_tree->l_rb)
 		tree->rb_leftmost = &new->l_rb;
-#endif
 }
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 # define LDLM_MAX_GROWN_EXTENT (32 * 1024 * 1024 - 1)
 
 /**
@@ -230,7 +215,7 @@ static void ldlm_extent_internal_policy_granted(struct ldlm_lock *req,
 
 		conflicting += tree->lit_size;
 
-		if (!INTERVAL_TREE_EMPTY(&tree->lit_root)) {
+		if (!RB_EMPTY_ROOT(&tree->lit_root.rb_root)) {
 			struct ldlm_lock *lck = NULL;
 
 			LASSERTF(!extent_iter_first(&tree->lit_root,
@@ -406,20 +391,39 @@ static void ldlm_extent_policy(struct ldlm_resource *res,
 	}
 }
 
-static bool ldlm_check_contention(struct ldlm_lock *lock, int contended_locks)
+static bool ldlm_update_contention(struct ldlm_lock *lock, int contended_locks)
 {
 	struct ldlm_resource *res = lock->l_resource;
+	struct ldlm_namespace *ns = ldlm_res_to_ns(res);
+	struct obd_counter_instance *instance = &res->lr_contention_hist;
 	time64_t now = ktime_get_seconds();
+	bool contended;
 
 	if (CFS_FAIL_CHECK(OBD_FAIL_LDLM_SET_CONTENTION))
 		return true;
 
-	CDEBUG(D_DLMTRACE, "contended locks = %d\n", contended_locks);
-	if (contended_locks > ldlm_res_to_ns(res)->ns_contended_locks)
-		res->lr_contention_time = now;
+	CDEBUG(D_DLMTRACE, "add %d to "DLDLMRES" since=%us v=(%u %u)\n",
+	       contended_locks, PLDLMRES(res),
+	       (u32)(now - instance->oci_last_event_time),
+	       instance->oci_hist[0], instance->oci_hist[1]);
 
-	return now < res->lr_contention_time +
-		ldlm_res_to_ns(res)->ns_contention_time;
+	/*
+	 * Patrick: Cancellations due to a conflicting request are the
+	 * problem we're worried about - that's really what contention is trying
+	 * to measure.
+	 * Cancellations (due to a conflict) mean other clients had to wait, and
+	 * the client holding the lock had to flush its data to disk before they
+	 * could do IO. This is what causes performance problems and makes it a
+	 * good idea to switch to DIO.
+	 */
+	contended = obd_counter_add_test(instance, now, contended_locks,
+					 ns->ns_contention_seconds,
+					 ns->ns_contended_locks,
+					 ns->ns_contention_hold_seconds);
+	if (contended_locks > 0 && contended)
+		atomic_inc(&ns->ns_contention_events);
+
+	RETURN(contended);
 }
 
 struct ldlm_extent_compat_args {
@@ -471,15 +475,15 @@ static bool ldlm_extent_compat_cb(struct ldlm_lock *lock, void *data)
  */
 static int
 ldlm_extent_compat_queue(struct list_head *queue, struct ldlm_lock *req,
-			 __u64 *flags, struct list_head *work_list,
-			 int *contended_locks)
+			 __u64 *flags, struct list_head *work_list)
 {
 	struct ldlm_resource *res = req->l_resource;
 	enum ldlm_mode req_mode = req->l_req_mode;
 	__u64 req_start = req->l_req_extent.start;
 	__u64 req_end = req->l_req_extent.end;
 	struct ldlm_lock *lock;
-	int check_contention;
+	int contended_locks = 0;
+	int contention = 0;
 	int compat = 1;
 
 	ENTRY;
@@ -489,15 +493,16 @@ ldlm_extent_compat_queue(struct list_head *queue, struct ldlm_lock *req,
 	/* Using interval tree for granted lock */
 	if (queue == &res->lr_granted) {
 		struct ldlm_interval_tree *tree;
-		struct ldlm_extent_compat_args data = {.work_list = work_list,
-						       .lock = req,
-						       .locks = contended_locks,
-						       .compat = &compat };
+		struct ldlm_extent_compat_args data = {
+			.work_list = work_list,
+			.lock = req,
+			.locks = &contended_locks,
+			.compat = &compat };
 		int idx;
 
 		for (idx = 0; idx < LCK_MODE_NUM; idx++) {
 			tree = &res->lr_itree[idx];
-			if (INTERVAL_TREE_EMPTY(&tree->lit_root))
+			if (RB_EMPTY_ROOT(&tree->lit_root.rb_root))
 				continue;
 
 			data.mode = tree->lit_mode;
@@ -548,12 +553,12 @@ ldlm_extent_compat_queue(struct list_head *queue, struct ldlm_lock *req,
 			if (!work_list || (*flags & LDLM_FL_SPECULATIVE)) {
 				if (extent_iter_first(&tree->lit_root,
 						      req_start, req_end)) {
-					if (!work_list) {
+					if (!work_list)
 						RETURN(0);
-					} else {
-						compat = -EAGAIN;
-						goto destroylock;
-					}
+
+					compat = -EAGAIN;
+					contended_locks = 1;
+					goto spec_contention;
 				}
 			} else {
 				ldlm_extent_search(&tree->lit_root,
@@ -566,7 +571,7 @@ ldlm_extent_compat_queue(struct list_head *queue, struct ldlm_lock *req,
 		}
 	} else { /* for waiting queue */
 		list_for_each_entry(lock, queue, l_res_link) {
-			check_contention = 1;
+			contention = 1;
 
 			/* We stop walking the queue if we hit ourselves so
 			 * we don't take conflicting locks enqueued after us
@@ -698,24 +703,24 @@ ldlm_extent_compat_queue(struct list_head *queue, struct ldlm_lock *req,
 				/* false contention, the requests doesn't
 				 * really overlap
 				 */
-				check_contention = 0;
+				contention = 0;
 			}
 
 			if (!work_list)
 				RETURN(0);
 
-			if (*flags & LDLM_FL_SPECULATIVE) {
-				compat = -EAGAIN;
-				goto destroylock;
-			}
-
 			/* don't count conflicting glimpse locks */
 			if (lock->l_req_mode == LCK_PR &&
 			    lock->l_policy_data.l_extent.start == 0 &&
-			     lock->l_policy_data.l_extent.end == OBD_OBJECT_EOF)
-				check_contention = 0;
+			    lock->l_policy_data.l_extent.end == OBD_OBJECT_EOF)
+				contention = 0;
 
-			*contended_locks += check_contention;
+			contended_locks += contention;
+
+			if (*flags & LDLM_FL_SPECULATIVE) {
+				compat = -EAGAIN;
+				goto spec_contention;
+			}
 
 			compat = 0;
 			if (lock->l_blocking_ast &&
@@ -724,15 +729,27 @@ ldlm_extent_compat_queue(struct list_head *queue, struct ldlm_lock *req,
 		}
 	}
 
-	if (ldlm_check_contention(req, *contended_locks) &&
-	    compat == 0 &&
-	    (*flags & LDLM_FL_DENY_ON_CONTENTION) &&
-	    req->l_req_mode != LCK_GROUP &&
-	    req_end - req_start <=
-	    ldlm_res_to_ns(req->l_resource)->ns_max_nolock_size)
-		GOTO(destroylock, compat = -EUSERS);
+	/* compatible locks aren't contending, and !work_list means RESCAN, so
+	 * we've already processed this lock
+	 */
+	if (compat > 0 || !work_list)
+		contended_locks = 0;
+
+	/* Check for contention & inform client by setting lock flag (but don't
+	 * send the flag to clients which don't know about it.
+	 */
+	if (ldlm_update_contention(req, contended_locks) &&
+	    req->l_export && exp_connect_lock_contention(req->l_export))
+		ldlm_set_contention(req);
 
 	RETURN(compat);
+
+	/* We need to count speculative non-glimpse locks in contention, but
+	 * they are destroyed if blocked, so we count them separately.
+	 */
+spec_contention:
+	ldlm_update_contention(req, contended_locks);
+
 destroylock:
 	list_del_init(&req->l_res_link);
 	if (ldlm_is_local(req))
@@ -810,7 +827,7 @@ void ldlm_resource_prolong(struct ldlm_prolong_args *arg)
 	lock_res(res);
 	for (idx = 0; idx < LCK_MODE_NUM; idx++) {
 		tree = &res->lr_itree[idx];
-		if (INTERVAL_TREE_EMPTY(&tree->lit_root))
+		if (RB_EMPTY_ROOT(&tree->lit_root.rb_root))
 			continue;
 
 		/* There is no possibility to check for the groupID
@@ -846,7 +863,6 @@ int ldlm_process_extent_lock(struct ldlm_lock *lock, __u64 *flags,
 {
 	struct ldlm_resource *res = lock->l_resource;
 	int rc, rc2 = 0;
-	int contended_locks = 0;
 	struct list_head *grant_work = intention == LDLM_PROCESS_ENQUEUE ?
 							NULL : work_list;
 	ENTRY;
@@ -865,11 +881,10 @@ int ldlm_process_extent_lock(struct ldlm_lock *lock, __u64 *flags,
 		 * ever stops being true, we want to find out. */
 		LASSERT(*flags == 0);
 		rc = ldlm_extent_compat_queue(&res->lr_granted, lock, flags,
-					NULL, &contended_locks);
+					      NULL);
 		if (rc == 1) {
 			rc = ldlm_extent_compat_queue(&res->lr_waiting, lock,
-						flags, NULL,
-						&contended_locks);
+						      flags, NULL);
 		}
 		if (rc == 0)
 			RETURN(LDLM_ITER_STOP);
@@ -882,16 +897,13 @@ int ldlm_process_extent_lock(struct ldlm_lock *lock, __u64 *flags,
 		RETURN(LDLM_ITER_CONTINUE);
 	}
 
-	contended_locks = 0;
-	rc = ldlm_extent_compat_queue(&res->lr_granted, lock, flags,
-				work_list, &contended_locks);
+	rc = ldlm_extent_compat_queue(&res->lr_granted, lock, flags, work_list);
 	if (rc < 0)
 		GOTO(out, *err = rc);
 
 	if (rc != 2) {
 		rc2 = ldlm_extent_compat_queue(&res->lr_waiting, lock,
-					flags, work_list,
-					&contended_locks);
+					       flags, work_list);
 		if (rc2 < 0)
 			GOTO(out, *err = rc = rc2);
 	}
@@ -911,7 +923,7 @@ int ldlm_process_extent_lock(struct ldlm_lock *lock, __u64 *flags,
 out:
 	return rc;
 }
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 /* When a lock is cancelled by a client, the KMS may undergo change if this
  * is the "highest lock".  This function returns the new KMS value, updating
@@ -1082,7 +1094,7 @@ void ldlm_extent_unlink_lock(struct ldlm_lock *lock)
 	LASSERT(lock->l_granted_mode == BIT(idx));
 	tree = &res->lr_itree[idx];
 
-	LASSERT(!INTERVAL_TREE_EMPTY(&tree->lit_root));
+	LASSERT(!RB_EMPTY_ROOT(&tree->lit_root.rb_root));
 
 	tree->lit_size--;
 
@@ -1093,6 +1105,7 @@ void ldlm_extent_unlink_lock(struct ldlm_lock *lock)
 		RB_CLEAR_NODE(&lock->l_rb);
 	} else {
 		struct ldlm_lock *next = list_next_entry(lock, l_same_extent);
+
 		list_del_init(&lock->l_same_extent);
 		extent_remove(lock, &tree->lit_root);
 		RB_CLEAR_NODE(&lock->l_rb);
@@ -1116,7 +1129,7 @@ void ldlm_extent_policy_local_to_wire(const union ldlm_policy_data *lpolicy,
 	wpolicy->l_extent.end = lpolicy->l_extent.end;
 	wpolicy->l_extent.gid = lpolicy->l_extent.gid;
 }
-void ldlm_extent_search(struct interval_tree_root *root,
+void ldlm_extent_search(struct rb_root_cached *root,
 			u64 start, u64 end,
 			bool (*matches)(struct ldlm_lock *lock, void *data),
 			void *data)

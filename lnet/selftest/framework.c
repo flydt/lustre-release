@@ -30,55 +30,55 @@ static int rpc_timeout = 64;
 module_param(rpc_timeout, int, 0644);
 MODULE_PARM_DESC(rpc_timeout, "rpc timeout in seconds (64 by default, 0 == never)");
 
-#define sfw_unpack_id(id)               \
-do {                                    \
-	__swab64s(&(id).nid);           \
-	__swab32s(&(id).pid);           \
+#define sfw_unpack_id(id)						\
+do {									\
+	__swab64s(&(id).nid);						\
+	__swab32s(&(id).pid);						\
 } while (0)
 
-#define sfw_unpack_sid(sid)             \
-do {                                    \
-	__swab64s(&(sid).ses_nid);      \
-	__swab64s(&(sid).ses_stamp);    \
+#define sfw_unpack_sid(sid)						\
+do {									\
+	__swab64s(&(sid).ses_nid);					\
+	__swab64s(&(sid).ses_stamp);					\
 } while (0)
 
-#define sfw_unpack_fw_counters(fc)        \
-do {                                      \
-	__swab32s(&(fc).running_ms);      \
-	__swab32s(&(fc).active_batches);  \
-	__swab32s(&(fc).zombie_sessions); \
-	__swab32s(&(fc).brw_errors);      \
-	__swab32s(&(fc).ping_errors);     \
+#define sfw_unpack_fw_counters(fc)					\
+do {									\
+	__swab32s(&(fc).running_ms);					\
+	__swab32s(&(fc).active_batches);				\
+	__swab32s(&(fc).zombie_sessions);				\
+	__swab32s(&(fc).brw_errors);					\
+	__swab32s(&(fc).ping_errors);					\
 } while (0)
 
-#define sfw_unpack_rpc_counters(rc)     \
-do {                                    \
-	__swab32s(&(rc).errors);        \
-	__swab32s(&(rc).rpcs_sent);     \
-	__swab32s(&(rc).rpcs_rcvd);     \
-	__swab32s(&(rc).rpcs_dropped);  \
-	__swab32s(&(rc).rpcs_expired);  \
-	__swab64s(&(rc).bulk_get);      \
-	__swab64s(&(rc).bulk_put);      \
+#define sfw_unpack_rpc_counters(rc)					\
+do {									\
+	__swab32s(&(rc).errors);					\
+	__swab32s(&(rc).rpcs_sent);					\
+	__swab32s(&(rc).rpcs_rcvd);					\
+	__swab32s(&(rc).rpcs_dropped);					\
+	__swab32s(&(rc).rpcs_expired);					\
+	__swab64s(&(rc).bulk_get);					\
+	__swab64s(&(rc).bulk_put);					\
 } while (0)
 
-#define sfw_unpack_lnet_counters(lc)    \
-do {                                    \
-	__swab32s(&(lc).lcc_errors);        \
-	__swab32s(&(lc).lcc_msgs_max);      \
-	__swab32s(&(lc).lcc_msgs_alloc);    \
-	__swab32s(&(lc).lcc_send_count);    \
-	__swab32s(&(lc).lcc_recv_count);    \
-	__swab32s(&(lc).lcc_drop_count);    \
-	__swab32s(&(lc).lcc_route_count);   \
-	__swab64s(&(lc).lcc_send_length);   \
-	__swab64s(&(lc).lcc_recv_length);   \
-	__swab64s(&(lc).lcc_drop_length);   \
-	__swab64s(&(lc).lcc_route_length);  \
+#define sfw_unpack_lnet_counters(lc)					\
+do {									\
+	__swab32s(&(lc).lcc_errors);					\
+	__swab32s(&(lc).lcc_msgs_max);					\
+	__swab32s(&(lc).lcc_msgs_alloc);				\
+	__swab32s(&(lc).lcc_send_count);				\
+	__swab32s(&(lc).lcc_recv_count);				\
+	__swab32s(&(lc).lcc_drop_count);				\
+	__swab32s(&(lc).lcc_route_count);				\
+	__swab64s(&(lc).lcc_send_length);				\
+	__swab64s(&(lc).lcc_recv_length);				\
+	__swab64s(&(lc).lcc_drop_length);				\
+	__swab64s(&(lc).lcc_route_length);				\
 } while (0)
 
-#define sfw_test_active(t)      (atomic_read(&(t)->tsi_nactive) != 0)
-#define sfw_batch_active(b)     (atomic_read(&(b)->bat_nactive) != 0)
+#define sfw_test_active(t)	(atomic_read(&(t)->tsi_nactive) != 0)
+#define sfw_batch_active(b)	(atomic_read(&(b)->bat_nactive) != 0)
 
 static struct smoketest_framework {
 	/* RPCs to be recycled */
@@ -114,12 +114,12 @@ static int sfw_stop_batch(struct sfw_batch *tsb, int force);
 static void sfw_destroy_session(struct sfw_session *sn);
 
 static inline struct sfw_test_case *
-sfw_find_test_case(int id)
+sfw_find_test_case(enum srpc_service_type id)
 {
 	struct sfw_test_case *tsc;
 
-	LASSERT(id <= SRPC_SERVICE_MAX_ID);
-	LASSERT(id > SRPC_FRAMEWORK_SERVICE_MAX_ID);
+	LASSERTF(id < SRPC_SERVICE_MAX_ID, "id = %i\n", id);
+	LASSERTF(id > SRPC_FRAMEWORK_SERVICE_MAX_ID, "id = %i\n", id);
 
 	list_for_each_entry(tsc, &sfw_data.fw_tests, tsc_list) {
 		if (tsc->tsc_srv_service->sv_id == id)
@@ -194,7 +194,7 @@ sfw_deactivate_session(void)
 __must_hold(&sfw_data.fw_lock)
 {
 	struct sfw_session *sn = sfw_data.fw_session;
-	int            nactive = 0;
+	int nactive = 0;
 	struct sfw_batch *tsb;
 	struct sfw_test_case *tsc;
 
@@ -255,7 +255,7 @@ sfw_session_expired(void *data)
 
 static inline void
 sfw_init_session(struct sfw_session *sn, struct lst_sid sid,
-		 unsigned features, const char *name)
+		 unsigned int features, const char *name)
 {
 	struct stt_timer *timer = &sn->sn_timer;
 
@@ -288,7 +288,7 @@ sfw_server_rpc_done(struct srpc_server_rpc *rpc)
 
 	CDEBUG(D_NET,
 	       "Incoming framework RPC done: service %s, peer %s, status %s:%d\n",
-	       sv->sv_name, libcfs_id2str(rpc->srpc_peer),
+	       sv->sv_name, libcfs_idstr(&rpc->srpc_peer),
 	       swi_state2str(rpc->srpc_wi.swi_state), status);
 
 	if (rpc->srpc_bulk) {
@@ -303,9 +303,8 @@ sfw_client_rpc_fini(struct srpc_client_rpc *rpc)
 	LASSERT(rpc->crpc_bulk.bk_niov == 0);
 	LASSERT(list_empty(&rpc->crpc_list));
 
-	CDEBUG(D_NET, "Outgoing framework RPC done: "
-	       "service %d, peer %s, status %s:%d:%d\n",
-	       rpc->crpc_service, libcfs_id2str(rpc->crpc_dest),
+	CDEBUG(D_NET, "Outgoing framework RPC done: service %d, peer %s, status %s:%d:%d\n",
+	       rpc->crpc_service, libcfs_idstr(&rpc->crpc_dest),
 	       swi_state2str(rpc->crpc_wi.swi_state),
 	       rpc->crpc_aborted, rpc->crpc_status);
 
@@ -588,8 +587,8 @@ sfw_load_test(struct sfw_test_instance *tsi)
 
 	rc = srpc_service_add_buffers(svc, nbuf);
 	if (rc != 0) {
-		CWARN("Failed to reserve enough buffers: "
-		      "service %s, %d needed: %d\n", svc->sv_name, nbuf, rc);
+		CWARN("Failed to reserve enough buffers: service %s, %d needed: %d\n",
+		      svc->sv_name, nbuf, rc);
 		/* NB: this error handler is not strictly correct, because
 		 * it may release more buffers than already allocated,
 		 * but it doesn't matter because request portal should
@@ -814,7 +813,7 @@ sfw_add_test_instance(struct sfw_batch *tsb, struct srpc_server_rpc *rpc)
 				goto error;
 			}
 
-			tsu->tsu_dest.nid = id.nid;
+			lnet_nid4_to_nid(id.nid, &tsu->tsu_dest.nid);
 			tsu->tsu_dest.pid = id.pid;
 			tsu->tsu_instance = tsi;
 			tsu->tsu_private  = NULL;
@@ -911,8 +910,8 @@ sfw_test_rpc_done(struct srpc_client_rpc *rpc)
 }
 
 int
-sfw_create_test_rpc(struct sfw_test_unit *tsu, struct lnet_process_id peer,
-		    unsigned features, int nblk, int blklen,
+sfw_create_test_rpc(struct sfw_test_unit *tsu, struct lnet_processid *peer,
+		    unsigned int features, int nblk, int blklen,
 		    struct srpc_client_rpc **rpcpp)
 {
 	struct srpc_client_rpc *rpc = NULL;
@@ -963,7 +962,7 @@ sfw_run_test(struct swi_workitem *wi)
 	struct sfw_test_instance *tsi = tsu->tsu_instance;
 	struct srpc_client_rpc *rpc = NULL;
 
-	if (tsi->tsi_ops->tso_prep_rpc(tsu, tsu->tsu_dest, &rpc) != 0) {
+	if (tsi->tsi_ops->tso_prep_rpc(tsu, &tsu->tsu_dest, &rpc) != 0) {
 		LASSERT(rpc == NULL);
 		wi->swi_state = SWI_STATE_DONE;
 		goto test_done;
@@ -1031,13 +1030,12 @@ sfw_run_batch(struct sfw_batch *tsb)
 		atomic_inc(&tsb->bat_nactive);
 
 		list_for_each_entry(tsu, &tsi->tsi_units, tsu_list) {
+			int cpt = lnet_nid2cpt(&tsu->tsu_dest.nid, NULL);
+
 			atomic_inc(&tsi->tsi_nactive);
 			tsu->tsu_loop = tsi->tsi_loop;
 			wi = &tsu->tsu_worker;
-			swi_init_workitem(wi, sfw_run_test,
-					  lst_test_wq[lnet_cpt_of_nid(
-							      tsu->tsu_dest.nid,
-							      NULL)]);
+			swi_init_workitem(wi, sfw_run_test, lst_test_wq[cpt]);
 			swi_schedule_workitem(wi);
 		}
 	}
@@ -1145,7 +1143,7 @@ sfw_add_test(struct srpc_server_rpc *rpc)
 	    request->tsr_ndest > SFW_MAX_NDESTS ||
 	    (request->tsr_is_client && request->tsr_ndest == 0) ||
 	    request->tsr_concur > SFW_MAX_CONCUR ||
-	    request->tsr_service > SRPC_SERVICE_MAX_ID ||
+	    request->tsr_service >= SRPC_SERVICE_MAX_ID ||
 	    request->tsr_service <= SRPC_FRAMEWORK_SERVICE_MAX_ID) {
 		reply->tsr_status = EINVAL;
 		return 0;
@@ -1161,7 +1159,7 @@ sfw_add_test(struct srpc_server_rpc *rpc)
 	if (bat == NULL) {
 		CERROR("dropping RPC %s from %s under memory pressure: rc = %d\n",
 			rpc->srpc_scd->scd_svc->sv_name,
-			libcfs_id2str(rpc->srpc_peer), -ENOMEM);
+			libcfs_idstr(&rpc->srpc_peer), -ENOMEM);
 		return -ENOMEM;
 	}
 
@@ -1178,7 +1176,7 @@ sfw_add_test(struct srpc_server_rpc *rpc)
 			      request->tsr_ndest;
 
 		return sfw_alloc_pages(rpc, CFS_CPT_ANY, len, 1);
-        }
+	}
 
 	rc = sfw_add_test_instance(bat, rpc);
 	CDEBUG(rc == 0 ? D_NET : D_WARNING,
@@ -1239,7 +1237,7 @@ sfw_handle_server_rpc(struct srpc_server_rpc *rpc)
 	struct srpc_service	*sv = rpc->srpc_scd->scd_svc;
 	struct srpc_msg     *reply	= &rpc->srpc_replymsg;
 	struct srpc_msg     *request	= &rpc->srpc_reqstbuf->buf_msg;
-	unsigned	features = LST_FEATS_MASK;
+	unsigned int features = LST_FEATS_MASK;
 	int		rc = 0;
 
 	LASSERT(sfw_data.fw_active_srpc == NULL);
@@ -1255,7 +1253,7 @@ sfw_handle_server_rpc(struct srpc_server_rpc *rpc)
 	/* Remove timer to avoid racing with it or expiring active session */
 	if (sfw_del_session_timer() != 0) {
 		CERROR("dropping RPC %s from %s: racing with expiry timer: rc = %d\n",
-		       sv->sv_name, libcfs_id2str(rpc->srpc_peer), -EAGAIN);
+		       sv->sv_name, libcfs_idstr(&rpc->srpc_peer), -EAGAIN);
 		spin_unlock(&sfw_data.fw_lock);
 		return -EAGAIN;
 	}
@@ -1293,8 +1291,6 @@ sfw_handle_server_rpc(struct srpc_server_rpc *rpc)
 	}
 
 	switch (sv->sv_id) {
-	default:
-		LBUG();
 	case SRPC_SERVICE_TEST:
 		rc = sfw_add_test(rpc);
 		break;
@@ -1323,6 +1319,8 @@ sfw_handle_server_rpc(struct srpc_server_rpc *rpc)
 		rc = sfw_remove_session(&request->msg_body.rmsn_reqst,
 					&reply->msg_body.rmsn_reply);
 		break;
+	default:
+		LASSERTF(0, "sv_id bad %u\n", sv->sv_id);
 	}
 
 	if (sfw_data.fw_session != NULL)
@@ -1355,7 +1353,7 @@ sfw_bulk_ready(struct srpc_server_rpc *rpc, int status)
 
 	if (status != 0) {
 		CERROR("Bulk transfer failed for RPC: service %s, peer %s, status %d: rc = %d\n",
-		       sv->sv_name, libcfs_id2str(rpc->srpc_peer), status, -EIO);
+		       sv->sv_name, libcfs_idstr(&rpc->srpc_peer), status, -EIO);
 		spin_unlock(&sfw_data.fw_lock);
 		return -EIO;
 	}
@@ -1367,7 +1365,7 @@ sfw_bulk_ready(struct srpc_server_rpc *rpc, int status)
 
 	if (sfw_del_session_timer() != 0) {
 		CERROR("dropping RPC %s from %s: racing with expiry timer: rc = %d\n",
-		       sv->sv_name, libcfs_id2str(rpc->srpc_peer), -EAGAIN);
+		       sv->sv_name, libcfs_idstr(&rpc->srpc_peer), -EAGAIN);
 		spin_unlock(&sfw_data.fw_lock);
 		return -EAGAIN;
 	}
@@ -1388,8 +1386,8 @@ sfw_bulk_ready(struct srpc_server_rpc *rpc, int status)
 }
 
 struct srpc_client_rpc *
-sfw_create_rpc(struct lnet_process_id peer, int service,
-	       unsigned features, int nbulkiov, int bulklen,
+sfw_create_rpc(struct lnet_processid *peer, int service,
+	       unsigned int features, int nbulkiov, int bulklen,
 	       void (*done)(struct srpc_client_rpc *), void *priv)
 {
 	struct srpc_client_rpc *rpc = NULL;

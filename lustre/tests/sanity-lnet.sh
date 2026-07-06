@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 #
 # Run select tests by setting ONLY, or as arguments to the script.
 # Skip specific tests by setting EXCEPT.
@@ -13,12 +13,14 @@ LUSTRE=${LUSTRE:-$(cd $(dirname $0)/..; echo $PWD)}
 . $LUSTRE/tests/test-framework.sh
 CLEANUP=${CLEANUP:-:}
 SETUP=${SETUP:-:}
+SUBSYSTEM="$SUBSYSTEM +neterror +net +nettrace +malloc"
 init_test_env "$@"
 . ${CONFIG:=$LUSTRE/tests/cfg/$NAME.sh}
 init_logging
 
 ALWAYS_EXCEPT="$SANITY_LNET_EXCEPT "
 always_except LU-10391 253 254
+always_except LU-18751 410
 
 [[ "$SLOW" = "no" ]] && EXCEPT_SLOW=""
 
@@ -37,6 +39,14 @@ cleanup_lnet() {
 		$LNETCTL lnet unconfigure 2>/dev/null
 	unload_modules
 }
+
+if (( $MDS1_VERSION >= $(version_code 2.16.56) )); then
+	net_delay_add="net_delay add"
+	net_delay_del="net_delay del"
+else
+	net_delay_add="net_delay_add"
+	net_delay_del="net_delay_del"
+fi
 
 restore_modules=false
 if module_loaded lnet ; then
@@ -95,6 +105,9 @@ setup_fakeif() {
 		    grep $FAKE_IPV6)
 
 	[[ -n $ip4 && -n $ip6 ]] || error "Failed setup $FAKE_IF"
+	wait_update $HOSTNAME \
+		"$netns_exec ip -o a s $FAKE_IF | grep -c tentative" \
+		"0" "10"
 }
 
 cleanup_fakeif() {
@@ -175,7 +188,7 @@ validate_nid() {
 
 	local num_re='[0-9]+'
 
-	if [[ $net =~ (gni|kfi)[0-9]* ]]; then
+	if [[ $net =~ (gni|kfi|bxi3f)[0-9]* ]]; then
 		[[ $addr =~ ${num_re} ]] && rc=0
 	elif [[ $net =~ tcp[0-9]* ]]; then
 		if ip_is_v4 "$addr" || ip_is_v6 "$addr"; then
@@ -295,23 +308,24 @@ elif ! intf_has_ipv4 ${INTERFACES[0]}; then
 	LNET_CONFIG_OPT="-l"
 fi
 
-if [[ $NETTYPE =~ (tcp|o2ib)[0-9]* ]]; then
-	if $FORCE_LARGE_NID; then
-		always_except LU-14288 101
-		always_except LU-14288 103
-		always_except LU-17457 199
-		always_except LU-17457 208
-		always_except LU-9680 213
-		always_except LU-17458 220
-		always_except LU-5960 230
-		always_except LU-9680 231
-		always_except LU-17457 255
-		always_except LU-9680 302
+if $FORCE_LARGE_NID; then
+	always_except LU-14288 101
+	always_except LU-14288 103
+	always_except LU-17457 199
+	always_except LU-17457 208
+	always_except LU-9680 213
+	always_except LU-17458 220
+	always_except LU-19314 228
+	always_except LU-5960 230
+	always_except LU-9680 231
+	always_except LU-17457 255
+	always_except LU-19334 257
+	always_except LU-19363 270
+	always_except LU-9680 302
 
-		FAKE_NID="${FAKE_IPV6}@tcp"
-	else
-		FAKE_NID="${FAKE_IP}@tcp"
-	fi
+	FAKE_NID="${FAKE_IPV6}@tcp"
+else
+	FAKE_NID="${FAKE_IP}@tcp"
 fi
 
 build_test_filter
@@ -456,6 +470,8 @@ peer:
         - nid: 10@gni
         - nid: 6@kfi
         - nid: 10@kfi
+        - nid: 6@bxi3f
+        - nid: 10@bxi3f
 EOF
 	append_global_yaml
 
@@ -463,6 +479,7 @@ EOF
 	nid_expr+=",6.6.[1-4/2].[0-6/3]@o2ib"
 	nid_expr+=",[6-12/4]@gni"
 	nid_expr+=",[6-12/4]@kfi"
+	nid_expr+=",[6-12/4]@bxi3f"
 
 	compare_peer_add "6.6.6.6@tcp" "${nid_expr}"
 }
@@ -526,9 +543,22 @@ test_7() {
 		error "Peer add failed $?"
 	compare_peer_del "7@kfi"
 
-	echo "Delete peer that has tcp, o2ib, gni and kfi nids"
-	do_lnetctl peer add --prim_nid 7@gni \
-		--nid [8-12]@gni,7.7.7.[1-4]@tcp,7.7.7.[5-9]@o2ib,[1-5]@kfi ||
+	echo "Delete peer with single nid (bxi3f)"
+	do_lnetctl peer add --prim_nid 7@bxi3f || error "Peer add failed $?"
+	compare_peer_del "7@bxi3f"
+
+	echo "Delete peer that has multiple nids (bxi3f)"
+	do_lnetctl peer add --prim_nid 7@bxi3f --nid [8-12]@bxi3f ||
+		error "Peer add failed $?"
+	compare_peer_del "7@bxi3f"
+
+	echo "Delete peer that has tcp, o2ib, gni, kfi and bxi3f nids"
+	local nid_expr="[8-12]@gni"
+	nid_expr+=",7.7.7.[1-4]@tcp"
+	nid_expr+=",7.7.7.[5-9]@o2ib"
+	nid_expr+=",[1-5]@kfi"
+	nid_expr+=",[3-7]@bxi3f"
+	do_lnetctl peer add --prim_nid 7@gni --nid "${nid_expr}" ||
 		error "Peer add failed $?"
 	compare_peer_del "7@gni"
 
@@ -666,7 +696,7 @@ create_nid() {
 	local num="$1"
 	local net="$2"
 
-	if [[ $net =~ gni* ]] || [[ $net =~ kfi* ]]; then
+	if [[ $net =~ (gni|kfi|bxi3f) ]]; then
 		echo "${num}@${net}"
 	else
 		echo "${num}.${num}.${num}.${num}@${net}"
@@ -1096,6 +1126,111 @@ test_28() {
 }
 run_test 28 "Test peer_list"
 
+test_50() {
+	reinit_dlc || return $?
+
+	local param
+
+	for param in alive_router_check_interval router_ping_timeout; do
+		echo 1 > /sys/module/lnet/parameters/$param
+	done
+
+	local tyaml=$TMP/sanity-lnet-$testnum.yaml
+	cat <<EOF > $tyaml
+routing:
+    enable: 1
+EOF
+
+	echo "Enable routing"
+	do_lnetctl import $tyaml ||
+		error "Import failed rc = $?"
+
+	# Get default buffer sizes for later
+	local tiny=$($LNETCTL export --backup |
+		     awk '/\s+tiny:/{print $NF}')
+	local small=$($LNETCTL export --backup |
+		      awk '/\s+small:/{print $NF}')
+	local large=$($LNETCTL export --backup |
+		      awk '/\s+large:/{print $NF}')
+
+	wait_update $HOSTNAME \
+		"$LNETCTL routing show | grep enable | grep -c 1" \
+		"1" "10"
+
+	(($? == 0)) ||
+		error "Routing not enabled"
+
+	cat <<EOF > $tyaml
+routing:
+    enable: 0
+EOF
+
+	echo "Disable routing"
+	do_lnetctl import $tyaml ||
+		error "Import failed rc = $?"
+
+	wait_update $HOSTNAME \
+		"$LNETCTL routing show | grep enable | grep -c 0" \
+		"1" "10"
+	(($? == 0)) ||
+		error "Routing not disabled"
+
+	local ncpt=$($LCTL get_param -n cpu_partition_table | wc -l)
+
+	tiny=$((tiny + ncpt))
+	small=$((small + ncpt))
+	large=$((large + ncpt))
+	cat <<EOF > $tyaml
+routing:
+    enable: 1
+buffers:
+    tiny: $tiny
+    small: $small
+    large: $large
+EOF
+
+	echo "Enable routing w/custom buffer sizses"
+	do_lnetctl import $tyaml ||
+		error "Import failed rc = $?"
+
+	cat /sys/module/lnet/parameters/*buffers
+	local tiny2=$($LNETCTL export --backup |
+		      awk '/\s+tiny:/{print $NF}')
+	local small2=$($LNETCTL export --backup |
+		       awk '/\s+small:/{print $NF}')
+	local large2=$($LNETCTL export --backup |
+		       awk '/\s+large:/{print $NF}')
+
+	((tiny2 == tiny)) ||
+		error "Expect tiny buffers $tiny found $tiny2"
+	((small2 == small)) ||
+		error "Expect small buffers $small found $small2"
+	((large2 == large)) ||
+		error "Expect large buffers $large found $large2"
+}
+run_test 50 "Enable/disable routing via yaml import"
+
+test_51() {
+	reinit_dlc || return $?
+
+	local range=$(cat /sys/module/lnet/parameters/lnet_numa_range)
+	local tyaml=$TMP/sanity-lnet-$testnum.yaml
+
+	((range++))
+	cat <<EOF > $tyaml
+numa:
+    range: $range
+EOF
+
+	do_lnetctl import $tyaml || error "Import failed rc = $?"
+
+	local range2=$(cat /sys/module/lnet/parameters/lnet_numa_range)
+
+	((range2 == range)) ||
+		error "Expect lnet_numa_range $range found $range2"
+}
+run_test 51 "Set numa range via yaml import"
+
 test_99a() {
 	reinit_dlc || return $?
 
@@ -1314,19 +1449,23 @@ declare -A ROUTER_NIDS
 declare -A RPEER_NIDS
 LNIDS=()
 LOCAL_NET=${NETTYPE}
+LOCAL_NET2=${NETTYPE}2
 REMOTE_NET=${NETTYPE}1
+REMOTE_NET2=${NETTYPE}3
 setup_router_test() {
 	(( $MDS1_VERSION >= $(version_code 2.15.0) )) ||
 		skip "need at least 2.15.0 for load_lnet"
 
 	local routers_required=1
 	local rpeers_required=1
+	local mr_peers=false
 	local flag
 
-	while getopts "r:p:" flag; do
+	while getopts "mp:r:" flag; do
 		case $flag in
-			r) routers_required="$OPTARG";;
+			m) mr_peers=true;;
 			p) rpeers_required="$OPTARG";;
+			r) routers_required="$OPTARG";;
 			*) ;;
 		esac
 	done
@@ -1362,6 +1501,12 @@ setup_router_test() {
 			return $?
 		do_net_add $router $REMOTE_NET ${router_interfaces[0]} ||
 			return $?
+		if $mr_peers; then
+			do_net_add $router $LOCAL_NET2 ${router_interfaces[0]} ||
+				return $?
+			do_net_add $router $REMOTE_NET2 ${router_interfaces[0]} ||
+				return $?
+		fi
 	done
 
 	for rpeer in ${!RPEER_INTERFACES[@]}; do
@@ -1369,10 +1514,18 @@ setup_router_test() {
 
 		do_net_add $rpeer $REMOTE_NET ${rpeer_interfaces[0]} ||
 			return $?
+		if $mr_peers; then
+			do_net_add $rpeer $REMOTE_NET2 ${rpeer_interfaces[0]} ||
+				return $?
+		fi
 	done
 
 	add_net $LOCAL_NET ${INTERFACES[0]} ||
 		return $?
+	if $mr_peers; then
+		add_net $LOCAL_NET2 ${INTERFACES[0]} ||
+			return $?
+	fi
 
 	for router in ${!ROUTER_INTERFACES[@]}; do
 		ROUTER_NIDS[$router]=$(do_node $router $LCTL list_nids \
@@ -1449,7 +1602,6 @@ route:
       gateway: ${router_nids[0]}
       hop: -1
       priority: 0
-      health_sensitivity: 1
 peer:
     - primary nid: ${router_nids[0]}
       Multi-Rail: False
@@ -1503,7 +1655,6 @@ EOF
       gateway: ${IF0_NET}.${i}@${NETTYPE}
       hop: -1
       priority: 0
-      health_sensitivity: 1
 EOF
 	done
 
@@ -1787,7 +1938,11 @@ test_111() {
 	local num_routes=$($LNETCTL route show 2>/dev/null | grep -c gateway)
 
 	(( num_routes == 499 )) ||
-		error "Expect 499 routes but found $num_routes"
+		error "Expect 499 routes but lnetctl found $num_routes"
+
+	num_routes=$($LCTL show_route 2>/dev/null | grep -c net)
+	(( num_routes == 499 )) ||
+		error "Epect 499 routes but lctl found $num_routes"
 
 	cleanup_router_test
 }
@@ -1810,6 +1965,689 @@ test_112() {
 	cleanup_fakeif
 }
 run_test 112 "multiple net configurations"
+
+do_import_test() {
+	reinit_dlc || return $?
+
+	cat ${1:-"$TMP/sanity-lnet-$testnum-expected.yaml"}
+
+	do_lnetctl import ${1:-"$TMP/sanity-lnet-$testnum-expected.yaml"} ||
+		error "Import failed with rc = $?"
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-actual.yaml
+
+	compare_yaml_files || return $?
+}
+
+test_150() {
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	cat <<EOF > $TMP/sanity-lnet.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: $(ip -o -4 a s ${INTERFACES[0]} | awk '{print $4}' | sed 's/\/.*//')
+EOF
+
+	do_import_test "$TMP/sanity-lnet.yaml" || return $?
+}
+run_test 150 "Check import of ip2nets yaml sequence"
+
+test_151() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp nettype"
+
+	cleanup_lnet || error "Failed to unload modules before test execution"
+
+	setup_fakeif || error "Failed to add fake IF"
+
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+	add_net "${NETTYPE}" "${FAKE_IF}" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	local if0_ip=$(ip -o -4 a s ${INTERFACES[0]} | awk '{print $4}' |
+		       sed 's/\/.*//')
+
+	echo "Check import of ip2nets with two matching interfaces"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+        1: ${FAKE_IF}
+    ip-range:
+        0: ${if0_ip}
+        1: ${FAKE_IP}
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+
+	echo "Additional rules for same net should not change config"
+
+	cat <<EOF >> $TMP/sanity-lnet-$testnum.yaml
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${FAKE_IF}
+    ip-range:
+        0: ${FAKE_IP}
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+
+	add_net "${NETTYPE}2" "${INTERFACES[0]}"
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	echo "Additional rule for second net should apply"
+
+	cat <<EOF >> $TMP/sanity-lnet-$testnum.yaml
+  - net-spec: ${NETTYPE}2
+    interfaces:
+        0: ${INTERFACES[0]}
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+
+	cleanup_fakeif
+}
+run_test 151 "Check correct application of multiple ip2nets rules"
+
+test_152() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp nettype"
+
+	cleanup_lnet || error "Failed to unload modules before test execution"
+
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	local if0_ip=$(ip -o -4 a s ${INTERFACES[0]} | awk '{print $4}' |
+		       sed 's/\/.*//')
+	local i range
+
+	echo "Check import of ip2nets with wildcard IP patterns"
+
+	for i in {3..1}; do
+		range=$(echo "$if0_ip" | cut -d. -f1-$i)
+		for ((j = 3; j >= $i; j--)); do
+			range="${range:+$range.}*"
+		done
+
+		cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: ${range}
+EOF
+
+		do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+	done
+
+	setup_fakeif || error "Failed to add fake IF"
+
+	echo "Check match-all expression mask later rules"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: "*.*.*.*"
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+        1: ${FAKE_IF}
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+        1: ${FAKE_IF}
+    ip-range:
+        0: $if0_ip
+        1: $FAKE_IP
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+
+	cleanup_fakeif
+}
+run_test 152 "Check import of ip2nets with wildcard IP patterns"
+
+create_ipv4_range() {
+	local stepped=${1:-false}
+
+	local if0_ip=$(ip -o -4 a s ${INTERFACES[0]} | awk '{print $4}' |
+		       sed 's/\/.*//')
+	local if0_net=$(echo "$if0_ip" | cut -d. -f1-3)
+	local if0_host=$(echo "$if0_ip" | cut -d. -f4)
+	local range_start=$((if0_host - 4 < 0 ? 0 : if0_host - 4))
+	local range_end=$((if0_host + 4 > 255 ? 255 : if0_host + 4))
+
+	if ${stepped}; then
+		(((if0_host - range_start) % 2 == 0)) || range_start=${if0_host}
+
+		echo "${if0_net}.[${range_start}-${range_end}/2]"
+	else
+		echo "${if0_net}.[${range_start}-${range_end}]"
+	fi
+}
+
+test_153() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp nettype"
+
+	cleanup_lnet || error "Failed to unload modules before test execution"
+
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	local ip_range=$(create_ipv4_range)
+
+	echo "Check import of ip2nets with IP address ranges"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: ${ip_range}
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+}
+run_test 153 "Check import of ip2nets with IP address ranges"
+
+test_154() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp nettype"
+
+	cleanup_lnet || error "Failed to unload modules before test execution"
+
+	setup_fakeif || error "Failed to add fake IF"
+
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	local ip_range=$(create_ipv4_range true)
+
+	echo "Check import of ip2nets with stepped IP address ranges"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: ${ip_range}
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+
+	cleanup_fakeif
+}
+run_test 154 "Check import of ip2nets with stepped IP address ranges"
+
+test_155() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp nettype"
+
+	reinit_dlc || return $?
+
+	local if0_ip=$(ip -o -4 a s ${INTERFACES[0]} | awk '{print $4}' |
+		       sed 's/\/.*//')
+
+	echo "Check import with no matching rules (should fail)"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: 10.20.30.40
+EOF
+
+	! do_lnetctl import "$TMP/sanity-lnet-$testnum.yaml" ||
+		error "Import should have failed"
+}
+run_test 155 "Check ip2nets import failure with no matching rules"
+
+test_156() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp nettype"
+
+	cleanup_lnet || error "Failed to unload modules before test execution"
+
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	local if0_ip=$(ip -o -4 a s ${INTERFACES[0]} | awk '{print $4}' |
+		       sed 's/\/.*//')
+	local if0_net3=$(echo "$if0_ip" | cut -d. -f1-3)
+	local if0_host=$(echo "$if0_ip" | cut -d. -f4)
+	local host2=$if0_host
+	local i
+
+	for i in {1..4}; do
+		((host2 + 2 < 255)) &&
+			host2=$((host2 + 2)) ||
+			host2=1
+		range=${range:+$range,}$host2
+		((i == 2)) && range=${range},$if0_host
+	done
+
+	echo "Check import of ip2nets with comma-separated IP list"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: ${if0_net3}.[${range}]
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml"
+}
+run_test 156 "Check import of ip2nets with comma-separated IP ranges"
+
+test_157() {
+	reinit_dlc || return $?
+
+	echo "Check import failure with missing net-spec"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: 192.168.1.1
+EOF
+
+	! do_lnetctl import "$TMP/sanity-lnet-$testnum.yaml" ||
+		error "Import should have failed with missing net-spec"
+}
+run_test 157 "Check import failure with malformed ip2nets YAML"
+
+test_158() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp nettype"
+
+	intf_has_ipv6 ${INTERFACES[0]} || skip "Interface has no IPv6"
+
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	local if0_ipv6=$(ip -o -6 a s ${INTERFACES[0]} | awk '{print $4}' |
+			 grep -v '^fe80::' | head -n 1 | cut -d/ -f1)
+
+	echo "Check import of ip2nets with single IPv6 address"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: ${if0_ipv6}
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+}
+run_test 158 "Check import of ip2nets with single IPv6 address"
+
+test_159() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp nettype"
+
+	intf_has_ipv6 ${INTERFACES[0]} || skip "Interface has no IPv6"
+
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	local if0_ipv6=$(ip -o -6 a s ${INTERFACES[0]} | awk '{print $4}' |
+			 grep -v '^fe80::' | head -n 1 | cut -d/ -f1)
+
+	echo "Check import of ip2nets with IPv6 /128 CIDR"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: ${if0_ipv6}/128
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+}
+run_test 159 "Check import of ip2nets with IPv6 /128 CIDR notation"
+
+test_160() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp nettype"
+
+	intf_has_ipv6 ${INTERFACES[0]} || skip "Interface has no IPv6"
+
+	cleanup_lnet || error "Failed to unload modules before test execution"
+
+	setup_fakeif || error "Failed to add fake IF"
+
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+	add_net "${NETTYPE}" "${FAKE_IF}" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	local if0_ipv6=$(ip -o -6 a s ${INTERFACES[0]} | awk '{print $4}' |
+			 grep -v '^fe80::' | head -n 1 | cut -d/ -f1)
+
+	echo "Check import of ip2nets with two IPv6 interfaces"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+        1: ${FAKE_IF}
+    ip-range:
+        0: ${if0_ipv6}
+        1: ${FAKE_IPV6}
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+
+	echo "Additional rules for same net should not change config"
+
+	cat <<EOF >> $TMP/sanity-lnet-$testnum.yaml
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${FAKE_IF}
+    ip-range:
+        0: ${FAKE_IPV6}
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+
+	add_net "${NETTYPE}2" "${INTERFACES[0]}"
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	echo "Additional rule for second net should apply"
+
+	cat <<EOF >> $TMP/sanity-lnet-$testnum.yaml
+  - net-spec: ${NETTYPE}2
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: ${if0_ipv6}
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+
+	cleanup_fakeif
+}
+run_test 160 "Check correct application of multiple IPv6 ip2nets rules"
+
+test_161() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp nettype"
+
+	intf_has_ipv6 ${INTERFACES[0]} || skip "Interface has no IPv6"
+
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	local if0_ipv6=$(ip -o -6 a s ${INTERFACES[0]} | awk '{print $4}' |
+			 grep -v '^fe80::' | head -n 1)
+	local network_addr=$(echo "$if0_ipv6" | cut -d/ -f1)
+	local prefix_len=$(cut -d/ -f2<<<"$if0_ipv6")
+
+	[[ -n $network_addr && -n $prefix_len ]] ||
+		error "Failed to get net addr or prefix len"
+
+	echo "Check import of ip2nets with various IPv6 prefix lengths"
+
+	local i
+
+	for i in {1..4}; do
+		cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: ${network_addr}/${prefix_len}
+EOF
+
+		echo "Testing with /${prefix_len} prefix"
+		do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+
+		prefix_len=$((prefix_len/2))
+	done
+}
+run_test 161 "Check import of ip2nets with various IPv6 prefix lengths"
+
+test_162() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp nettype"
+
+	intf_has_ipv6 ${INTERFACES[0]} || skip "Interface has no IPv6"
+
+	reinit_dlc || return $?
+
+	local if0_ipv6=$(ip -o -6 a s ${INTERFACES[0]} | awk '{print $4}' |
+			 grep -v '^fe80::' | head -n 1 | sed 's,/[0-9]\+$,,')
+
+	echo "Check import with non-matching IPv6 address (should fail)"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ip2nets:
+  - net-spec: ${NETTYPE}
+    interfaces:
+        0: ${INTERFACES[0]}
+    ip-range:
+        0: 2001:db8:dead:beef::1
+EOF
+
+	! do_lnetctl import "$TMP/sanity-lnet-$testnum.yaml" ||
+		error "Import should have failed with non-matching IPv6"
+}
+run_test 162 "Check ip2nets import failure with non-matching IPv6"
+
+check_tunable_warning() {
+	dmesg | tac | sed '/LNet: Added LNI/q' | \
+		grep -q "All tunables of NIs of a net should be the same"
+}
+
+test_170() {
+	[[ ${NETTYPE} == tcp* ]] || skip "Test written for tcp"
+
+	cleanup_lnet || error "Failed to unload modules before test execution"
+	cleanup_netns || error "Failed to cleanup netns before test execution"
+	setup_fakeif || error "Failed to add fake IF"
+	reinit_dlc || return $?
+
+	# Disable console ratelimit
+	rlpath="/sys/module/libcfs/parameters/libcfs_console_ratelimit"
+	local rl=$(cat $rlpath)
+	echo 0 > $rlpath
+
+	local IMPORT="do_lnetctl import --old-api"
+	local expected="$TMP/sanity-lnet-$testnum-expected.yaml"
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	echo "Different CPTs"
+	cat <<EOF > $expected
+net:
+-     net type: ${NETTYPE}
+      local NI(s):
+        - interfaces:
+                0: ${INTERFACES[0]}
+          CPT: "[0]"
+        - interfaces:
+                0: ${FAKE_IF}
+          CPT: "[1]"
+EOF
+	$IMPORT <  ${expected} || error "Import failed $?"
+	cat <<EOF > $expected
+CPT:"[0]"
+CPT:"[1]"
+EOF
+	$LNETCTL export --backup | grep CPT: | tr -d ' ' > $actual
+	diff $expected $actual || error "Bad parsing"
+	reinit_dlc
+
+	echo "lnd_tunables not read if no tunables"
+	cat <<EOF > $expected
+net:
+-     net type: ${NETTYPE}
+      local NI(s):
+        - interfaces:
+                0: ${INTERFACES[0]}
+          lnd tunables:
+                conns_per_peer: 5
+                tos: -1
+EOF
+	$IMPORT <  ${expected} || error "Import failed $?"
+	$LNETCTL export --backup | grep -q "conns_per_peer: 5" || error "Bad parsing"
+	reinit_dlc
+
+	echo "lnd_tunables cannot be different"
+	cat <<EOF > $expected
+net:
+-     net type: ${NETTYPE}
+      local NI(s):
+        - interfaces:
+                0: ${INTERFACES[0]}
+          lnd tunables:
+                conns_per_peer: 5
+                tos: -1
+        - interfaces:
+                0: ${FAKE_IF}
+          lnd tunables:
+                conns_per_peer: 3
+                tos: -1
+EOF
+	$IMPORT <  ${expected} || error "Import failed $?"
+	$LNETCTL export --backup | grep -q "conns_per_peer: 5" || error "Bad parsing"
+	$LNETCTL export --backup | grep -q "conns_per_peer: 3" || error "Bad parsing"
+	reinit_dlc
+
+	echo "Wrong tunables (lnd_tunables) read from NI if first is empty"
+	cat <<EOF > $expected
+net:
+-     net type: ${NETTYPE}
+      local NI(s):
+        - interfaces:
+                0: ${INTERFACES[0]}
+        - interfaces:
+                0: ${FAKE_IF}
+          tunables:
+                peer_timeout: 181
+                peer_credits: 8
+                peer_buffer_credits: 0
+                credits: 256
+          lnd tunables:
+                conns_per_peer: 3
+                tos: -1
+EOF
+	$IMPORT <  ${expected} || error "Import failed $?"
+	# conns_per_peer has default value for first ni and 3 for second
+	$LNETCTL export --backup | grep "conns_per_peer:" | grep -qv 3 || error "Bad parsing"
+	$LNETCTL export --backup | grep -q "conns_per_peer: 3" || error "Bad parsing"
+	# Previous ni got set tunables to default value
+	(( $($LNETCTL export --backup | grep -c "peer_timeout: 181") == 0 )) || \
+		error "Bad parsing"
+	check_tunable_warning || error "Missing warning"
+	reinit_dlc
+
+	echo "Tunables can be set directly in the net"
+	cat <<EOF > $expected
+net:
+-     net type: ${NETTYPE}
+      local NI(s):
+        - interfaces:
+                0: ${INTERFACES[0]}
+        - interfaces:
+                0: ${FAKE_IF}
+      tunables:
+            peer_timeout: 182
+            peer_credits: 8
+            peer_buffer_credits: 0
+            credits: 256
+      lnd tunables:
+            conns_per_peer: 3
+            tos: -1
+EOF
+	$IMPORT <  ${expected} || error "Import failed $?"
+	(( $($LNETCTL export --backup | grep -c "peer_timeout: 182") == 2 )) ||
+		error "Bad parsing"
+	(( $($LNETCTL export --backup | grep -c "conns_per_peer: 3") == 2 )) ||
+		error "Bad parsing"
+	reinit_dlc
+
+	echo "Show warning if we try to set different tunables (not lnd_tunables) for NIs of a same net"
+	cat <<EOF > $expected
+net:
+-     net type: ${NETTYPE}
+      local NI(s):
+        - interfaces:
+                0: ${INTERFACES[0]}
+          tunables:
+                peer_timeout: 182
+                peer_credits: 8
+                peer_buffer_credits: 0
+                credits: 256
+        - interfaces:
+                0: ${FAKE_IF}
+          tunables:
+                peer_timeout: 183
+                peer_credits: 8
+                peer_buffer_credits: 0
+                credits: 256
+EOF
+	$IMPORT <  ${expected} || error "Import failed $?"
+	# Tunables for the two nis will be the same, a warning will be emitted
+	(( $($LNETCTL export --backup | grep -c "peer_timeout: 182") == 2 )) ||
+	check_tunable_warning || error "Missing warning"
+
+	# Restore console_ratelimit
+	echo $rl > $rlpath
+
+	cleanup_lnet
+}
+run_test 170 "Check CPTs and tunables parsing when importing"
 
 test_199() {
 	[[ ${NETTYPE} == tcp* || ${NETTYPE} == o2ib* ]] ||
@@ -1838,6 +2676,11 @@ test_200() {
 	cleanup_lnet || return $?
 	setup_netns || error "setup_netns failed with $?"
 	load_lnet "networks=\"\""
+	ip a
+	ss -ltunp
+	do_ns ip a
+	do_ns ss -ltunp
+	lsmod | grep lnet
 	do_ns $LNETCTL lnet configure $LNET_CONFIG_INIT_OPT ||
 		error "Failed to configure LNet in non-default namespace rc = $?"
 	$LNETCTL net show --net tcp | grep -q "nid: $FAKE_NID$" ||
@@ -1863,6 +2706,8 @@ run_test 201 "load lnet using networks module options in a non-default namespace
 test_202() {
 	[[ ${NETTYPE} == tcp* ]] ||
 		skip "Need tcp NETTYPE"
+	(( $CLIENT_VERSION < $(version_code 2.17.53) )) ||
+		skip "kernel ip2nets deprecated in 2.17.53"
 	cleanup_lnet || return $?
 	setup_netns || error "setup_netns failed with $?"
 	load_lnet "networks=\"\" ip2nets=\"tcp0($FAKE_IF) ${FAKE_IP}\""
@@ -1894,7 +2739,7 @@ run_test 203 "add a network using an interface in the non-default namespace"
 
 LNET_PARAMS_FILE="$TMP/$TESTSUITE.parameters"
 function save_lnet_params() {
-	$LNETCTL global show | egrep -v '^global:$' |
+	$LNETCTL global show | grep -E -v '^global:$' |
 			       sed 's/://' > $LNET_PARAMS_FILE
 }
 
@@ -1903,7 +2748,7 @@ function restore_lnet_params() {
 	while read param value; do
 		[[ $param == max_intf ]] && continue
 		[[ $param == lnd_timeout ]] && continue
-		$LNETCTL set ${param} ${value} ||
+		do_lnetctl set ${param} ${value} ||
 			error "Failed to restore ${param} to ${value}"
 	done < $LNET_PARAMS_FILE
 }
@@ -1945,6 +2790,10 @@ function lnet_health_pre() {
 
 	RETRY_PARAM=$($LNETCTL global show | awk '/retry_count/{print $NF}')
 	RSND_PRE=$($LNETCTL stats show | awk '/resend_count/{print $NF}')
+	FAILED_RSND_PRE=$($LNETCTL stats show |
+			  awk '/failed_resends/{print $NF}')
+	SUCCESS_RSND_PRE=$($LNETCTL stats show |
+			   awk '/successful_resends/{print $NF}')
 	LO_HVAL_PRE=$($LNETCTL net show -v 2 | awk '/health value/{print $NF}' |
 		      xargs echo | sed 's/ /+/g' | bc -l)
 
@@ -1960,6 +2809,10 @@ function lnet_health_pre() {
 
 function lnet_health_post() {
 	RSND_POST=$($LNETCTL stats show | awk '/resend_count/{print $NF}')
+	FAILED_RSND_POST=$($LNETCTL stats show |
+			   awk '/failed_resends/{print $NF}')
+	SUCCESS_RSND_POST=$($LNETCTL stats show |
+			    awk '/successful_resends/{print $NF}')
 	LO_HVAL_POST=$($LNETCTL net show -v 2 |
 		       awk '/health value/{print $NF}' |
 		       xargs echo | sed 's/ /+/g' | bc -l)
@@ -1975,6 +2828,10 @@ function lnet_health_post() {
 	echo "Pre resends: $RSND_PRE" &&
 	echo "Post resends: $RSND_POST" &&
 	echo "Resends delta: $((RSND_POST - RSND_PRE))" &&
+	echo "Pre failed resends: $FAILED_RSND_PRE" &&
+	echo "Post failed resends: $FAILED_RSND_POST" &&
+	echo "Pre successful resends: $SUCCESS_RSND_PRE" &&
+	echo "Post successful resends: $SUCCESS_RSND_POST" &&
 	echo "Pre local health: $LO_HVAL_PRE" &&
 	echo "Post local health: $LO_HVAL_POST" &&
 	echo "Pre remote health: $RMT_HVAL_PRE" &&
@@ -1992,8 +2849,12 @@ function lnet_health_post() {
 
 function check_no_resends() {
 	echo "Check that no resends took place"
-	[[ $RSND_POST -ne $RSND_PRE ]] &&
+	(( RSND_POST == RSND_PRE )) ||
 		error "Found resends: $RSND_POST != $RSND_PRE"
+	(( FAILED_RSND_POST == FAILED_RSND_PRE )) ||
+		error "Found resends: $FAILED_RSND_POST != $FAILED_RSND_PRE"
+	(( SUCCESS_RSND_POST == SUCCESS_RSND_PRE )) ||
+		error "Found resends: $SUCCESS_RSND_POST != $SUCCESS_RSND_PRE"
 
 	return 0
 }
@@ -2002,10 +2863,25 @@ function check_resends() {
 	local delta=$((RSND_POST - RSND_PRE))
 
 	echo "Check that $RETRY_PARAM resends took place"
-	[[ $delta -ne $RETRY_PARAM ]] &&
+	(( delta == RETRY_PARAM )) ||
 		error "Expected $RETRY_PARAM resends found $delta"
 
+	echo "Check for 1 failed resend"
+	delta=$((FAILED_RSND_POST - FAILED_RSND_PRE))
+	(( delta == 1 )) || error "Found $delta failed resends"
+
+	echo "Check for 0 successful resends"
+	delta=$((SUCCESS_RSND_POST - SUCCESS_RSND_PRE))
+	(( delta == 0 )) || error "Found $delta successful resends"
+
 	return 0
+}
+
+function check_successful_resends() {
+	local delta=$((SUCCESS_RSND_POST - SUCCESS_RSND_PRE))
+
+	echo "Check for 1 successful resend"
+	(( delta == 1 )) || error "Found $delta successful resends"
 }
 
 function check_no_local_health() {
@@ -2140,7 +3016,7 @@ setup_health_test() {
 
 	$LNETCTL net show
 
-	$LNETCTL peer show -v 2 | egrep -e nid -e health
+	$LNETCTL peer show -v 2 | grep -E -e nid -e health
 
 	$LCTL set_param debug=+net
 
@@ -2158,7 +3034,7 @@ cleanup_health_test() {
 		NET_DEL_ARGS=""
 	fi
 
-	unload_modules || rc=$?
+	unload_modules || rc=$((rc + $?))
 
 	if $RLOADED; then
 		do_rpc_nodes $RNODE unload_modules_local ||
@@ -2166,20 +3042,60 @@ cleanup_health_test() {
 		RLOADED=false
 	fi
 
-	[[ $rc -ne 0 ]] &&
-		error "Failed cleanup"
+	((rc == 0)) || error "Failed cleanup"
 
 	return $rc
 }
 
+add_drop_rule() {
+	if ((${RANDOM} % 2 == 0)); then
+		do_lctl net_drop add $@ ||
+			error "$LCTL net_drop add $@ failed rc = $?"
+	else
+		do_lnetctl fault drop add $@ ||
+			error "$LNETCTL fault drop add $@ failed rc = $?"
+	fi
+}
+
+del_drop_rule() {
+	if ((${RANDOM} % 2 == 0)); then
+		do_lctl net_drop del $@ ||
+			error "$LCTL net_drop del $@ failed rc = $?"
+	else
+		do_lnetctl fault drop del $@ ||
+			error "$LNETCTL fault drop del $@ failed rc = $?"
+	fi
+}
+
+add_delay_rule() {
+	if ((${RANDOM} % 2 == 0)); then
+		do_lctl $net_delay_add $@ ||
+			error "$LCTL net_delay add $@ failed rc = $?"
+	else
+		do_lnetctl fault delay add $@ ||
+			error "$LNETCTL fault delay add $@ failed rc = $?"
+	fi
+}
+
+del_delay_rule() {
+	if ((${RANDOM} % 2 == 0)); then
+		do_lctl $net_delay_del $@ ||
+			error "$LCTL net_delay del $@ failed rc = $?"
+	else
+		do_lnetctl fault delay del $@ ||
+			error "$LNETCTL fault delay del $@ failed rc = $?"
+	fi
+}
+
 add_health_test_drop_rules() {
-	local args="-m GET -r 1 -e ${1}"
+	local hstatus="-e $1"
+	local rate="-r ${2:-1}"
+	local args="-m GET $hstatus $rate"
 	local src dst
 
 	for src in "${LNIDS[@]}"; do
 		for dst in "${RNIDS[@]}" "${LNIDS[@]}"; do
-			$LCTL net_drop add -s $src -d $dst ${args} ||
-				error "Failed to add drop rule $src $dst $args"
+			add_drop_rule -s $src -d $dst ${args}
 		done
 	done
 }
@@ -2197,7 +3113,7 @@ do_lnet_health_ping_test() {
 
 	lnet_health_post
 
-	$LCTL net_drop del -a
+	del_drop_rule -a
 
 	return 0
 }
@@ -2214,7 +3130,7 @@ test_204() {
 		       ${LNET_LOCAL_NO_RESEND_STATUSES}; do
 		do_lnet_health_ping_test "${hstatus}" || return $?
 		check_no_resends || return $?
-		check_no_local_health || return $?
+		check_local_health || return $?
 	done
 
 	cleanup_health_test || return $?
@@ -2331,6 +3247,8 @@ test_208_load_and_check_lnet() {
 
 test_208() {
 	[[ ${NETTYPE} == tcp* ]] || skip "Need tcp NETTYPE"
+	(( $CLIENT_VERSION < $(version_code 2.17.53) )) ||
+		skip "kernel ip2nets deprecated in 2.17.53"
 
 	cleanup_lnet || error "Failed to unload modules before test execution"
 	setup_fakeif || error "Failed to add fake IF"
@@ -2397,7 +3315,7 @@ test_209() {
 	lnet_health_post
 
 	check_no_resends || return $?
-	check_no_local_health || return $?
+	check_local_health || return $?
 	check_no_remote_health || return $?
 
 	cleanup_health_test || return $?
@@ -2523,16 +3441,11 @@ test_210() {
 		error "failed to set recovery_limit"
 
 	$LCTL set_param debug=+net
-	$LCTL net_drop_add -s *@${NETTYPE} -d *@${NETTYPE} -m GET -r 1 \
-		-e local_error ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE}1 -d *@${NETTYPE}1 -m GET -r 1 \
-		-e local_error ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE} -d *@${NETTYPE} -r 1 ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE}1 -d *@${NETTYPE}1 -r 1 ||
-		error "Failed to add drop rule"
+	add_drop_rule -s *@${NETTYPE} -d *@${NETTYPE} -m GET -r 1 -e local_error
+	add_drop_rule -s *@${NETTYPE}1 -d *@${NETTYPE}1 -m GET -r 1 \
+		-e local_error
+	add_drop_rule -s *@${NETTYPE} -d *@${NETTYPE} -r 1
+	add_drop_rule -s *@${NETTYPE}1 -d *@${NETTYPE}1 -r 1
 	do_lnetctl net set --health 0 --nid $prim_nid ||
 		error "Failed to set NI health to 0 rc $?"
 
@@ -2542,7 +3455,7 @@ test_210() {
 	check_ping_count "ni" "$prim_nid" "3" "10"
 	check_nid_in_recovq "-l" "$prim_nid" "1"
 
-	$LCTL net_drop_del -a
+	del_drop_rule -a
 
 	reinit_dlc || return $?
 	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
@@ -2562,16 +3475,11 @@ test_210() {
 		error "failed to set max_recovery_ping_interval"
 
 	$LCTL set_param debug=+net
-	$LCTL net_drop_add -s *@${NETTYPE} -d *@${NETTYPE} -m GET -r 1 \
-		-e local_error ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE}1 -d *@${NETTYPE}1 -m GET -r 1 \
-		-e local_error ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE} -d *@${NETTYPE} -r 1 ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE}1 -d *@${NETTYPE}1 -r 1 ||
-		error "Failed to add drop rule"
+	add_drop_rule -s *@${NETTYPE} -d *@${NETTYPE} -m GET -r 1 -e local_error
+	add_drop_rule -s *@${NETTYPE}1 -d *@${NETTYPE}1 -m GET -r 1 \
+		-e local_error
+	add_drop_rule -s *@${NETTYPE} -d *@${NETTYPE} -r 1
+	add_drop_rule -s *@${NETTYPE}1 -d *@${NETTYPE}1 -r 1
 	do_lnetctl net set --health 0 --nid $prim_nid ||
 		error "Failed to set NI health to 0 rc $?"
 
@@ -2581,7 +3489,7 @@ test_210() {
 	check_ping_count "ni" "$prim_nid" "4" "10"
 	check_nid_in_recovq "-l" "$prim_nid" "1"
 
-	$LCTL net_drop_del -a
+	del_drop_rule -a
 
 	do_lnetctl set max_recovery_ping_interval $default ||
 		error "failed to set max_recovery_ping_interval"
@@ -2608,16 +3516,12 @@ test_211() {
 	do_lnetctl set recovery_limit 10 ||
 		error "failed to set recovery_limit"
 
-	$LCTL net_drop_add -s *@${NETTYPE} -d *@${NETTYPE} -m GET -r 1 \
-		-e remote_error ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE}1 -d *@${NETTYPE}1 -m GET -r 1 \
-		-e remote_error ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE} -d *@${NETTYPE} -r 1 ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE}1 -d *@${NETTYPE}1 -r 1 ||
-		error "Failed to add drop rule"
+	add_drop_rule -s *@${NETTYPE} -d *@${NETTYPE} -m GET -r 1 \
+		-e remote_error
+	add_drop_rule -s *@${NETTYPE}1 -d *@${NETTYPE}1 -m GET -r 1 \
+		-e remote_error
+	add_drop_rule -s *@${NETTYPE} -d *@${NETTYPE} -r 1
+	add_drop_rule -s *@${NETTYPE}1 -d *@${NETTYPE}1 -r 1
 
 	# Set health to 0 on one interface. This forces it onto the recovery
 	# queue.
@@ -2630,7 +3534,7 @@ test_211() {
 	# Ping count should reset to 0 when peer ages out
 	check_ping_count "peer_ni" "$prim_nid" "0"
 
-	$LCTL net_drop_del -a
+	del_drop_rule -a
 
 	# Set health to force it back onto the recovery queue. Set to 500 means
 	# in ~5 seconds it should be back at maximum value.
@@ -2661,16 +3565,12 @@ test_211() {
 	do_lnetctl set max_recovery_ping_interval 4 ||
 		error "failed to set max_recovery_ping_interval"
 
-	$LCTL net_drop_add -s *@${NETTYPE} -d *@${NETTYPE} -m GET -r 1 \
-		-e remote_error ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE}1 -d *@${NETTYPE}1 -m GET -r 1 \
-		-e remote_error ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE} -d *@${NETTYPE} -r 1 ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@${NETTYPE}1 -d *@${NETTYPE}1 -r 1 ||
-		error "Failed to add drop rule"
+	add_drop_rule -s *@${NETTYPE} -d *@${NETTYPE} -m GET -r 1 \
+		-e remote_error
+	add_drop_rule -s *@${NETTYPE}1 -d *@${NETTYPE}1 -m GET -r 1 \
+		-e remote_error
+	add_drop_rule -s *@${NETTYPE} -d *@${NETTYPE} -r 1
+	add_drop_rule -s *@${NETTYPE}1 -d *@${NETTYPE}1 -r 1
 
 	# Set health to 0 on one interface. This forces it onto the recovery
 	# queue.
@@ -2684,7 +3584,7 @@ test_211() {
 	check_ping_count "peer_ni" "$prim_nid" "4" "14"
 	check_nid_in_recovq "-p" "$prim_nid" "1"
 
-	$LCTL net_drop_del -a
+	del_drop_rule -a
 
 	do_lnetctl set max_recovery_ping_interval $default ||
 		error "failed to set max_recovery_ping_interval"
@@ -2735,26 +3635,20 @@ test_212() {
 		error "$rnode failed to discover $my_nid"
 
 	log "Fail local discover ping to set LNET_PEER_REDISCOVER flag"
-	$LCTL net_drop_add -s "*@$NETTYPE" -d "*@$NETTYPE" -r 1 \
-		-e local_error ||
-		error "Failed to add drop rule"
+	add_drop_rule -s "*@$NETTYPE" -d "*@$NETTYPE" -r 1 -e local_error
 	do_lnetctl discover --force $rnodepnid &&
 		error "Discovery should have failed"
-	$LCTL net_drop_del -a
+	del_drop_rule -a
 
 	local nid
 	for nid in $rnodenids; do
 		# We need GET (PING) delay just long enough so we can trigger
 		# discovery on the remote peer
-		$LCTL net_delay_add -s "*@$NETTYPE" -d $nid -r 1 -m GET -l 3 ||
-			error "Failed to add delay rule"
-		$LCTL net_drop_add -s "*@$NETTYPE" -d $nid -r 1 -m GET \
-			-e local_error ||
-			error "Failed to add drop rule"
+		add_delay_rule -s "*@$NETTYPE" -d $nid -r 1 -m GET -l 3
+		add_drop_rule -s "*@$NETTYPE" -d $nid -r 1 -m GET -e local_error
 		# We need PUT (PUSH) delay just long enough so we can process
 		# the PING failure
-		$LCTL net_delay_add -s "*@$NETTYPE" -d $nid -r 1 -m PUT -l 6 ||
-			error "Failed to add delay rule"
+		add_delay_rule -s "*@$NETTYPE" -d $nid -r 1 -m PUT -l 6
 	done
 
 	log "Force $HOSTNAME to discover $rnodepnid (in background)"
@@ -2789,9 +3683,9 @@ test_212() {
 	# lnet_destroy_peer_locked()
 
 	# Delete the delay rules to send the PUSH
-	$LCTL net_delay_del -a
+	del_delay_rule -a
 	# Delete the drop rules
-	$LCTL net_drop_del -a
+	del_drop_rule -a
 
 	unload_modules ||
 		error "Failed to unload modules"
@@ -2834,7 +3728,7 @@ function check_ni_status() {
 	local expect="$2"
 
 	local status=$($LNETCTL net show |
-		       grep -A 1 ${nid} |
+		       grep -wA 1 ${nid} |
 		       awk '/status/{print $NF}')
 
 	echo "NI ${nid} expect status \"${expect}\" found \"${status}\""
@@ -2881,7 +3775,7 @@ get_ni_stat() {
 	local stat=$2
 
 	$LNETCTL net show -v 2 |
-		egrep -e nid -e $stat |
+		grep -E -e nid -e $stat |
 		grep -wA 1 $nid |
 		awk '/'$stat':/{print $NF}'
 }
@@ -3025,15 +3919,13 @@ test_216() {
 	local src dst
 	for src in "${nids[@]}"; do
 		for dst in "${nids[@]}"; do
-			$LCTL net_drop_add -r 1 -s $src -d $dst \
-				-e network_timeout ||
-				error "Failed to add drop rule"
+			add_drop_rule -r 1 -s $src -d $dst -e network_timeout
 		done
 	done
 
 	do_lnetctl ping ${nids[0]} || rc=$?
 
-	$LCTL net_drop_del -a
+	del_drop_rule -a
 
 	[[ $rc -eq 0 ]] &&
 		error "expected ping to fail"
@@ -3080,8 +3972,7 @@ test_218() {
 	do_lnetctl ping $nid2 ||
 		error "ping failed"
 
-	$LCTL net_drop_add -s $nid1 -d $nid1 -e local_error -r 1 ||
-		error "Failed to add drop rule"
+	add_drop_rule -s $nid1 -d $nid1 -e local_error -r 1
 
 	do_lnetctl ping --source $nid1 $nid1 &&
 		error "ping should have failed"
@@ -3104,10 +3995,10 @@ test_218() {
 	health_recovered=$($LNETCTL net show -v 2 |
 			   grep -c 'health value: 1000')
 
-	$LCTL net_drop_del -a
+	del_drop_rule -a
 
 	[[ $health_recovered -ne 2 ]] &&
-		do_lnetctl net show -v 2 | egrep -e nid -e health &&
+		do_lnetctl net show -v 2 | grep -E -e nid -e health &&
 		error "Health hasn't recovered"
 
 	return 0
@@ -3135,43 +4026,75 @@ test_219() {
 }
 run_test 219 "Consolidate peer entries"
 
-# check that all routes are up
+# check that all routes have the 'expect' status
+# lctl, lnetctl and debugfs can all report route status, so we check all three
+# to ensure they are in agreement.
 check_route_aliveness() {
 	local node="$1"
-	local expected="$2"
+	local expect="$2"
 
-	local lctl_actual
-	local lnetctl_actual
+	local lctl_status
+	local lnetctl_status
+	local debugfs_status
 	local chk_intvl
-	local i
+	local timeout
 
 	chk_intvl=$(cat /sys/module/lnet/parameters/alive_router_check_interval)
+	timeout=$(cat /sys/module/lnet/parameters/router_ping_timeout)
 
-	lctl_actual=$(do_node $node $LCTL show_route |
-			awk '{print $7}' | sort -u | xargs)
-	lnetctl_actual=$(do_node $node $LNETCTL route show -v |
-			awk '/state/{print $NF}' | sort -u | xargs)
+	# Router may delay start for chk_intvl + timeout, so wait for 2x this
+	local lctl_cmd="do_node $node $LCTL show_route"
+	local lnetctl_cmd="do_node $node $LNETCTL route show -v"
+	local debugfs_cmd="do_node $node $LCTL get_param -n routes"
+	local max_wait=$((2 * (chk_intvl + timeout)))
+	local waited=0
+	local begin=$SECONDS
+	local got_expected=false
 
-	for ((i = 0; i < $chk_intvl; i++)); do
-		if [[ $lctl_actual == $expected ]] &&
-		   [[ $lnetctl_actual == $expected ]]; then
+	echo "waiting up to $max_wait seconds for route status agreement"
+	while ((waited <= max_wait)); do
+		lctl_status=$($lctl_cmd | awk '{print $7}' | sort -u | xargs)
+		lnetctl_status=$($lnetctl_cmd | awk '/state/{print $NF}' |
+				 sort -u | xargs)
+		debugfs_status=$($debugfs_cmd | awk '/'${NETTYPE}'/{print $4}' |
+				 sort -u | xargs)
+
+
+		if [[ $lctl_status == $expect ]] &&
+		   [[ $lnetctl_status == $expect ]] &&
+		   [[ $debugfs_status == $expect ]]; then
+		   	got_expected=true
 			break
 		fi
+		if ${VERBOSE}; then
+			echo "Wait $((max_wait - waited))s for route '$expect'"
+			echo "    lctl:'$lctl_status' lnetctl:'$lnetctl_status'"
+			echo "    debugfs:'$debugfs_status'"
+		fi
 
-		echo "wait 1s for route state change"
 		sleep 1
-
-		lctl_actual=$(do_node $node $LCTL show_route |
-				awk '{print $7}' | sort -u | xargs)
-		lnetctl_actual=$(do_node $node $LNETCTL route show -v |
-				awk '/state/{print $NF}' | sort -u | xargs)
+		waited=$((SECONDS - begin))
 	done
 
-	[[ $lctl_actual != $expected ]] &&
-		error "Wanted \"$expected\" lctl found \"$lctl_actual\""
+	if ! got_expected; then
+		echo "lctl shows:"
+		$lctl_cmd
+		echo "lnetctl shows:"
+		$lnetctl_cmd
+		echo "debugfs shows:"
+		$debugfs_cmd
 
-	[[ $lnetctl_actual != $expected ]] &&
-		error "Wanted \"$expected\" lnetctl found \"$lnetctl_actual\""
+		[[ $lctl_status == $expect ]] ||
+			error "Wanted '$expect' lctl found '$lctl_status'"
+
+		[[ $lnetctl_status == $expect ]] ||
+			error "Wanted '$expect' lnetctl found '$lnetctl_status'"
+
+		[[ $debugfs_status == $expect ]] ||
+			error "Wanted '$expect' debugfs found '$debugfs_status'"
+	fi
+
+	echo "Got '$expect' after ${waited}s"
 
 	return 0
 }
@@ -3467,9 +4390,8 @@ test_225() {
 run_test 225 "Check avoid_asym_router_failure=0 w/DD disabled"
 
 test_226() {
-
-	(( $MDS1_VERSION >= $(version_code v2_15_62-31-g2b210f3905) )) ||
-		skip "need MDS >= 2.15.62.31 for refcnt fix LU-17440"
+	(( $MDS1_VERSION >= $(version_code v2_16_57-110-ged70ccb471) )) ||
+		skip "need MDS >= 2.16.57.110 for refcnt fix LU-17440"
 
 	setup_router_test -r 2 || return $?
 
@@ -3534,6 +4456,42 @@ test_227() {
 }
 run_test 227 "Check router peer health w/DD disabled"
 
+test_228() {
+	setup_router_test -r 2 || return $?
+
+	do_basic_rtr_test || return $?
+
+	do_rpc_nodes $HOSTNAME,${RPEERS[0]} load_module \
+		../lnet/selftest/lnet_selftest ||
+			error "Failed to load lnet-selftest module"
+
+	local lstpid rc
+
+	$LSTSH -H -t $HOSTNAME -f ${RPEERS[0]} -m rw &
+	lstpid=$!
+
+	do_lnetctl peer set --health 500 --all ||
+		error "Failed to set peer NI health rc = $?"
+
+	wait $lstpid
+	rc=$?
+
+	((rc == 0)) ||
+		error "LST returned non-zero rc = $rc"
+
+	do_lnetctl peer set --health 1000 --all ||
+		error "Failed to set peer NI health rc = $?"
+
+	local no_route=$(dmesg | tail | grep lnet_handle_find_routed_path |
+			 grep -c "no route")
+
+	((no_route == 0)) ||
+		error "Detected no route send failures"
+
+	cleanup_router_test || return $?
+}
+run_test 228 "Routes should stay up when health is decremented"
+
 test_230() {
 	[[ ${NETTYPE} == tcp* ]] || skip "Need tcp NETTYPE"
 
@@ -3554,7 +4512,7 @@ test_230() {
 		fi
 		$LNETCTL net show -v 1 | grep -q "conns_per_peer: $i" ||
 			error "failed to set conns-per-peer to $i"
-		lnid="$(lctl list_nids | head -n 1)"
+		lnid="$($LCTL list_nids | head -n 1)"
 		do_lnetctl ping "$lnid" ||
 			error "failed to ping myself"
 
@@ -3695,6 +4653,43 @@ test_232() {
 }
 run_test 232 "Test setting ToS value"
 
+test_233() {
+	setup_health_test true || return $?
+
+	local retries=$($LNETCTL global show | awk '/retry_count:/{print $NF}')
+	(( retries > 0 )) || skip "Need retry_count > 0, found $retries"
+
+	local hstatus
+	for hstatus in ${LNET_LOCAL_RESEND_STATUSES}; do
+		echo "Simulate intermittent $hstatus"
+
+		lnet_health_pre || return $?
+		add_health_test_drop_rules ${hstatus} 2
+		do_lnetctl ping --source ${LNIDS[0]} ${RNIDS[0]} ||
+			error "ping failed with rc = $?"
+		$LCTL net_drop_del -a
+		lnet_health_post
+
+		check_successful_resends || return $?
+	done
+
+	for hstatus in ${LNET_REMOTE_RESEND_STATUSES}; do
+		echo "Simulate intermittent $hstatus"
+
+		lnet_health_pre || return $?
+		add_health_test_drop_rules ${hstatus} 2
+		do_lnetctl ping --source ${LNIDS[0]} ${RNIDS[0]} ||
+			error "ping failed with rc = $?"
+		lnet_health_post
+		$LCTL net_drop_del -a
+
+		check_successful_resends || return $?
+	done
+
+	cleanup_health_test
+}
+run_test 233 "Check for successful resends"
+
 check_parameter() {
 	local para=$1
 	local value=$2
@@ -3705,6 +4700,293 @@ check_parameter() {
 		     tee /dev/stderr | \
 		     grep -c "^ \+${para}: ${value}$") != ${#INTERFACES[@]} ))
 }
+
+test_234() {
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+
+	local nid=$($LCTL list_nids | head -n 1)
+
+	# Verify NI starts with UP status and maximum health
+	check_ni_status "$nid" up
+
+	local health=$($LNETCTL net show -v 2 --net ${NETTYPE} |
+		       awk '/health value/{print $NF}')
+	echo "Initial health value: $health"
+	((health == 1000)) ||
+		error "NI $nid should start with health value 1000, found $health"
+
+	# Prevent recovery pings from incrementing health during this test
+	local hs=$($LNETCTL global show |
+		   awk '/^\s+health_sensitivity:/{print $NF}')
+	do_lnetctl set health_sensitivity 0 ||
+		error "Failed to set health_sensitivity 0"
+
+	# Manually set health to 0 - should transition status to DOWN
+	echo "Setting health value to 0"
+	do_lnetctl net set --health 0 --nid $nid ||
+		error "Failed to set health to 0"
+
+	# Verify status changed to DOWN
+	check_ni_status "$nid" down
+
+	# Verify health is actually 0
+	health=$($LNETCTL net show -v 2 --net ${NETTYPE} |
+		 awk '/health value/{print $NF}')
+	echo "Health value after setting to 0: $health"
+	((health == 0)) ||
+		error "NI $nid health should be 0, found $health"
+
+	# Set health back to maximum - should transition status to UP
+	echo "Setting health value to 1000"
+	do_lnetctl net set --health 1000 --nid $nid ||
+		error "Failed to set health to 1000"
+
+	# Verify status changed back to UP
+	check_ni_status "$nid" up
+
+	# Verify health is at maximum
+	health=$($LNETCTL net show -v 2 --net ${NETTYPE} |
+		 awk '/health value/{print $NF}')
+	echo "Health value after setting to 1000: $health"
+	((health == 1000)) ||
+		error "NI $nid health should be 1000, found $health"
+
+	do_lnetctl set health_sensitivity $hs ||
+		error "Failed to set health_sensitivity $hs"
+
+	return 0
+}
+run_test 234 "Verify NI status changes with manual health value transitions"
+
+test_235() {
+	[[ ${NETTYPE} == kfi* ]] && skip "kfi doesn't support drop rules"
+
+	reinit_dlc || return $?
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+	add_net "${NETTYPE}1" "${INTERFACES[0]}" || return $?
+
+	local nid1=$($LCTL list_nids | head -n 1)
+	local nid2=$($LCTL list_nids | tail -n 1)
+
+	# Verify both NIDs start with UP status
+	check_ni_status "$nid1" up
+	check_ni_status "$nid2" up
+
+	# Add drop rule to cause local failures on nid1
+	echo "Adding drop rule for $nid1"
+	$LCTL net_drop_add -s $nid1 -d $nid1 -m GET -r 1 -e local_timeout ||
+		error "Failed to add drop rule"
+
+	# Manually set health to 100 to force NI into recovery
+	echo "Setting health to 100 for $nid1"
+	do_lnetctl net set --health 100 --nid $nid1 ||
+		error "Failed to set health to 100"
+
+	# Recovery ping should cause health to decrement to 0, and status set
+	# to DOWN
+	wait_update $HOSTNAME \
+		"$LNETCTL net show --net ${NETTYPE} | \
+		 awk '/^\\\s+status:/{print \\\$NF}'" \
+		"down" "60"
+
+	(($? == 0)) || error "NI status did not go down"
+
+	# Verify nid2 is still UP
+	check_ni_status "$nid2" up
+
+	# Clear drop rules
+	$LCTL net_drop_del -a
+
+	# Set health 900, recovery ping should increment to max and status set
+	# to UP
+	echo "Restoring health to 900 for $nid1"
+	do_lnetctl net set --health 900 --nid $nid1 ||
+		error "Failed to set health to 900"
+
+	# Verify status is back to UP
+	wait_update $HOSTNAME \
+		"$LNETCTL net show --net ${NETTYPE} | \
+		 awk '/^\\\s+status:/{print \\\$NF}'" \
+		"up" "60"
+
+	(($? == 0)) || error "NI status did not go up"
+
+	return 0
+}
+run_test 235 "Verify NI status DOWN when health reaches 0 after failures"
+
+check_remote_peer_ni_status() {
+	local node="$1"
+	local nid="$2"
+	local expect="$3"
+	local rc
+
+	wait_update $node \
+		"$LNETCTL peer show --nid $nid | \
+		 grep -E -A 1 '\s+nid: ${nid}$' | \
+		 awk '/\s+state:/{print \\\$NF}'" \
+		 "$expect" "60"
+
+	rc=$?
+	(($rc == 0)) ||
+		error "Expect peer NI state \"$expect\" for $nid on $node"
+
+	return $rc
+}
+
+test_236() {
+	setup_router_test || return $?
+
+	do_basic_rtr_test || return $?
+
+	# Add another net on local host and router
+	add_net "${NETTYPE}3" "${INTERFACES[0]}" || return $?
+
+	local router=${ROUTERS[0]}
+	local rtr_interfaces=( ${ROUTER_INTERFACES[$router]} )
+
+	do_net_add $router ${NETTYPE}3 ${rtr_interfaces[0]} ||
+		return $?
+
+	local nid1=$($LCTL list_nids | head -1)
+	local nid2=$($LCTL list_nids | tail -1)
+
+	check_ni_status "$nid1" up
+	check_ni_status "$nid2" up
+
+	# Router shows both interfaces as up
+	check_remote_peer_ni_status "$router" "$nid1" "up" || return $?
+	check_remote_peer_ni_status "$router" "$nid2" "up" || return $?
+
+	# Drop traffic on nid1
+	$LCTL net_drop_add -s $nid1 -d $nid1 -r 1 -e local_timeout ||
+		error "Failed to add drop rule"
+
+	# Set health to 0
+	do_lnetctl net set --health 0 --nid $nid1 ||
+		error "Failed to set health to 0"
+
+	# Verify nid1 status is down, nid2 up
+	check_ni_status "$nid1" down
+	check_ni_status "$nid2" up
+
+	# Verify new NI status is reflected on router
+	check_remote_peer_ni_status "$router" "$nid1" "down" || return $?
+	check_remote_peer_ni_status "$router" "$nid2" "up" || return $?
+
+	# Clear drop rules, verify status transitions back to UP
+	$LCTL net_drop_del -a || return $?
+	do_lnetctl net set --health 900 --nid $nid1 ||
+		error "Failed to set health to 900"
+	wait_update $HOSTNAME \
+		"$LNETCTL net show --net ${NETTYPE} | \
+		 awk '/^\\\s+status:/{print \\\$NF}'" \
+		"up" "60"
+
+	(($? == 0)) || error "NI status did not go to up"
+
+	# Verify new NI status is reflected on router
+	check_remote_peer_ni_status "$router" "$nid1" "up" || return $?
+	check_remote_peer_ni_status "$router" "$nid2" "up" || return $?
+
+	cleanup_router_test
+}
+run_test 236 "Local NI state propagates to routers"
+
+do_mr_forwarding_test() {
+	local expect_mr_forwarding="$1"
+
+	local rpeer=${RPEERS[0]}
+	local rpeer_nids=( ${RPEER_NIDS[$rpeer]} )
+
+	do_lnetctl discover ${rpeer_nids[0]} ||
+		error "Discovery failed with rc = $?"
+
+	local router=${ROUTERS[0]}
+	local i
+
+#define CFS_FAIL_RTR_HEALTH_INC                0xe004
+	do_node $router "$LCTL set_param fail_loc=0xe004" ||
+		error "Failed to set fail_loc rc = $?"
+	do_node $router "$LNETCTL set health_sensitivity 0" ||
+		error "Failed to set health_sensitivity 0 rc = $?"
+	do_node $router "$LNETCTL peer set --health 0 --nid ${rpeer_nids[0]}" ||
+		error "Failed to set health 0 for ${rpeer_nids[0]} rc = $?"
+
+	local pre_sends=( $(do_node $router \
+			    "$LNETCTL peer show -v --nid ${rpeer_nids[0]}" |
+			    awk '/send_count/{print $NF}' | xargs echo) )
+
+	do_node $router "$LNETCTL peer show -v 2 | grep -e nid -e health"
+
+	local my_nid=$($LCTL list_nids | head -n 1)
+
+	for i in {1..50}; do
+		do_lnetctl ping --source ${my_nid} ${rpeer_nids[0]} ||
+			error "Ping failed with rc=$?"
+	done
+
+	local post_sends=( $(do_node $router \
+			     "$LNETCTL peer show -v --nid ${rpeer_nids[0]}" |
+			     awk '/send_count/{print $NF}' | xargs echo ) )
+
+	do_node $router "$LNETCTL peer show -v 2 | grep -e nid -e health"
+
+	echo "pre_sends: ${pre_sends[@]}"
+	echo "post_sends: ${post_sends[@]}"
+
+	do_node $router "$LCTL set_param fail_loc=0" ||
+		error "Failed to set fail_loc rc = $?"
+
+	if [[ ${#pre_sends[@]} != 2 ]] || [[ ${#post_sends[@]} != 2 ]]; then
+		error "Unexpected send counts"
+	fi
+
+	if $expect_mr_forwarding ; then
+		((post_sends[1] - pre_sends[1] >= 50)) ||
+			error "Expected ${post_sends[1]}-${pre_sends[1]} >= 50"
+	else
+		((post_sends[1] - pre_sends[1] < 50)) ||
+			error "Expected ${post_sends[1]}-${pre_sends[1]} < 50"
+	fi
+
+	return 0
+}
+
+test_237() {
+	setup_router_test -m || return $?
+
+	do_basic_rtr_test || return $?
+
+	do_mr_forwarding_test true || return $?
+
+	cleanup_router_test
+}
+run_test 237 "Check MR forwarding feature"
+
+test_238() {
+	setup_router_test -m
+
+	do_lnetctl set discovery 0 ||
+		error "Failed to disable discovery rc = $?"
+
+	do_basic_rtr_test || return $?
+
+	# Router should show non-MR for me
+	local my_nid=$($LCTL list_nids | head -n 1)
+	local mr=$(do_node ${ROUTERS[0]} "$LNETCTL peer show --nid $my_nid" |
+		   awk '/Multi-Rail:/{print $NF}')
+
+	[[ $mr == false ]] ||
+		error "Expect 'Multi-Rail: false', found $mr"
+
+	do_mr_forwarding_test false || return $?
+
+	cleanup_router_test
+}
+run_test 238 "Check MR forwarding feature skipped for non-MR source"
 
 test_241() {
 	reinit_dlc || return $?
@@ -3740,8 +5022,36 @@ test_241() {
 
 	# Restore tunable timeout to old value
 	do_lnetctl net set --net ${NETTYPE} --lnd-timeout ${old_lnd_to}
+
 }
 run_test 241 "Check setting LND timeout value via lnetctl updates tunables"
+
+test_245() {
+	reinit_dlc || return $?
+
+	add_net ${NETTYPE} ${INTERFACES[0]} || return $?
+
+	local param count paramlist="timeout"
+
+	[[ $NETTYPE != kfi* ]] || paramlist+=" traffic_class_num"
+
+	for param in $paramlist; do
+		echo "Check $param present in net show -v"
+		count=$($LNETCTL net show -v | grep -c " \+$param:")
+
+		((count == 1)) ||
+			error "$param parameter is missing"
+
+		echo "Check $param absent from export -b"
+		count=$($LNETCTL export -b | grep -c " \+$param:")
+
+		((param == 0)) ||
+			error "$param parameter is present"
+	done
+
+	return 0
+}
+run_test 245 "Check read-only params do not appear in export --backup"
 
 ### Test that linux route is added for each ni
 test_250() {
@@ -3838,9 +5148,8 @@ do_expired_message_drop_test() {
 
 	for lnid in "${LNIDS[@]}"; do
 		for rnid in "${RNIDS[@]}"; do
-			$LCTL net_delay add -s "${lnid}" -d "${rnid}" \
-				-l "${delay}" -r 1 -m GET ||
-				error "Failed to add delay rule"
+			add_delay_rule -s "${lnid}" -d "${rnid}" \
+				-l "${delay}" -r 1 -m GET
 		done
 	done
 
@@ -3879,7 +5188,7 @@ do_expired_message_drop_test() {
 
 	sleep ${delay}
 
-	$LCTL net_delay del -a
+	del_delay_rule -a
 
 	wait
 
@@ -3924,6 +5233,8 @@ run_test 254 "Message delayed beyond deadline should be dropped (multi-rail)"
 
 test_255() {
 	[[ ${NETTYPE} == tcp* ]] || skip "Need tcp NETTYPE"
+	(( $CLIENT_VERSION < $(version_code 2.17.53) )) ||
+		skip "kernel ip2nets deprecated in 2.17.53"
 
 	reinit_dlc || return $?
 
@@ -3954,7 +5265,6 @@ EOF
       gateway: ${IF0_NET}.${i}@${NETTYPE}
       hop: -1
       priority: 0
-      health_sensitivity: 1
 EOF
 	done
 
@@ -3975,10 +5285,13 @@ EOF
 
 	validate_gateway_nids
 
-	# Since we have an complex YAML config file we can test import
-	do_lnetctl lnet unconfigure ||
-		error "Failed to stop LNet rc=$?"
-	do_lnetctl import <  ${GLOBAL_YAML_FILE} || error "Import failed $?"
+	# Since we have a complex YAML config file we can test import
+	reinit_dlc || return $?
+
+	do_lnetctl import < $TMP/sanity-lnet-$testnum-actual.yaml ||
+		error "Import failed $?"
+
+	validate_gateway_nids
 }
 run_test 255 "Use lnet routes param with pdsh syntax"
 
@@ -4051,7 +5364,7 @@ test_256() {
 
 	for lnid in ${LNIDS[@]}; do
 		for rnid in ${rpeer_nids[@]}; do
-			cmd="$LCTL net_delay_add -s ${lnid} -d ${rnid} $args"
+			cmd="$LCTL $net_delay_add -s ${lnid} -d ${rnid} $args"
 			echo "$router $cmd"
 			do_node $router $cmd || error "Failed to add delay rule"
 		done
@@ -4077,7 +5390,7 @@ test_256() {
 	echo "Issued last ping - sleep $delay"
 	sleep ${delay}
 
-	do_node $router $LCTL net_delay_del -a
+	do_node $router $LCTL $net_delay_del -a
 
 	local rc=0 rcsum=0
 	for idx in $(seq 1 $((rtr_pc + 1))); do
@@ -4106,6 +5419,66 @@ test_256() {
 	cleanup_router_test
 }
 run_test 256 "Router should not drop messages that are past the deadline"
+
+test_257() {
+	setup_router_test -r 2 -p 1 || return $?
+
+	do_basic_rtr_test || return $?
+
+	do_rpc_nodes $HOSTNAME,${RPEERS[0]} load_module \
+		../lnet/selftest/lnet_selftest ||
+			error "Failed to load lnet-selftest module"
+
+	local param
+	local all_nodes=$(comma_list ${ROUTERS[@]} ${RPEERS[@]} $HOSTNAME)
+
+	for param in alive_router_check_interval router_ping_timeout; do
+		do_nodes $all_nodes "echo 5 > /sys/module/lnet/parameters/$param"
+	done
+
+	$LSTSH -H -t $HOSTNAME -f ${RPEERS[0]} -m rw &
+
+	log "Wait 5s for LST to start"
+	sleep 5
+
+	log "Disable routing on ${ROUTERS[0]}"
+	do_node ${ROUTERS[0]} "$LNETCTL set routing 0" ||
+		error "Failed to disable routing rc = $?"
+
+	log "Wait for lst to finish"
+	wait
+
+	local drops=$(do_node ${ROUTERS[0]} \
+		      "$LNETCTL net show -v; $LNETCTL peer show -v" |
+		      awk '/drop_count:/{print $NF}' | xargs echo |
+		      sed 's/ /\+/g' | bc)
+
+	((drops == 0)) ||
+		error "Detected $drops dropped messages - expect 0"
+
+	$LSTSH -H -t $HOSTNAME -f ${RPEERS[0]} -m rw &
+
+	log "Wait 5s for LST to start"
+	sleep 5
+
+	log "Enable routing on ${ROUTERS[0]}"
+	do_node ${ROUTERS[0]} "$LNETCTL set routing 1" ||
+		error "Failed to enable routing rc = $?"
+
+	log "Wait for lst to finish"
+	wait
+
+	drops=$(do_node ${ROUTERS[0]} \
+		"$LNETCTL net show -v; $LNETCTL peer show -v" |
+		awk '/drop_count:/{print $NF}' | xargs echo |
+		sed 's/ /\+/g' | bc)
+
+	((drops == 0)) ||
+		error "Detected $drops dropped messages - expect 0"
+
+	cleanup_router_test
+}
+run_test 257 "Test graceful router shutdown/startup"
 
 check_sysctl() {
 	while IFS= read -r line; do
@@ -4211,7 +5584,120 @@ test_260() {
 }
 run_test 260 "test that linux sysctl parameter are set correctly"
 
+test_265() {
+	reinit_dlc || return $?
+
+	local cpt
+
+	for cpt in "[1-0]" "[]"; do
+		cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+net:
+-     net type: ${NETTYPE}
+      local NI(s):
+      -     interfaces:
+                  0: ${INTERFACES[0]}
+            CPT: "${cpt}"
+EOF
+
+		! do_lnetctl import $TMP/sanity-lnet-$testnum.yaml ||
+			error "Import should have failed"
+
+		cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+net:
+-     net type: ${NETTYPE}
+      local NI(s):
+      -     interfaces:
+                  0: ${INTERFACES[0]}
+            CPT: ${cpt}
+EOF
+
+		! do_lnetctl import $TMP/sanity-lnet-$testnum.yaml ||
+			error "Import should have failed"
+	done
+}
+run_test 265 "Import of invalid CPT should fail"
+
+test_266() {
+	reinit_dlc || return $?
+
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	local cpt=$($LNETCTL net show -v --net ${NETTYPE} |
+		    awk '/CPT/{print $NF}')
+	local low=$(awk -F, '{print $1}'<<<"$cpt" | tr -d '[]"')
+	local high=$(awk -F, '{print $NF}'<<<"$cpt" | tr -d '[]"')
+
+	local tyaml=$TMP/sanity-lnet-$testnum.yaml
+
+	cat <<EOF > $tyaml
+net:
+-     net type: ${NETTYPE}
+      local NI(s):
+      -     interfaces:
+                  0: ${INTERFACES[0]}
+EOF
+	$LNETCTL net show -v -n ${NETTYPE} | awk '/^\s+tunables:$/,/^\s+CPT:/' |
+		grep -v -e 'dev cpt' -e 'CPT' >> $tyaml
+
+	echo "            CPT: \"[$low-$high]\"" >> $tyaml
+
+	reinit_dlc || return $?
+
+	do_lnetctl import $tyaml || error "Import failed rc = $?"
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-actual.yaml
+
+	compare_yaml_files || return $?
+
+	cat <<EOF > $tyaml
+net:
+-     net type: ${NETTYPE}
+      local NI(s):
+      -     interfaces:
+                  0: ${INTERFACES[0]}
+EOF
+	$LNETCTL net show -v -n ${NETTYPE} | awk '/^\s+tunables:$/,/^\s+CPT:/' |
+		grep -v -e 'dev cpt' -e 'CPT' >> $tyaml
+
+	echo "            CPT: [$low-$high]" >> $tyaml
+
+	reinit_dlc || return $?
+
+	do_lnetctl import $tyaml || error "Import failed rc = $?"
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-actual.yaml
+
+	compare_yaml_files || return $?
+}
+run_test 266 "Validate CPT parsing in network sequence"
+
+test_270() {
+	[[ "$NETTYPE" =~ tcp ]] || skip "Need tcp NETTYPE"
+
+	cleanup_lnet || error "Failed to unload modules before test execution"
+	reinit_dlc || return $?
+
+	#define CFS_FAIL_TEST_PING_MD 0xe003  CFS_FAIL_SOME 0x10000000
+	"$LCTL" set_param fail_loc=0x1000e003 fail_val=100
+
+	"$LNETCTL" net add --net "tcp" --if "${INTERFACES[0]}"
+
+	local nid="$($LCTL list_nids | head -n 1)"
+
+	do_lnetctl ping "$nid" ||
+		error "$LNETCTL ping $nid with TEST_PING_MD failed"
+	dmesg | grep -q "found metadata reply" ||
+		error "Didn't find metadata reply message in log"
+
+	cleanup_lnet || error "Failed to unload modules after test execution"
+}
+run_test 270 "Test NID metadata"
+
 test_280() {
+	cleanup_lnet || error "Failed to unload modules before test execution"
+
 	local rc=0
 
 	modinfo ksocklnd 2>/dev/null || rc=$?
@@ -4238,6 +5724,69 @@ test_280() {
 	$LUSTRE_RMMOD
 }
 run_test 280 "Don't panic when request_module fails"
+
+test_290() {
+	[[ ${NETTYPE} == tcp* ]] || skip "Need tcp NETTYPE"
+	if (( $LINUX_VERSION_CODE < $(version_code 4.2.0) )); then
+		skip "Need kernel >= 4.2.0 for local net namespace"
+	fi
+
+	cleanup_lnet || error "Failed to unload modules before test execution"
+	setup_fakeif || error "Failed to add fake IF"
+	reinit_dlc || return $?
+
+	$LNETCTL net add --nid ${FAKE_IP}@tcp
+	sleep 1
+	accept_port=$(cat /sys/module/lnet/parameters/accept_port)
+	binding_found=$(ss -ltnup | awk -v ip="${FAKE_IP}" -v port="${accept_port}" '
+		$5 == ip ":" port { print }
+	')
+	if [[ -z "$binding_found" ]]; then
+		error "Explicit binding not found for ${FAKE_IP}:${accept_port}"
+	fi
+
+	cleanup_fakeif
+}
+run_test 290 "Check that lnet acceptor is using explicit address binding"
+
+test_291() {
+	[[ ${NETTYPE} == tcp* ]] ||
+		skip "Need tcp NETTYPE"
+
+	reinit_dlc || return $?
+	cleanup_lnet || return $?
+
+	local lnid cmd
+
+	load_lnet "accept_port_bulk=989" || error "Failed to load LNet"
+
+	$LCTL net up $LNET_CONFIG_OPT ||
+		error "Failed to load LNet with accept_port_bulk=989"
+
+	$LNETCTL net show -v 1 | grep -q "conns_per_peer: 1" ||
+		error "failed to set conns-per-peer to 1"
+	lnid="$(lctl list_nids | head -n 1)"
+	do_lnetctl ping "$lnid" ||
+		error "failed to ping myself"
+
+	# "lctl --net tcp conn_list" prints the list of active
+	# connections. Since we're pinging ourselves, there should be
+	# 2 Control connections plus 2*conns_per_peer connections
+	# created (one Bulk Input, one Bulk Output in each pair).
+	# Here's the sample output for conns_per_peer set to 1:
+	# 12345-1.1.1.1@tcp I[0]host01->host01:988 2626560/1061296 nonagle
+	# 12345-1.1.1.1@tcp O[0]host01->host01:1022 2626560/1061488 nonagle
+	# 12345-1.1.1.1@tcp C[0]host01->host01:988 2626560/1061296 nonagle
+	# 12345-1.1.1.1@tcp C[0]host01->host01:1023 2626560/1061488 nonagle
+	cmd="printf 'network tcp\nconn_list\n' | lctl | grep -c ':989'"
+
+	# Expect one bulk connection on port 989
+	wait_update $HOSTNAME "$cmd" "1" 10 ||
+		error "expected 1 tcp connection on port 989"
+
+	cleanup_lnet || return $?
+}
+run_test 291 "load lnet using custom accept port for bulk tcp connections"
 
 test_300() {
 	# LU-13274
@@ -4485,10 +6034,10 @@ test_311() {
 	dd if=/dev/zero of=$DIR/$tdir/$tfile bs=1M count=1 oflag=direct ||
 		error "dd write failed"
 
-	local list=$(comma_list $(osts_nodes))
+	local osts=$(osts_nodes)
 
 #define CFS_KFI_FAIL_WAIT_SEND_COMP1 0xF115
-	do_nodes $list $LCTL set_param fail_loc=0x8000F115
+	do_nodes $osts $LCTL set_param fail_loc=0x8000F115
 	dd if=$DIR/$tdir/$tfile of=/dev/null bs=1M count=1 ||
 		error "dd read failed"
 
@@ -4507,16 +6056,16 @@ test_312() {
 
 	mkdir -p $DIR/$tdir || error "mkdir failed"
 
-	local list=$(comma_list $(osts_nodes))
+	local osts=$(osts_nodes)
 
 #define CFS_KFI_FAIL_WAIT_SEND_COMP3 0xF117
-	do_nodes $list $LCTL set_param fail_loc=0x8000F117
+	do_nodes $osts $LCTL set_param fail_loc=0x8000F117
 	dd if=/dev/zero of=$DIR/$tdir/$tfile bs=1M count=1 oflag=direct ||
 		error "dd write failed"
 
 	local tfile2="$DIR/$tdir/testfile2"
 
-	do_nodes $list $LCTL set_param fail_loc=0x8000F117
+	do_nodes $osts $LCTL set_param fail_loc=0x8000F117
 	dd if=$DIR/$tdir/$tfile of=$tfile2 bs=1M count=1 oflag=direct ||
 		error "dd read failed"
 
@@ -4527,6 +6076,47 @@ test_312() {
 	cleanupall || error "Failed cleanup"
 }
 run_test 312 "TAG_RX_OK is possible after TX_FAIL"
+
+test_350() {
+	reinit_dlc || return $?
+
+	add_net ${NETTYPE} ${INTERFACES[0]} || return $?
+
+	local my_nid=$($LCTL list_nids)
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+ping:
+  nids:
+    0: $my_nid
+EOF
+
+	do_lnetctl import -e $TMP/sanity-lnet-$testnum.yaml ||
+		error "Import failed with rc = $?"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+discover:
+  nids:
+    0: $my_nid
+EOF
+
+	do_lnetctl import -e $TMP/sanity-lnet-$testnum.yaml ||
+		error "Import failed with rc = $?"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+peer:
+-     primary nid: $my_nid
+      Multi-Rail: true
+      peer ni:
+      -     nid: $my_nid
+            state: NA
+EOF
+
+	$LNETCTL peer show > $TMP/sanity-lnet-$testnum-actual.yaml ||
+		error "export failed with rc = $?"
+
+	compare_yaml_files
+}
+run_test 350 "Check import --exec of ping/discover"
 
 check_udsp_prio() {
 	local target_net="${1}"
@@ -4626,6 +6216,144 @@ test_402() {
 }
 run_test 402 "Destination net rule should not panic"
 
+test_403() {
+	local rule_type
+
+	for rule_type in src dst; do
+		reinit_dlc || return $?
+
+		local nid
+
+		if [[ ${NETTYPE} == kfi* ]] || [[ ${NETTYPE} == gni* ]]; then
+			nid=401@kfi
+		else
+			nid=1.1.1.1@${NETTYPE}
+		fi
+
+		for arg in ${NETTYPE} ${nid}; do
+			cat <<EOF > $TMP/$TESTSUITE-$testnum-expected.yaml
+udsp:
+- idx: 0
+  ${rule_type}: ${arg}
+  action:
+    priority: 1
+EOF
+
+			do_lnetctl udsp add --${rule_type} ${arg} --prio 1 ||
+				error "udsp add failed rc=$?"
+
+			$LNETCTL udsp show > $TMP/$TESTSUITE-$testnum-actual.yaml
+
+			compare_yaml_files || return $?
+
+			do_lnetctl udsp del --idx 0 ||
+				error "udsp del failed rc=$?"
+
+			do_lnetctl udsp show
+
+			[[ -z $($LNETCTL udsp show) ]] ||
+				error "Unexpected udsp show output"
+		done
+	done
+
+	return 0
+}
+run_test 403 "Add and delete udsp net and nid rules"
+
+check_udsp_priorities() {
+	local rule_type="$1"
+
+	if [[ $rule_type == both ]]; then
+		check_net_udsp_prio "$net" "$nid" "1" "-1"
+		check_peer_udsp_prio "$net" "$nid" "1" "-1"
+	elif [[ ${rule_type} == src ]]; then
+		check_net_udsp_prio "$net" "$nid" "1" "-1"
+	else
+		check_peer_udsp_prio "$net" "$nid" "1" "-1"
+	fi
+}
+
+do_udsp_test() {
+	local rule_type="$1"
+	local net="$2"
+	local nid="$3"
+
+	local arg arg_type
+
+	if [[ -n $net ]]; then
+		arg=$net
+		arg_type="net"
+	else
+		arg=$nid
+		arg_type="nid"
+	fi
+
+	[[ -n $net ]] && arg=$net || arg=$nid
+
+	if [[ $rule_type == both ]]; then
+		do_lnetctl udsp add --src $arg --prio 1 ||
+			error "Failed to add $rule_type $arg_type priority rule"
+		do_lnetctl udsp add --dst $arg --prio 1 ||
+			error "Failed to add $rule_type $arg_type priority rule"
+	else
+		do_lnetctl udsp add --$rule_type $arg --prio 1 ||
+			error "Failed to add $rule_type $arg_type priority rule"
+	fi
+
+	do_lnetctl discover "$($LCTL list_nids | head -n 1)" ||
+		error "failed to discover myself"
+
+	check_udsp_priorities "$rule_type"
+
+	$LNETCTL export --backup > $TMP/$TESTSUITE-$testnum-expected.yaml ||
+		error "export failed"
+
+	reinit_dlc || return $?
+
+	$LNETCTL import $TMP/$TESTSUITE-$testnum-expected.yaml ||
+		error "Failed to import from backup"
+
+	$LNETCTL export --backup > $TMP/$TESTSUITE-$testnum-actual.yaml ||
+		error "export failed"
+
+	compare_yaml_files || error "Unexpected config after import"
+
+	do_lnetctl discover "$($LCTL list_nids | head -n 1)" ||
+		error "failed to discover myself"
+
+	check_udsp_priorities "$rule_type"
+}
+
+test_404() {
+	local rule_type nid
+
+	for rule_type in src dst both ; do
+		reinit_dlc || return $?
+
+		add_net "${NETTYPE}" "${INTERFACES[0]}"
+		add_net "${NETTYPE}2" "${INTERFACES[0]}"
+
+		nid=$($LCTL list_nids | head -n 1)
+
+		do_udsp_test ${rule_type} "${NETTYPE}" "${nid}" || return $?
+
+		reinit_dlc || return $?
+
+		add_net "${NETTYPE}" "${INTERFACES[0]}"
+		add_net "${NETTYPE}2" "${INTERFACES[0]}"
+
+		nid=$($LCTL list_nids | tail -n 1)
+
+		do_lnetctl discover "$($LCTL list_nids | head -n 1)" ||
+			error "Failed to discover myself"
+
+		do_udsp_test ${rule_type} "${NETTYPE}2" "${nid}" || return $?
+	done
+
+	return 0
+}
+run_test 404 "Check udsp src/dst net rule"
+
 test_410() {
 	reinit_dlc || return $?
 
@@ -4638,6 +6366,39 @@ test_410() {
 }
 run_test 410 "No segfault in lnetctl fault command"
 
+test_450() {
+	[[ $NETTYPE == tcp* ]] || skip "Need tcp NETTYPE"
+
+	reinit_dlc || return $?
+
+	setup_fakeif || return $?
+
+	add_net "$NETTYPE" "${INTERFACES[0]}" || return $?
+	add_net "$NETTYPE" "$FAKE_IF" || return $?
+
+	$LNETCTL export --backup > $TMP/sanity-lnet-$testnum-expected.yaml
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum.yaml
+net:
+    - net type: $NETTYPE
+      local NI(s):
+        - interfaces:
+              0: ${INTERFACES[0]}
+              1: ${FAKE_IF}
+EOF
+
+	do_import_test "$TMP/sanity-lnet-$testnum.yaml" || return $?
+
+	do_lnetctl import --del $TMP/sanity-lnet-$testnum.yaml ||
+		error "Import --del failed with rc = $?"
+
+	[[ -z $($LCTL list_nids) ]] ||
+		error "NIDs still configured \"$($LCTL list_nids)\""
+
+	cleanup_fakeif
+}
+run_test 450 "Check import of multiple interfaces"
+
 test_500() {
 	reinit_dlc || return $?
 
@@ -4649,15 +6410,12 @@ test_500() {
 	do_lnetctl discover $($LCTL list_nids | head -n 1) ||
 		error "Failed to discover self"
 
-	$LCTL net_delay_add -s *@tcp -d *@tcp -r 1 -l 1 -m PUT ||
-		error "Failed to add delay rule"
+	add_delay_rule -s *@tcp -d *@tcp -r 1 -l 1 -m PUT
 
-	$LCTL net_drop_add -s *@tcp -d $($LCTL list_nids | head -n 1) -m PUT \
-		-e local_timeout -r 1 ||
-		error "Failed to add drop rule"
-	$LCTL net_drop_add -s *@tcp -d $($LCTL list_nids | tail -n 1) -m PUT \
-		-e local_timeout -r 1 ||
-		error "Failed to add drop rule"
+	add_drop_rule -s *@tcp -d $($LCTL list_nids | head -n 1) -m PUT \
+		-e local_timeout -r 1
+	add_drop_rule -s *@tcp -d $($LCTL list_nids | tail -n 1) -m PUT \
+		-e local_timeout -r 1
 
 	ip link set $FAKE_IF down ||
 		error "Failed to set link down"
@@ -4722,8 +6480,7 @@ test_501() {
 
 	$LCTL set_param debug=-1
 
-	$LCTL net_drop_add -s *@tcp -d *@tcp -r 1 ||
-		error "Failed to add drop rule"
+	add_drop_rule -s *@tcp -d *@tcp -r 1
 
 	local test_val
 
@@ -4743,8 +6500,7 @@ test_502() {
 
 	$LCTL set_param debug=-1
 
-	$LCTL net_drop_add -s *@tcp -d *@tcp -r 1 ||
-		error "Failed to add drop rule"
+	add_drop_rule -s *@tcp -d *@tcp -r 1
 
 	local test_val
 
@@ -4756,6 +6512,690 @@ test_502() {
 	cleanup_health_test
 }
 run_test 502 "Verify lnetctl peer set --health (MR)"
+
+test_600() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+ip2nets:
+    - net-spec: tcp0
+      interfaces:
+          0: eth0
+          1: eth1
+      ip-range:
+          0: 10.0.0.*
+    - net-spec: o2ib0
+      ip-range:
+          0: 192.168.[1-2].*
+EOF
+
+	$LEGACY2YAML 'tcp0(eth0,eth1) 10.0.0.*; o2ib0 192.168.[1-2].*' \
+		> $actual || error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 600 "lnet_legacy2yaml: basic ip2nets conversion"
+
+test_601() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+route:
+    - net: tcp0
+      gateway: 10.0.0.1@o2ib0
+      hop: 1
+EOF
+
+	$LEGACY2YAML "routes='tcp0 1 10.0.0.1@o2ib0'" > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 601 "lnet_legacy2yaml: basic routes conversion"
+
+test_602() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+route:
+    - net: tcp0
+      gateway: 10.0.0.1@o2ib0
+      hop: 2
+      priority: 7
+EOF
+
+	$LEGACY2YAML "routes='tcp0 2 10.0.0.1@o2ib0:7'" > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 602 "lnet_legacy2yaml: routes with priority"
+
+test_603() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+route:
+    - net: tcp0
+      gateway: 10.0.0.1@o2ib0
+      hop: 1
+EOF
+
+	$LEGACY2YAML "routes='tcp0 10.0.0.1@o2ib0'" --default-hop \
+		> $actual || error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 603 "lnet_legacy2yaml: default hop flag"
+
+test_604() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+route:
+    - net: tcp0
+      gateway: 10.0.0.1@o2ib0
+      hop: 3
+EOF
+
+	$LEGACY2YAML --default-hop 3 "routes='tcp0 10.0.0.1@o2ib0'" \
+		> $actual || error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 604 "lnet_legacy2yaml: default hop with explicit value"
+
+test_605() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+ip2nets:
+    - net-spec: tcp
+      ip-range:
+          0: "*.*.*.*"
+EOF
+
+	$LEGACY2YAML 'tcp *.*.*.*' > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 605 "lnet_legacy2yaml: quote leading star in IP pattern"
+
+test_606() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+	local ip_file="$TMP/sanity-lnet-$testnum-ip.rules"
+	local routes_file="$TMP/sanity-lnet-$testnum-routes.rules"
+
+	echo 'tcp0 10.1.0.*' > "$ip_file"
+	echo 'tcp0 1 10.1.0.1@o2ib0:9' > "$routes_file"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+ip2nets:
+    - net-spec: tcp0
+      ip-range:
+          0: 10.1.0.*
+route:
+    - net: tcp0
+      gateway: 10.1.0.1@o2ib0
+      hop: 1
+      priority: 9
+EOF
+
+	$LEGACY2YAML -i "$ip_file" -r "$routes_file" > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+
+	rm -f "$ip_file" "$routes_file"
+}
+run_test 606 "lnet_legacy2yaml: file inputs"
+
+test_607() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+	local opts
+
+	opts="options lnet 'ip2nets=\"tcp0 10.0.0.*\""
+	opts+=" routes=\"tcp0 1 10.0.0.2@o2ib0\"'"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+ip2nets:
+    - net-spec: tcp0
+      ip-range:
+          0: 10.0.0.*
+route:
+    - net: tcp0
+      gateway: 10.0.0.2@o2ib0
+      hop: 1
+EOF
+
+	$LEGACY2YAML "$opts" > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 607 \
+	"lnet_legacy2yaml: options line with combined ip2nets and routes"
+
+test_608() {
+	local output
+
+	output=$($LEGACY2YAML 'tcp0' 2>&1)
+	local rc=$?
+
+	((rc == 2)) || error "Expected exit code 2, got $rc"
+	echo "$output" | grep -iq 'error' ||
+		error "Expected error message in output"
+}
+run_test 608 "lnet_legacy2yaml: error on invalid rule (missing IP pattern)"
+
+test_609() {
+	local output
+
+	# Run with no stdin and no args - expect error
+	output=$(echo -n "" | $LEGACY2YAML 2>&1)
+	local rc=$?
+
+	((rc == 1)) || error "Expected exit code 1, got $rc"
+	echo "$output" | grep -iq "no ip2nets, routes, or networks data" ||
+		error "Expected 'no data' message in output"
+}
+run_test 609 "lnet_legacy2yaml: error on no input"
+
+test_610() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+	local ip1="$TMP/sanity-lnet-$testnum-ip1.rules"
+	local ip2="$TMP/sanity-lnet-$testnum-ip2.rules"
+	local r1="$TMP/sanity-lnet-$testnum-r1.rules"
+
+	echo 'tcp0 10.0.0.*' > "$ip1"
+	echo 'o2ib0 192.168.0.*' > "$ip2"
+	echo 'tcp0 1 10.0.0.1@o2ib0' > "$r1"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+ip2nets:
+    - net-spec: tcp0
+      ip-range:
+          0: 10.0.0.*
+    - net-spec: o2ib0
+      ip-range:
+          0: 192.168.0.*
+route:
+    - net: tcp0
+      gateway: 10.0.0.1@o2ib0
+      hop: 1
+    - net: o2ib0
+      gateway: 192.168.0.1@tcp0
+      hop: 1
+EOF
+
+	$LEGACY2YAML -i "$ip1" -i "$ip2" -r "$r1" \
+		"routes='o2ib0 1 192.168.0.1@tcp0'" > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+
+	rm -f "$ip1" "$ip2" "$r1"
+}
+run_test 610 \
+	"lnet_legacy2yaml: multiple files and inline, check order"
+
+test_611() {
+	local output
+
+	output=$($LEGACY2YAML "routes='tcp0 0 10.0.0.1@o2ib0'" 2>&1)
+	local rc=$?
+
+	((rc == 2)) || error "Expected exit code 2, got $rc"
+	echo "$output" | grep -iq "hopcount" ||
+		error "Expected hopcount error in output"
+}
+run_test 611 "lnet_legacy2yaml: invalid hopcount"
+
+test_612() {
+	local output
+
+	output=$($LEGACY2YAML 'tcp0 10.0.0' 2>&1)
+	local rc=$?
+
+	((rc == 2)) || error "Expected exit code 2, got $rc"
+	echo "$output" | grep -iq "invalid.*ip pattern" ||
+		error "Expected invalid IP pattern error in output"
+}
+run_test 612 "lnet_legacy2yaml: malformed IP pattern"
+
+test_613() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+ip2nets:
+    - net-spec: tcp0
+      ip-range:
+          0: 10.0.0.*
+          1: 10.0.1.*
+EOF
+
+	$LEGACY2YAML 'tcp0 10.0.0.* 10.0.1.*' > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 613 \
+	"lnet_legacy2yaml: multiple IP patterns in single rule"
+
+test_614() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+ip2nets:
+    - net-spec: tcp0
+      interfaces:
+          0: eth0
+          1: eth1
+      ip-range:
+          0: 10.0.0.*
+          1: 10.0.1.*
+EOF
+
+	$LEGACY2YAML 'tcp0(eth0,eth1) 10.0.0.* 10.0.1.*' > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 614 "lnet_legacy2yaml: interfaces enumeration with multiple IP ranges"
+
+test_615() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+	local modprobe_file="$TMP/sanity-lnet-$testnum-modprobe.conf"
+
+	cat <<EOF > "$modprobe_file"
+# Modprobe configuration file for LNet
+options lnet ip2nets="tcp0(eth0) 10.1.0.*"
+
+# Routes configuration
+options lnet routes="tcp0 1 10.1.0.1@o2ib0:9"
+
+# Line continuation test
+options lnet \\
+  ip2nets="o2ib0 192.168.1.*"
+EOF
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+ip2nets:
+    - net-spec: tcp0
+      interfaces:
+          0: eth0
+      ip-range:
+          0: 10.1.0.*
+    - net-spec: o2ib0
+      ip-range:
+          0: 192.168.1.*
+route:
+    - net: tcp0
+      gateway: 10.1.0.1@o2ib0
+      hop: 1
+      priority: 9
+EOF
+
+	$LEGACY2YAML -m "$modprobe_file" > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+
+	rm -f "$modprobe_file"
+}
+run_test 615 "lnet_legacy2yaml: modprobe configuration file input"
+
+test_616() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+	local modprobe_file="$TMP/sanity-lnet-$testnum-modprobe.conf"
+	local ip_file="$TMP/sanity-lnet-$testnum-ip.rules"
+
+	cat <<EOF > "$modprobe_file"
+options lnet ip2nets="tcp0 10.0.0.*"
+options lnet routes="tcp0 1 10.0.0.1@o2ib0"
+EOF
+
+	echo 'o2ib0 192.168.0.*' > "$ip_file"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+ip2nets:
+    - net-spec: tcp0
+      ip-range:
+          0: 10.0.0.*
+    - net-spec: o2ib0
+      ip-range:
+          0: 192.168.0.*
+route:
+    - net: tcp0
+      gateway: 10.0.0.1@o2ib0
+      hop: 1
+EOF
+
+	$LEGACY2YAML -m "$modprobe_file" -i "$ip_file" > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+
+	rm -f "$modprobe_file" "$ip_file"
+}
+run_test 616 \
+	"lnet_legacy2yaml: combining modprobe file with explicit ip2nets file"
+
+test_617() {
+	reinit_dlc || return $?
+
+	local modprobe_file="$TMP/sanity-lnet-$testnum-modprobe.conf"
+	local yaml_file="$TMP/sanity-lnet-$testnum.yaml"
+	local export_file="$TMP/sanity-lnet-$testnum-expected.yaml"
+	local actual_file="$TMP/sanity-lnet-$testnum-actual.yaml"
+	local if0_ip
+	local ip_pattern
+
+	# Get IP address of the first interface and create pattern
+	if0_ip=$(ip -o -4 a s ${INTERFACES[0]} | awk '{print $4}' | \
+		 sed 's/\/.*//' | head -n 1)
+	[[ -n $if0_ip ]] || error "Cannot determine IP for ${INTERFACES[0]}"
+
+	# Create IP pattern matching the network (e.g., 192.168.1.*)
+	ip_pattern=$(awk -F. '{print $1"."$2"."$3".*"}' <<< "${if0_ip}")
+
+	echo "Configuring network ${NETTYPE} on ${INTERFACES[0]}"
+	add_net "${NETTYPE}" "${INTERFACES[0]}" || return $?
+
+	$LNETCTL export --backup > "$export_file" ||
+		error "lnetctl export failed"
+
+	echo "Generating modprobe configuration"
+	cat <<EOF > "$modprobe_file"
+options lnet ip2nets="${NETTYPE}(${INTERFACES[0]}) ${ip_pattern}"
+EOF
+
+	echo "Generated modprobe configuration:"
+	cat "$modprobe_file"
+
+	echo "Converting modprobe config to YAML"
+	$LEGACY2YAML -m "$modprobe_file" > "$yaml_file" ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	echo "Generated YAML configuration:"
+	cat "$yaml_file"
+
+	reinit_dlc || return $?
+
+	do_lnetctl import < "$yaml_file" ||
+		error "lnetctl import failed"
+
+	$LNETCTL export --backup > "$actual_file" ||
+		error "lnetctl export after import failed"
+
+	compare_yaml_files ||
+		error "Round-trip YAML comparison failed"
+
+	rm -f "$modprobe_file" "$yaml_file" "$export_file" "$actual_file"
+}
+run_test 617 \
+	"lnet_legacy2yaml: round-trip tunables from LNet to modprobe to YAML"
+
+test_618() {
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+route:
+    - net: tcp7
+      gateway: 10.3.3.[6-12]@tcp
+      hop: 8
+      priority: 20
+EOF
+
+	local cfg="tcp7: { gateway: 10.3.3.[6-12]@tcp, priority: 20, hop: 8 }"
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	$LEGACY2YAML -r <(echo "$cfg") > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 618 "lnet_legacy2yaml: alternative route format"
+
+test_619() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+	local routes_file="$TMP/sanity-lnet-$testnum-routes.conf"
+
+	cat <<EOF > "$routes_file"
+# Alternative route format examples
+tcp1: { gateway: 10.1.1.2@tcp0, priority: 3 }  # High priority route
+# This is a comment line
+tcp4: { gateway: 10.3.3.4@tcp }
+tcp6: { gateway: 10.3.3.6@tcp, hop: 2, priority: 5 }
+tcp7: { gateway: 10.3.3.[6-12]@tcp, priority: 20, hop: 8 }
+EOF
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+route:
+    - net: tcp1
+      gateway: 10.1.1.2@tcp0
+      priority: 3
+    - net: tcp4
+      gateway: 10.3.3.4@tcp
+    - net: tcp6
+      gateway: 10.3.3.6@tcp
+      hop: 2
+      priority: 5
+    - net: tcp7
+      gateway: 10.3.3.[6-12]@tcp
+      hop: 8
+      priority: 20
+EOF
+
+	$LEGACY2YAML -r "$routes_file" > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+
+	rm -f "$routes_file"
+}
+run_test 619 "lnet_legacy2yaml: multiple alternative format routes from file"
+
+test_620() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+	local routes_file="$TMP/sanity-lnet-$testnum-routes.conf"
+
+	cat <<EOF > "$routes_file"
+# Mixed route formats
+tcp1: { gateway: 10.1.1.2@tcp0, priority: 3 }
+tcp0 1 10.2.2.3@tcp1
+tcp6: { gateway: 10.3.3.6@tcp, hop: 2, priority: 5 }
+tcp2 2 10.4.4.5@tcp0:7
+EOF
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+route:
+    - net: tcp1
+      gateway: 10.1.1.2@tcp0
+      priority: 3
+    - net: tcp0
+      gateway: 10.2.2.3@tcp1
+      hop: 1
+    - net: tcp6
+      gateway: 10.3.3.6@tcp
+      hop: 2
+      priority: 5
+    - net: tcp2
+      gateway: 10.4.4.5@tcp0
+      hop: 2
+      priority: 7
+EOF
+
+	$LEGACY2YAML -r "$routes_file" > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+
+	rm -f "$routes_file"
+}
+run_test 620 "lnet_legacy2yaml: mixed legacy and alternative route formats"
+
+test_621() {
+	local cfg="tcp0: { gateway: 10.0.0.1@o2ib0, hop: 0 }"
+	local output
+
+	output=$($LEGACY2YAML -r <(echo "$cfg") 2>&1)
+	local rc=$?
+
+	((rc == 2)) || error "Expected exit code 2, got $rc"
+	echo "$output" | grep -iq "hopcount.*out of range" ||
+		error "Expected hopcount out of range error in output"
+}
+run_test 621 "lnet_legacy2yaml: alternative format with invalid hopcount"
+
+test_622() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+	local cfg="tcp5: { gateway: 10.5.5.5@tcp0 }"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+route:
+    - net: tcp5
+      gateway: 10.5.5.5@tcp0
+      hop: 3
+EOF
+
+	$LEGACY2YAML -r <(echo "$cfg") --default-hop 3 > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 622 "lnet_legacy2yaml: alternative format with default-hop flag"
+
+test_623() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+net:
+    - net type: tcp
+EOF
+
+	$LEGACY2YAML 'options lnet networks=tcp' > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 623 "lnet_legacy2yaml: basic networks conversion"
+
+test_624() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+net:
+    - net type: tcp0
+      local NI(s):
+        - interfaces:
+              0: eth0
+EOF
+
+	$LEGACY2YAML 'options lnet networks=tcp0(eth0)' > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 624 "lnet_legacy2yaml: networks with interfaces"
+
+test_625() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+net:
+    - net type: tcp0
+      local NI(s):
+        - interfaces:
+              0: eth0
+    - net type: o2ib
+      local NI(s):
+        - interfaces:
+              0: ib0
+EOF
+
+	$LEGACY2YAML 'options lnet networks=tcp0(eth0),o2ib(ib0)' > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+}
+run_test 625 "lnet_legacy2yaml: multiple networks"
+
+test_626() {
+	local actual="$TMP/sanity-lnet-$testnum-actual.yaml"
+	local modprobe_file="$TMP/sanity-lnet-$testnum-modprobe.conf"
+
+	cat <<EOF > "$modprobe_file"
+options lnet networks=tcp0(eth0),o2ib(ib0)
+options lnet ip2nets="tcp1(eth1) 192.168.1.*"
+options lnet routes="tcp0 1 10.0.0.1@o2ib0"
+EOF
+
+	cat <<EOF > $TMP/sanity-lnet-$testnum-expected.yaml
+net:
+    - net type: tcp0
+      local NI(s):
+        - interfaces:
+              0: eth0
+    - net type: o2ib
+      local NI(s):
+        - interfaces:
+              0: ib0
+ip2nets:
+    - net-spec: tcp1
+      interfaces:
+          0: eth1
+      ip-range:
+          0: 192.168.1.*
+route:
+    - net: tcp0
+      gateway: 10.0.0.1@o2ib0
+      hop: 1
+EOF
+
+	$LEGACY2YAML -m "$modprobe_file" > $actual ||
+		error "lnet_legacy2yaml failed with rc=$?"
+
+	compare_yaml_files || error "YAML comparison failed"
+
+	rm -f "$modprobe_file"
+}
+run_test 626 "lnet_legacy2yaml: mixed networks, ip2nets, and routes"
+
+test_627() {
+	local output
+
+	output=$($LEGACY2YAML 'options lnet networks=tcp0(eth0' 2>&1)
+	local rc=$?
+
+	((rc == 2)) || error "Expected exit code 2, got $rc"
+	echo "$output" | grep -iq "Invalid network specification" ||
+		error "Expected invalid network specification error in output"
+}
+run_test 627 "lnet_legacy2yaml: invalid networks format"
+
+test_628() {
+	local output
+
+	output=$($LEGACY2YAML 'tcp0(eth0) 10.0.0.* tcp1(eth1) 192.168.1.*' 2>&1)
+	local rc=$?
+
+	((rc == 2)) || error "Expected exit code 2, got $rc"
+	echo "$output" | grep -iq "Multiple network rules must be separated" ||
+		error "Expected missing delimiter error in output"
+}
+run_test 628 "lnet_legacy2yaml: missing delimiter error"
+
+test_629() {
+	local output
+
+	output=$($LEGACY2YAML 'options lnet routes="tcp0 1 10.0.0.1@o2ib0 10.0.0.2@o2ib0"' 2>&1)
+	local rc=$?
+
+	((rc == 2)) || error "Expected exit code 2, got $rc"
+	echo "$output" | grep -iq "multiple gateway specifications found" ||
+		error "Expected multiple gateway error in output"
+}
+run_test 629 "lnet_legacy2yaml: multiple gateways error"
 
 complete_test $SECONDS
 cleanup_testsuite

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LGPL-2.1
+// SPDX-License-Identifier: LGPL-2.1+
 
 /*
  * Copyright (c) 2014, 2017, Intel Corporation.
@@ -29,7 +29,8 @@
 #include <float.h>
 #include <limits.h>
 #include <ctype.h>
-#include "libcfs/util/list.h"
+#include <lnetconfig/liblnetconfig.h>
+#include <libcfs/util/list.h>
 #include <cyaml.h>
 
 #define INDENT		4
@@ -405,10 +406,12 @@ static int assign_type_value(struct cYAML *obj, const char *value)
 
 	if (strcmp(value, "null") == 0)
 		obj->cy_type = CYAML_TYPE_NULL;
-	else if (strcmp(value, "false") == 0) {
+	else if (strcmp(value, "False") == 0 ||
+		 strcmp(value, "false") == 0) {
 		obj->cy_type = CYAML_TYPE_FALSE;
 		obj->cy_valueint = 0;
-	} else if (strcmp(value, "true") == 0) {
+	} else if (strcmp(value, "True") == 0 ||
+		   strcmp(value, "true") == 0) {
 		obj->cy_type = CYAML_TYPE_TRUE;
 		obj->cy_valueint = 1;
 	} else if (*value == '-' || (*value >= '0' && *value <= '9')) {
@@ -729,6 +732,21 @@ struct cYAML *cYAML_get_object_item(struct cYAML *parent, const char *name)
 		found = cYAML_get_object_item(node->cy_next, name);
 
 	return found;
+}
+
+struct cYAML *cYAML_get_object_child(struct cYAML *parent, const char *name)
+{
+	struct cYAML *node = parent;
+
+	if (!node || !name || node->cy_type != CYAML_TYPE_OBJECT)
+		return NULL;
+
+	for (node = node->cy_child; node != NULL; node = node->cy_next)
+		if (node->cy_string)
+			if (strcmp(node->cy_string, name) == 0)
+				return node;
+
+	return NULL;
 }
 
 struct cYAML *cYAML_get_next_seq_item(struct cYAML *seq, struct cYAML **itm)

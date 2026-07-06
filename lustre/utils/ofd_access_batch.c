@@ -1,24 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- *
  * Copyright 2020, DataDirect Networks Storage.
  *
  * This file is part of Lustre, http://www.lustre.org/
@@ -216,7 +197,7 @@ int alr_batch_add(struct alr_batch *alrb, const char *obd_name,
 	if (alrb == NULL)
 		return 0;
 
-	assert(sizeof(time_t) == sizeof(__u64));
+	static_assert(sizeof(time_t) == sizeof(__u64), "time_t size mismatch");
 
 	fhn_init(&fhn, pfid);
 

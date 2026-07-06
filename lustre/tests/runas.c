@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
@@ -144,17 +124,25 @@ int main(int argc, char **argv)
 			break;
 
 		case 'G':
-			if (!optarg || !isdigit(optarg[0])) {
-				fprintf(stderr,
-					"Provided parameter '%s' for option '-G' is bad\n",
-					optarg);
-				Usage_and_abort(name);
-				break;
-			}
 			num_supp = 0;
 			while ((grp = strsep(&optarg, ",")) != NULL) {
-				printf("adding supp group %d\n", atoi(grp));
-				supp_groups[num_supp++] = atoi(grp);
+				gid_t supp_gid;
+
+				if (isdigit(*grp)) {
+					supp_gid = atoi(grp);
+				} else {
+					struct group *gr = getgrnam(optarg);
+
+					if (!gr) {
+						fprintf(stderr,
+							"getgrname %s failed\n",
+							grp);
+						Usage_and_abort(name);
+					}
+					supp_gid = (gid_t)gr->gr_gid;
+				}
+				printf("adding supp group %d\n", supp_gid);
+				supp_groups[num_supp++] = supp_gid;
 				if (num_supp >= NGROUPS_MAX)
 					break;
 			}

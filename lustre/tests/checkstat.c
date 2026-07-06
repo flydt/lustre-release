@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
@@ -38,11 +18,14 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
 #include <pwd.h>
 #include <grp.h>
+#include <linux/fs.h>
 
 static void
 usage(char *argv0, int help)
@@ -68,6 +51,7 @@ usage(char *argv0, int help)
 	printf(" -s    size             file must have the given size\n");
 	printf(" -u    user             file must be owned by given user\n");
 	printf(" -g    group            file must be owned by given group\n");
+	printf(" -j    projid           file must have the given project ID\n");
 	printf(" -f                     follow symlinks\n");
 	printf(" -a                     file must be absent\n");
 	printf(" -v                     increase verbosity\n");
@@ -117,6 +101,7 @@ main(int argc, char **argv)
 	int perms = -1;
 	uid_t uid = (uid_t)-1;
 	gid_t gid = (gid_t)-1;
+	long long projid = -1;
 	char *type = NULL;
 	long absent = 0;
 	char *checklink = NULL;
@@ -125,7 +110,7 @@ main(int argc, char **argv)
 	int follow = 0;
 	char *term;
 
-	while ((c = getopt(argc, argv, "p:t:l:s:u:g:avfh")) != -1)
+	while ((c = getopt(argc, argv, "p:t:l:s:u:g:j:avfh")) != -1)
 		switch (c) {
 		case 'p':
 			perms = (int)strtol(optarg, &term, 0);
@@ -191,6 +176,15 @@ main(int argc, char **argv)
 					return 1;
 				}
 				uid = gr->gr_gid;
+			}
+			break;
+
+		case 'j':
+			projid = strtoll(optarg, &term, 0);
+			if (term == optarg || projid < 0) {
+				fprintf(stderr, "Can't parse projid %s\n",
+					optarg);
+				return 1;
 			}
 			break;
 
@@ -360,6 +354,36 @@ main(int argc, char **argv)
 			if (verbose)
 				printf("%s is owned by group #%ld OK\n",
 				       fname, (long)gid);
+		}
+
+		if (projid != -1) {
+			struct fsxattr fsx = { 0 };
+			int fd = open(fname, O_RDONLY | O_NOCTTY | O_NDELAY);
+
+			if (fd < 0) {
+				if (verbose)
+					printf("%s: can't open to read projid: %s\n",
+					       fname, strerror(errno));
+				return 1;
+			}
+			rc = ioctl(fd, FS_IOC_FSGETXATTR, &fsx);
+			close(fd);
+			if (rc != 0) {
+				if (verbose)
+					printf("%s: can't get projid: %s\n",
+					       fname, strerror(errno));
+				return 1;
+			}
+			if ((long long)fsx.fsx_projid != projid) {
+				if (verbose)
+					printf("%s has projid %u, not %lld\n",
+					       fname, fsx.fsx_projid, projid);
+				return 1;
+			}
+
+			if (verbose)
+				printf("%s has projid %lld OK\n",
+				       fname, projid);
 		}
 	} while (++optind < argc);
 

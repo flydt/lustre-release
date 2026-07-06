@@ -65,6 +65,9 @@ static int mgc_local_llog_fini(const struct lu_env *env,
 	RETURN(0);
 }
 
+/* Configure the MGC to fetch config logs from the MGS to a local
+ * filesystem device during mount.
+ */
 static int mgc_fs_setup(const struct lu_env *env, struct obd_device *obd,
 			struct super_block *sb)
 {
@@ -78,8 +81,14 @@ static int mgc_fs_setup(const struct lu_env *env, struct obd_device *obd,
 	LASSERT(lsi);
 	LASSERT(lsi->lsi_dt_dev);
 
-	/* The mgc fs exclusion mutex. Only one fs can be setup at a time. */
-	mutex_lock(&cli->cl_mgc_mutex);
+	/* MGC can currently only fetch config logs for one fs at a time.
+	 * Allow this mount to be killed if it is hung for some reason.
+	 */
+	rc = mutex_lock_interruptible(&cli->cl_mgc_mutex);
+	CDEBUG(D_MGC, "%s: cl_mgc_mutex %s for %s: rc = %d\n", obd->obd_name,
+	       lsi->lsi_osd_obdname, rc ? "interrupted" : "locked", rc);
+	if (rc)
+		RETURN(rc);
 
 	/* Setup the configs dir */
 	fid.f_seq = FID_SEQ_LOCAL_NAME;
@@ -114,11 +123,11 @@ static int mgc_fs_setup(const struct lu_env *env, struct obd_device *obd,
 		GOTO(out_llog, rc);
 
 	/* We take an obd ref to insure that we can't get to mgc_cleanup
-	 * without calling mgc_fs_cleanup first.
+	 * without calling mgc_fs_clear() first.
 	 */
 	class_incref(obd, "mgc_fs", obd);
 
-	/* We keep the cl_mgc_sem until mgc_fs_cleanup */
+	/* We hold the cl_mgc_mutex until mgc_fs_clear() is called */
 	EXIT;
 out_llog:
 	if (rc) {
@@ -130,12 +139,15 @@ out_los:
 		local_oid_storage_fini(env, cli->cl_mgc_los);
 out_mutex:
 		cli->cl_mgc_los = NULL;
+		CDEBUG(D_MGC, "%s: cl_mgc_mutex unlock for %s: rc = %d\n",
+		       obd->obd_name, lsi->lsi_osd_obdname, rc);
 		mutex_unlock(&cli->cl_mgc_mutex);
 	}
 	return rc;
 }
 
-static int mgc_fs_cleanup(const struct lu_env *env, struct obd_device *obd)
+/* Unconfigure the MGC from fetching config logs to the local device */
+static int mgc_fs_clear(const struct lu_env *env, struct obd_device *obd)
 {
 	struct client_obd *cli = &obd->u.cli;
 
@@ -151,6 +163,7 @@ static int mgc_fs_cleanup(const struct lu_env *env, struct obd_device *obd)
 	cli->cl_mgc_los = NULL;
 
 	class_decref(obd, "mgc_fs", obd);
+	CDEBUG(D_MGC, "%s: cl_mgc_mutex unlock\n", obd->obd_name);
 	mutex_unlock(&cli->cl_mgc_mutex);
 
 	RETURN(0);
@@ -160,25 +173,63 @@ static int mgc_fs_cleanup(const struct lu_env *env, struct obd_device *obd)
 static int mgc_target_register(struct obd_export *exp,
 			       struct mgs_target_info *mti)
 {
-	size_t mti_len = offsetof(struct mgs_target_info, mti_nidlist);
 	struct ptlrpc_request *req;
-	struct mgs_target_info *req_mti, *rep_mti;
+	struct mgs_target_info *request_mti, *reply_mti;
+	struct mgs_target_nidlist *mtn;
+	struct ptlrpc_bulk_desc *desc;
+	size_t nidlist_size = NIDLIST_SIZE(mti->mti_nid_count);
+	int pages = 0;
+	unsigned int avail = 0;
+	size_t bufsize;
 	int rc;
+	bool nidlist, large_nids;
 
 	ENTRY;
-	req = ptlrpc_request_alloc(class_exp2cliimp(exp), &RQF_MGS_TARGET_REG);
+
+	server_mti_print("mgc_target_register: req", mti);
+
+	nidlist = exp_connect_flags(exp) & OBD_CONNECT_MGS_NIDLIST;
+	large_nids = target_supports_large_nid(mti);
+
+	if (CFS_FAIL_CHECK(OBD_FAIL_MGC_REG_BEFORE_CONN))
+		nidlist = false;
+
+	/* it is OK to use new protocol with an old MGS, mti buffer is the
+	 * same in both cases
+	 */
+	req = ptlrpc_request_alloc(class_exp2cliimp(exp),
+				   &RQF_MGS_TARGET_REG_NIDLIST);
 	if (!req)
 		RETURN(-ENOMEM);
 
-	server_mti_print("mgc_target_register: req", mti);
-	if (target_supports_large_nid(mti)) {
-		mti_len += mti->mti_nid_count * LNET_NIDSTR_SIZE;
+	if (large_nids || nidlist) {
+		bufsize = MGS_MAXREQSIZE - sizeof(struct ptlrpc_body) -
+			  sizeof(*mti) - sizeof(*mtn);
+		avail = bufsize / MTN_NIDSTR_SIZE;
+	} else {
+		nidlist_size = 0;
+	}
 
+	if (nidlist) {
+		if (mti->mti_nid_count <= avail) { /* inline buffer */
+			req_capsule_set_size(&req->rq_pill,
+					     &RMF_MGS_TARGET_NIDLIST,
+					     RCL_CLIENT,
+					     sizeof(*mtn) + nidlist_size);
+		} else { /* use bulk for big NID lists */
+			pages = DIV_ROUND_UP((sizeof(*mti) & ~PAGE_MASK) +
+					     nidlist_size, PAGE_SIZE);
+		}
+	} else if (large_nids) {
+		if (mti->mti_nid_count > avail) {
+			/* can't fit, send all we can */
+			CDEBUG(D_MGC, "can fit only %u NIDs from %u\n",
+			       avail, mti->mti_nid_count);
+			mti->mti_nid_count = avail;
+			nidlist_size = NIDLIST_SIZE(avail);
+		}
 		req_capsule_set_size(&req->rq_pill, &RMF_MGS_TARGET_INFO,
-				     RCL_CLIENT, mti_len);
-
-		req_capsule_set_size(&req->rq_pill, &RMF_MGS_TARGET_INFO,
-				     RCL_SERVER, mti_len);
+				     RCL_CLIENT, sizeof(*mti) + nidlist_size);
 	}
 
 	rc = ptlrpc_request_pack(req, LUSTRE_MGS_VERSION, MGS_TARGET_REG);
@@ -187,17 +238,49 @@ static int mgc_target_register(struct obd_export *exp,
 		RETURN(rc);
 	}
 
-	req_mti = req_capsule_client_get(&req->rq_pill, &RMF_MGS_TARGET_INFO);
-	if (!req_mti) {
+	request_mti = req_capsule_client_get(&req->rq_pill,
+					     &RMF_MGS_TARGET_INFO);
+	if (!request_mti) {
 		ptlrpc_req_put(req);
 		RETURN(-ENOMEM);
 	}
+	*request_mti = *mti;
 
-	memcpy(req_mti, mti, mti_len);
+	mtn = req_capsule_client_get(&req->rq_pill, &RMF_MGS_TARGET_NIDLIST);
+	if (!mtn) {
+		ptlrpc_req_put(req);
+		RETURN(-ENOMEM);
+	}
+	mtn->mtn_nids = 0;
+	mtn->mtn_flags = 0;
+
+	if (pages) {
+		LASSERT(nidlist);
+		mtn->mtn_flags |= NIDLIST_IN_BULK;
+		mtn->mtn_nids = mti->mti_nid_count;
+		req->rq_bulk_write = 1;
+		desc = ptlrpc_prep_bulk_imp(req, pages,
+					    MD_MAX_BRW_SIZE >> LNET_MTU_BITS,
+					    PTLRPC_BULK_GET_SOURCE,
+					    MGS_BULK_PORTAL,
+					    &ptlrpc_bulk_kiov_nopin_ops);
+		if (!desc) {
+			ptlrpc_req_put(req);
+			RETURN(-ENOMEM);
+		}
+		desc->bd_frag_ops->add_iov_frag(desc, mti->mti_nidlist,
+						nidlist_size);
+	} else if (nidlist) {
+		mtn->mtn_nids = mti->mti_nid_count;
+		memcpy(mtn->mtn_inline_list, mti->mti_nidlist, nidlist_size);
+	} else if (large_nids) {
+		memcpy(request_mti, mti, sizeof(*mti) + nidlist_size);
+	}
+
 	ptlrpc_request_set_replen(req);
 	CDEBUG(D_MGC, "register %s\n", mti->mti_svname);
 	/* Limit how long we will wait for the enqueue to complete */
-	req->rq_delay_limit = MGC_TARGET_REG_LIMIT;
+	req->rq_delay_limit_ns = ktime_set(MGC_TARGET_REG_LIMIT, 0);
 
 	/* if the target needs to regenerate the config log in MGS, it's better
 	 * to use some longer limit to let MGC have time to change connection to
@@ -205,19 +288,14 @@ static int mgc_target_register(struct obd_export *exp,
 	 * will fail and exit if the request expired due to delay limit.
 	 */
 	if (mti->mti_flags & (LDD_F_UPDATE | LDD_F_NEED_INDEX))
-		req->rq_delay_limit = MGC_TARGET_REG_LIMIT_MAX;
+		req->rq_delay_limit_ns = ktime_set(MGC_TARGET_REG_LIMIT_MAX, 0);
 
 	rc = ptlrpc_queue_wait(req);
 	if (ptlrpc_client_replied(req)) {
-		rep_mti = req_capsule_server_get(&req->rq_pill,
-						 &RMF_MGS_TARGET_INFO);
-		if (rep_mti) {
-			mti_len = offsetof(struct mgs_target_info, mti_nidlist);
-
-			if (target_supports_large_nid(mti))
-				mti_len += mti->mti_nid_count * LNET_NIDSTR_SIZE;
-			memcpy(mti, rep_mti, mti_len);
-		}
+		reply_mti = req_capsule_server_get(&req->rq_pill,
+						   &RMF_MGS_TARGET_INFO);
+		if (reply_mti)
+			*mti = *reply_mti;
 	}
 	if (!rc) {
 		CDEBUG(D_MGC, "register %s got index = %d\n",
@@ -227,6 +305,126 @@ static int mgc_target_register(struct obd_export *exp,
 	ptlrpc_req_put(req);
 
 	RETURN(rc);
+}
+
+static int mgc_nid_notify_interpret(const struct lu_env *env,
+				    struct ptlrpc_request *req,
+				    void *args, int rc)
+{
+	struct mgs_target_info *mti;
+
+	if (!ptlrpc_client_replied(req) ||
+	    lustre_msg_get_type(req->rq_repmsg) == PTL_RPC_MSG_ERR) {
+		CDEBUG(D_MGC, "fail to send NID notify, rc = %d\n", rc);
+		return rc;
+	}
+
+	mti = req_capsule_server_get(&req->rq_pill, &RMF_MGS_TARGET_INFO);
+	if (!mti)
+		return -EPROTO;
+
+	server_mti_print("mgc_nid_notify: rep", mti);
+
+	if (rc)
+		CDEBUG(D_MGC, "%s: NID notify failed, rc = %d\n",
+		       mti->mti_svname, rc);
+	return rc;
+}
+
+static int mgc_nid_notify(struct obd_export *exp,
+			  struct mgs_target_info *mti,
+			  struct ptlrpc_request_set *set)
+{
+	struct ptlrpc_request *req;
+	struct mgs_target_info *request_mti;
+	struct mgs_target_nidlist *mtn;
+	struct ptlrpc_bulk_desc *desc;
+	size_t bufsize, nidlist_size;
+	unsigned int avail;
+	int pages = 0;
+	int rc;
+
+	server_mti_print("mgc_nid_notify: req", mti);
+
+	if (!(exp_connect_flags(exp) & OBD_CONNECT_MGS_NIDLIST))
+		RETURN(-ENOPROTOOPT);
+
+	req = ptlrpc_request_alloc(class_exp2cliimp(exp),
+				   &RQF_MGS_TARGET_REG_NIDLIST);
+	if (!req)
+		RETURN(-ENOMEM);
+
+	bufsize = MGS_MAXREQSIZE - sizeof(struct ptlrpc_body) -
+		  sizeof(*mti) - sizeof(*mtn);
+	avail = bufsize / MTN_NIDSTR_SIZE;
+
+	nidlist_size = NIDLIST_SIZE(mti->mti_nid_count);
+	if (mti->mti_nid_count <= avail) {
+		/* inline buffer fits NIDs */
+		req_capsule_set_size(&req->rq_pill, &RMF_MGS_TARGET_NIDLIST,
+				     RCL_CLIENT, sizeof(*mtn) + nidlist_size);
+	} else { /* use bulk for big NID lists */
+		pages = DIV_ROUND_UP((sizeof(*mti) & ~PAGE_MASK) +
+				     nidlist_size, PAGE_SIZE);
+	}
+
+	rc = ptlrpc_request_pack(req, LUSTRE_MGS_VERSION, MGS_TARGET_REG);
+	if (rc < 0) {
+		ptlrpc_request_free(req);
+		RETURN(rc);
+	}
+
+	request_mti = req_capsule_client_get(&req->rq_pill,
+					     &RMF_MGS_TARGET_INFO);
+	if (!request_mti) {
+		ptlrpc_req_put(req);
+		RETURN(-ENOMEM);
+	}
+	*request_mti = *mti;
+
+	mtn = req_capsule_client_get(&req->rq_pill, &RMF_MGS_TARGET_NIDLIST);
+	if (!mtn) {
+		ptlrpc_req_put(req);
+		RETURN(-ENOMEM);
+	}
+
+	mtn->mtn_nids = mti->mti_nid_count;
+	mtn->mtn_flags = NIDLIST_APPEND;
+	if (pages) {
+		mtn->mtn_flags |= NIDLIST_IN_BULK;
+		req->rq_bulk_write = 1;
+		desc = ptlrpc_prep_bulk_imp(req, pages,
+					    MD_MAX_BRW_SIZE >> LNET_MTU_BITS,
+					    PTLRPC_BULK_GET_SOURCE,
+					    MGS_BULK_PORTAL,
+					    &ptlrpc_bulk_kiov_nopin_ops);
+		if (!desc) {
+			ptlrpc_req_put(req);
+			RETURN(-ENOMEM);
+		}
+		desc->bd_frag_ops->add_iov_frag(desc, mti->mti_nidlist,
+						nidlist_size);
+	} else {
+		memcpy(mtn->mtn_inline_list, mti->mti_nidlist, nidlist_size);
+	}
+
+	ptlrpc_request_set_replen(req);
+	req->rq_interpret_reply = mgc_nid_notify_interpret;
+
+	if (!pages) {
+		ptlrpcd_add_req(req);
+	} else if (set) {
+		ptlrpc_set_add_req(set, req);
+		ptlrpc_check_set(NULL, set);
+	} else {
+		/* caller provides no set but bulk is used, wait for
+		 * RPC reply to make sure mti is not freed by caller
+		 */
+		rc = ptlrpc_queue_wait(req);
+		ptlrpc_req_put(req);
+	}
+
+	return 0;
 }
 
 int mgc_set_info_async_server(const struct lu_env *env,
@@ -254,6 +452,19 @@ int mgc_set_info_async_server(const struct lu_env *env,
 		rc =  mgc_target_register(exp, mti);
 		RETURN(rc);
 	}
+	if (KEY_IS(KEY_NID_NOTIFY)) {
+		size_t mti_len = offsetof(struct mgs_target_info, mti_nidlist);
+		struct mgs_target_info *mti = val;
+
+		mti_len += NIDLIST_SIZE(mti->mti_nid_count);
+		if (vallen != mti_len)
+			RETURN(-EINVAL);
+
+		CDEBUG(D_MGC, "NID notify for %s about %d new NIDs\n",
+		       mti->mti_svname, mti->mti_nid_count);
+		rc =  mgc_nid_notify(exp, mti, set);
+		RETURN(rc);
+	}
 	if (KEY_IS(KEY_SET_FS)) {
 		struct super_block *sb = (struct super_block *)val;
 
@@ -266,7 +477,7 @@ int mgc_set_info_async_server(const struct lu_env *env,
 	if (KEY_IS(KEY_CLEAR_FS)) {
 		if (vallen != 0)
 			RETURN(-EINVAL);
-		rc = mgc_fs_cleanup(env, exp->exp_obd);
+		rc = mgc_fs_clear(env, exp->exp_obd);
 		RETURN(rc);
 	}
 
@@ -283,7 +494,7 @@ int mgc_process_nodemap_log(struct obd_device *obd,
 	struct nodemap_config *new_config = NULL;
 	struct lu_nodemap *recent_nodemap = NULL;
 	struct ptlrpc_bulk_desc *desc;
-	struct page **pages = NULL;
+	struct folio **folios = NULL;
 	u64 config_read_offset = 0;
 	u8 nodemap_cur_pass = 0;
 	int nrpages = 0;
@@ -307,14 +518,16 @@ int mgc_process_nodemap_log(struct obd_device *obd,
 	 */
 	nrpages = CONFIG_READ_NRPAGES_INIT;
 
-	OBD_ALLOC_PTR_ARRAY(pages, nrpages);
-	if (!pages)
+	OBD_ALLOC_PTR_ARRAY(folios, nrpages);
+	if (!folios)
 		GOTO(out, rc = -ENOMEM);
 
 	for (i = 0; i < nrpages; i++) {
-		pages[i] = alloc_page(GFP_KERNEL);
-		if (!pages[i])
+		folios[i] = folio_alloc(GFP_KERNEL, 0);
+		if (IS_ERR_OR_NULL(folios[i])) {
+			folios[i] = NULL;
 			GOTO(out, rc = -ENOMEM);
+		}
 	}
 
 again:
@@ -358,8 +571,8 @@ again:
 		GOTO(out, rc = -ENOMEM);
 
 	for (i = 0; i < nrpages; i++)
-		desc->bd_frag_ops->add_kiov_frag(desc, pages[i], 0,
-						 PAGE_SIZE);
+		desc->bd_frag_ops->add_kiov_frag(desc, folio_page(folios[i], 0),
+						 0, PAGE_SIZE);
 
 	ptlrpc_request_set_replen(req);
 	rc = ptlrpc_queue_wait(req);
@@ -407,10 +620,10 @@ again:
 		union lu_page *ptr;
 		int rc2;
 
-		ptr = kmap(pages[i]);
+		ptr = ll_kmap_local_folio(folios[i], 0);
 		rc2 = nodemap_process_idx_pages(new_config, ptr,
 						&recent_nodemap);
-		kunmap(pages[i]);
+		ll_kunmap_local(ptr);
 		if (rc2 < 0) {
 			CWARN("%s: error processing %s log nodemap: rc = %d\n",
 			      obd->obd_name,
@@ -442,20 +655,21 @@ out:
 			nodemap_config_dealloc(new_config);
 	}
 
-	if (pages) {
+	if (folios) {
 		for (i = 0; i < nrpages; i++) {
-			if (!pages[i])
+			if (!folios[i])
 				break;
-			__free_page(pages[i]);
+			folio_put(folios[i]);
 		}
-		OBD_FREE_PTR_ARRAY(pages, nrpages);
+		OBD_FREE_PTR_ARRAY(folios, nrpages);
 	}
 	return rc;
 }
 
-int mgc_process_config_server(struct obd_device *obd, size_t len, void *buf)
+int mgc_process_config_server(const struct lu_env *env, struct lu_device *lu,
+			      struct lustre_cfg *lcfg)
 {
-	struct lustre_cfg *lcfg = buf;
+	struct obd_device *obd = lu->ld_obd;
 	int rc = -ENOENT;
 
 	ENTRY;
@@ -546,8 +760,9 @@ static int mgc_llog_local_copy(const struct lu_env *env,
 	/* build new local llog */
 	rc = llog_backup(env, obd, rctxt, lctxt, logname, logname);
 	if (rc == -ENOENT) {
-		CWARN("%s: no remote llog for %s, check MGS config\n",
-		      obd->obd_name, logname);
+		CDEBUG_LIMIT(strstr(logname, "sptlrpc") ? D_MGC : D_WARNING,
+			     "%s: no remote llog for %s, check MGS config\n",
+			     obd->obd_name, logname);
 		llog_erase(env, lctxt, NULL, logname);
 	} else if (rc < 0) {
 		/* error during backup, get local one back from the copy */
@@ -612,7 +827,9 @@ int mgc_process_server_cfg_log(struct lu_env *env, struct llog_ctxt **ctxt,
 		       mgc->obd_name, cld->cld_logname);
 	} else if (rc) {
 		/* In case of error we may have empty or incomplete local
-		 * config. In both cases proceed with remote llog first
+		 * config. In both cases proceed with remote llog first.
+		 *
+		 * mgs_write_log_target() handles positive EALREADY specially.
 		 */
 		rc = class_config_parse_llog(env, *ctxt, cld->cld_logname,
 					     &cld->cld_cfg);

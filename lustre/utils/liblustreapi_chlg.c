@@ -1,26 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1+
 /*
- * LGPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
  * (C) Copyright 2017 Commissariat a l'energie atomique et aux energies
  *     alternatives
- *
- * All rights reserved. This program and the accompanying materials
- * are made available under the terms of the GNU Lesser General Public License
- * (LGPL) version 2.1 or (at your discretion) any later version.
- * (LGPL) version 2.1 accompanies this distribution, and is available at
- * http://www.gnu.org/licenses/lgpl-2.1.html
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * Lesser General Public License for more details.
- *
- * LGPL HEADER END
  */
 /*
- * lustre/utils/liblustreapi_chlg.c
+ * This file is part of Lustre, http://www.lustre.org/
  *
  * lustreapi library for filesystem changelog
  *
@@ -37,10 +21,13 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <ctype.h>
 
 #include <lustre/lustreapi.h>
 #include <linux/lustre/lustre_ioctl.h>
+#include <linux/lustre/lustre_user.h>
 
+#include "lustreapi_internal.h"
 
 static int chlg_dev_path(char *path, size_t path_len, const char *device)
 {
@@ -167,6 +154,86 @@ out_close:
 out_free_cp:
 	free(cp);
 	return rc;
+}
+
+/**
+ * Parse user string to extract numeric ID if possible
+ *
+ * @param[in] username	User name or ID (e.g. "cl1", "cl1-user", "1", or "user")
+ * @param[out] user_id	User ID number (0 will let MDT parse the username)
+ * @return 0 on success, < 0 on error.
+ */
+static int changelog_parse_username(const char *username, __u32 *user_id)
+{
+	__u32 id;
+
+	/* Try to parse as pure numeric ID first */
+	if (isdigit(username[0])) {
+		id = atoi(username);
+		if (id > 0) {
+			*user_id = id;
+			return 0;
+		}
+	}
+
+	/* Try to parse as "cl<ID>" format */
+	if (sscanf(username, "cl%u", &id) == 1) {
+		*user_id = id;
+		return 0;
+	}
+
+	/* Let MDT parse the user string */
+	*user_id = 0;
+	return 0;
+}
+
+/**
+ * Start reading changelog for a specific user with a specific mask
+ *
+ * @param priv      Opaque private control structure
+ * @param flags     Start flags (e.g. CHANGELOG_FLAG_JOBID)
+ * @param device    Report changes recorded on this MDT
+ * @param username  Changelog user name or ID, e.g. "cl1", "cl1-user", "1", or
+ *		    "user"
+ * @param mask      Changelog record mask in numeric form, 0 means the user's
+ *		    registered mask will be used.
+ *		    (Please see llapi_convert_str2mask/mask2str() for converting
+ *		    mask string to numeric form and vice versa.)
+ * @param startrec  Report changes beginning with this record number
+ */
+int llapi_changelog_start_user(void **priv, enum changelog_send_flag flags,
+			       const char *device, const char *username,
+			       __u64 mask, long long startrec)
+{
+	struct changelog_private *cp;
+	struct changelog_filter cf = { 0 };
+	__u32 user_id;
+	int rc;
+
+	/* Try to parse user ID from string */
+	rc = changelog_parse_username(username, &user_id);
+	if (rc != 0)
+		return rc;
+
+	/* Get a changelog reader */
+	rc = llapi_changelog_start(priv, flags, device, startrec);
+	if (rc != 0)
+		return rc;
+	cp = *priv;
+
+	cf.cf_user_id = user_id;
+	if (user_id == 0)
+		snprintf(cf.cf_username, sizeof(cf.cf_username), "%s",
+			 username);
+	cf.cf_mask = mask;
+
+	rc = ioctl(cp->clp_fd, OBD_IOC_CHANGELOG_FILTER, &cf);
+	if (rc) {
+		rc = -errno;
+		llapi_error(LLAPI_MSG_ERROR, rc, "cannot set changelog filter");
+	}
+
+	return rc < 0 ? -errno : 0;
 }
 
 /** Finish reading from a changelog */
@@ -391,7 +458,8 @@ int llapi_changelog_clear(const char *mdtname, const char *idstr,
 	char dev_path[PATH_MAX];
 	char cmd[64];
 	size_t cmd_len = sizeof(cmd);
-	char *dashp, *clidp = NULL;
+	const char *dashp;
+	char *clidp = NULL;
 	int fd;
 	int rc;
 

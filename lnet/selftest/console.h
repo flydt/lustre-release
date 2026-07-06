@@ -19,15 +19,15 @@
 #define __LST_CONSOLE_H__
 
 #include <linux/uaccess.h>
+#include <linux/libcfs/libcfs.h>
+#include <linux/lnet/lib-types.h>
 
-#include <libcfs/libcfs.h>
-#include <lnet/lib-types.h>
 #include "selftest.h"
 #include "conrpc.h"
 
 /* node descriptor */
 struct lstcon_node {
-	struct lnet_process_id		nd_id;    /* id of the node */
+	struct lnet_processid		nd_id;    /* id of the node */
 	int				nd_ref;   /* reference count */
 	int				nd_state; /* state of the node */
 	int				nd_timeout; /* session timeout */
@@ -165,14 +165,6 @@ lstcon_trans_stat(void)
 	return &console_session.ses_trans_stat;
 }
 
-static inline struct list_head *
-lstcon_id2hash(struct lnet_process_id id, struct list_head *hash)
-{
-	unsigned int idx = LNET_NIDADDR(id.nid) % LST_NODE_HASHSIZE;
-
-	return &hash[idx];
-}
-
 extern int lstcon_session_match(struct lst_sid sid);
 extern int lstcon_session_new(char *name, int key, unsigned int version,
 			      int timeout, int flags);
@@ -201,10 +193,6 @@ extern int lstcon_nodes_add(char *name, int nnd,
 extern int lstcon_nodes_remove(char *name, int nnd,
 			       struct lnet_process_id __user *nds_up,
 			       struct list_head __user *result_up);
-extern int lstcon_group_info(char *name,
-			     struct lstcon_ndlist_ent __user *gent_up,
-			     int *index_p, int *ndent_p,
-			     struct lstcon_node_ent __user *ndents_up);
 extern int lstcon_batch_add(char *name);
 extern int lstcon_batch_run(char *name, int timeout,
 			    struct list_head __user *result_up);

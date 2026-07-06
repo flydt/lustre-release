@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 #
 # Run select tests by setting ONLY, or as arguments to the script.
 # Skip specific tests by setting EXCEPT.
@@ -9,7 +9,7 @@ ONLY=${ONLY:-"$*"}
 
 LUSTRE=${LUSTRE:-$(dirname $0)/..}
 . $LUSTRE/tests/test-framework.sh
-init_test_env $@
+init_test_env "$@"
 init_logging
 
 ALWAYS_EXCEPT="$SANITY_QUOTA_EXCEPT "
@@ -31,7 +31,9 @@ build_test_filter
 DIRECTIO=${DIRECTIO:-$LUSTRE/tests/directio}
 ORIG_PWD=${PWD}
 TSTID=${TSTID:-"$(id -u $TSTUSR)"}
+TSTGID=${TSTGID:-"$(id -g $TSTUSR)"}
 TSTID2=${TSTID2:-"$(id -u $TSTUSR2)"}
+TSTGID2=${TSTGID2:-"$(id -g $TSTUSR2)"}
 TSTPRJID=${TSTPRJID:-1000}
 TSTPRJID2=${TSTPRJID2:-1001}
 BLK_SZ=1024
@@ -86,7 +88,7 @@ lustre_fail() {
 
 	case $fail_node in
 	mds_ost|mdt_ost|mds_oss) nodes="$(tgts_nodes)";;
-	mds|mdt) nodes="$(comma_list $(mdts_nodes))";;
+	mds|mdt) nodes="$(mdts_nodes)";;
 	ost) nodes="$(osts_nodes)";;
 	esac
 
@@ -95,6 +97,7 @@ lustre_fail() {
 
 RUNAS="runas -u $TSTID -g $TSTID"
 RUNAS2="runas -u $TSTID2 -g $TSTID2"
+RUNAS3="runas -u $TSTID -g $TSTGID"
 
 FAIL_ON_ERROR=false
 
@@ -186,9 +189,9 @@ wait_reintegration() {
 		if $(facet_up $tgt); then
 			# reintegration starts after recovery completion
 			wait_recovery_complete $tgt
-			wait_update_facet $tgt "$cmd |
-				grep "$qtype" | awk '{ print \\\$3 }'" \
-					"$result" $max || return 1
+			wait_update_facet $tgt "$cmd | grep $qtype |
+				awk '{ print \\\$3 }'" "$result" $max ||
+				return 1
 		fi
 	done
 	return 0
@@ -316,7 +319,7 @@ cleanup_quota_test() {
 	rm -rf $DIR/$tdir
 	[ -d $DIR/${tdir}_dom ] && rm -rf $DIR/${tdir}_dom
 	echo "Wait for unlink objects finished..."
-	wait_delete_completed
+	wait_delete_completed || error "wait_delete_completed failed"
 	sync_all_data || true
 	reset_quota_settings
 }
@@ -759,6 +762,12 @@ test_1b() {
 		"user quota isn't released after deletion"
 	resetquota -u $TSTUSR
 
+	sync
+	sync
+
+	debugfs -R "ls /quota_master/dt-0x0" /tmp/lustre-mdt1
+	debugfs -R "ls /quota_master/dt-qpool1" /tmp/lustre-mdt1
+
 	# test for group
 	log "--------------------------------------"
 	log "Group quota (block hardlimit:$global_limit MB)"
@@ -1116,6 +1125,7 @@ run_test 1g "Quota pools: Block hard limit with wide striping"
 
 test_1h() {
 	local limit=10 # MB
+	local testdir="$DIR/$tdir"
 	local testfile="$DIR/$tdir/$tfile-0"
 
 	check_set_fallocate_or_skip
@@ -1147,6 +1157,53 @@ test_1h() {
 	used=$(getquota -u $TSTUSR global curspace)
 	[ $used -eq 0 ] || quota_error u $TSTUSR \
 		"user quota isn't released after deletion"
+
+	$LFS setstripe -i 0 -c 1 $testdir || error "setstripe $testdir failed"
+
+	$RUNAS fallocate -l$((count + 2))MiB $testfile &&
+		quota_error u $TSTUSR "Write success, expect EDQUOT"
+	$LFS quota -u $TSTID
+
+	$LFS setquota -u $TSTUSR -b 0 -B 0 -i 0 -I 0 $DIR ||
+		error "reset user quota failed"
+	$LFS setquota -g $TSTUSR -b 0 -B ${limit}M -i 0 -I 0 $DIR ||
+		error "set group quota failed"
+
+	wait_quota_synced ost1 OST0000 grp $TSTID hardlimit $((limit*1024))
+
+	rm -f $testfile
+	wait_delete_completed || error "wait_delete_completed failed"
+	sync_all_data || true
+
+	$RUNAS fallocate -l$((count + 2))MiB $testfile &&
+		quota_error g $TSTUSR "Write success, expect EDQUOT"
+	$LFS quota -g $TSTID
+
+	! is_project_quota_supported &&
+		echo "Skip project quota is not supported" && return 0
+
+	$LFS setquota -g $TSTUSR -b 0 -B 0 -i 0 -I 0 $DIR ||
+		error "reset group quota failed"
+
+	rm -f $testfile
+	wait_delete_completed || error "wait_delete_completed failed"
+	sync_all_data || true
+
+	$LFS setquota -p $TSTPRJID -b 0 -B ${limit}M -i 0 -I 0 $DIR ||
+		error "set project quota failed"
+
+	wait_quota_synced ost1 OST0000 prj $TSTPRJID hardlimit $((limit*1024))
+
+	# make sure the system is clean
+	used=$(getquota -p $TSTPRJID global curinodes)
+	[ $used -ne 0 ] &&
+		error "Used inodes($used) for project $TSTPRJID isn't 0"
+
+	change_project -sp $TSTPRJID $DIR/$tdir
+
+	$RUNAS fallocate -l$((count + 2))MiB $testfile &&
+		quota_error p $TSTUSR "Write success, expect EDQUOT"
+	$LFS quota -p $TSTPRJID $DIR
 }
 run_test 1h "Block hard limit test using fallocate"
 
@@ -1220,8 +1277,13 @@ test_1i() {
 run_test 1i "Quota pools: different limit and usage relations"
 
 test_1j() {
-	local limit=40 # MB
-	local limit2=$((limit*2)) # MB
+	local blim=40 # MB
+	local blim2=$((blim*2)) # MB
+	local ilim=2048
+	local ilim2=$((ilim*2))
+	local testdir="$DIR/$tdir/test_dir"
+	local testdir1="$DIR/$tdir/test_dir1"
+	local testdir2="$DIR/$tdir/test_dir2"
 	local testf="$DIR/$tdir/$tfile-0"
 	local testf1="$DIR/$tdir/$tfile-1"
 	local testf2="$DIR/$tdir/$tfile-2"
@@ -1229,25 +1291,45 @@ test_1j() {
 	local client_nid=$(h2nettype $client_ip)
 	local nm=test_1j
 
-	(( $OST1_VERSION >= $(version_code 2.14.0.74) )) ||
-		skip "need OST at least 2.14.0.74"
+	(( $OST1_VERSION >= $(version_code 2.15.63.108) )) ||
+		skip "need OST >= v2_15_63-108-gbdf2744ad5 for root project quota"
 
 	is_project_quota_supported ||
 		skip "skip project quota unsupported"
 
 	setup_quota_test || error "setup quota failed with $?"
 
-	# enable ost quota
+	# enable quota
+	set_mdt_qtype $QTYPE || error "enable mdt quota failed"
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
 
 	# test for Project
 	log "--------------------------------------"
-	log "Project quota (block hardlimit:$limit mb)"
-	$LFS setquota -p $TSTPRJID -b 0 -B ${limit}M -i 0 -I 0 $DIR ||
+	log "Project quota (hardlimit: $blim mb, $ilim files)"
+	$LFS setquota -p $TSTPRJID -b 0 -B ${blim}M -i 0 -I ${ilim} $DIR ||
 		error "set project quota failed"
 
-	$LFS setquota -p $TSTPRJID2 -b 0 -B ${limit2}M -i 0 -I 0 $DIR ||
+	$LFS setquota -p $TSTPRJID2 -b 0 -B ${blim2}M -i 0 -I ${ilim2} $DIR ||
 		error "set project quota failed"
+
+	$LFS mkdir -i 0 -c 1 $testdir || error "failed to create $testdir"
+	(( $MDSCOUNT > 1 )) && {
+		$LFS mkdir -i 1 -c 1 $testdir1 ||
+				error "failed to create $testdir1"
+	} || {
+		$LFS mkdir -i 0 -c 1 $testdir1 ||
+				error "failed to create $testdir1"
+	}
+	(( $MDSCOUNT > 2 )) && {
+		$LFS mkdir -i 2 -c 1 $testdir2 ||
+				error "failed to create $testdir2"
+	} || {
+		$LFS mkdir -i 0 -c 1 $testdir2 ||
+				error "failed to create $testdir2"
+	}
+	change_project -sp $TSTPRJID $testdir
+	change_project -sp $TSTPRJID $testdir1
+	change_project -sp $TSTPRJID2 $testdir2
 
 	$LFS setstripe $testf -c 1 -i 0 || error "setstripe $testf failed"
 	$LFS setstripe $testf1 -c 1 -i 1 || error "setstripe $testf1 failed"
@@ -1259,35 +1341,61 @@ test_1j() {
 	$LFS quota -pv $TSTPRJID $DIR
 	$LFS quota -pv $TSTPRJID2 $DIR
 
-	runas -u 0 -g 0 $DD of=$testf count=$limit oflag=direct || true
-	runas -u 0 -g 0 $DD of=$testf count=$((limit/2)) \
-		seek=$limit oflag=direct || true
+	runas -u 0 -g 0 createmany -m ${testdir}/tfile1- $ilim || true
+	runas -u 0 -g 0 createmany -m ${testdir}/tfile2- ${ilim/2} || true
 
-	local procf=osd-$ost1_FSTYPE.$FSNAME-*.quota_slave.root_prj_enable
+	runas -u 0 -g 0 $DD of=$testf count=$blim oflag=direct || true
+	runas -u 0 -g 0 $DD of=$testf count=$((blim/2)) \
+		seek=$blim oflag=direct || true
+
+	local procf=osd-$mds1_FSTYPE.$FSNAME-*.quota_slave.root_prj_enable
+	for ((m = 1; m <= $MDSCOUNT; m++)); do
+		do_facet mds$m $LCTL set_param $procf=1
+		stack_trap "do_facet mds$m $LCTL set_param $procf=0"
+	done
+
+	procf=osd-$ost1_FSTYPE.$FSNAME-*.quota_slave.root_prj_enable
 	do_facet ost1 $LCTL set_param $procf=1 ||
 		error "enable root quotas for project failed"
 	stack_trap "do_facet ost1 $LCTL set_param $procf=0"
 	do_facet ost2 $LCTL set_param $procf=1 ||
 		error "enable root quotas for project failed"
 	stack_trap "do_facet ost2 $LCTL set_param $procf=0"
-	lctl get_param *.*.quota_slave.root_prj_enable
+	lctl get_param osd-*.*.quota_slave.root_prj_enable
 
 	$LFS quota -pv $TSTPRJID $DIR
 	$LFS quota -pv $TSTPRJID2 $DIR
 
 	# check that after enabling root_prj_enable,
 	# root gets EDQUOT as earlier hit the limit
-	runas -u 0 -g 0 $DD of=$testf1 count=$limit oflag=direct || true
-	runas -u 0 -g 0 $DD of=$testf1 count=$((limit/2)) \
-		seek=$limit oflag=direct &&
+	(( $MDS1_VERSION >= $(version_code 2.16.57) )) && {
+		runas -u 0 -g 0 createmany -m ${testdir1}/tfile- $ilim && {
+			$LFS quota -pv $TSTPRJID $DIR
+			$LFS quota -pv $TSTPRJID2 $DIR
+
+			quota_error "project" $TSTPRJID "root create success"
+		}
+	}
+
+	runas -u 0 -g 0 $DD of=$testf1 count=$blim oflag=direct || true
+	runas -u 0 -g 0 $DD of=$testf1 count=$((blim/2)) \
+		seek=$blim oflag=direct &&
 		quota_error "project" $TSTPRJID "root write to project success"
 
 	# check that ROOT still can write to the directories
 	# with different PRJID with larger limit
-	runas -u 0 -g 0 $DD of=$testf2 count=$limit oflag=direct || true
-	runas -u 0 -g 0 $DD of=$testf2 count=$((limit/2)) \
-		seek=$limit oflag=direct ||
-		quota_error "project" $TSTPRJID2 "root write to project success"
+	runas -u 0 -g 0 createmany -m ${testdir2}/tfile1- $ilim || true
+	runas -u 0 -g 0 createmany -m ${testdir2}/tfile2- ${ilim/2} ||
+		quota_error "project" $TSTPRJID2 "root create to project failed"
+
+	runas -u 0 -g 0 $DD of=$testf2 count=$blim oflag=direct || true
+	runas -u 0 -g 0 $DD of=$testf2 count=$((blim/2)) \
+		seek=$blim oflag=direct ||
+		quota_error "project" $TSTPRJID2 "root write to project failed"
+
+	for ((m = 1; m <= $MDSCOUNT; m++)); do
+		do_facet mds$m $LCTL set_param $procf=0
+	done
 
 	do_facet ost1 $LCTL set_param $procf=0 ||
 		error "disable root quotas for project failed"
@@ -1328,6 +1436,11 @@ test_1j() {
 		wait_nm_sync $nm trusted_nodemap
 		wait_nm_sync $nm rbac
 
+		(( $MDS1_VERSION >= $(version_code 2.16.57) )) && {
+			runas -u 0 -g 0 createmany -m ${testdir}/tfile3- $ilim &&
+			quota_error "project" $TSTPRJID "root should fail"
+		}
+
 		runas -u 0 -g 0 $DD of=$testf count=$((limit/2)) \
 			seek=$limit oflag=direct &&
 			quota_error "project" $TSTPRJID "root write should fail"
@@ -1336,7 +1449,12 @@ test_1j() {
 		wait_nm_sync active
 	fi
 
-	runas -u 0 -g 0 $DD of=$testf count=$limit seek=$limit oflag=direct ||
+	(( $MDS1_VERSION >= $(version_code 2.16.57) )) && {
+		runas -u 0 -g 0 createmany -m ${testdir}/tfile4- $ilim ||
+			quota_error "project" $TSTPRJID "root create failed"
+	}
+
+	runas -u 0 -g 0 $DD of=$testf count=$blim seek=$blim oflag=direct ||
 		quota_error "project" $TSTPRJID "root write to project failed"
 
 	# cleanup
@@ -1347,6 +1465,151 @@ test_1j() {
 		"project quota isn't released after deletion"
 }
 run_test 1j "Enable project quota enforcement for root"
+
+LQA_NEW="do_facet mds1 $LCTL lqa new --fsname $FSNAME"
+LQA_ADD="do_facet mds1 $LCTL lqa add --fsname $FSNAME"
+LQA_REMOVE="do_facet mds1 $LCTL lqa remove --fsname $FSNAME"
+LQA_DESTROY="do_facet mds1 $LCTL lqa destroy --fsname $FSNAME"
+LQA_LIST="do_facet mds1 $LCTL lqa list --fsname $FSNAME"
+
+test_1k() {
+	local lqa="lqa1"
+	local glbl_limit=1024 # MB
+	local hard=20 # MB
+	local range_min=$TSTID
+	local range_max=$TSTID
+	local tfile1="$DIR/$tdir/$tfile-0"
+
+	(( $MDS1_VERSION >= $(version_code 2.17.50) )) ||
+		skip "need MDS >= 2.17.50 to support lfs lqa commands"
+
+	setup_quota_test || error "setup quota failed with $?"
+	set_ost_qtype $QTYPE || error "enable ost quota failed"
+
+
+	((TSTID > TSTPRJID)) || range_max=$TSTPRJID
+	((TSTID < TSTPRJID)) || range_min=$TSTPRJID
+	range_min=$((range_min/2))
+	range_max=$((range_max+100))
+	echo "range_min $range_min, range_max $range_max"
+
+	$LQA_NEW --name $lqa || error "cannot create $lqa"
+	stack_trap "$LQA_DESTROY --name $lqa"
+
+	$LQA_ADD --name $lqa --range $range_min-$range_max ||
+		error "cannot add range $range_min-$range_max to $lqa"
+
+	# Set quota to the user to notify slaves with the limits. It is required
+	# until LQAs start notifying slaves with new limits for all IDs from the
+	# range automatically.
+	$LFS setquota -u $TSTID -B ${glbl_limit}M $DIR ||
+		error "set hard block limit to user $TSTID failed"
+	wait_quota_synced ost1 OST0000 usr $TSTID hardlimit $((glbl_limit*1024))
+
+	$LFS setquota -U --lqa $lqa -B ${hard}M $DIR ||
+		error "set user quota failed for lqa:$lqa"
+	$LFS quota -U --lqa $lqa $DIR
+
+	$LFS setstripe $tfile1 -i 0 -c 1 || error "1: setstripe $tfile1 failed"
+	chown $TSTUSR.$TSTUSR $tfile1 || error "1: chown $tfile1 failed"
+
+	test_1_check_write $tfile1 "user" $hard
+
+	rm -f $tfile1
+	wait_delete_completed || error "wait_delete_completed failed"
+	sync_all_data || true
+
+	$LFS setquota -U --lqa $lqa -B 0 -b 0 $DIR ||
+		error "set user quota failed for lqa:$lqa"
+
+	$LFS setquota -g $TSTID -B ${glbl_limit}M $DIR ||
+		error "set hard block limit to group $TSTID failed"
+	wait_quota_synced ost1 OST0000 usr $TSTID hardlimit $((glbl_limit*1024))
+
+	$LFS setquota -G --lqa $lqa -B ${hard}M $DIR ||
+		error "set grp quota failed for lqa:$lqa"
+	$LFS setstripe $tfile1 -i 0 -c 1 || error "2: setstripe $tfile1 failed"
+	chown $TSTUSR.$TSTUSR $tfile1 || error "2: chown $tfile1 failed"
+
+	test_1_check_write $tfile1 "group" $hard
+
+	is_project_quota_supported || skip "Project quota is not supported"
+
+	rm -f $tfile1
+	wait_delete_completed || error "wait_delete_completed failed"
+	sync_all_data || true
+
+	$LFS setquota -G --lqa $lqa -B 0 -b 0 $DIR ||
+		error "set group quota failed for lqa:$lqa"
+
+	$LFS setquota -p $TSTPRJID -B ${glbl_limit}M $DIR ||
+		error "set hard block limit to group $TSTID failed"
+	wait_quota_synced ost1 OST0000 prj $TSTPRJID hardlimit \
+		$((glbl_limit*1024))
+
+	$LFS setquota -P --lqa $lqa -B ${hard}M $DIR ||
+		error "set project quota failed for lqa:$lqa"
+
+	$LFS setstripe $tfile1 -i 0 -c 1 || error "3: setstripe $tfile1 failed"
+	chown $TSTUSR:$TSTUSR $tfile1 || error "3: chown $tfile1 failed"
+	change_project -p $TSTPRJID $tfile1
+
+	test_1_check_write $tfile1 "project" $hard
+}
+run_test 1k "LQA: Block hard limit (normal use and out of quota)"
+
+test_1l() {
+	local tfile2=$MOUNT2/$tdir/$tfile.2
+	local tfile1=$DIR/$tdir/$tfile.1
+	local qdisk=30 # MB
+
+	is_project_quota_supported ||
+		skip "skip project quota unsupported"
+
+	mount_client $MOUNT2 || error "mount client2 failed"
+	stack_trap "umount_client $MOUNT2"
+	setup_quota_test || error "setup quota failed with $?"
+
+	$LFS setstripe -c 1 -i 0 $DIR/$tdir || error "setstripe failed"
+	set_ost_qtype $QTYPE || error "enable ost quota failed"
+	change_project -sp $TSTPRJID $DIR/$tdir ||
+		error "change_project failed"
+
+	# Enable root_prj_enable on MDT0 and OST0
+	local procf=osd-$mds1_FSTYPE.$FSNAME-MDT0000.quota_slave.root_prj_enable
+	do_facet mds1 $LCTL set_param $procf=1 ||
+		error "enable root quota for project failed on mds1"
+	stack_trap "do_facet mds1 $LCTL set_param $procf=0"
+
+	procf=osd-$ost1_FSTYPE.$FSNAME-OST0000.quota_slave.root_prj_enable
+	do_facet ost1 $LCTL set_param $procf=1 ||
+		error "enable root quota for project failed on ost1"
+	stack_trap "do_facet ost1 $LCTL set_param $procf=0"
+
+	# Set project quota limit
+	$LFS setquota -p $TSTPRJID -b 0 -B ${qdisk}M -i 0 -I 0 $DIR ||
+		error "set project quota failed"
+
+	# Fill quota from client 1 using direct IO to guarantee EDQUOT
+	$DD of=$tfile1 count=$((qdisk + 10)) oflag=direct &&
+		error "succeeded, expect EDQUOT"
+
+	# This write() should return success since pages go to cache
+	dd if=/dev/urandom of=$tfile2 bs=1M count=1 ||
+		skip "buffered write $tfile2 failed: $?"
+	local oldsum=($(md5sum $tfile2))
+
+	# Re-read file to verify data persisted
+	cancel_lru_locks osc
+	local newsum=($(md5sum $tfile2))
+	[[ "$newsum" == "$oldsum" ]] || {
+		echo "source file: $oldsum"
+		echo "copied file: $newsum"
+		cmp -bl $tfile1 $tfile2 | head -1024
+		error "old and new files differ"
+	}
+}
+run_test 1l "Async writes should not be rejected by quota with root_prj_enable"
 
 # test inode hardlimit
 test_2() {
@@ -1968,67 +2231,65 @@ run_test 4b "Grace time strings handling"
 
 # chown & chgrp (chown & chgrp successfully even out of block/file quota)
 test_5() {
-	local BLIMIT=10 # MB
-	local ILIMIT=10 # inodes
+	local blimit=10 # MB
+	local ilimit=1024 # inodes
 
 	setup_quota_test || error "setup quota failed with $?"
 
 	set_mdt_qtype $QTYPE || error "enable mdt quota failed"
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
 
-	echo "Set quota limit (0 ${BLIMIT}M 0 $ILIMIT) for $TSTUSR.$TSTUSR"
-	$LFS setquota -u $TSTUSR -b 0 -B ${BLIMIT}M -i 0 -I $ILIMIT $DIR ||
+	echo "Set quota limit (0 ${blimit}M 0 $ilimit) for $TSTUSR.$TSTUSR"
+	$LFS setquota -u $TSTUSR -b 0 -B ${blimit}M -i 0 -I $ilimit $DIR ||
 		error "set user quota failed"
-	$LFS setquota -g $TSTUSR -b 0 -B ${BLIMIT}M -i 0 -I $ILIMIT $DIR ||
-	if is_project_quota_supported; then
+	$LFS setquota -g $TSTUSR -b 0 -B ${blimit}M -i 0 -I $ilimit $DIR ||
 		error "set group quota failed"
-		$LFS setquota -p $TSTPRJID -b 0 -B ${BLIMIT}M -i 0 \
-			-I $ILIMIT $DIR || error "set project quota failed"
+	if is_project_quota_supported; then
+		$LFS setquota -p $TSTPRJID -b 0 -B ${blimit}M -i 0 \
+			-I $ilimit $DIR || error "set project quota failed"
 	fi
 
 	# make sure the system is clean
-	local USED=$(getquota -u $TSTUSR global curinodes)
-	[ $USED -ne 0 ] && error "Used inode($USED) for user $TSTUSR isn't 0."
-	USED=$(getquota -g $TSTUSR global curinodes)
-	[ $USED -ne 0 ] && error "Used inode($USED) for group $TSTUSR isn't 0."
-	USED=$(getquota -u $TSTUSR global curspace)
-	[ $USED -ne 0 ] && error "Used block($USED) for user $TSTUSR isn't 0."
-	USED=$(getquota -g $TSTUSR global curspace)
-	[ $USED -ne 0 ] && error "Used block($USED) for group $TSTUSR isn't 0."
+	local used=$(getquota -u $TSTUSR global curinodes)
+	(( $used == 0 )) || error "Used inode($used) for user $TSTUSR isn't 0."
+	used=$(getquota -g $TSTUSR global curinodes)
+	(( $used == 0 )) || error "Used inode($used) for group $TSTUSR isn't 0."
+	used=$(getquota -u $TSTUSR global curspace)
+	(( $used == 0 )) || error "Used block($used) for user $TSTUSR isn't 0."
+	used=$(getquota -g $TSTUSR global curspace)
+	(( $used == 0 )) || error "Used block($used) for group $TSTUSR isn't 0."
 	if is_project_quota_supported; then
-		USED=$(getquota -p $TSTPRJID global curinodes)
-		[ $USED -ne 0 ] &&
-			error "Used inode($USED) for project $TSTPRJID isn't 0."
-		USED=$(getquota -p $TSTPRJID global curspace)
-		[ $USED -ne 0 ] &&
-			error "Used block($USED) for project $TSTPRJID isn't 0."
+		used=$(getquota -p $TSTPRJID global curinodes)
+		(( $used == 0 )) ||
+			error "Used inode($used) for project $TSTPRJID isn't 0."
+		used=$(getquota -p $TSTPRJID global curspace)
+		(( $used == 0 )) ||
+			error "Used block($used) for project $TSTPRJID isn't 0."
 	fi
 
-	echo "Create more than $ILIMIT files and more than $BLIMIT MB ..."
-	createmany -m $DIR/$tdir/$tfile-0_ $((ILIMIT + 1)) ||
+	echo "Create more than $ilimit files and more than $blimit MB ..."
+	createmany -m $DIR/$tdir/$tfile-0_ $((ilimit + 1)) ||
 		error "create failure, expect success"
 	if is_project_quota_supported; then
 		touch $DIR/$tdir/$tfile-0_1
 		change_project -p $TSTPRJID $DIR/$tdir/$tfile-0_1
 	fi
-	$DD of=$DIR/$tdir/$tfile-0_1 count=$((BLIMIT+1)) ||
+	$DD of=$DIR/$tdir/$tfile-0_1 count=$((blimit+1)) ||
 		error "write failure, expect success"
 
 	echo "Chown files to $TSTUSR.$TSTUSR ..."
-	for i in $(seq 0 $ILIMIT); do
-		chown $TSTUSR.$TSTUSR $DIR/$tdir/$tfile-0_$i ||
-			quota_error a $TSTUSR "chown failure, expect success"
-	done
+	chown $TSTUSR:$TSTUSR $DIR/$tdir/$tfile-0_* ||
+		quota_error a $TSTUSR "chown failure, expect success"
 
 	# cleanup
-	unlinkmany $DIR/$tdir/$tfile-0_ $((ILIMIT + 1)) ||
+	unlinkmany $DIR/$tdir/$tfile-0_ $((ilimit + 1)) ||
 		error "unlinkmany $DIR/$tdir/$tfile-0_ failed"
 }
 run_test 5 "Chown & chgrp successfully even out of block/file quota"
 
 # test dropping acquire request on master
 test_6() {
-	local LIMIT=3 # MB
+	local limit=3 # MB
 
 	# Clear dmesg so watchdog is not triggered by previous
 	# test output
@@ -2037,41 +2298,47 @@ test_6() {
 	setup_quota_test || error "setup quota failed with $?"
 
 	# make sure the system is clean
-	local USED=$(getquota -u $TSTUSR global curspace)
-	[ $USED -ne 0 ] && error "Used space($USED) for user $TSTUSR isn't 0."
+	local used=$(getquota -u $TSTUSR global curspace)
+	(( $used == 0 )) || error "Used space($used) for user $TSTUSR isn't 0."
 
 	# make sure no granted quota on ost
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
 	resetquota -u $TSTUSR
 
 	# create file for $TSTUSR
-	local TESTFILE=$DIR/$tdir/$tfile-$TSTUSR
-	$LFS setstripe $TESTFILE -c 1 -i 0 || error "setstripe $TESTFILE failed"
-	chown $TSTUSR.$TSTUSR $TESTFILE || error "chown $TESTFILE failed"
+	local testfile=$DIR/$tdir/$tfile-$TSTUSR
+	$LFS setstripe $testfile -c 1 -i 0 || error "setstripe $testfile failed"
+	chown $TSTUSR.$TSTUSR $testfile || error "chown $testfile failed"
 
 	# create file for $TSTUSR2
-	local TESTFILE2=$DIR/$tdir/$tfile-$TSTUSR2
-	$LFS setstripe $TESTFILE2 -c 1 -i 0 || error "setstripe $TESTFILE2 failed"
-	chown $TSTUSR2.$TSTUSR2 $TESTFILE2 || error "chown $TESTFILE2 failed"
+	local testfile2=$DIR/$tdir/$tfile-$TSTUSR2
+	$LFS setstripe $testfile2 -c 1 -i 0 ||
+		error "setstripe $testfile2 failed"
+	chown $TSTUSR2.$TSTUSR2 $testfile2 || error "chown $testfile2 failed"
 
 	# cache per-ID lock for $TSTUSR on slave
-	$LFS setquota -u $TSTUSR -b 0 -B ${LIMIT}M -i 0 -I 0 $DIR ||
+	$LFS setquota -u $TSTUSR -b 0 -B ${limit}M -i 0 -I 0 $DIR ||
 		error "set quota failed"
-	$RUNAS $DD of=$TESTFILE count=1 ||
-		error "write $TESTFILE failure, expect success"
-	$RUNAS2 $DD of=$TESTFILE2 count=1 ||
-		error "write $TESTFILE2 failure, expect success"
+	$RUNAS $DD of=$testfile count=1 ||
+		error "write $testfile failure, expect success"
+	$RUNAS2 $DD of=$testfile2 count=1 ||
+		error "write $testfile2 failure, expect success"
 
 	if at_is_enabled; then
 		at_max_saved=$(at_max_get ost1)
 		at_max_set $TIMEOUT ost1
+		stack_trap "at_max_set $at_max_saved ost1"
 
 		# write to enforced ID ($TSTUSR) to exceed limit to make sure
 		# DQACQ is sent, which makes at_max to take effect
-		$RUNAS $DD of=$TESTFILE count=$LIMIT seek=1 oflag=sync \
+		$RUNAS $DD of=$testfile count=$limit seek=1 oflag=sync \
 								conv=notrunc
-		rm -f $TESTFILE
+		rm -f $testfile
 		wait_delete_completed
+		$LFS setstripe $testfile -c 1 -i 0 ||
+			error "setstripe $testfile failed"
+		chown $TSTUSR.$TSTUSR $testfile ||
+			error "chown $testfile failed"
 	fi
 
 	sync; sync
@@ -2081,23 +2348,28 @@ test_6() {
 	#define OBD_FAIL_PTLRPC_DROP_REQ_OPC 0x513
 	lustre_fail mds 0x513 601
 
+	local qs_timeout=$(do_facet ost1 $LCTL get_param -n \
+			   osd-*.$FSNAME-OST0000.quota_slave.timeout)
+	echo "old quota_slave timeout "$qs_timeout
 	do_facet ost1 $LCTL set_param \
 			osd-*.$FSNAME-OST*.quota_slave.timeout=$((TIMEOUT / 2))
+	stack_trap "do_facet ost1 $LCTL set_param \
+			osd-*.$FSNAME-OST*.quota_slave.timeout=$qs_timeout"
 
 	# write to un-enforced ID ($TSTUSR2) should succeed
-	$RUNAS2 $DD of=$TESTFILE2 count=$LIMIT seek=1 oflag=sync conv=notrunc ||
+	$RUNAS2 $DD of=$testfile2 count=$limit seek=1 oflag=sync conv=notrunc ||
 		error "write failure, expect success"
 
 	# write to enforced ID ($TSTUSR) in background, exceeding limit
 	# to make sure DQACQ is sent
-	$RUNAS $DD of=$TESTFILE count=$LIMIT seek=1 oflag=sync conv=notrunc &
+	$RUNAS $DD of=$testfile count=$limit seek=1 oflag=sync conv=notrunc &
 	DDPID=$!
 
 	# watchdog timer uses a factor of 2
 	echo "Sleep for $((TIMEOUT * 2 + 1)) seconds ..."
 	sleep $((TIMEOUT * 2 + 1))
 
-	[ $at_max_saved -ne 0 ] && at_max_set $at_max_saved ost1
+	(( $at_max_saved == 0 )) || at_max_set $at_max_saved ost1
 
 	# write should be blocked and never finished
 	if ! ps -p $DDPID  > /dev/null 2>&1; then
@@ -2111,22 +2383,20 @@ test_6() {
 	do_facet ost1 dmesg > $TMP/lustre-log-${TESTNAME}.log
 	watchdog=$(awk '/[Ss]ervice thread pid/ && /was inactive/ \
 			{ print; }' $TMP/lustre-log-${TESTNAME}.log)
-	[ -z "$watchdog" ] || error "$watchdog"
+	[[ -z "$watchdog" ]] || error "$watchdog"
 
 	rm -f $TMP/lustre-log-${TESTNAME}.log
 
 	# write should continue then fail with EDQUOT
 	local count=0
-	local c_size
-	while [ true ]; do
-		if ! ps -p ${DDPID} > /dev/null 2>&1; then break; fi
-		if [ $count -ge 240 ]; then
+	while true; do
+		ps -p ${DDPID} > /dev/null 2>&1 || break
+		((count++ < 240 )) ||
 			quota_error u $TSTUSR "dd not finished in $count secs"
-		fi
-		count=$((count + 1))
-		if [ $((count % 30)) -eq 0 ]; then
-			c_size=$(stat -c %s $TESTFILE)
-			echo "Waiting $count secs. $c_size"
+		if ((count % 30 == 0)); then
+			local c_size=$(stat -c %s $testfile)
+
+			echo "Waiting $count secs. size=$c_size"
 			$SHOW_QUOTA_USER
 		fi
 		sleep 1
@@ -2136,37 +2406,37 @@ run_test 6 "Test dropping acquire request on master"
 
 # quota reintegration (global index)
 test_7a() {
-	local TESTFILE=$DIR/$tdir/$tfile
-	local LIMIT=20 # MB
+	local testfile=$DIR/$tdir/$tfile
+	local limit=20 # MB
 
-	[ "$SLOW" = "no" ] && LIMIT=5
+	[[ "$SLOW" == "yes" ]] || limit=5
 
 	setup_quota_test || error "setup quota failed with $?"
 
 	# make sure the system is clean
-	local USED=$(getquota -u $TSTUSR global curspace)
-	[ $USED -ne 0 ] && error "Used space($USED) for user $TSTUSR isn't 0."
+	local used=$(getquota -u $TSTUSR global curspace)
+	(( $used == 0 )) || error "Used space($used) for user $TSTUSR isn't 0"
 
 	# make sure no granted quota on ost1
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
 	resetquota -u $TSTUSR
 	set_ost_qtype "none" || error "disable ost quota failed"
 
-	local OSTUUID=$(ostname_from_index 0)
-	USED=$(getquota -u $TSTUSR $OSTUUID bhardlimit)
-	[ $USED -ne 0 ] &&
-		error "limit($USED) on $OSTUUID for user $TSTUSR isn't 0"
+	local ostname=$(ostname_from_index 0)
+	used=$(getquota -u $TSTUSR $ostname bhardlimit)
+	(( $used == 0 )) ||
+		error "limit($used) on $ostname for user $TSTUSR isn't 0"
 
 	# create test file
-	$LFS setstripe $TESTFILE -c 1 -i 0 || error "setstripe $TESTFILE failed"
-	chown $TSTUSR.$TSTUSR $TESTFILE || error "chown $TESTFILE failed"
+	$LFS setstripe $testfile -c 1 -i 0 || error "setstripe $testfile failed"
+	chown $TSTUSR.$TSTUSR $testfile || error "chown $testfile failed"
 
 	echo "Stop ost1..."
 	stop ost1
 
 	echo "Enable quota & set quota limit for $TSTUSR"
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
-	$LFS setquota -u $TSTUSR -b 0 -B ${LIMIT}M -i 0 -I 0 $DIR ||
+	$LFS setquota -u $TSTUSR -b 0 -B ${limit}M -i 0 -I 0 $DIR ||
 		error "set quota failed"
 
 	echo "Start ost1..."
@@ -2177,10 +2447,10 @@ test_7a() {
 
 	# hardlimit should have been fetched by slave during global
 	# reintegration, write will exceed quota
-	$RUNAS $DD of=$TESTFILE count=$((LIMIT + 1)) oflag=sync &&
+	$RUNAS $DD of=$testfile count=$((limit + 1)) oflag=sync &&
 		quota_error u $TSTUSR "write success, but expect EDQUOT"
 
-	rm -f $TESTFILE
+	rm -f $testfile
 	wait_delete_completed
 	sync_all_data || true
 	sleep 3
@@ -2198,7 +2468,7 @@ test_7a() {
 	wait_ost_reint $QTYPE || error "reintegration failed"
 
 	# hardlimit should be cleared on slave during reintegration
-	$RUNAS $DD of=$TESTFILE count=$((LIMIT + 1)) oflag=sync ||
+	$RUNAS $DD of=$testfile count=$((limit + 1)) oflag=sync ||
 		quota_error u $TSTUSR "write error, but expect success"
 }
 run_test 7a "Quota reintegration (global index)"
@@ -2206,31 +2476,31 @@ run_test 7a "Quota reintegration (global index)"
 # quota reintegration (slave index)
 test_7b() {
 	local limit=100000 # MB
-	local TESTFILE=$DIR/$tdir/$tfile
+	local testfile=$DIR/$tdir/$tfile
 
 	setup_quota_test || error "setup quota failed with $?"
 
 	# make sure the system is clean
-	local USED=$(getquota -u $TSTUSR global curspace)
-	[ $USED -ne 0 ] && error "Used space($USED) for user $TSTUSR isn't 0."
+	local used=$(getquota -u $TSTUSR global curspace)
+	(( $used == 0 )) || error "Used space($used) for user $TSTUSR isn't 0"
 
 	# make sure no granted quota on ost1
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
 	resetquota -u $TSTUSR
 	set_ost_qtype "none" || error "disable ost quota failed"
 
-	local OSTUUID=$(ostname_from_index 0)
-	USED=$(getquota -u $TSTUSR $OSTUUID bhardlimit)
-	[ $USED -ne 0 ] &&
-		error "limit($USED) on $OSTUUID for user $TSTUSR isn't 0"
+	local ostname=$(ostname_from_index 0)
+	used=$(getquota -u $TSTUSR $ostname bhardlimit)
+	(( $used == 0 )) ||
+		error "limit($used) on $ostname for user $TSTUSR isn't 0"
 
 	# create test file
-	$LFS setstripe $TESTFILE -c 1 -i 0 || error "setstripe $TESTFILE failed"
-	chown $TSTUSR.$TSTUSR $TESTFILE || error "chown $TESTFILE failed"
+	$LFS setstripe $testfile -c 1 -i 0 || error "setstripe $testfile failed"
+	chown $TSTUSR.$TSTUSR $testfile || error "chown $testfile failed"
 
 	# consume some space to make sure the granted space will not
 	# be released during reconciliation
-	$RUNAS $DD of=$TESTFILE count=1 oflag=sync ||
+	$RUNAS $DD of=$testfile count=1 oflag=sync ||
 		error "consume space failure, expect success"
 
 	# define OBD_FAIL_QUOTA_EDQUOT 0xa02
@@ -2241,9 +2511,9 @@ test_7b() {
 		error "set quota failed"
 
 	# ignore the write error
-	$RUNAS $DD of=$TESTFILE count=1 seek=1 oflag=sync conv=notrunc
+	$RUNAS $DD of=$testfile count=1 seek=1 oflag=sync conv=notrunc
 
-	local old_used=$(getquota -u $TSTUSR $OSTUUID bhardlimit)
+	local old_used=$(getquota -u $TSTUSR $ostname bhardlimit)
 
 	lustre_fail mds 0
 
@@ -2254,8 +2524,8 @@ test_7b() {
 
 	wait_ost_reint $QTYPE || error "reintegration failed"
 
-	USED=$(getquota -u $TSTUSR $OSTUUID bhardlimit)
-	[ $USED -gt $old_used ] || error "limit on $OSTUUID $USED <= $old_used"
+	used=$(getquota -u $TSTUSR $ostname bhardlimit)
+	(( $used > $old_used )) || error "limit on $ostname $used <= $old_used"
 
 	cleanup_quota_test
 	$SHOW_QUOTA_USER
@@ -2264,19 +2534,19 @@ run_test 7b "Quota reintegration (slave index)"
 
 # quota reintegration (restart mds during reintegration)
 test_7c() {
-	local LIMIT=20 # MB
-	local TESTFILE=$DIR/$tdir/$tfile
-
-	[ "$SLOW" = "no" ] && LIMIT=5
+	local limit=20 # MB
+	local testfile=$DIR/$tdir/$tfile
+ 
+	[[ "$SLOW" == "yes" ]] || limit=5
 
 	setup_quota_test || error "setup quota failed with $?"
 
 	# make sure the system is clean
-	local USED=$(getquota -u $TSTUSR global curspace)
-	[ $USED -ne 0 ] && error "Used space($USED) for user $TSTUSR isn't 0."
+	local used=$(getquota -u $TSTUSR global curspace)
+	(( $used == 0 )) || error "Used space($used) for user $TSTUSR isn't 0"
 
 	set_ost_qtype "none" || error "disable ost quota failed"
-	$LFS setquota -u $TSTUSR -b 0 -B ${LIMIT}M -i 0 -I 0 $DIR ||
+	$LFS setquota -u $TSTUSR -b 0 -B ${limit}M -i 0 -I 0 $DIR ||
 		error "set quota failed"
 
 	# define OBD_FAIL_QUOTA_DELAY_REINT 0xa03
@@ -2305,7 +2575,7 @@ test_7c() {
 
 	# hardlimit should have been fetched by slave during global
 	# reintegration, write will exceed quota
-	$RUNAS $DD of=$TESTFILE count=$((LIMIT + 1)) oflag=sync &&
+	$RUNAS $DD of=$testfile count=$((limit + 1)) oflag=sync &&
 		quota_error u $TSTUSR "write success, but expect EDQUOT"
 	return 0
 }
@@ -2313,8 +2583,8 @@ run_test 7c "Quota reintegration (restart mds during reintegration)"
 
 # Quota reintegration (Transfer index in multiple bulks)
 test_7d(){
-	local TESTFILE=$DIR/$tdir/$tfile
-	local TESTFILE1="$DIR/$tdir/$tfile"-1
+	local testfile=$DIR/$tdir/$tfile
+	local testfile1="$DIR/$tdir/$tfile"-1
 	local limit=20 # MB
 
 	setup_quota_test || error "setup quota failed with $?"
@@ -2336,10 +2606,10 @@ test_7d(){
 
 	# hardlimit should have been fetched by slave during global
 	# reintegration, write will exceed quota
-	$RUNAS $DD of=$TESTFILE count=$((limit + 1)) oflag=sync &&
+	$RUNAS $DD of=$testfile count=$((limit + 1)) oflag=sync &&
 		quota_error u $TSTUSR "$TSTUSR write success, expect EDQUOT"
 
-	$RUNAS2 $DD of=$TESTFILE1 count=$((limit + 1)) oflag=sync &&
+	$RUNAS2 $DD of=$testfile1 count=$((limit + 1)) oflag=sync &&
 		quota_error u $TSTUSR2 "$TSTUSR2 write success, expect EDQUOT"
 	return 0
 }
@@ -2347,48 +2617,50 @@ run_test 7d "Quota reintegration (Transfer index in multiple bulks)"
 
 # quota reintegration (inode limits)
 test_7e() {
-	[ "$MDSCOUNT" -lt "2" ] && skip "needs >= 2 MDTs"
+	(( "$MDSCOUNT" >= "2" )) || skip "needs >= 2 MDTs"
 
 	# LU-2435: skip this quota test if underlying zfs version has not
 	# supported native dnode accounting
-	[ "$mds1_FSTYPE" == zfs ] && {
+	[[ "$mds1_FSTYPE" == zfs ]] && {
 		local F="feature@userobj_accounting"
 		local pool=$(zpool_name mds1)
 		local feature=$(do_facet mds1 $ZPOOL get -H $F $pool)
 
-		[[ "$feature" != *" active "* ]] &&
+		[[ "$feature" =~ " active " ]] ||
 			skip "requires zpool with active userobj_accounting"
 	}
 
 	local ilimit=$((1024 * 2)) # inodes
-	local TESTFILE=$DIR/${tdir}-1/$tfile
+	local testfile=$DIR/${tdir}-1/$tfile
 
 	setup_quota_test || error "setup quota failed with $?"
 
 	# make sure the system is clean
-	local USED=$(getquota -u $TSTUSR global curinodes)
-	[ $USED -ne 0 ] && error "Used inode($USED) for user $TSTUSR isn't 0."
+	local used=$(getquota -u $TSTUSR global curinodes)
+	(( $used == 0 )) || error "Used inode($used) for user $TSTUSR isn't 0"
 
 	# make sure no granted quota on mdt1
 	set_mdt_qtype $QTYPE || error "enable mdt quota failed"
 	resetquota -u $TSTUSR
 	set_mdt_qtype "none" || error "disable mdt quota failed"
 
-	local MDTUUID=$(mdtuuid_from_index $((MDSCOUNT - 1)))
-	USED=$(getquota -u $TSTUSR $MDTUUID ihardlimit)
-	[ $USED -ne 0 ] && error "limit($USED) on $MDTUUID for user" \
-		"$TSTUSR isn't 0."
+	local mdtname=$(mdtname_from_index $((MDSCOUNT - 1)))
 
-	echo "Stop mds${MDSCOUNT}..."
-	stop mds${MDSCOUNT}
+	used=$(getquota -u $TSTUSR $mdtname ihardlimit)
+	(( $used == 0 )) ||
+		error "limit($used) on $mdtname for user $TSTUSR isn't 0"
+
+	local facet=mds${MDSCOUNT}
+	echo "Stop $facet..."
+	stop $facet
 
 	echo "Enable quota & set quota limit for $TSTUSR"
 	set_mdt_qtype $QTYPE || error "enable mdt quota failed"
 	$LFS setquota -u $TSTUSR -b 0 -B 0 -i 0 -I $ilimit $DIR ||
 		error "set quota failed"
 
-	echo "Start mds${MDSCOUNT}..."
-	start mds${MDSCOUNT} $(mdsdevname $MDSCOUNT) $MDS_MOUNT_OPTS
+	echo "Start $facet..."
+	start $facet $(mdsdevname $MDSCOUNT) $MDS_MOUNT_OPTS
 	quota_init
 
 	wait_mdt_reint $QTYPE || error "reintegration failed"
@@ -2400,33 +2672,74 @@ test_7e() {
 
 	# hardlimit should have been fetched by slave during global
 	# reintegration, create will exceed quota
-	$RUNAS createmany -m $TESTFILE $((ilimit + 1)) &&
+	$RUNAS createmany -m $testfile $((ilimit + 1)) &&
 		quota_error u $TSTUSR "create succeeded, expect EDQUOT"
 
-	$RUNAS unlinkmany $TESTFILE $ilimit || error "unlink files failed"
+	$RUNAS unlinkmany $testfile $ilimit || error "unlink files failed"
 	wait_delete_completed
 	sync_all_data || true
 
-	echo "Stop mds${MDSCOUNT}..."
-	stop mds${MDSCOUNT}
+	echo "Stop $facet..."
+	stop $facet
 
 	$LFS setquota -u $TSTUSR -b 0 -B 0 -i 0 -I 0 $DIR ||
 		error "clear quota failed"
 
-	echo "Start mds${MDSCOUNT}..."
-	start mds${MDSCOUNT} $(mdsdevname $MDSCOUNT) $MDS_MOUNT_OPTS
+	echo "Start $facet..."
+	start $facet $(mdsdevname $MDSCOUNT) $MDS_MOUNT_OPTS
 	quota_init
 
 	wait_mdt_reint $QTYPE || error "reintegration failed"
 
 	# hardlimit should be cleared on slave during reintegration
-	$RUNAS createmany -m $TESTFILE $((ilimit + 1)) ||
+	$RUNAS createmany -m $testfile $((ilimit + 1)) ||
 		quota_error u $TSTUSR "create failed, expect success"
 
-	$RUNAS unlinkmany $TESTFILE $((ilimit + 1)) || error "unlink failed"
+	$RUNAS unlinkmany $testfile $((ilimit + 1)) || error "unlink failed"
 	rmdir $DIR/${tdir}-1 || error "unlink remote dir failed"
 }
 run_test 7e "Quota reintegration (inode limits)"
+
+# quota reintegration automatically
+test_7f() {
+	(( $OST1_VERSION >= $(version_code v2_17_50-30-gf33ac875ca) )) ||
+		skip "need OST >= 2.17.50.39 for quota reint timeout"
+
+	local blk_limit=1048576
+	local testfile="$DIR/$tdir/$tfile-0"
+
+	setup_quota_test || error "setup quota failed with $?"
+	set_ost_qtype $QTYPE || error "enable ost quota failed"
+
+	$LFS setquota -u $TSTID -b 0 -B $blk_limit $DIR ||
+		error "failed to set quota for $TSTUSR"
+
+	wait_quota_synced "ost1" "OST0000" "usr" $TSTID "hardlimit" "$blk_limit"
+
+	$LFS quota -v -u $TSTID $DIR
+
+	#define OBD_FAIL_QUOTA_DROP_VER_UPDATE  0xA11
+	do_facet ost1 $LCTL set_param fail_loc=0xa11
+
+	$LFS setquota -u $TSTID2 -b 0 -B $blk_limit $DIR ||
+		error "failed to set quota for $TSTUSR2"
+
+	sleep 5
+
+	value=$(get_quota_on_qsd ost1 OST0000 usr $TSTID2 hardlimit)
+	(( value == 0)) || error "hardlimit for $TSTID2 is not 0 ($value)"
+
+	# trigger quota request from OST1
+	$LFS setstripe $testfile -i 0 -c 1 || error "setstripe $testfile failed"
+	chown $TSTUSR.$TSTUSR $testfile || error "chown $testfile failed"
+
+	$RUNAS $DD of=$testfile count=$(( blk_limit / 1024 )) oflag=direct
+
+	value=$(get_quota_on_qsd ost1 OST0000 usr $TSTID2 hardlimit)
+	(( value == blk_limit)) ||
+		error "Quota for $TSTID2 is not synced ($value)"
+}
+run_test 7f "Quota reintegration automatically"
 
 # run dbench with quota enabled
 test_8() {
@@ -2575,7 +2888,7 @@ test_12a() {
 	[ "$OSTCOUNT" -lt "2" ] && skip "needs >= 2 OSTs"
 
 	local blimit=22 # MB
-	local blk_cnt=$((blimit - 5))
+	local blk_cnt=$((blimit - OSTCOUNT - 2))
 	local TESTFILE0="$DIR/$tdir/$tfile"-0
 	local TESTFILE1="$DIR/$tdir/$tfile"-1
 
@@ -2655,7 +2968,7 @@ test_12b() {
 run_test 12b "Inode quota rebalancing"
 
 test_13(){
-	local TESTFILE=$DIR/$tdir/$tfile
+	local testfile=$DIR/$tdir/$tfile
 	# the name of lwp on ost1 name is MDT0000-lwp-OST0000
 	local procf="ldlm.namespaces.*MDT0000-lwp-OST0000.lru_size"
 
@@ -2666,37 +2979,37 @@ test_13(){
 
 	$LFS setquota -u $TSTUSR -b 0 -B 10M -i 0 -I 0 $DIR ||
 		error "set quota failed"
-	$LFS setstripe $TESTFILE -c 1 -i 0 || error "setstripe $TESTFILE failed"
-	chown $TSTUSR.$TSTUSR $TESTFILE || error "chown $TESTFILE failed"
+	$LFS setstripe $testfile -c 1 -i 0 || error "setstripe $testfile failed"
+	chown $TSTUSR.$TSTUSR $testfile || error "chown $testfile failed"
 
 	# clear the locks in cache first
 	do_facet ost1 $LCTL set_param -n $procf=clear
 	local init_nlock=$(do_facet ost1 $LCTL get_param -n $procf)
 
 	# write to acquire the per-ID lock
-	$RUNAS $DD of=$TESTFILE count=1 oflag=sync ||
+	$RUNAS $DD of=$testfile count=1 oflag=sync ||
 		quota_error a $TSTUSR "dd failed"
 
 	local nlock=$(do_facet ost1 $LCTL get_param -n $procf)
-	[ $nlock -eq $((init_nlock + 1)) ] ||
+	(( $nlock == $init_nlock + 1 )) ||
 		error "lock count($nlock) != $init_lock + 1"
 
 	# clear quota doesn't trigger per-ID lock cancellation
 	resetquota -u $TSTUSR
 	nlock=$(do_facet ost1 $LCTL get_param -n $procf)
-	[ $nlock -eq $((init_nlock + 1)) ] ||
+	(( $nlock == $init_nlock + 1 )) ||
 		error "per-ID lock is lost on quota clear"
 
 	# clear the per-ID lock
 	do_facet ost1 $LCTL set_param -n $procf=clear
 	nlock=$(do_facet ost1 $LCTL get_param -n $procf)
-	[ $nlock -eq $init_nlock ] || error "per-ID lock isn't cleared"
+	(( $nlock == $init_nlock )) || error "per-ID lock isn't cleared"
 
 	# spare quota should be released
-	local OSTUUID=$(ostname_from_index 0)
-	local limit=$(getquota -u $TSTUSR $OSTUUID bhardlimit)
-	local space=$(getquota -u $TSTUSR $OSTUUID curspace)
-	[ $limit -le $space ] ||
+	local ostname=$(ostname_from_index 0)
+	local limit=$(getquota -u $TSTUSR $ostname bhardlimit)
+	local space=$(getquota -u $TSTUSR $ostname curspace)
+	(( $limit <= $space )) ||
 		error "spare quota isn't released, limit:$limit, space:$space"
 }
 run_test 13 "Cancel per-ID lock in the LRU list"
@@ -3201,47 +3514,48 @@ test_22() {
 run_test 22 "enable/disable quota by 'lctl conf_param/set_param -P'"
 
 test_23_sub() {
-	local TESTFILE="$DIR/$tdir/$tfile"
-	local LIMIT=$1
+	local testfile="$DIR/$tdir/$tfile"
+	local limit=$1
 
 	setup_quota_test || error "setup quota failed with $?"
 
 	set_ost_qtype $QTYPE || error "Enable ost quota failed"
 
 	# test for user
-	log "User quota (limit: $LIMIT MB)"
-	$LFS setquota -u $TSTUSR -b 0 -B "$LIMIT"M -i 0 -I 0 $DIR ||
+	log "User quota (limit: $limit MB)"
+	$LFS setquota -u $TSTUSR -b 0 -B "$limit"M -i 0 -I 0 $DIR ||
 		error "set quota failed"
 	quota_show_check b u $TSTUSR
 
-	$LFS setstripe $TESTFILE -c 1 -i 0 || error "setstripe $TESTFILE failed"
-	chown $TSTUSR.$TSTUSR $TESTFILE || error "chown $TESTFILE failed"
+	$LFS setstripe $testfile -c 1 -i 0 || error "setstripe $testfile failed"
+	chown $TSTUSR.$TSTUSR $testfile || error "chown $testfile failed"
 
 	log "Step1: trigger EDQUOT with O_DIRECT"
 	log "Write half of file"
-	$RUNAS $DD of=$TESTFILE count=$((LIMIT/2)) oflag=direct ||
+	$RUNAS $DD of=$testfile count=$((limit/2)) oflag=direct ||
 		quota_error u $TSTUSR "(1) Write failure, expect success." \
-			"limit=$LIMIT"
+			"limit=$limit"
 	log "Write out of block quota ..."
-	$RUNAS $DD of=$TESTFILE count=$((LIMIT/2 + 1)) seek=$((LIMIT/2)) \
+	$RUNAS $DD of=$testfile count=$((limit/2 + 1)) seek=$((limit/2)) \
 		oflag=direct conv=notrunc &&
 		quota_error u $TSTUSR "(2) Write success, expect EDQUOT." \
-			"limit=$LIMIT"
+			"limit=$limit"
 	log "Step1: done"
 
 	log "Step2: rewrite should succeed"
-	$RUNAS $DD of=$TESTFILE count=1 oflag=direct conv=notrunc||
+	$RUNAS $DD of=$testfile count=1 oflag=direct conv=notrunc||
 		quota_error u $TSTUSR "(3) Write failure, expect success." \
-			"limit=$LIMIT"
+			"limit=$limit"
 	log "Step2: done"
 
 	cleanup_quota_test
 
-	local OST0_UUID=$(ostname_from_index 0)
-	local OST0_QUOTA_USED=$(getquota -u $TSTUSR $OST0_UUID curspace)
-	[ $OST0_QUOTA_USED -ne 0 ] &&
-		($SHOW_QUOTA_USER; \
-		quota_error u $TSTUSR "quota isn't released")
+	local ostname=$(ostname_from_index 0)
+	local OST0_QUOTA_USED=$(getquota -u $TSTUSR $ostname curspace)
+	(( $OST0_QUOTA_USED == 0 )) || {
+		$SHOW_QUOTA_USER
+		quota_error u $TSTUSR "quota isn't released"
+	}
 	$SHOW_QUOTA_USER
 }
 
@@ -3807,20 +4121,20 @@ test_39() {
 	setup_quota_test || error "setup quota failed with $?"
 
 	touch $TESTFILE
-	projectid=$(lfs project $TESTFILE | awk '{print $1}')
-	[ $projectid -ne 0 ] &&
-		error "Project id should be 0 not $projectid"
+	projectid=($(lfs project $TESTFILE))
+	(( projectid == 0 )) ||
+		error "Project id should be 0, not $projectid"
 	change_project -p 1024 $TESTFILE
-	projectid=$(lfs project $TESTFILE | awk '{print $1}')
-	[ $projectid -ne 1024 ] &&
-		error "Project id should be 1024 not $projectid"
+	projectid=($(lfs project $TESTFILE))
+	(( projectid == 1024 )) ||
+		error "Project id should be 1024, not $projectid"
 
 	stopall || error "failed to stopall (1)"
 	mount
 	setupall
-	projectid=$(lfs project $TESTFILE | awk '{print $1}')
-	[ $projectid -eq 1024 ] ||
-		error "Project id should be 1024 not $projectid"
+	projectid=($(lfs project $TESTFILE))
+	(( projectid == 1024 )) ||
+		error "Project id should be 1024, not $projectid"
 }
 run_test 39 "Project ID interface works correctly"
 
@@ -3921,6 +4235,7 @@ test_41() {
 		skip "Project quota is not supported"
 	setup_quota_test || error "setup quota failed with $?"
 	local dir="$DIR/$tdir/dir"
+	local file="$dir/$tfile"
 	local blimit=102400
 	local ilimit=4096
 	local projid=$((testnum * 1000))
@@ -3939,6 +4254,10 @@ test_41() {
 	test_mkdir -p $dir && change_project -sp $projid $dir
 	$LFS setquota -p $projid -b 0 -B ${blimit}K -i 0 -I $ilimit $dir ||
 		error "set project quota failed"
+	touch $file || error "touch $file failed"
+	$LFS project $file
+	local file_proj=($($LFS project $file))
+	[[ ${file_proj[0]} == $projid ]] || error "project not set on $file"
 
 	sync; sync_all_data
 	sleep_maxage
@@ -3953,9 +4272,8 @@ test_41() {
 	local iused=$(getquota -p $projid global curinodes)
 	local expected="$ilimit$iused"
 
-	wait_update $HOSTNAME \
-		"df -iP $dir | awk \\\"/$FSNAME/\\\"'{print \\\$2 \\\$3}'" \
-		"$expected" ||
+	wait_update $HOSTNAME "df -iP $dir |
+		awk \\\"/$FSNAME/\\\"'{print \\\$2 \\\$3}'" "$expected" ||
 		error "failed to get correct statfs for project quota"
 
 	expected=$(df -kP $dir | awk "/$FSNAME/"' {print $2}')
@@ -3967,16 +4285,26 @@ test_41() {
 	expected=$(df -kP $dir | awk "/$FSNAME/"' {print $3}')
 	(( expected - bused < 4)) || error "bused mismatch: $expected != $bused"
 
+	# check if df output on regular file works as expected
+	echo "== project statfs on file (prjid=$projid): $file =="
+	df -kP $file; df -iP $file; $LFS quota -p $projid $dir
+	local bused=$(getquota -p $projid global curspace)
+	local iused=$(getquota -p $projid global curinodes)
+	local expected="$ilimit$iused"
+
+	wait_update $HOSTNAME "df -iP $dir |
+		awk \\\"/$FSNAME/\\\"'{print \\\$2 \\\$3}'" "$expected" ||
+		error "failed to get correct statfs for project quota"
+
 	# disable statfs_project and check again
 	$LCTL set_param llite.*.statfs_project=0
 
 	expected=$({ df -kP $MOUNT; df -iP $MOUNT; } | \
 		awk '/'$FSNAME'/ { printf "%d %d ", $2,$3 }')
 
-	wait_update $HOSTNAME \
-		"{ df -kP $dir; df -iP $dir; } |
-		 awk '/$FSNAME/ { printf \\\"%d %d \\\", \\\$2,\\\$3 }'" \
-		"$expected" ||
+	wait_update $HOSTNAME "{ df -kP $dir; df -iP $dir; } |
+		awk '/$FSNAME/ { printf \\\"%d %d \\\", \\\$2,\\\$3 }'" \
+			"$expected" ||
 		error "failed to get correct statfs when statfs_project=0"
 }
 run_test 41 "df should return projid-specific values"
@@ -4037,43 +4365,66 @@ test_delete_qid()
 	local qtype_file=$2
 	local qtype=$3
 	local qid=$4
-	local osd="osd-ldiskfs"
-
-	[ "$ost1_FSTYPE" = zfs ] && osd="osd-zfs"
+	local osd="osd-$ost1_FSTYPE"
+	local qmt=$FSNAME-QMT0000
+	local qtype_param=qmt.$qmt.dt-0x0.$qtype_file
 
 	rm -f $DIR/$tdir/$tfile
-	$LFS setstripe -i 0 -c 1 $DIR/$tdir/$tfile
+	touch $DIR/$tdir/$tfile
 	chmod a+rw $DIR/$tdir/$tfile
+	[[ $qtype_file =~ prj ]] && change_project -sp $qid $DIR/$tdir/$tfile
 
-	$LFS setquota $qtype $qid -B 300M $MOUNT
+	local idx=$($LFS getstripe -i $DIR/$tdir/$tfile)
+	local ost=$(ostname_from_index $idx)
+	local facet=ost$((idx + 1))
+
+	$LFS setquota $qtype $qid -B 300M $MOUNT || error "set quota failed"
 	$RUNAS $DD of=$DIR/$tdir/$tfile count=1 || error "failed to dd"
 
-	do_facet $SINGLEMDS \
-		"cat /proc/fs/lustre/qmt/$FSNAME-QMT0000/dt-0x0/$qtype_file |
-		 grep -E 'id: *$qid'" || error "QMT: no qid $qid is found"
-	echo $osd
-	do_facet ost1 \
-		"cat /proc/fs/lustre/$osd/$FSNAME-OST0000/$qslv_file |
-		 grep -E 'id: *$qid'" || error "QSD: no qid $qid is found"
+	echo "checking $qid exists on $SINGLEMDS and $facet"
+	wait_update_facet_cond $SINGLEMDS "$LCTL get_param $qtype_param |
+				      grep -E 'id: *$qid'" "=~" "$qid" || {
+		do_facet $SINGLEMDS "$LCTL get_param $qtype_param"
+		$LFS quota -a $qtype $DIR
+		error "QMT: $SINGLEMDS no qid $qid is found"
+	}
+	wait_update_facet_cond $facet "$LCTL get_param $osd.$ost.$qslv_file |
+				      grep -E 'id: *$qid'" "=~" "$qid" || {
+		do_facet $facet "$LCTL get_param $qtype_param"
+		$LFS quota -a $qtype $DIR
+		error "QSD: $facet no qid $qid is found on $ost"
+	}
 
+	echo "checking $qid removed on $SINGLEMDS and $facet"
 	$LFS setquota $qtype $qid --delete $MOUNT
-	do_facet $SINGLEMDS \
-		"cat /proc/fs/lustre/qmt/$FSNAME-QMT0000/dt-0x0/$qtype_file |
-		 grep -E 'id: *$qid'" && error "QMT: qid $qid is not deleted"
-	sleep 5
-	do_facet ost1 \
-		"cat /proc/fs/lustre/$osd/$FSNAME-OST0000/$qslv_file |
-		 grep -E 'id: *$qid'" && error "QSD: qid $qid is not deleted"
+	wait_update_facet $SINGLEMDS "$LCTL get_param $qtype_param |
+				      grep -E 'id: *$qid'" "" || {
+		do_facet $SINGLEMDS "$LCTL get_param $qtype_param"
+		$LFS quota -a $qtype $DIR
+		error "QMT: $SINGLEMDS qid $qid is not deleted"
+	}
+	wait_update_facet $facet "$LCTL get_param $osd.$ost.$qslv_file |
+				  grep -E 'id: *$qid'" "" || {
+		do_facet $facet "$LCTL get_param $qtype_param"
+		$LFS quota -a $qtype $DIR
+		error "QSD: $facet qid $qid is not deleted"
+	}
 
-	$LFS setquota $qtype $qid -B 500M $MOUNT
-	$RUNAS $DD of=$DIR/$tdir/$tfile count=1 || error "failed to dd"
-	do_facet $SINGLEMDS \
-		"cat /proc/fs/lustre/qmt/$FSNAME-QMT0000/dt-0x0/$qtype_file |
-		 grep -E 'id: *$qid'" || error "QMT: qid $pid is not recreated"
-	cat /proc/fs/lustre/$osd/$FSNAME-OST0000/$qslv_file
-	do_facet ost1 \
-		"cat /proc/fs/lustre/$osd/$FSNAME-OST0000/$qslv_file |
-		 grep -E 'id: *$qid'" || error "QSD: qid $qid is not recreated"
+	echo "checking $qid recreated on $SINGLEMDS and $facet"
+	$LFS setquota $qtype $qid -B 500M $MOUNT || error "set new quota failed"
+	$RUNAS $DD of=$DIR/$tdir/$tfile count=2 || error "failed to dd again"
+	wait_update_facet_cond $SINGLEMDS "$LCTL get_param $qtype_param |
+					   grep -E 'id: *$qid'" "=~" "$qid" || {
+		do_facet $SINGLEMDS "$LCTL get_param $qtype_param"
+		$LFS quota -a $qtype $DIR
+		error "QMT: $SINGLEMDS qid $pid is not recreated"
+	}
+	wait_update_facet_cond $facet "$LCTL get_param $osd.$ost.$qslv_file |
+				       grep -E 'id: *$qid'" "=~" "$qid" || {
+		do_facet $facet "$LCTL get_param $qtype_param"
+		$LFS quota -a $qtype $DIR
+		error "QSD: $facet qid $qid is not recreated"
+	}
 }
 
 test_48()
@@ -4082,10 +4433,10 @@ test_48()
 	set_ost_qtype $QTYPE || error "enable ost quota failed"
 	quota_init
 
-	test_delete_qid "quota_slave/limit_user" "glb-usr" "-u" $TSTID
-	test_delete_qid "quota_slave/limit_group" "glb-grp" "-g" $TSTID
+	test_delete_qid "quota_slave.limit_user" "glb-usr" "-u" $TSTID
+	test_delete_qid "quota_slave.limit_group" "glb-grp" "-g" $TSTID
 	is_project_quota_supported &&
-	    test_delete_qid "quota_slave/limit_project" "glb-prj" "-p" "10000"
+	    test_delete_qid "quota_slave.limit_project" "glb-prj" "-p" "10000"
 
 	cleanup_quota_test
 }
@@ -4203,19 +4554,23 @@ test_get_allquota() {
 		[ ${g_blimits[$i]} -eq $g_blimit ] ||
 		error "block limit for group ID $((start_qid + i - 3)) is wrong"
 		[ ${u_iusage2[$i]} -eq $((u_iusage[$i] + 1)) ] ||
-		error "file usage for user ID $((start_qid + i - 3)) is wrong ${u_iusage[$i]}, ${u_iusage2[$i]}"
+		error "file usage for user ID $((start_qid + i - 3)) is wrong" \
+			"${u_iusage[$i]}, ${u_iusage2[$i]}"
 		[ ${u_busage2[$i]} -ge $((u_busage[$i] + 4)) ] ||
-		error "block usage for user ID $((start_qid + i - 3)) is wrong ${u_busage[$i]}, ${u_busage2[$i]}"
+		error "block usage for user ID $((start_qid + i - 3)) wrong" \
+			"${u_busage[$i]}, ${u_busage2[$i]}"
 		[ ${g_iusage2[$i]} -eq $((g_iusage[$i] + 1)) ] ||
-		error "file usage for group ID $((start_qid + i - 3)) is wrong ${g_iusage[$i]}, ${g_iusage2[$i]}"
+		error "file usage for group ID $((start_qid + i - 3)) wrong" \
+			"${g_iusage[$i]}, ${g_iusage2[$i]}"
 		[ ${g_busage2[$i]} -ge $((g_busage[$i] + 4)) ] ||
-		error "block usage for group ID $((start_qid + i - 3)) is wrong ${g_busage[$i]}, ${g_busage2[$i]}"
+		error "block usage for group ID $((start_qid + i - 3)) wrong" \
+			"${g_busage[$i]}, ${g_busage2[$i]}"
 	done
 
 	unlinkmany ${TFILE} $qid_cnt
 }
 
-test_49()
+test_49a()
 {
 	(( MDS1_VERSION >= $(version_code 2.15.60) )) ||
 		skip "Need MDS version at least 2.15.60"
@@ -4274,7 +4629,20 @@ test_49()
 	formatall
 	setupall
 }
-run_test 49 "lfs quota -a prints the quota usage for all quota IDs"
+run_test 49a "lfs quota -a prints the quota usage for all quota IDs"
+
+test_49b() {
+	local root_name
+
+	(( MDS1_VERSION >= $(version_code v2_15_61-145-g3edc718) )) ||
+		skip "Need MDS version >= 2.15.61 for lfs quota all support"
+
+	root_name=$($LFS quota -a -u --show-root --busage $DIR |
+			awk '/root/ {print $1}')
+	# check username is not merged with the usage
+	[[ $root_name == "root" ]] || error "root name is insane: $root_name"
+}
+run_test 49b "lfs quota -a --blocks has a delimiter"
 
 test_50() {
 	! is_project_quota_supported &&
@@ -4797,6 +5165,7 @@ test_default_quota() {
 	cancel_lru_locks osc
 	cancel_lru_locks mdc
 	sync; sync_all_data || true
+	wait_delete_completed || error "wait_delete_completed failed"
 	if [ $qres_type == "data" ]; then
 		$RUNAS $DD of=$TESTFILE count=$((LIMIT*2 >> 10)) oflag=sync ||
 			quota_error $qtype $qid "write failed, expect succeed"
@@ -4935,14 +5304,14 @@ test_dom() {
 		error "set $qid quota failed"
 
 	for ((i = 0; i < $((LIMIT/2048)); i++)); do
-		$RUNAS $DD of=$DIR/$tdir_dom/$tfile-$i count=1 oflag=sync ||
+		$RUNAS3 $DD of=$DIR/$tdir_dom/$tfile-$i count=1 oflag=sync ||
 								dd_failed=true
 	done
 
 	$dd_failed && quota_error $qtype $qid "write failed, expect succeed"
 
 	for ((i = $((LIMIT/2048)); i < $((LIMIT/1024 + 10)); i++)); do
-		$RUNAS $DD of=$DIR/$tdir_dom/$tfile-$i count=1 oflag=sync ||
+		$RUNAS3 $DD of=$DIR/$tdir_dom/$tfile-$i count=1 oflag=sync ||
 								dd_failed=true
 	done
 
@@ -4954,14 +5323,15 @@ test_dom() {
 	cancel_lru_locks osc
 	cancel_lru_locks mdc
 	sync; sync_all_data || true
+	wait_delete_completed
 
 	dd_failed=false
 
-	$RUNAS $DD of=$DIR/$tdir/file count=$((LIMIT/2048)) oflag=sync ||
+	$RUNAS3 $DD of=$DIR/$tdir/file count=$((LIMIT/2048)) oflag=sync ||
 		quota_error $qtype $qid "write failed, expect succeed"
 
 	for ((i = 0; i < $((LIMIT/2048 + 10)); i++)); do
-		$RUNAS $DD of=$DIR/$tdir_dom/$tfile-$i count=1 oflag=sync ||
+		$RUNAS3 $DD of=$DIR/$tdir_dom/$tfile-$i count=1 oflag=sync ||
 								dd_failed=true
 	done
 
@@ -4974,24 +5344,25 @@ test_dom() {
 	cancel_lru_locks osc
 	cancel_lru_locks mdc
 	sync; sync_all_data || true
+	wait_delete_completed
 
 	dd_failed=false
 
 	for ((i = 0; i < $((LIMIT/2048)); i++)); do
-		$RUNAS $DD of=$DIR/$tdir_dom/$tfile-$i count=1 oflag=sync ||
+		$RUNAS3 $DD of=$DIR/$tdir_dom/$tfile-$i count=1 oflag=sync ||
 								dd_failed=true
 	done
 
 	$dd_failed && quota_error $qtype $qid "write failed, expect succeed"
 
-	$RUNAS $DD of=$DIR/$tdir/file count=$((LIMIT/2048 + 10)) oflag=sync &&
+	$RUNAS3 $DD of=$DIR/$tdir/file count=$((LIMIT/2048 + 10)) oflag=sync &&
 		quota_error $qtype $qid "write succeed, expect EDQUOT"
 
 	rm -fr $DIR/$tdir
 	rm -fr $DIR/$tdir_dom
+	wait_delete_completed
 
-	$LFS setquota -u $TSTUSR -b 0 -B 0 -i 0 -I 0 $DIR ||
-		error "reset usr quota failed"
+	resetquota -$qtype $qid
 }
 
 test_63() {
@@ -5009,20 +5380,27 @@ test_64() {
 
 	touch $dir1/file
 	ln -s $dir1/file $dir1/file_link
+	ln -s bad $dir1/bad_link
+	ln -s self_link $dir1/self_link
 	mkfifo $dir1/fifo
 
-	$LFS project -srp $TSTPRJID $dir1 >&/dev/null ||
+	$LFS project -p $((TSTPRJID-1)) $dir1/bad_link ||
+		error "set project on bad link should succeed"
+	$LFS project -p $((TSTPRJID-1)) $dir1/self_link ||
+		error "set project on recursive link should succeed"
+
+	$LFS project -srp $TSTPRJID $dir1 ||
 		error "set project should succeed"
 
 	used=$(getquota -p $TSTPRJID global curinodes)
-	[ $used -eq 4 ] || error "expected 4 got $used"
-	$LFS project -rC $dir1 >&/dev/null ||
+	(( $used == 6 )) || error "expected 6 got $used"
+	$LFS project -rC $dir1 ||
 		error "clear project should succeed"
 
 	used=$(getquota -p $TSTPRJID global curinodes)
-	[ $used -eq 0 ] || error "expected 0 got $used"
+	(( $used == 0 )) || error "expected 0 got $used"
 }
-run_test 64 "lfs project on non dir/files should succeed"
+run_test 64 "lfs project on non-dir/files should succeed"
 
 test_65() {
 	local SIZE=10 # MB
@@ -5044,9 +5422,23 @@ test_65() {
 	local quota_all=$($RUNAS $LFS quota $DIR)
 
 	[ "$(echo "$quota_all" | head -n3)" == "$quota_u" ] ||
+	{
+		echo "quota_u:"
+		echo "$quota_u"
+		echo "quota_all (only first 3 lines compared):"
+		echo "$quota_all"
+
 		error "usr quota not match"
+	}
 	[ "$(echo "$quota_all" | tail -n3)" == "$quota_g" ] ||
+	{
+		echo "quota_g:"
+		echo "$quota_g"
+		echo "quota_all (only last 3 lines compared):"
+		echo "$quota_all"
+
 		error "grp quota not match"
+	}
 }
 run_test 65 "Check lfs quota result"
 
@@ -6257,7 +6649,7 @@ test_84()
 		skip "need OSS >= v2_15_53-115-ga2fd4d3aee for insane quota fix"
 
 	local dir1="$DIR/$tdir/dir1"
-	local TESTFILE1="$dir1/$tfile-1"
+	local testfile1="$dir1/$tfile-1"
 	local waited=0
 	local grant=0
 	local grant2=0
@@ -6284,11 +6676,11 @@ test_84()
 	mkdir -p $dir1 || error "failed to mkdir"
 	chown $TSTUSR.$TSTUSR $dir1 || error "chown $dir1 failed"
 
-	$LFS setstripe -c 1 -i 0 $TESTFILE1
-	$LFS getstripe $TESTFILE1
-	chown $TSTUSR.$TSTUSR $TESTFILE1
+	$LFS setstripe -c 1 -i 0 $testfile1
+	$LFS getstripe $testfile1
+	chown $TSTUSR.$TSTUSR $testfile1
 
-	$RUNAS $DD of=$TESTFILE1 count=60 conv=nocreat oflag=direct ||
+	$RUNAS $DD of=$testfile1 count=60 conv=nocreat oflag=direct ||
 		quota_error g $TSTUSR "write failed"
 
 	sync_all_data || true
@@ -6298,13 +6690,14 @@ test_84()
 
 	# the grant quota should be larger than 0
 	waited=0
+	local ostname=$(ostname_from_index 0)
 	while (( $waited < 60 )); do
-		grant=$(getquota -g $TSTUSR lustre-OST0000 bhardlimit $qp)
-		grant2=$(getquota -g $TSTUSR lustre-OST0000 bhardlimit)
+		grant=$(getquota -g $TSTUSR $ostname bhardlimit $qp)
+		grant2=$(getquota -g $TSTUSR $ostname bhardlimit)
 		(( ${grant} > 0 && ${grant2} > 0 )) && break
 
 		do_facet ost1 $LCTL set_param \
-				osd-*.*-OST0000.quota_slave.force_reint=1
+				osd-*.$ostname.quota_slave.force_reint=1
 		sleep 1
 		waited=$((waited + 1))
 	done
@@ -6331,8 +6724,8 @@ test_84()
 	# the grant quota should be set as insane value
 	waited=0
 	while (( $waited < 60 )); do
-		grant=$(getquota -g $TSTUSR lustre-OST0000 bhardlimit $qp)
-		grant2=$(getquota -g $TSTUSR lustre-OST0000 bhardlimit)
+		grant=$(getquota -g $TSTUSR $ostname bhardlimit $qp)
+		grant2=$(getquota -g $TSTUSR $ostname bhardlimit)
 		(( ${#grant} == 20 && ${#grant2} == 20 )) && break
 
 		sleep 1
@@ -6359,9 +6752,9 @@ test_84()
 	$LFS quota -gv --pool $qp $TSTUSR $DIR
 
 	# the grant quota should be reset
-	grant=$(getquota -g $TSTUSR lustre-OST0000 bhardlimit)
+	grant=$(getquota -g $TSTUSR $ostname bhardlimit)
 	(( ${#grant} == 20 )) && error "grant is not cleared"
-	grant=$(getquota -g $TSTUSR lustre-OST0000 bhardlimit $qp)
+	grant=$(getquota -g $TSTUSR $ostname bhardlimit $qp)
 	(( ${#grant} == 20 )) && error "pool grant is not cleared"
 
 	$LFS quota -gv $TSTUSR --pool $qp $DIR
@@ -6374,14 +6767,14 @@ test_84()
 		error "failed to set group quota for $TSTUSR"
 	$LFS quota -gv $TSTUSR $DIR
 
-	$RUNAS $DD of=$TESTFILE1 count=200 conv=nocreat oflag=direct &&
+	$RUNAS $DD of=$testfile1 count=200 conv=nocreat oflag=direct &&
 		quota_error g $TSTUSR "dd succeed, expect EDQUOT"
 
 	$LFS setquota -g $TSTUSR -B 300M $DIR ||
 		error "failed to set group quota for $TSTUSR"
 	$LFS quota -gv $TSTUSR $DIR
 
-	$RUNAS $DD of=$TESTFILE1 count=200 conv=nocreat oflag=direct ||
+	$RUNAS $DD of=$testfile1 count=200 conv=nocreat oflag=direct ||
 		quota_error g $TSTUSR "dd failed, expect succeed"
 }
 run_test 84 "Reset quota should fix the insane granted quota"
@@ -6732,9 +7125,8 @@ test_90a()
 	(( MDS1_VERSION >= $(version_code 2.15.60) )) ||
 		skip "Need MDS version at least 2.15.60"
 
-	setup_quota_test || error "setup quota failed with $?"
-
-	stack_trap cleanup_quota_test
+	wait_delete_completed || error "wait_delete_completed failed"
+	sync_all_data
 
 	check_quota_no_mount
 	check_quota_no_mount -u $TSTUSR
@@ -6760,11 +7152,11 @@ test_90b()
 	(( MDS1_VERSION >= $(version_code 2.15.60) )) ||
 		skip "Need MDS version at least 2.15.60"
 
-	setup_quota_test || error "setup quota failed with $?"
-	mount_client $MOUNT2
+	wait_delete_completed || error "wait_delete_completed failed"
+	sync_all_data
 
+	mount_client $MOUNT2
 	stack_trap "umount $MOUNT2"
-	stack_trap cleanup_quota_test
 
 	check_quota_two_mounts -u $TSTUSR
 	check_quota_two_mounts "-a -u"
@@ -6786,6 +7178,8 @@ run_test 90b "lfs quota should work with multiple mount points"
 
 test_91()
 {
+	(( $MDS1_VERSION >= $(version_code 2.16.50.52) )) ||
+		skip "need MDS >= 2.16.50.52 to handle the absence OST in qmt_map_lge_idx"
 	(( OSTCOUNT >= 2 )) || skip_env "needs >= 2 OSTs"
 	local mds_dev=$(mdsdevname 1)
 	local ost1_dev=$(ostdevname 1)
@@ -6863,8 +7257,8 @@ run_test 92 "Cannot set inode limit with Quota Pools"
 
 test_93()
 {
-	(( OST1_VERSION >= $(version_code 2.16.52) )) ||
-		skip "Need OST version at least 2.16.52"
+	(( OST1_VERSION >= $(version_code v2_16_53-39-g47ce8c5341) )) ||
+		skip "Need OST >= 2.16.53.39 for projid update"
 
 	local testfile="$DIR/$tdir/$tfile"
 	local cnt=30
@@ -6879,7 +7273,8 @@ test_93()
 	sync; sync_all_data || true
 	sleep 5
 
-	usage=$(getquota -p $TSTPRJID ${FSNAME}-OST0000 curspace)
+	local ostname=$(ostname_from_index 0)
+	usage=$(getquota -p $TSTPRJID $ostname curspace)
 	(( usage == 0 )) || error "usage for $TSTPRJID should be 0"
 
 	#define OBD_FAIL_OUT_DROP_PROJID_SET	0x170c
@@ -6890,7 +7285,7 @@ test_93()
 	sync; sync_all_data || true
 	sleep 5
 
-	usage=$(getquota -p $TSTPRJID ${FSNAME}-OST0000 curspace)
+	usage=$(getquota -p $TSTPRJID $ostname curspace)
 	(( usage == 0 )) || error "usage for $TSTPRJID should still be 0"
 
 	$DD of=$testfile conv=notrunc oflag=append count=5 ||
@@ -6901,10 +7296,678 @@ test_93()
 	sleep 5
 
 	usage=$(getquota -p $TSTPRJID global curspace)
-	(( usage > (cnt * 1024 * 9 / 10) )) ||
+	(( usage > cnt * 1024 * 9 / 10 )) ||
 		error "usage for $TSTPRJID is incorrect: $usage"
 }
 run_test 93 "update projid while client write to OST"
+
+test_94()
+{
+	local off=100000
+	local lim=70000
+	local squash=100
+	local idcount=5
+	local nm="tenant"
+	local ip=$(host_nids_address $HOSTNAME $NETTYPE)
+	local nid=$(h2nettype $ip)
+	local lineno=0
+	local act
+
+	(( $MDS1_VERSION >= $(version_code 2.16.55.1) )) ||
+		skip "need MDS >= v2_16_55-1-g9cd60bd to respect nodemap offset"
+
+	for ((i = off; i < off + idcount; i++)); do
+		$LFS setquota -u $i -B$i $MOUNT ||
+			error "Set quota for usr id $i failed"
+		$LFS setquota -g $i -B$i $MOUNT ||
+			error "Set quota for grp id $i failed"
+		is_project_quota_supported && $LFS setquota -p $i -B$i \
+			$MOUNT || error "Set quota for prj id $i failed"
+	done
+	stack_trap "cleanup_lqes $off $((off + idcount))"
+	for ((i = 2 * off; i < 2 * off + idcount; i++)); do
+		$LFS setquota -u $i -B$i $MOUNT ||
+			error "Set quota for usr id $i failed"
+		$LFS setquota -g $i -B$i $MOUNT ||
+			error "Set quota for grp id $i failed"
+		is_project_quota_supported && $LFS setquota -p $i -B$i \
+			$MOUNT || error "Set quota for prj id $i failed"
+	done
+	stack_trap "cleanup_lqes $((2 * off)) $((2 * off + idcount))"
+
+	$LFS setquota -u $((off + squash)) -B$off $MOUNT ||
+		error "Set quota for usr id $i failed"
+	stack_trap "$LFS setquota -u $((off + squash)) -B0 $MOUNT"
+	$LFS setquota -g $((off + squash)) -B$off $MOUNT ||
+		error "Set quota for usr id $i failed"
+	stack_trap "$LFS setquota -g $((off + squash)) -B0 $MOUNT"
+	$LFS setquota -p $((off + squash)) -B$off $MOUNT ||
+		error "Set quota for usr id $i failed"
+	stack_trap "$LFS setquota -p $((off + squash)) -B0 $MOUNT"
+
+        act=$(do_facet mgs $LCTL get_param -n nodemap.active)
+	do_facet mgs $LCTL nodemap_activate 1
+	stack_trap "do_facet mgs $LCTL nodemap_activate $act; \
+		    wait_nm_sync active"
+
+	do_facet mgs $LCTL nodemap_add $nm ||
+		error "unable to add $nm as nodemap"
+	stack_trap "do_facet mgs $LCTL nodemap_del $nm"
+
+	do_facet mgs $LCTL nodemap_add_range --name $nm --range $nid ||
+		error "Add range $nid to $nm failed"
+
+	do_facet mgs "$LCTL nodemap_modify --name $nm \
+		--property squash_uid --value $squash"
+	do_facet mgs "$LCTL nodemap_modify --name $nm \
+		--property squash_gid --value $squash"
+	do_facet mgs "$LCTL nodemap_modify --name $nm \
+		--property squash_projid --value $squash"
+	do_facet mgs $LCTL nodemap_add_offset --name $nm \
+		--offset $off --limit $lim ||
+			error "cannot set offset $off-$((lim + off - 1))"
+	do_facet mgs $LCTL nodemap_modify --name $nm \
+		--property admin --value 1
+	do_facet mgs $LCTL nodemap_modify --name $nm \
+		--property trusted --value 1
+	wait_nm_sync $nm trusted_nodemap
+
+	$LFS quota -u -a -n --show-root $MOUNT | head -n 10
+	while IFS= read -r line; do
+		(( lineno++ >= 2 )) || continue
+		read -r qid qval <<< "$line"
+		((qid <= lim)) ||
+			error "Access to foreign quota uid range $qid"
+		# squash id is not sequential plus it might have QIDs set in
+		# prevous tests. So check limits only for the first idcount QIDs
+		# that have been set in a current test.
+		if ((lineno - 2 <= idcount)); then
+			local exp=$((off + lineno -3))
+			((qval == exp)) ||
+				error "Quota uid $qid is $qval expect $exp"
+		fi
+	done < <($LFS quota -u -a --show-root --bhardlimit $MOUNT)
+
+	$LFS quota -g -a -n --show-root $MOUNT | head -n 10
+	lineno=0
+	while IFS= read -r line; do
+		(( lineno++ >= 2 )) || continue
+		read -r qid qval <<< "$line"
+		((qid <= lim)) ||
+			error "Access to foreign quota gid range $qid"
+		if ((lineno - 2 <= idcount)); then
+			local exp=$((off + lineno -3))
+			((qval == exp)) ||
+				error "Quota gid $qid is $qval expect $exp"
+		fi
+	done < <($LFS quota -g -a --show-root --bhardlimit $MOUNT)
+
+	is_project_quota_supported && {
+		$LFS quota -p -a -n --show-root $MOUNT | head -n 10
+		lineno=0
+		while IFS= read -r line; do
+			(( lineno++ >= 2 )) || continue
+			read -r qid qval <<< "$line"
+			((qid <= lim)) ||
+				error "Access to foreign quota prjid range $qid"
+			if ((lineno - 2 <= idcount)); then
+				local exp=$((off + lineno -3))
+				((qval == exp)) ||
+					error "Quota prj $qid lim $qval != $exp"
+			fi
+		done < <($LFS quota -p -a --show-root --bhardlimit $MOUNT)
+	}
+
+	do_facet mgs $LCTL nodemap_modify --name $nm \
+		--property trusted --value 0
+	wait_nm_sync $nm trusted_nodemap
+
+	# When trusted=0 it could return only ROOT and squash id records for
+	# user and group. And only squash id for project.
+	$LFS quota -u -a --show-root $MOUNT | head -n 10
+	lineno=0
+	while IFS= read -r line; do
+		(( lineno++ >= 2 )) || continue
+		read -r qid qval <<< "$line"
+		numid=$(id -u "$qid" 2>/dev/null || echo "$qid")
+		((numid == 0 || numid == squash)) ||
+			error "Access to untrusted quota uid $qid"
+		((qval == off)) ||
+			error "Quota uid $qid is now $qval expect $((off))"
+		((lineno <= 4)) ||
+			error "Quota uid $qid val $qval not expected"
+	done < <($LFS quota -u -a --show-root --bhardlimit $MOUNT)
+
+	$LFS quota -g -a --show-root $MOUNT | head -n 10
+	lineno=0
+	while IFS= read -r line; do
+		(( lineno++ >= 2 )) || continue
+		read -r qid qval <<< "$line"
+		numid=$(getent group $qid | cut -d: -f3)
+		((numid == 0 || numid == squash)) ||
+			error "Access to untrusted quota gid $qid"
+		((qval == off)) ||
+			error "Quota gid $qid is now $qval expect $((off))"
+		((lineno <= 4)) ||
+			error "Quota gid $qid val $qval not expected"
+	done < <($LFS quota -g -a --show-root --bhardlimit $MOUNT)
+
+	is_project_quota_supported && {
+		$LFS quota -p -a -n --show-root $MOUNT | head -n 10
+		lineno=0
+		while IFS= read -r line; do
+			(( lineno++ >= 2 )) || continue
+			read -r qid qval <<< "$line"
+			((qid == squash)) ||
+				error "Quota prj $qid val $qval not expected"
+			((qval == off)) ||
+				error "Quota prj $qid lim is $qval expect $off"
+			((lineno <= 3)) ||
+				error "Quota prj $qid val $qval not expected"
+		done < <($LFS quota -p -a -n --show-root --bhardlimit $MOUNT)
+	}
+
+	return 0
+}
+run_test 94 "lfs quota all respects nodemap offset"
+
+test_95a() {
+	local cmd="do_facet mgs $LCTL get_param -n "
+	local squash=100
+	local off=100000
+	local lim=70000
+	local nm="nm0"
+	local ip=$(host_nids_address $HOSTNAME $NETTYPE)
+	local nid=$(h2nettype $ip)
+
+	(( $MDS1_VERSION >= $(version_code 2_16_52-39-gb162043239) )) ||
+		skip "need MDS >= 2.16.52.39 to have idmap fix for root"
+
+	$LFS setquota -u $off -B1025 $DIR ||
+		error "Can't setquota for uid $off"
+	stack_trap "$LFS setquota -u $off -B0 $DIR"
+	$LFS setquota -g $off -B1026 $DIR ||
+		error "Can't setquota for gid $off"
+	stack_trap "$LFS setquota -g $off -B0 $DIR"
+	$LFS setquota -p $((off + squash)) -B1027 $DIR ||
+		error "Can't setquota for project $((off + squash))"
+	stack_trap "$LFS setquota -p $((off + squash)) -B0 $DIR"
+
+	local act=$($cmd nodemap.active)
+	do_facet mgs $LCTL nodemap_activate 1
+	wait_nm_sync active
+	stack_trap "do_facet mgs $LCTL nodemap_activate $act; \
+		    wait_nm_sync active"
+
+	do_facet mgs $LCTL nodemap_add $nm ||
+		error "unable to add $nm as nodemap"
+	stack_trap "do_facet mgs $LCTL nodemap_del $nm"
+
+	do_facet mgs $LCTL nodemap_add_range --name $nm --range $nid ||
+		error "Add range $nid to $nm failed"
+
+	do_facet mgs "$LCTL nodemap_modify --name $nm \
+		--property squash_uid --value $squash"
+
+	do_facet mgs "$LCTL nodemap_modify --name $nm \
+		--property squash_gid --value $squash"
+
+	do_facet mgs "$LCTL nodemap_modify --name $nm \
+		--property squash_projid --value $squash"
+
+	do_facet mgs $LCTL nodemap_add_offset --name $nm \
+		--offset $off --limit $lim ||
+			error "cannot set offset $off-$((lim + off - 1))"
+
+	do_facet mgs $LCTL nodemap_modify --name $nm --property admin --value 1
+	wait_nm_sync $nm admin_nodemap
+
+	$LFS quota -u 0 $DIR
+	(( $($LFS quota -q -u 0 --bhardlimit $DIR) == 1025 )) ||
+		error "Wrong user limit for squashed root"
+
+	$LFS quota -g 0 $DIR
+	(( $($LFS quota -q -g 0 --bhardlimit $DIR) == 1026 )) ||
+		error "Wrong group limit for squashed root"
+
+	$LFS quota -p 0 $DIR
+	(( $($LFS quota -q -p 0 --bhardlimit $DIR) == 1027 )) ||
+		error "Wrong proj limit for squashed root"
+}
+run_test 95a "Correct limits for squashed root"
+
+test_95b()
+{
+	local cmd="do_facet mgs $LCTL get_param -n "
+	local trusted
+	local projid
+	local act
+	local size
+
+	is_project_quota_supported || skip "project is not supported"
+	setup_quota_test || error "setup quota failed with $?"
+
+	trusted=$($cmd nodemap.default.trusted_nodemap)
+	do_facet mgs "$LCTL nodemap_modify --name default \
+		--property trusted --value 0"
+	stack_trap "do_facet mgs $LCTL nodemap_modify --name default \
+		--property trusted --value $trusted"
+
+	projid=$($cmd nodemap.default.squash_projid)
+	do_facet mgs "$LCTL nodemap_modify --name default \
+		--property squash_projid --value $TSTPRJID"
+	stack_trap "do_facet mgs $LCTL nodemap_modify --name default \
+		--property squash_projid --value $projid"
+
+	$LFS setquota -p $TSTPRJID -B10M $MOUNT ||
+		error "Set default quotas with squashed uid"
+
+	$LFS project -p 0 -sr $DIR
+	stack_trap "$LFS project -C -r $DIR"
+	$LFS project $DIR
+
+	act=$($cmd nodemap.active)
+	do_facet mgs $LCTL nodemap_activate 1
+	wait_nm_sync active
+	stack_trap "do_facet mgs $LCTL nodemap_activate $act; \
+		    wait_nm_sync active"
+
+	size=$(df -h --output=size $DIR | awk 'NR > 1 {print $1}')
+	echo "size :$size"
+	[[ $size == "10M" ]] || error "Wrong df size:$size, expect:10M"
+}
+run_test 95b "df respects squashed project id"
+
+test_delete_big_file() {
+	local equot_expected=$1
+	local testdir=$DIR/$tdir
+	local tfile1=$DIR/$tdir/dd.out.0
+	local tfile2=$DIR/$tdir/dd.out.1
+	local limit=3 # GB
+
+	chown $TSTID:$TSTID $testdir || error "failed to chown $testdir"
+	$LFS project -sp $TSTPRJID $testdir ||
+		error "fail to set project on $testdir"
+
+	$LFS setquota -p $TSTPRJID -B ${limit}G $DIR ||
+		error "failed to set quota limits for $TSTPRJID"
+	$LFS quota -p $TSTPRJID -h $DIR
+
+	$LFS setstripe $tfile1 -i 0 -c 1 || error "setstripe $tfile1 failed"
+	chown $TSTID:$TSTID $tfile1 || error "fail to chown $tfile1"
+	wait_quota_synced ost1 OST0000 prj $TSTPRJID hardlimit \
+		$((limit*1024*1024))
+
+	$RUNAS fallocate -l2GiB $tfile1 || error "fail to write 2GiB"
+	$RUNAS $DD of=$tfile1 seek=2048 count=1500 oflag=sync &&
+		error "DD should fail on first write"
+
+	$LFS quota -p $TSTPRJID -h $DIR
+
+	rm -f $tfile1
+	wait_delete_completed
+
+	$LFS quota -p $TSTPRJID -h $DIR
+	$LFS setstripe $tfile2 -i 1 -c 1 || error "setstripe $tfile2 failed"
+	chown $TSTID:$TSTID $tfile2 || error "fail to chown $tfile2"
+	wait_quota_synced ost2 OST0001 prj $TSTPRJID hardlimit \
+		$((limit*1024*1024))
+
+	$RUNAS fallocate -l2GiB $tfile2 || {
+		(( equot_expected == 0 )) && error "fail to write 2GiB"
+	}
+
+	(( equot_expected == 0 )) && {
+		$RUNAS $DD of=$tfile2 seek=2048 count=512 oflag=sync ||
+			error "write should succeed after deleting big files"
+	}
+
+	$LFS quota -p $TSTPRJID -h $DIR
+
+	rm -f $tfile2
+	sleep 10
+	$LFS quota -p $TSTPRJID -h $DIR
+}
+
+test_96() {
+	local smallost
+
+	(( $MDS1_VERSION >= $(version_code 2_16_57) )) ||
+		skip "need OST >= 2.16.57 to run this test"
+
+	[ "$ost1_FSTYPE" == zfs ] &&
+		skip "the test in only needed to run on LDiskFS"
+
+	(( OSTCOUNT >= 2 )) || skip "needs >= 2 OSTs"
+
+	is_project_quota_supported || skip "project is not supported"
+
+	smallost=($($LFS df -o $DIR | awk "/OST00/ { print \$4 }" | sort -n))
+
+	if (( smallost < 3657728 )); then
+		skip "OST is too small, skip the test"
+	fi
+
+	setup_quota_test || error "setup quota failed with $?"
+	set_ost_qtype $QTYPE || error "enable ost quota failed"
+
+	do_facet ost1 $LCTL set_param fail_loc=0
+	do_facet ost2 $LCTL set_param fail_loc=0
+	test_delete_big_file 0
+}
+run_test 96 "quota grant should be released when big files are deleted"
+
+test_97a()
+{
+	local lqa="lqa1"
+	local longstr="0123456789123456789"
+	local badname="lqa2*"
+
+	(( $MDS1_VERSION >= $(version_code 2.17.50) )) ||
+		skip "need MDS >= 2.17.50 to support lctl lqa commands"
+
+	$LQA_NEW && error "lqa new succeeded with no lqa"
+#define LQA_NAME_MAX 15 /* Maximum lqa name length */
+	$LQA_NEW --name $longstr && error "lqa max name length is 16"
+	$LQA_NEW --name $badname && error "Name $badname contains an asterisk"
+	$LQA_NEW --name $lqa || error "cannot create $lqa"
+	stack_trap "$LQA_DESTROY --name $lqa || true"
+
+	$LQA_ADD && error "lqa add succeeded with no --name"
+	$LQA_ADD --name $lqa && error "lqa add succeeded wit no range"
+	$LQA_ADD --name $lqa --range -10 && error "lqa add wrong format 1"
+	$LQA_ADD --name $lqa --range 10-9 && error "lqa add wrong format 2"
+	$LQA_ADD --name $lqa --range 10--9 && error "lqa add wrong format 3"
+	$LQA_ADD --name $lqa --range 10 || error "lqa failed to add [10]"
+	$LQA_ADD --name $lqa --range 11-20 || error "lqa failed to add [10-20]"
+
+	$LQA_LIST || error "lqa list failed with no --name"
+	$LQA_LIST --name $lqa || error "lqa list failed to show $lqa ranges"
+
+	$LQA_REMOVE && error "lqa remove succeeded with no --name"
+	$LQA_REMOVE --name $lqa && error "lqa remove succeeded with no --range"
+	$LQA_REMOVE --name $lqa --range -10 && error "lqa remove wrong format 1"
+	$LQA_REMOVE --name $lqa --range 10-9 &&
+		error "lqa remove wrong format 2"
+	$LQA_REMOVE --name $lqa --range 10--9 &&
+		error "lqa remove wrong format 3"
+	$LQA_REMOVE --name $lqa --range 10 || error "lqa failed to remove 10"
+	$LQA_REMOVE --name $lqa --range 11-20 ||
+		error "lqa failed to remove 10-20"
+
+	$LQA_DESTROY && error "lqa destroy succeeded with no --name"
+	$LQA_DESTROY --name $lqa || error "cannot destroy $lqa"
+}
+run_test 97a "LQA control commands"
+
+test_97b()
+{
+	local lqa="lqa1"
+	local lqa2="lqa2"
+	local max_id=4294967295
+	local max_iter=50
+	local base=1000
+
+	(( $MDS1_VERSION >= $(version_code 2.17.50) )) ||
+		skip "need MDS >= 2.17.50 to support lctl lqa commands"
+
+	$LQA_NEW --name $lqa || error "cannot create $lqa"
+	stack_trap "$LQA_DESTROY --name $lqa"
+	$LQA_NEW --name $lqa && error "$lqa should already exist"
+	$LQA_NEW --name $lqa2 || error "cannot create $lqa2"
+	stack_trap "$LQA_DESTROY --name $lqa2"
+	$LQA_LIST | grep -q $lqa || error "lqa $lqa doesnt' exist"
+	$LQA_LIST | grep -q $lqa2 || error "lqa $lqa2 doesnt' exist"
+
+	# PQ could have the same name as LQA
+	pool_add $lqa || error "faled to create pool $lqa"
+	destroy_pool $lqa || error "failed to destroy pool $lqa"
+
+	$LQA_ADD --name $lqa --range 10-19 ||
+		error "cannot add range 10-19 to $lqa"
+	$LQA_LIST --name $lqa | grep -q "10-19" ||
+		error "range 10-19 doesn't exist in $lqa"
+	$LQA_ADD --name $lqa2 --range 10-19 ||
+		error "cannot add range 10-19 to $lqa2"
+	$LQA_LIST --name $lqa2 | grep -q "10-19" ||
+		error "range 10-20 doesn't exist in $lqa2"
+	$LQA_ADD --name $lqa --range 15-31 && error "ranges intersect in $lqa"
+	$LQA_ADD --name $lqa --range 20-29 ||
+		error "cannot add range 20-29 to $lqa"
+	$LQA_ADD --name $lqa --range 30 ||
+		error "cannot add range 30-30 to $lqa"
+	$LQA_REMOVE --name $lqa --range 10-19 ||
+		error "cannot remove range 10-19 from $lqa"
+	$LQA_REMOVE --name $lqa --range 10-19 &&
+		error "range 10-19 has been alread removed from $lqa"
+	$LQA_LIST --name $lqa || grep -q "20-29" ||
+		"range 20-29 doesn't exist in $lqa"
+	$LQA_REMOVE --name $lqa --range 20-29 ||
+		error "cannot remove range 20-29 from $lqa"
+	$LQA_LIST --name $lqa || grep -q "30-30" ||
+		"range 30-30 doesn't exist in $lqa"
+
+	$LQA_DESTROY --name $lqa || error "cannot destroy $lqa"
+	$LQA_DESTROY --name $lqa2 || error "cannot destroy $lqa2"
+	$LQA_NEW --name $lqa || error "cannot recreate $lqa"
+	$LQA_NEW --name $lqa2 || error "cannot recreate $lqa2"
+	$LQA_LIST --name $lqa | (($(wc -l) == 1)) ||
+		echo "$lqa is not empty after recreating"
+
+	[[ "$SLOW" = "yes" ]] && max_iter=500
+	local start=$SECONDS
+	do_facet mds1 "for ((i = 1; i <= $max_iter; i++)); do $LCTL lqa add \
+		       --fsname $FSNAME --name $lqa \
+		       --range \\\$(($max_id - i * $base)); done" ||
+		       error "cannot add $max_iter ranges in a cycle"
+	local end=$SECONDS
+	log "adding $max_iter LQA ranges took $((end - start))s"
+
+	local num=$($LQA_LIST --name $lqa | grep -oE '[0-9]+-[0-9]+' | wc -l)
+	echo "num $num"
+	((num == max_iter)) || error "$lqa ranges num $num != $max_iter"
+	$LQA_ADD --name $lqa --range $((max_id + 10)) &&
+		error "range id > UINT_MAX"
+	start=$SECONDS
+	do_facet mds1 "for i in {1..$max_iter}; do $LCTL lqa remove \
+		       --fsname $FSNAME --name $lqa \
+		       --range \\\$(($max_id - i * $base)); done" ||
+		       error "cannot remove $max_iter ranges in a cycle"
+	end=$SECONDS
+	log "Removing $max_iter LQA ranges took $((end - start))s"
+}
+run_test 97b "Check LQA internals"
+
+test_97c ()
+{
+	local lqa="lqa1"
+	local bhard=8000 # KB
+	local bsoft=7000 # KB
+	local ihard=4000
+	local isoft=3000
+	local limit
+
+	(( $MDS1_VERSION >= $(version_code 2.17.50) )) ||
+		skip "need MDS >= 2.17.50 to support lfs lqa commands"
+
+	$LQA_NEW --name $lqa || error "cannot create $lqa"
+	stack_trap "$LQA_DESTROY --name $lqa"
+
+	$LQA_ADD --name $lqa --range 10-19 ||
+		error "cannot add range 10-19 to $lqa"
+	$LFS setquota -u $TSTID --lqa $lqa -B ${bhard} -b ${bsoft} -I ${ihard} \
+		-i ${isoft} $DIR && error "QID can't be set for lqa:$lqa"
+	$LFS setquota -U --lqa $lqa -B ${bhard} -b ${bsoft} -I ${ihard} \
+		-i ${isoft} $DIR || error "set user quota failed for lqa:$lqa"
+	$LFS quota -U --lqa $lqa $DIR
+
+	echo "Verifying initial LQA quota limits"
+	limit=$($LFS quota -U --lqa $lqa -Bq)
+	((limit == bhard)) || error "bhard limit $limit != $bhard for lqa:$lqa"
+	limit=$($LFS quota -U --lqa $lqa -bq)
+	((limit == bsoft)) || error "bsoft limit $limit != $bhard for lqa:$lqa"
+	limit=$($LFS quota -U --lqa $lqa --ihardlimit -q)
+	((limit == ihard)) || error "ihard limit $limit != $bhard for lqa:$lqa"
+	limit=$($LFS quota -U --lqa $lqa --isoftlimit -q)
+	((limit == isoft)) || error "isoft limit $limit != $bhard for lqa:$lqa"
+
+	# Restart MDS to test LQA quota limits consistency
+	echo "Restarting MDS to test LQA quota limits consistency"
+	stop mds1 || error "Failed to stop MDS"
+
+	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS ||
+		error "Failed to start MDS"
+	wait_recovery_complete mds1 || error "MDS recovery failed"
+
+	echo "Verifying LQA quota limits consistency after MDS restart"
+	$LFS quota -U --lqa $lqa $DIR
+
+	# Check that LFS quota settings haven't been changed after MDS restart
+	limit=$($LFS quota -U --lqa $lqa -Bq)
+	((limit == bhard)) ||
+		error "bhard limit $limit != $bhard after restart for lqa:$lqa"
+	limit=$($LFS quota -U --lqa $lqa -bq)
+	((limit == bsoft)) ||
+		error "bsoft limit $limit != $bsoft after restart for lqa:$lqa"
+	limit=$($LFS quota -U --lqa $lqa --ihardlimit -q)
+	((limit == ihard)) ||
+		error "ihard limit $limit != $ihard after restart for lqa:$lqa"
+	limit=$($LFS quota -U --lqa $lqa --isoftlimit -q)
+	((limit == isoft)) ||
+		error "isoft limit $limit != $isoft after restart for lqa:$lqa"
+
+	echo "SUCCESS: LQA quota limits are consistent after MDS restart"
+}
+run_test 97c "LQA lfs quota commands and MDS restart consistency"
+
+test_97d() {
+	local lqa="lqa1"
+	local lqa2="lqa2"
+
+	(( $MDS1_VERSION >= $(version_code 2.17.50) )) ||
+		skip "need MDS >= 2.17.50 to support lctl lqa commands"
+
+	setup_quota_test || error "setup quota failed with $?"
+	stack_trap cleanup_quota_test EXIT
+
+	# Create LQA tenants using standard commands
+	echo "Creating LQA tenants"
+	$LQA_NEW --name $lqa || error "Failed to create LQA tenant $lqa"
+	stack_trap "$LQA_DESTROY --name $lqa" EXIT
+	$LQA_NEW --name $lqa2 || error "Failed to create LQA tenant $lqa2"
+	stack_trap "$LQA_DESTROY --name $lqa2" EXIT
+
+	# Add ranges using standard commands
+	echo "Adding ranges to LQA tenants"
+	$LQA_ADD --name $lqa --range 1000-2000 ||
+		error "Failed to add range 1000-2000 to $lqa"
+	$LQA_ADD --name $lqa2 --range 2200-2800 ||
+		error "Failed to add range 2200-2800 to $lqa2"
+
+	# Verify LQA tenants exist and have ranges
+	echo "Verifying LQA ranges were added correctly"
+	$LQA_LIST --name $lqa | grep -q "1000-2000" ||
+		error "Range 1000-2000 not found in $lqa"
+	$LQA_LIST --name $lqa2 | grep -q "2200-2800" ||
+		error "Range 2200-2800 not found in $lqa2"
+
+	# Display current ranges for verification
+	echo "Current ranges in $lqa:"
+	$LQA_LIST --name $lqa
+	echo "Current ranges in $lqa2:"
+	$LQA_LIST --name $lqa2
+
+	# Restart MDS to test LQA range persistence
+	echo "Restarting MDS to test LQA range persistence"
+	stop mds1 || error "Failed to stop MDS"
+
+	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS ||
+		error "Failed to start MDS"
+	wait_recovery_complete mds1 || error "MDS recovery failed"
+	# Check if LQA ranges survived MDS restart (automatic recreation)
+	echo "Checking if LQA ranges survived MDS restart"
+
+	# Tenants should be automatically recreated from disk with their ranges
+	echo "Verifying automatic tenant recreation and range loading"
+	echo "Current ranges in $lqa after restart:"
+	$LQA_LIST --name $lqa
+	echo "Current ranges in $lqa2 after restart:"
+	$LQA_LIST --name $lqa2
+
+	# Check if ranges were automatically restored from disk
+	local restored_ranges1=$($LQA_LIST --name $lqa 2>/dev/null |
+				  grep -v "LQA:" | wc -l)
+	local restored_ranges2=$($LQA_LIST --name $lqa2 2>/dev/null |
+				  grep -v "LQA:" | wc -l)
+
+	# Test passes if ranges were automatically restored from disk
+	[[ $restored_ranges1 -gt 0 && $restored_ranges2 -gt 0 ]] ||
+		error "LQA ranges were not automatically restored"
+
+	echo "SUCCESS: LQA disk persistence working"
+}
+run_test 97d "LQA disk persistence using standard commands"
+
+test_98() {
+	(( $MDSCOUNT >= 2 )) || skip "needs >= 2 MDTs"
+
+	local testdir="$DIR/$tdir"
+
+	# Use the current round-robin index and map it into the
+	# range of configured MDT indices [0..MDSCOUNT-1].
+	local rr_idx=$($LCTL get_param -n lmv.*.qos_rr_index | head -1)
+	local idx=$((rr_idx % MDSCOUNT))
+	local expected_mdt=$(((rr_idx+1) % MDSCOUNT))
+
+	wait_clients_import_state $HOSTNAME mds$((idx+1)) FULL
+	wait_clients_import_state $HOSTNAME mds$((expected_mdt+1)) FULL
+
+	local old_rr=$($LCTL get_param -n lmv.*.qos_threshold_rr | head -1)
+	stack_trap "$LCTL set_param lmv.*.qos_threshold_rr=$old_rr"
+
+	#define OBD_FAIL_QUOTA_EDQUOT            0xA02
+	# fail_val selects which MDTs to fail:
+	#   0            - fail all MDTs
+	#   1..0xffff    - fail single MDT at index (fail_val - 1)
+	#   0x10000+     - bitmask mode: bits 0-15 are MDT indices to fail
+	# We use mode 2 (single MDT) with fail_val = idx+1 to target specific MDT
+	stack_trap "do_facet mds$((idx+1)) $LCTL set_param fail_loc=0 fail_val=0"
+	do_facet mds$((idx+1)) $LCTL set_param \
+		fail_val=$((idx+1)) fail_loc=0xA02 ||
+		error "Failed to set fail_loc on mds$((idx+1))"
+
+	$LCTL set_param lmv.*.qos_threshold_rr=100 ||
+		error "Failed to set qos_threshold_rr"
+
+	local set_qos_rr=$($LCTL get_param -n lmv.*.qos_threshold_rr | head -1)
+	[[ "$set_qos_rr" == "100%" ]] ||
+		error "qos_threshold_rr expected 100%, got $set_qos_rr"
+
+	local old_qos_maxage=$($LCTL get_param -n lmv.*.qos_maxage)
+	$LCTL set_param lmv.*.qos_maxage=10 ||
+		error "Failed to set qos_maxage"
+	stack_trap "$LCTL set_param -n lmv.*.qos_maxage=$old_qos_maxage"
+
+	local set_qos_maxage=$($LCTL get_param -n lmv.*.qos_maxage | head -1)
+	(( set_qos_maxage == 10 )) ||
+		error "qos_maxage not set correctly: expected 10, got $set_qos_maxage"
+	# import can be used only after (qos_maxage >> 1)s after setup
+	sleep 5
+
+	echo "First MDT: $idx, expected retry MDT: $expected_mdt"
+
+	mkdir "$testdir" || error "mkdir failed - retry mechanism not working"
+
+	[[ -d "$testdir" ]] || error "Directory not created after retry"
+
+	local stripe_index=$($LFS getdirstripe -i $testdir)
+
+	(( stripe_index != idx )) ||
+		error "Created on MDT$stripe_index, should not be MDT$idx"
+
+	echo "Directory successfully created on MDT$stripe_index after retry"
+}
+run_test 98 "Verify MDT retry on -EDQUOT during mkdir"
 
 quota_fini()
 {

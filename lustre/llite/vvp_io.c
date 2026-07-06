@@ -20,13 +20,13 @@
 
 #include <obd.h>
 #include <linux/pagevec.h>
+#include <lustre_compat/linux/mm.h>
 #include <linux/memcontrol.h>
 #include <linux/falloc.h>
 
 #include "llite_internal.h"
 #include "vvp_internal.h"
 #include <lustre_compat.h>
-#include <libcfs/linux/linux-misc.h>
 
 static struct vvp_io *cl2vvp_io(const struct lu_env *env,
 				const struct cl_io_slice *slice)
@@ -135,6 +135,21 @@ static int vvp_prep_size(const struct lu_env *env, struct cl_object *obj,
 	result = cl_object_attr_get(env, obj, attr);
 	if (result == 0) {
 		kms = attr->cat_kms;
+		/*
+		 * For parity I/O, use ci_parity_eof instead of kms to
+		 * determine if we're past EOF.
+		 */
+		if (io->ci_parity_io && exceed != NULL) {
+			loff_t parity_eof = io->ci_parity_eof;
+			unsigned long cur_index = start >> PAGE_SHIFT;
+
+			if ((parity_eof == 0 && cur_index != 0) ||
+			    (((parity_eof - 1) >> PAGE_SHIFT) < cur_index)) {
+				*exceed = 1;
+				vvp_object_size_unlock(obj);
+				return 0;
+			}
+		}
 		if (pos > kms || !attr->cat_kms_valid) {
 			/*
 			 * A glimpse is necessary to determine whether we
@@ -147,14 +162,16 @@ static int vvp_prep_size(const struct lu_env *env, struct cl_object *obj,
 				/* If objective page index exceed end-of-file
 				 * page index, return directly. Do not expect
 				 * kernel will check such case correctly.
+				 * For parity I/O, use ci_parity_eof which is
+				 * calculated from RAID geometry in the LOV
+				 * layer.
 				 */
-				loff_t size = i_size_read(inode);
-				unsigned long cur_index = start >>
-					PAGE_SHIFT;
+				loff_t size = io->ci_parity_io ?
+					io->ci_parity_eof : i_size_read(inode);
+				unsigned long cur_index = start >> PAGE_SHIFT;
 
 				if ((size == 0 && cur_index != 0) ||
-				    (((size - 1) >> PAGE_SHIFT) <
-				     cur_index))
+				    (((size - 1) >> PAGE_SHIFT) < cur_index))
 					*exceed = 1;
 			}
 
@@ -162,21 +179,19 @@ static int vvp_prep_size(const struct lu_env *env, struct cl_object *obj,
 		}
 		/*
 		 * region is within kms and, hence, within real file
-		 * size (A). We need to increase i_size to cover the
+		 * size (A). We need to fix i_size to cover the
 		 * read region so that generic_file_read() will do its
 		 * job, but that doesn't mean the kms size is
 		 * _correct_, it is only the _minimum_ size. If
-		 * someone does a stat they will get the correct size
-		 * which will always be >= the kms value here.
+		 * someone does a read outside of kms - glimpse needed.
+		 * size might to be wrong due lock cancelation in middle.
 		 * b=11081
 		 */
-		if (i_size_read(inode) < kms) {
-			i_size_write(inode, kms);
-			CDEBUG(D_VFSTRACE,
-			       DFID" updating i_size %llu\n",
-			       PFID(lu_object_fid(&obj->co_lu)),
-			       (__u64)i_size_read(inode));
-		}
+		i_size_write(inode, kms);
+		CDEBUG(D_VFSTRACE,
+		       DFID" updating i_size %llu\n",
+		       PFID(lu_object_fid(&obj->co_lu)),
+		       (__u64)i_size_read(inode));
 	}
 
 	vvp_object_size_unlock(obj);
@@ -200,7 +215,8 @@ static int vvp_io_one_lock_index(const struct lu_env *env, struct cl_io *io,
 
 	memset(&vio->vui_link, 0, sizeof(vio->vui_link));
 
-	if (vio->vui_fd && (vio->vui_fd->fd_flags & LL_FILE_GROUP_LOCKED)) {
+	if (vio->vui_fd &&
+	    (vio->vui_fd->lfd_file_flags & LL_FILE_GROUP_LOCKED)) {
 		descr->cld_mode = CLM_GROUP;
 		descr->cld_gid  = vio->vui_fd->fd_grouplock.lg_gid;
 		enqflags |= CEF_LOCK_MATCH;
@@ -537,9 +553,8 @@ static int vvp_io_rw_lock(const struct lu_env *env, struct cl_io *io,
 	int result;
 	int ast_flags = 0;
 
-	LASSERT(io->ci_type == CIT_READ || io->ci_type == CIT_WRITE);
 	ENTRY;
-
+	LASSERT(io->ci_type == CIT_READ || io->ci_type == CIT_WRITE);
 	vvp_io_update_iov(env, vio, io);
 
 	if (io->u.ci_rw.crw_nonblock)
@@ -547,16 +562,12 @@ static int vvp_io_rw_lock(const struct lu_env *env, struct cl_io *io,
 	if (io->ci_lock_no_expand)
 		ast_flags |= CEF_LOCK_NO_EXPAND;
 	if (vio->vui_fd) {
-		int flags;
-
 		/* Group lock held means no lockless any more */
-		if (vio->vui_fd->fd_flags & LL_FILE_GROUP_LOCKED)
+		if (vio->vui_fd->lfd_file_flags & LL_FILE_GROUP_LOCKED)
 			io->ci_dio_lock = 1;
 
-		flags = iocb_ki_flags_get(vio->vui_iocb->ki_filp,
-					  vio->vui_iocb);
 		if (ll_file_nolock(vio->vui_fd->fd_file) ||
-		    (iocb_ki_flags_check(flags, DIRECT) &&
+		    (iocb_ki_flags_check(vio->vui_iocb, IOCB_DIRECT) &&
 		     !io->ci_dio_lock))
 			ast_flags |= CEF_NEVER;
 	}
@@ -602,8 +613,11 @@ static int vvp_io_write_lock(const struct lu_env *env,
 	loff_t end;
 
 	if (io->u.ci_wr.wr_append) {
+		LASSERT(io->u.ci_wr.wr_append_lockpos >=
+			io->u.ci_wr.wr.crw_pos + io->u.ci_wr.wr.crw_bytes);
+
 		start = 0;
-		end   = OBD_OBJECT_EOF;
+		end   = io->u.ci_wr.wr_append_lockpos;
 	} else {
 		start = io->u.ci_wr.wr.crw_pos;
 		end   = start + io->u.ci_wr.wr.crw_bytes - 1;
@@ -677,7 +691,7 @@ static int vvp_do_vmtruncate(struct inode *inode, size_t size)
 	}
 	i_size_write(inode, size);
 
-	ll_truncate_pagecache(inode, size);
+	truncate_pagecache(inode, size);
 	ll_inode_size_unlock(inode);
 	return result;
 }
@@ -813,10 +827,8 @@ static int vvp_io_read_start(const struct lu_env *env,
 	int total_bytes_read = 0;
 	struct iov_iter iter;
 	pgoff_t page_offset;
-	int flags;
 
 	ENTRY;
-
 	CLOBINVRNT(env, obj, vvp_object_invariant(obj));
 
 	CDEBUG(D_VFSTRACE, DNAME": read [%llu, %llu)\n",
@@ -832,8 +844,7 @@ static int vvp_io_read_start(const struct lu_env *env,
 	if (!can_populate_pages(env, io, inode))
 		RETURN(0);
 
-	flags = iocb_ki_flags_get(file, vio->vui_iocb);
-	if (!iocb_ki_flags_check(flags, DIRECT)) {
+	if (!iocb_ki_flags_check(vio->vui_iocb, IOCB_DIRECT)) {
 		result = cl_io_lru_reserve(env, io, pos, crw_bytes);
 		if (result)
 			RETURN(result);
@@ -968,41 +979,6 @@ static int vvp_io_commit_sync(const struct lu_env *env, struct cl_io *io,
 	RETURN(bytes > 0 ? bytes : rc);
 }
 
-/*
- * From kernel v4.19-rc5-248-g9b89a0355144 use XArrary
- * Prior kernels use radix_tree for tags
- */
-static inline void ll_page_tag_dirty(struct page *page,
-				     struct address_space *mapping)
-{
-#ifndef HAVE_RADIX_TREE_TAG_SET
-	__xa_set_mark(&mapping->i_pages, page_index(page), PAGECACHE_TAG_DIRTY);
-#else
-	radix_tree_tag_set(&mapping->page_tree, folio_index_page(page),
-			   PAGECACHE_TAG_DIRTY);
-#endif
-}
-
-/*
- * Kernels 4.2 - 4.5 pass memcg argument to account_page_dirtied()
- * Kernel v5.2-5678-gac1c3e4 no longer exports account_page_dirtied
- */
-static inline void ll_account_page_dirtied(struct page *page,
-					   struct address_space *mapping)
-{
-#ifdef HAVE_ACCOUNT_PAGE_DIRTIED_3ARGS
-	struct mem_cgroup *memcg = mem_cgroup_begin_page_stat(page);
-
-	account_page_dirtied(page, mapping, memcg);
-	mem_cgroup_end_page_stat(memcg);
-#elif defined(HAVE_ACCOUNT_PAGE_DIRTIED_EXPORT)
-	account_page_dirtied(page, mapping);
-#else
-	vvp_account_page_dirtied(page, mapping);
-#endif
-	ll_page_tag_dirty(page, mapping);
-}
-
 /* Taken from kernel set_page_dirty, __set_page_dirty_nobuffers
  * Last change to this area: b93b016313b3ba8003c3b8bb71f569af91f19fc7
  *
@@ -1016,18 +992,16 @@ static void vvp_set_batch_dirty(struct folio_batch *fbatch)
 {
 	struct page *page = fbatch_at_pg(fbatch, 0, 0);
 	int count = folio_batch_count(fbatch);
-	int i;
-#if !defined(HAVE_FOLIO_BATCH) || !defined(HAVE_FILEMAP_GET_FOLIOS) ||	\
-	defined(HAVE_KALLSYMS_LOOKUP_NAME)
-	int pg, npgs;
-#endif
-#ifdef HAVE_KALLSYMS_LOOKUP_NAME
+#ifdef HAVE_ACCOUNT_PAGE_DIRTIED
 	struct address_space *mapping = page->mapping;
 	unsigned long flags;
 	unsigned long skip_pages = 0;
-	int pgno;
+	int pgno, pg, npgs;
 	int dirtied = 0;
+#elif !defined(HAVE_FOLIO_BATCH) || !defined(HAVE_FILEMAP_GET_FOLIOS)
+	int pg, npgs;
 #endif
+	int i;
 
 	ENTRY;
 
@@ -1042,25 +1016,21 @@ static void vvp_set_batch_dirty(struct folio_batch *fbatch)
 	 * we can't do page dirtying in batch (taking the xarray lock only once)
 	 * so we just fall back to a looped call to __set_page_dirty_nobuffers
 	 */
-#ifndef HAVE_ACCOUNT_PAGE_DIRTIED_EXPORT
-	if (!vvp_account_page_dirtied) {
-		for (i = 0; i < count; i++) {
+#ifndef HAVE_ACCOUNT_PAGE_DIRTIED
+	for (i = 0; i < count; i++) {
 #if defined(HAVE_FOLIO_BATCH) && defined(HAVE_FILEMAP_GET_FOLIOS)
-			filemap_dirty_folio(page->mapping, fbatch->folios[i]);
+		filemap_dirty_folio(page->mapping, fbatch->folios[i]);
 #else
-			npgs = fbatch_at_npgs(fbatch, i);
-			for (pg = 0; pg < npgs; pg++) {
-				page = fbatch_at_pg(fbatch, i, pg);
-				__set_page_dirty_nobuffers(page);
-			}
-#endif
+		npgs = fbatch_at_npgs(fbatch, i);
+		for (pg = 0; pg < npgs; pg++) {
+			page = fbatch_at_pg(fbatch, i, pg);
+			__set_page_dirty_nobuffers(page);
 		}
-		EXIT;
-	}
 #endif
-
+	}
+	EXIT;
+#else
 	/* account_page_dirtied is available directly or via kallsyms */
-#ifdef HAVE_KALLSYMS_LOOKUP_NAME
 	for (pgno = i = 0; i < count; i++) {
 		npgs = fbatch_at_npgs(fbatch, i);
 		for (pg = 0; pg < npgs; pg++) {
@@ -1082,7 +1052,7 @@ static void vvp_set_batch_dirty(struct folio_batch *fbatch)
 		}
 	}
 
-	ll_xa_lock_irqsave(&mapping->i_pages, flags);
+	xa_lock_irqsave(&mapping->i_pages, flags);
 
 	/* Notes on differences with __set_page_dirty_nobuffers:
 	 * 1. We don't need to call page_mapping because we know this is a page
@@ -1105,12 +1075,14 @@ static void vvp_set_batch_dirty(struct folio_batch *fbatch)
 				 "all pages must have the same mapping.  page %px, mapping %px, first mapping %px\n",
 				 page, page->mapping, mapping);
 			WARN_ON_ONCE(!PagePrivate(page) && !PageUptodate(page));
-			ll_account_page_dirtied(page, mapping);
+			compat_account_page_dirtied(page, mapping);
+			__xa_set_mark(&mapping->i_pages, folio_index_page(page),
+				      PAGECACHE_TAG_DIRTY);
 			dirtied++;
 			folio_memcg_unlock_page(page);
 		}
 	}
-	ll_xa_unlock_irqrestore(&mapping->i_pages, flags);
+	xa_unlock_irqrestore(&mapping->i_pages, flags);
 
 	CDEBUG(D_VFSTRACE, "mapping %p, count %d, dirtied %d\n", mapping,
 	       count, dirtied);
@@ -1181,7 +1153,8 @@ static bool page_list_sanity_check(struct cl_object *obj,
 }
 
 /* Return how many bytes have queued or written */
-int vvp_io_write_commit(const struct lu_env *env, struct cl_io *io)
+int vvp_io_write_commit(const struct lu_env *env, struct cl_io *io,
+			enum cl_io_priority prio)
 {
 	struct cl_object *obj = io->ci_obj;
 	struct inode *inode = vvp_object_inode(obj);
@@ -1197,8 +1170,9 @@ int vvp_io_write_commit(const struct lu_env *env, struct cl_io *io)
 	if (npages == 0)
 		RETURN(0);
 
-	CDEBUG(D_VFSTRACE, "commit async pages: %d, from %d, to %d\n",
-		npages, vio->u.readwrite.vui_from, vio->u.readwrite.vui_to);
+	CDEBUG(D_VFSTRACE, "commit async pages: %d, from %d, to %d prio %d\n",
+		npages, vio->u.readwrite.vui_from, vio->u.readwrite.vui_to,
+		prio);
 
 	LASSERT(page_list_sanity_check(obj, queue));
 
@@ -1206,7 +1180,7 @@ int vvp_io_write_commit(const struct lu_env *env, struct cl_io *io)
 	rc = cl_io_commit_async(env, io, queue,
 				vio->u.readwrite.vui_from,
 				vio->u.readwrite.vui_to,
-				write_commit_callback);
+				write_commit_callback, prio);
 	npages -= queue->pl_nr; /* already committed pages */
 	if (npages > 0) {
 		/* calculate how many bytes were written */
@@ -1230,7 +1204,7 @@ int vvp_io_write_commit(const struct lu_env *env, struct cl_io *io)
 	LASSERT(ergo(rc == 0, queue->pl_nr == 0));
 
 	/* out of quota, try sync write */
-	if (rc == -EDQUOT && !cl_io_is_mkwrite(io)) {
+	if ((rc == -EDQUOT && !cl_io_is_mkwrite(io)) || prio > IO_PRIO_NORMAL) {
 		struct ll_inode_info *lli = ll_i2info(inode);
 
 		rc = vvp_io_commit_sync(env, io, queue,
@@ -1281,10 +1255,8 @@ static int vvp_io_write_start(const struct lu_env *env,
 	size_t ci_bytes = io->ci_bytes;
 	struct iov_iter iter;
 	size_t written = 0;
-	int flags;
 
 	ENTRY;
-
 	trunc_sem_down_read(&lli->lli_trunc_sem);
 
 	if (!can_populate_pages(env, io, inode))
@@ -1296,8 +1268,18 @@ static int vvp_io_write_start(const struct lu_env *env,
 		 * out-of-order writes.
 		 */
 		ll_merge_attr(env, inode);
-		pos = io->u.ci_wr.wr.crw_pos = i_size_read(inode);
-		vio->vui_iocb->ki_pos = pos;
+		io->u.ci_wr.wr.crw_pos = i_size_read(inode);
+
+		if (io->u.ci_wr.wr_append_lockpos <
+		    io->u.ci_wr.wr.crw_pos + io->u.ci_wr.wr.crw_bytes) {
+			CDEBUG(D_VFSTRACE, "size changed during append old size %llu, new size %llu, bytes %lu\n",
+			       pos, io->u.ci_wr.wr.crw_pos, io->ci_bytes);
+			if (io->ci_bytes == 0)
+				io->ci_need_restart = 1;
+			RETURN(0);
+		}
+
+		pos = vio->vui_iocb->ki_pos = io->u.ci_wr.wr.crw_pos;
 	} else {
 		LASSERTF(vio->vui_iocb->ki_pos == pos,
 			 "ki_pos %lld [%lld, %lld)\n",
@@ -1305,8 +1287,9 @@ static int vvp_io_write_start(const struct lu_env *env,
 			 pos, pos + crw_bytes);
 	}
 
-	CDEBUG(D_VFSTRACE, DNAME": write [%llu, %llu)\n",
-	       encode_fn_file(file), pos, pos + crw_bytes);
+	CDEBUG(D_VFSTRACE, DNAME": write [%llu, %llu) append %d append lockpos "
+	       "%llu\n", encode_fn_file(file), pos, pos + crw_bytes,
+	       cl_io_is_append(io), io->u.ci_wr.wr_append_lockpos);
 
 	/* The maximum Lustre file size is variable, based on the OST maximum
 	 * object size and number of stripes.  This needs another check in
@@ -1329,8 +1312,7 @@ static int vvp_io_write_start(const struct lu_env *env,
 	if (CFS_FAIL_CHECK(OBD_FAIL_LLITE_IMUTEX_NOSEC) && lock_inode)
 		RETURN(-EINVAL);
 
-	flags = iocb_ki_flags_get(file, vio->vui_iocb);
-	if (!iocb_ki_flags_check(flags, DIRECT)) {
+	if (!iocb_ki_flags_check(vio->vui_iocb, IOCB_DIRECT)) {
 		result = cl_io_lru_reserve(env, io, pos, crw_bytes);
 		if (result)
 			RETURN(result);
@@ -1352,29 +1334,18 @@ static int vvp_io_write_start(const struct lu_env *env,
 		iter = *vio->vui_iter;
 
 		if (unlikely(lock_inode))
-			ll_inode_lock(inode);
+			inode_lock(inode);
 		result = __generic_file_write_iter(vio->vui_iocb, &iter);
 		if (unlikely(lock_inode))
-			ll_inode_unlock(inode);
+			inode_unlock(inode);
 
 		written = result;
 		if (result > 0)
-#ifdef HAVE_GENERIC_WRITE_SYNC_2ARGS
 			result = generic_write_sync(vio->vui_iocb, result);
-#else
-		{
-			ssize_t err;
-
-			err = generic_write_sync(vio->vui_iocb->ki_filp, pos,
-						 result);
-			if (err < 0 && result > 0)
-				result = err;
-		}
-#endif
 	}
 
 	if (result > 0) {
-		result = vvp_io_write_commit(env, io);
+		result = vvp_io_write_commit(env, io, IO_PRIO_NORMAL);
 		/* Simulate short commit */
 		if (CFS_FAULT_CHECK(OBD_FAIL_LLITE_SHORT_COMMIT)) {
 			vio->u.readwrite.vui_written >>= 1;
@@ -1453,7 +1424,7 @@ static int vvp_io_kernel_fault(struct vvp_fault_io *cfio)
 	if (vmf->page) {
 		/* success, vmpage is locked */
 		LL_CDEBUG_PAGE(D_PAGE, vmf->page, "got addr %p type NOPAGE\n",
-			       get_vmf_address(vmf));
+			       (void *)vmf->address);
 		if (unlikely(!(cfio->ft_flags & VM_FAULT_LOCKED))) {
 			lock_page(vmf->page);
 			cfio->ft_flags |= VM_FAULT_LOCKED;
@@ -1465,12 +1436,12 @@ static int vvp_io_kernel_fault(struct vvp_fault_io *cfio)
 	}
 
 	if (cfio->ft_flags & VM_FAULT_SIGBUS) {
-		CDEBUG(D_PAGE, "got addr %p - SIGBUS\n", get_vmf_address(vmf));
+		CDEBUG(D_PAGE, "got addr %p - SIGBUS\n", (void *)vmf->address);
 		return -EFAULT;
 	}
 
 	if (cfio->ft_flags & VM_FAULT_OOM) {
-		CDEBUG(D_PAGE, "got addr %p - OOM\n", get_vmf_address(vmf));
+		CDEBUG(D_PAGE, "got addr %p - OOM\n", (void *)vmf->address);
 		return -ENOMEM;
 	}
 
@@ -1612,7 +1583,8 @@ static int vvp_io_fault_start(const struct lu_env *env,
 			 * still have chance to detect it.
 			 */
 			result = cl_io_commit_async(env, io, plist, 0, to,
-						    mkwrite_commit_callback);
+						    mkwrite_commit_callback,
+						    IO_PRIO_NORMAL);
 			/* Have overquota flag, trying sync write to check
 			 * whether indeed out of quota
 			 */
@@ -1626,7 +1598,8 @@ static int vvp_io_fault_start(const struct lu_env *env,
 					cl_page_list_add(plist, page, true);
 					result = cl_io_commit_async(env, io,
 						plist, 0, to,
-						mkwrite_commit_callback);
+						mkwrite_commit_callback,
+						IO_PRIO_NORMAL);
 					io->ci_noquota = 0;
 				} else {
 					cl_page_put(env, page);
@@ -1709,9 +1682,9 @@ static void vvp_io_fsync_end(const struct lu_env *env,
 		ll_merge_attr_try(env, inode);
 }
 
-static int vvp_io_read_ahead(const struct lu_env *env,
-			     const struct cl_io_slice *ios,
-			     pgoff_t start, struct cl_read_ahead *ra)
+static int vvp_io_read_ahead_prep(const struct lu_env *env,
+				  const struct cl_io_slice *ios,
+				  pgoff_t start, struct cl_read_ahead *ra)
 {
 	int result = 0;
 
@@ -1721,7 +1694,8 @@ static int vvp_io_read_ahead(const struct lu_env *env,
 	    ios->cis_io->ci_type == CIT_FAULT) {
 		struct vvp_io *vio = cl2vvp_io(env, ios);
 
-		if (unlikely(vio->vui_fd->fd_flags & LL_FILE_GROUP_LOCKED)) {
+		if (unlikely(vio->vui_fd->lfd_file_flags &
+			     LL_FILE_GROUP_LOCKED)) {
 			ra->cra_end_idx = CL_PAGE_EOF;
 			result = 1; /* no need to call down */
 		}
@@ -1749,7 +1723,7 @@ static int vvp_io_lseek_start(const struct lu_env *env,
 	struct inode *inode = vvp_object_inode(io->ci_obj);
 	__u64 start = io->u.ci_lseek.ls_start;
 
-	ll_inode_lock(inode);
+	inode_lock(inode);
 	inode_dio_wait(inode);
 
 	/* At the moment we have DLM lock so just update inode
@@ -1772,7 +1746,7 @@ static void vvp_io_lseek_end(const struct lu_env *env,
 	if (io->u.ci_lseek.ls_result > i_size_read(inode))
 		io->u.ci_lseek.ls_result = -ENXIO;
 
-	ll_inode_unlock(inode);
+	inode_unlock(inode);
 }
 
 static const struct cl_io_operations vvp_io_ops = {
@@ -1829,7 +1803,7 @@ static const struct cl_io_operations vvp_io_ops = {
 			.cio_end       = vvp_io_lseek_end,
 		},
 	},
-	.cio_read_ahead = vvp_io_read_ahead
+	.cio_read_ahead_prep	= vvp_io_read_ahead_prep,
 };
 
 int vvp_io_init(const struct lu_env *env, struct cl_object *obj,
@@ -1887,8 +1861,16 @@ int vvp_io_init(const struct lu_env *env, struct cl_object *obj,
 	/* Enqueue layout lock and get layout version. We need to do this
 	 * even for operations requiring to open file, such as read and write,
 	 * because it might not grant layout lock in IT_OPEN.
+	 *
+	 * However, fsync operations should NOT acquire layout locks because:
+	 * 1. fsync only flushes already-mapped pages to disk
+	 * 2. The mapping from file offsets to OST objects already occurred
+	 *    during the original write operations that populated the page cache
+	 * 3. Layout changes should only affect NEW writes, not existing cache
+	 * 4. Acquiring layout locks during fsync can cause deadlocks when
+	 *    fsync is called from within write operations (EX-12989)
 	 */
-	if (result == 0 && !io->ci_ignore_layout) {
+	if (result == 0 && !io->ci_ignore_layout && io->ci_type != CIT_FSYNC) {
 		result = ll_layout_refresh(inode, &vio->vui_layout_gen);
 		if (result == -ENOENT)
 			/* If the inode on MDS has been removed, but the objects

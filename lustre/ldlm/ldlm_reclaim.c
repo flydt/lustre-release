@@ -35,7 +35,7 @@
  * to 0, the feature is disabled.
  */
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 
 /* Lock count is stored in ldlm_reclaim_threshold & ldlm_lock_limit */
 __u64 ldlm_reclaim_threshold;
@@ -167,6 +167,7 @@ static void ldlm_reclaim_res(struct ldlm_namespace *ns, int *count,
 	struct ldlm_reclaim_cb_data	data;
 	int				idx, type, start;
 	int				rc;
+
 	ENTRY;
 
 	LASSERT(*count != 0);
@@ -195,8 +196,8 @@ static void ldlm_reclaim_res(struct ldlm_namespace *ns, int *count,
 	cfs_hash_for_each_nolock(ns->ns_rs_hash, ldlm_reclaim_lock_cb, &data,
 				 start);
 
-	CDEBUG(D_DLMTRACE, "NS(%s): %d locks to be reclaimed, found %d/%d "
-	       "locks.\n", ldlm_ns_name(ns), *count, data.rcd_added,
+	CDEBUG(D_DLMTRACE, "NS(%s): %d locks to be reclaimed, found %d/%d locks.\n",
+	       ldlm_ns_name(ns), *count, data.rcd_added,
 	       data.rcd_total);
 
 	LASSERTF(*count >= data.rcd_added, "count:%d, added:%d\n", *count,
@@ -242,6 +243,7 @@ static void ldlm_reclaim_ns(void)
 	enum ldlm_side		 ns_cli = LDLM_NAMESPACE_SERVER;
 	s64 age_ns;
 	bool			 skip = true;
+
 	ENTRY;
 
 	if (!atomic_add_unless(&ldlm_nr_reclaimer, 1, 1)) {
@@ -386,11 +388,7 @@ int ldlm_reclaim_setup(void)
 	ldlm_last_reclaim_age_ns = LDLM_RECLAIM_AGE_MAX;
 	ldlm_last_reclaim_time = ktime_get();
 
-#ifdef HAVE_PERCPU_COUNTER_INIT_GFP_FLAG
 	return percpu_counter_init(&ldlm_granted_total, 0, GFP_KERNEL);
-#else
-	return percpu_counter_init(&ldlm_granted_total, 0);
-#endif
 }
 
 void ldlm_reclaim_cleanup(void)
@@ -398,7 +396,7 @@ void ldlm_reclaim_cleanup(void)
 	percpu_counter_destroy(&ldlm_granted_total);
 }
 
-#else /* HAVE_SERVER_SUPPORT */
+#else /* CONFIG_LUSTRE_FS_SERVER */
 
 bool ldlm_reclaim_full(void)
 {
@@ -422,4 +420,4 @@ void ldlm_reclaim_cleanup(void)
 {
 }
 
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */

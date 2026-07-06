@@ -13,7 +13,6 @@
 
 #define DEBUG_SUBSYSTEM S_RPC
 
-#include <libcfs/libcfs.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <obd_class.h>
@@ -47,7 +46,7 @@ void request_out_callback(struct lnet_event *ev)
 	sptlrpc_request_out_callback(req);
 
 	spin_lock(&req->rq_lock);
-	req->rq_real_sent = ktime_get_real_seconds();
+	req->rq_real_sent_ns = ktime_get_real();
 	req->rq_req_unlinked = 1;
 	/* reply_in_callback happened before request_out_callback? */
 	if (req->rq_reply_unlinked)
@@ -188,9 +187,9 @@ void client_bulk_callback(struct lnet_event *ev)
 	    CFS_FAIL_ONCE))
 		ev->status = -EIO;
 
-	CDEBUG_LIMIT((ev->status == 0) ? D_NET : D_ERROR,
-		     "event type %d, status %d, desc %p\n",
-		     ev->type, ev->status, desc);
+	CDEBUG((ev->status == 0) ? D_NET : D_ERROR,
+		     "event type %d, status %d, req %p desc %p mbits %llu\n",
+		     ev->type, ev->status, desc->bd_req, desc, ev->match_bits);
 
 	spin_lock(&desc->bd_lock);
 	req = desc->bd_req;
@@ -434,22 +433,26 @@ void reply_out_callback(struct lnet_event *ev)
 	EXIT;
 }
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 /*
  * Server's bulk completion callback
  */
 void server_bulk_callback(struct lnet_event *ev)
 {
-	struct ptlrpc_cb_id     *cbid = ev->md_user_ptr;
+	struct ptlrpc_cb_id *cbid = ev->md_user_ptr;
 	struct ptlrpc_bulk_desc *desc = cbid->cbid_arg;
 	ENTRY;
 
-	LASSERT(ev->type == LNET_EVENT_SEND ||
-		ev->type == LNET_EVENT_UNLINK ||
-		(ptlrpc_is_bulk_put_source(desc->bd_type) &&
-		 ev->type == LNET_EVENT_ACK) ||
-		(ptlrpc_is_bulk_get_sink(desc->bd_type) &&
-		 ev->type == LNET_EVENT_REPLY));
+	if (ev->type != LNET_EVENT_SEND &&
+	    ev->type != LNET_EVENT_UNLINK &&
+	    !(ptlrpc_is_bulk_put_source(desc->bd_type) &&
+	      ev->type == LNET_EVENT_ACK) &&
+	    !(ptlrpc_is_bulk_get_sink(desc->bd_type) &&
+	      ev->type == LNET_EVENT_REPLY)) {
+		ev->status = -EBADMSG;
+		CERROR("Unexpected event type: %d for %d\n",
+		       ev->type, desc->bd_type);
+	}
 
 	CDEBUG_LIMIT((ev->status == 0) ? D_NET : D_ERROR,
 		     "event type %d, status %d, desc %p\n",
@@ -495,11 +498,10 @@ static void ptlrpc_master_callback(struct lnet_event *ev)
 		callback == reply_in_callback ||
 		callback == client_bulk_callback ||
 		callback == request_in_callback ||
-		callback == reply_out_callback
-#ifdef HAVE_SERVER_SUPPORT
-		|| callback == server_bulk_callback
+#ifdef CONFIG_LUSTRE_FS_SERVER
+		callback == server_bulk_callback ||
 #endif
-		);
+		callback == reply_out_callback);
 
 	callback(ev);
 	if (ev->unlinked)

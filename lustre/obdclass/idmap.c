@@ -54,48 +54,6 @@ int lustre_groups_search(struct group_info *group_info, gid_t grp)
 }
 EXPORT_SYMBOL(lustre_groups_search);
 
-void lustre_groups_from_list(struct group_info *ginfo, gid_t *glist)
-{
-#ifdef HAVE_GROUP_INFO_GID
-	memcpy(ginfo->gid, glist, ginfo->ngroups * sizeof(__u32));
-#else
-	int i;
-	int count = ginfo->ngroups;
-
-	/* fill group_info from gid array */
-	for (i = 0; i < ginfo->nblocks && count > 0; i++) {
-		int cp_count = min(CFS_NGROUPS_PER_BLOCK, count);
-		int off = i * CFS_NGROUPS_PER_BLOCK;
-		int len = cp_count * sizeof(*glist);
-
-		memcpy(ginfo->blocks[i], glist + off, len);
-		count -= cp_count;
-	}
-#endif
-}
-EXPORT_SYMBOL(lustre_groups_from_list);
-
-void lustre_list_from_groups(gid_t *glist, struct group_info *ginfo)
-{
-#ifdef HAVE_GROUP_INFO_GID
-	memcpy(glist, ginfo->gid, ginfo->ngroups * sizeof(__u32));
-#else
-	int i;
-	int count = ginfo->ngroups;
-
-	/* fill in gid array from group_info */
-	for (i = 0; i < ginfo->nblocks && count > 0; i++) {
-		int cp_count = min(CFS_NGROUPS_PER_BLOCK, count);
-		int off = i * CFS_NGROUPS_PER_BLOCK;
-		int len = cp_count * sizeof(*glist);
-
-		memcpy(glist + off, ginfo->blocks[i], len);
-		count -= cp_count;
-	}
-#endif
-}
-EXPORT_SYMBOL(lustre_list_from_groups);
-
 /* groups_sort() is copied from linux kernel! */
 /* a simple shell-metzner sort */
 void lustre_groups_sort(struct group_info *group_info)
@@ -185,3 +143,40 @@ int has_proper_groups(struct lu_ucred *ucred)
 	return rc;
 }
 EXPORT_SYMBOL(has_proper_groups);
+
+int lustre_print_groups(struct group_info *group_info)
+{
+	int g;
+
+	if (!group_info)
+		RETURN(-ENOENT);
+
+	get_group_info(group_info);
+	CDEBUG(D_INFO, "ngroups=%u\n", group_info->ngroups);
+	for (g = 0; g < group_info->ngroups; g++)
+		CDEBUG(D_INFO, "group[%u] = %u\n", g,
+		       from_kgid(&init_user_ns, group_info->gid[g]));
+	put_group_info(group_info);
+
+	RETURN(0);
+}
+EXPORT_SYMBOL(lustre_print_groups);
+
+int lustre_print_ucred(struct lu_ucred *ucred)
+{
+	struct group_info *group_info;
+
+	if (unlikely(!ucred))
+		return -EINVAL;
+
+	group_info = ucred->uc_ginfo;
+	if (!group_info && ucred->uc_identity)
+		group_info = ucred->uc_identity->mi_ginfo;
+
+	CDEBUG(D_INFO, "uid=%u gid=%u fsuid=%u fsgid=%u supp=%u/%u ginfo=%px\n",
+	       ucred->uc_uid, ucred->uc_gid, ucred->uc_fsuid, ucred->uc_fsgid,
+	       ucred->uc_suppgids[0], ucred->uc_suppgids[1], group_info);
+
+	return lustre_print_groups(group_info);
+}
+EXPORT_SYMBOL(lustre_print_ucred);

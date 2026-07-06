@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: LGPL-2.1 */
+/* SPDX-License-Identifier: LGPL-2.1+ */
 
 /*
  * Copyright (c) 2015, James Simmons <jsimmons@infradead.org>
@@ -26,7 +26,7 @@ lustre_ni_show_tunables(struct cYAML *lnd_tunables,
 			__u32 net_type,
 			struct lnet_lnd_tunables *lnd, bool backup);
 
-void
+bool
 lustre_yaml_extract_lnd_tunables(struct cYAML *tree,
 				 __u32 net_type,
 				 struct lnet_lnd_tunables *tun);

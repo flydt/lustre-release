@@ -15,11 +15,14 @@
 #define __OBD_H
 
 #include <linux/fs.h>
+#include <lustre_compat/linux/folio.h>
 #include <linux/posix_acl.h>
 #include <linux/kobject.h>
+#include <lustre_compat/linux/mm.h>
 #include <linux/spinlock.h>
 #include <linux/sysfs.h>
 #include <lustre_compat/linux/xarray.h>
+#include <lustre_compat/linux/linux-misc.h>
 
 #include <uapi/linux/lustre/lustre_idl.h>
 #include <lustre_lib.h>
@@ -81,7 +84,7 @@ struct obd_type {
 	const struct md_ops	*typ_md_ops;
 	struct proc_dir_entry	*typ_procroot;
 	struct dentry		*typ_debugfs_entry;
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	bool			 typ_sym_filter;
 #endif
 	atomic_t		 typ_refcnt;
@@ -93,14 +96,35 @@ struct obd_type {
 
 struct brw_page {
 	u64		 bp_off;
-	struct page	*bp_page;
+	struct folio	*bp_folio;
 	u32		 bp_count;
 	u32		 bp_flag;
 	/* used for encryption: difference with offset in clear text page */
 	u16		 bp_off_diff;
 	/* used for encryption: difference with count in clear text page */
 	u16		 bp_count_diff;
+	s32		 bp_pgno;
 } __attribute__((packed));
+
+static inline u32 brw_page_offset(struct brw_page *brwpg)
+{
+	return brwpg->bp_off & ~PAGE_MASK;
+}
+
+static inline size_t brw_pgno(struct brw_page *brwpg)
+{
+	return brwpg->bp_pgno > 0 ? brwpg->bp_pgno : 0;
+}
+
+static inline void *brw_kmap_local(struct brw_page *brwpg)
+{
+	return kmap_local_folio(brwpg->bp_folio, brw_pgno(brwpg) << PAGE_SHIFT);
+}
+
+static inline struct page *brw_folio_page(struct brw_page *brwpg)
+{
+	return folio_page(brwpg->bp_folio, brw_pgno(brwpg));
+}
 
 struct timeout_item {
 	enum timeout_event ti_event;
@@ -258,7 +282,8 @@ struct client_obd {
 	/* just a sum of the loi/lop pending numbers to be exported by /proc */
 	atomic_t		cl_pending_w_pages;
 	atomic_t		cl_pending_r_pages;
-	u32			cl_max_pages_per_rpc;
+	u32			cl_max_pages_per_rpc_read;
+	u32			cl_max_pages_per_rpc_write;
 	u32			cl_max_rpcs_in_flight;
 	u32			cl_max_short_io_bytes;
 	ktime_t			cl_stats_init;
@@ -268,6 +293,12 @@ struct client_obd {
 	struct obd_histogram	cl_write_page_hist;
 	struct obd_histogram	cl_read_offset_hist;
 	struct obd_histogram	cl_write_offset_hist;
+	struct obd_histogram	cl_read_io_latency_hist;
+	struct obd_histogram	cl_write_io_latency_hist;
+	/* RPC latency histograms by size (in pages) stores "binary usec" */
+	ktime_t			cl_io_latency_stats_init;
+	struct obd_histogram	*cl_read_io_latency_by_size;
+	struct obd_histogram	*cl_write_io_latency_by_size;
 	ktime_t			cl_batch_stats_init;
 	struct obd_histogram	cl_batch_rpc_hist;
 
@@ -355,8 +386,8 @@ struct client_obd {
 	atomic_t		cl_resends; /* resend count */
 
 	/* ptlrpc work for writeback in ptlrpcd context */
-	void			*cl_writeback_work;
-	void			*cl_lru_work;
+	struct work_struct	cl_writeback_work;
+	struct work_struct	cl_lru_work;
 	struct mutex		cl_quota_mutex;
 	/* quota IDs/types that have exceeded quota */
 	struct xarray		cl_quota_exceeded_ids;
@@ -414,10 +445,9 @@ struct lov_obd {
 
 #define lmv_tgt_desc lu_tgt_desc
 
-struct qos_exclude_prefix {
+struct qos_exclude_pattern {
 	struct list_head	qep_list;
-	struct rhash_head	qep_hash;
-	char			qep_name[NAME_MAX + 1];
+	char			qep_name[NAME_MAX + 3]; /* +2 for ".*" */
 };
 
 struct lmv_obd {
@@ -462,6 +492,8 @@ struct niobuf_local {
 	__u16		lnb_locked:1;
 	/* this lnb corresponds to a hole in the file */
 	__u16		lnb_hole:1;
+	/* page from TLS for dio/fake rw */
+	__u16		lnb_dio:1;
 };
 
 struct tgt_thread_big_cache {
@@ -474,6 +506,7 @@ struct tgt_thread_big_cache {
 #define LUSTRE_MDD_NAME		"mdd"
 #define LUSTRE_OSD_LDISKFS_NAME	"osd-ldiskfs"
 #define LUSTRE_OSD_ZFS_NAME	"osd-zfs"
+#define LUSTRE_OSD_WBCFS_NAME	"osd-wbcfs"
 #define LUSTRE_VVP_NAME		"vvp"
 #define LUSTRE_LMV_NAME		"lmv"
 #define LUSTRE_SLP_NAME		"slp"
@@ -502,6 +535,8 @@ struct tgt_thread_big_cache {
 #define LUSTRE_OSS_OBDNAME "OSS"
 #define LUSTRE_MGS_OBDNAME "MGS"
 #define LUSTRE_MGC_OBDNAME "MGC"
+
+#define LUSTRE_ECHO_UUID "ECHO_UUID"
 
 static inline int is_lwp_on_mdt(char *name)
 {
@@ -605,6 +640,13 @@ enum {
 	OBDF_RECOVERING,	/* there are recoverable clients */
 	OBDF_ABORT_RECOVERY,	/* abort client and MDT recovery */
 	OBDF_ABORT_MDT_RECOVERY, /* abort recovery between MDTs */
+	OBDF_VERSION_RECOV,	/* obd uses version checking */
+	OBDF_REPLAYABLE,	/* recovery enabled; inform clients */
+	OBDF_NO_RECOV,		/* fail instead of retry messages */
+	OBDF_STOPPING,		/* started cleanup */
+	OBDF_STARTING,		/* started setup */
+	OBDF_FORCE,		/* cleanup with > 0 obd refcount */
+	OBDF_FAIL,		/* cleanup with failover */
 	OBDF_NUM_FLAGS,
 };
 
@@ -624,13 +666,6 @@ struct obd_device {
 	/* bitfield modification is protected by obd_dev_lock */
 	DECLARE_BITMAP(obd_flags, OBDF_NUM_FLAGS);
 	unsigned long
-		obd_version_recov:1,	/* obd uses version checking */
-		obd_replayable:1,	/* recovery enabled; inform clients */
-		obd_no_recov:1,		/* fail instead of retry messages */
-		obd_stopping:1,		/* started cleanup */
-		obd_starting:1,		/* started setup */
-		obd_force:1,		/* cleanup with > 0 obd refcount */
-		obd_fail:1,		/* cleanup with failover */
 		obd_no_conn:1,		/* deny new connections */
 		obd_inactive:1,		/* device active/inactive
 					 * (for /proc/status only!!) */
@@ -640,7 +675,7 @@ struct obd_device {
 		obd_dynamic_nids:1,	/* Allow dynamic NIDs on device */
 		obd_read_only:1,	/* device is read-only */
 		obd_need_scrub:1;	/* device need scrub */
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	/* no committed-transno notification */
 	unsigned long			obd_no_transno:1;
 #endif
@@ -654,7 +689,7 @@ struct obd_device {
 	/* nid-export hash body */
 	struct rhltable			obd_nid_hash;
 	/* nid stats body */
-	struct cfs_hash             *obd_nid_stats_hash;
+	struct rhltable			obd_nid_stats_hash;
 	/* client_generation-export hash body */
 	struct cfs_hash		    *obd_gen_hash;
 	struct list_head	obd_nid_stats;
@@ -798,7 +833,7 @@ extern unsigned int ldlm_enqueue_min;
 
 int obd_uuid_add(struct obd_device *obd, struct obd_export *export);
 void obd_uuid_del(struct obd_device *obd, struct obd_export *export);
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 struct obd_export *obd_uuid_lookup(struct obd_device *obd,
 				   struct obd_uuid *uuid);
 
@@ -808,23 +843,29 @@ int obd_nid_export_for_each(struct obd_device *obd, struct lnet_nid *nid,
 int obd_nid_add(struct obd_device *obd, struct obd_export *exp);
 void obd_nid_del(struct obd_device *obd, struct obd_export *exp);
 
+struct nid_stat *obd_nid_stats_get(struct obd_device *obd, struct nid_stat *ns);
+void obd_nid_stats_put(struct obd_device *obd, struct nid_stat *ns);
+
 /* both client and MDT recovery are aborted, or MDT is stopping  */
 static inline bool obd_recovery_abort(struct obd_device *obd)
 {
-	return obd->obd_stopping || test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags);
+	return test_bit(OBDF_STOPPING, obd->obd_flags) ||
+	       test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags);
 }
 
 /* MDT recovery is aborted, or MDT is stopping */
 static inline bool obd_mdt_recovery_abort(struct obd_device *obd)
 {
-	return obd->obd_stopping || test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags) ||
-		test_bit(OBDF_ABORT_MDT_RECOVERY, obd->obd_flags);
+	return test_bit(OBDF_STOPPING, obd->obd_flags) ||
+	       test_bit(OBDF_ABORT_RECOVERY, obd->obd_flags) ||
+	       test_bit(OBDF_ABORT_MDT_RECOVERY, obd->obd_flags);
 }
 #endif
 
 /* get/set_info keys */
 #define KEY_ASYNC               "async"
 #define KEY_CHANGELOG_CLEAR     "changelog_clear"
+#define KEY_CHANGELOG_USER	"changelog_user"
 #define KEY_FID2PATH            "fid2path"
 #define KEY_CHECKSUM            "checksum"
 #define KEY_CLEAR_FS            "clear_fs"
@@ -843,6 +884,7 @@ static inline bool obd_mdt_recovery_abort(struct obd_device *obd)
 #define KEY_MGSSEC              "mgssec"
 #define KEY_READ_ONLY           "read-only"
 #define KEY_REGISTER_TARGET     "register_target"
+#define KEY_NID_NOTIFY		"nid_notify"
 #define KEY_SET_FS              "set_fs"
 #define KEY_TGT_COUNT           "tgt_count"
 /*      KEY_SET_INFO in lustre_idl.h */
@@ -851,13 +893,14 @@ static inline bool obd_mdt_recovery_abort(struct obd_device *obd)
 #define KEY_CACHE_LRU_SHRINK	"cache_lru_shrink"
 #define KEY_OSP_CONNECTED	"osp_connected"
 #define KEY_FID2IDX		"fid2idx"
-#define KEY_MAX_PAGES_PER_RPC	"max_pages_per_rpc"
+
+#define KEY_MAX_PAGES_PER_RPC_READ      "max_pages_per_rpc_read"
+#define KEY_MAX_PAGES_PER_RPC_WRITE     "max_pages_per_rpc_write"
 
 #define KEY_UNEVICT_CACHE_SHRINK	"unevict_cache_shrink"
 
 /* Flags for op_xvalid */
 enum op_xvalid {
-	OP_XVALID_CTIME_SET	= BIT(0),	/* 0x0001 */
 	OP_XVALID_BLOCKS	= BIT(1),	/* 0x0002 */
 	OP_XVALID_OWNEROVERRIDE	= BIT(2),	/* 0x0004 */
 	OP_XVALID_FLAGS		= BIT(3),	/* 0x0008 */
@@ -1011,6 +1054,8 @@ struct md_op_data {
 	__u32			op_stripe_index;
 	/* Archive ID for PCC attach */
 	__u32			op_archive_id;
+	/* layout version to pass from lmv to mdc level */
+	__u32			op_layout_version;
 };
 
 struct md_readdir_info {
@@ -1118,10 +1163,6 @@ struct obd_ops {
 				__u32 keylen, void *key,
 				__u32 vallen, void *val,
 				struct ptlrpc_request_set *set);
-	int (*o_setup)(struct obd_device *obd, struct lustre_cfg *cfg);
-	int (*o_precleanup)(struct obd_device *obd);
-	int (*o_cleanup)(struct obd_device *obd);
-	int (*o_process_config)(struct obd_device *obd, size_t len, void *data);
 	int (*o_postrecov)(struct obd_device *obd);
 	int (*o_add_conn)(struct obd_import *imp, struct obd_uuid *uuid,
 			  int priority);
@@ -1233,7 +1274,7 @@ struct md_open_data {
 	struct obd_client_handle	*mod_och;
 	struct ptlrpc_request		*mod_open_req;
 	struct ptlrpc_request		*mod_close_req;
-	atomic_t			 mod_refcount;
+	struct kref			 mod_refcount;
 	bool				 mod_is_create;
 };
 
@@ -1296,7 +1337,7 @@ struct md_ops {
 
 	int (*m_read_page)(struct obd_export *exp, struct md_op_data *op_data,
 			   struct md_readdir_info *mrinfo, __u64 hash_offset,
-			   struct page **ppage);
+			   struct folio **pfolio);
 
 	int (*m_unlink)(struct obd_export *exp, struct md_op_data *op_data,
 			struct ptlrpc_request **req);
@@ -1384,6 +1425,10 @@ struct md_ops {
 			     bool wait);
 	int (*m_batch_add)(struct obd_export *exp, struct lu_batch *bh,
 			   struct md_op_item *item);
+	int (*m_dirpage_add)(struct obd_export *exp, struct inode *inode,
+			     struct folio **pool,
+			     unsigned int cfs_pgs, unsigned int lu_pgs,
+			     int is_hash64);
 };
 
 static inline struct md_open_data *obd_mod_alloc(void)
@@ -1393,21 +1438,9 @@ static inline struct md_open_data *obd_mod_alloc(void)
 	OBD_ALLOC_PTR(mod);
 	if (mod == NULL)
 		return NULL;
-	atomic_set(&mod->mod_refcount, 1);
+	kref_init(&mod->mod_refcount);
 	return mod;
 }
-
-#define obd_mod_get(mod) atomic_inc(&(mod)->mod_refcount)
-#define obd_mod_put(mod)						\
-({									\
-	if (atomic_dec_and_test(&(mod)->mod_refcount)) {		\
-		if ((mod)->mod_open_req)				\
-			ptlrpc_req_finished((mod)->mod_open_req);	\
-		if ((mod)->mod_close_req)				\
-			ptlrpc_req_finished((mod)->mod_close_req);	\
-		OBD_FREE_PTR(mod);					\
-	}								\
-})
 
 void obdo_from_inode(struct obdo *dst, struct inode *src, u64 valid);
 void obdo_set_parent_fid(struct obdo *dst, const struct lu_fid *parent);
@@ -1475,10 +1508,17 @@ bad_format:
 	return false;
 }
 
-static inline int cli_brw_size(struct obd_device *obd)
+static inline __u32 cli_brw_size(struct obd_device *obd)
 {
+	struct client_obd *cli;
+	__u32 max_ppr;
+
 	LASSERT(obd != NULL);
-	return obd->u.cli.cl_max_pages_per_rpc << PAGE_SHIFT;
+	cli = &(obd->u.cli);
+	max_ppr = max(cli->cl_max_pages_per_rpc_read,
+		     cli->cl_max_pages_per_rpc_write);
+
+	return max_ppr << PAGE_SHIFT;
 }
 
 /*
@@ -1495,14 +1535,14 @@ static inline void client_adjust_max_dirty(struct client_obd *cli)
 			(OSC_MAX_DIRTY_DEFAULT * 1024 * 1024) >> PAGE_SHIFT;
 	} else {
 		unsigned long dirty_max = cli->cl_max_rpcs_in_flight *
-					  cli->cl_max_pages_per_rpc;
+					  cli->cl_max_pages_per_rpc_write;
 
 		if (dirty_max > cli->cl_dirty_max_pages)
 			cli->cl_dirty_max_pages = dirty_max;
 	}
 
-	if (cli->cl_dirty_max_pages > cfs_totalram_pages() / 8)
-		cli->cl_dirty_max_pages = cfs_totalram_pages() / 8;
+	if (cli->cl_dirty_max_pages > compat_totalram_pages() / 8)
+		cli->cl_dirty_max_pages = compat_totalram_pages() / 8;
 
 	/* This value is exported to userspace through the max_dirty_mb
 	 * parameter.  So we round up the number of pages to make it a round

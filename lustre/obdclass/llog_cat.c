@@ -52,11 +52,11 @@ static int llog_cat_new_log(const struct lu_env *env,
 	struct thandle *handle = NULL;
 	struct dt_device *dt = NULL;
 	struct llog_log_hdr	*llh = cathandle->lgh_hdr;
-	int			 rc, index;
+	int rc, index;
 
 	ENTRY;
 
-	index = (cathandle->lgh_last_idx + 1) % (llog_max_idx(llh) + 1);
+	index = (cathandle->lgh_last_idx + 1) % (llog_max_idx(cathandle) + 1);
 
 	/* check that new llog index will not overlap with the first one.
 	 * - llh_cat_idx is the index just before the first/oldest still in-use
@@ -133,7 +133,7 @@ static int llog_cat_new_log(const struct lu_env *env,
 	rc = llog_create(env, loghandle, th);
 	/* if llog is already created, no need to initialize it */
 	if (rc == -EEXIST) {
-		GOTO(out, rc = 0);
+		GOTO(out, rc);
 	} else if (rc != 0) {
 		CERROR("%s: can't create new plain llog in catalog: rc = %d\n",
 		       loghandle2name(loghandle), rc);
@@ -195,7 +195,7 @@ static int llog_cat_new_log(const struct lu_env *env,
 
 out:
 	if (handle != NULL) {
-		handle->th_result = rc >= 0 ? 0 : rc;
+		handle->th_result = (rc >= 0 || rc == -EEXIST) ? 0 : rc;
 		dt_trans_stop(env, dt, handle);
 	}
 	RETURN(rc);
@@ -207,7 +207,7 @@ out_destroy:
 	loghandle->lgh_hdr->llh_flags &= ~LLOG_F_ZAP_WHEN_EMPTY;
 	/* this is to mimic full log, so another llog_cat_current_log()
 	 * can skip it and ask for another onet */
-	loghandle->lgh_last_idx = llog_max_idx(loghandle->lgh_hdr) + 1;
+	loghandle->lgh_last_idx = llog_max_idx(loghandle) + 1;
 	llog_trans_destroy(env, loghandle, th);
 	if (handle != NULL)
 		dt_trans_stop(env, dt, handle);
@@ -292,27 +292,30 @@ static int llog_cat_prep_log(const struct lu_env *env,
 	loghandle = *ploghandle;
 	if (!IS_ERR_OR_NULL(loghandle)) {
 		loghandle = llog_handle_get(loghandle);
-		if (loghandle) {
-			if (llog_exist(loghandle) == 0)
+		if (loghandle && loghandle->lgh_destroyed) {
+			llog_handle_put(env, loghandle);
+		} else if (loghandle) {
+			if (!llog_exist(loghandle))
 				rc = llog_cat_declare_create(env, cathandle,
 							     loghandle, th);
 			llog_handle_put(env, loghandle);
+			return rc;
 		}
-		return rc;
 	}
 
 	down_write(&cathandle->lgh_lock);
 	if (!IS_ERR_OR_NULL(*ploghandle)) {
-		loghandle = *ploghandle;
-		up_write(&cathandle->lgh_lock);
-		loghandle = llog_handle_get(loghandle);
-		if (loghandle) {
-			if (llog_exist(loghandle) == 0)
+		loghandle = llog_handle_get(*ploghandle);
+		if (loghandle && loghandle->lgh_destroyed) {
+			llog_handle_put(env, loghandle);
+		} else if (loghandle) {
+			up_write(&cathandle->lgh_lock);
+			if (!llog_exist(loghandle))
 				rc = llog_cat_declare_create(env, cathandle,
 							     loghandle, th);
 			llog_handle_put(env, loghandle);
+			return rc;
 		}
-		return rc;
 	}
 
 	/* Slow path with open/create declare, only one thread do all stuff
@@ -463,12 +466,16 @@ EXPORT_SYMBOL(llog_cat_close);
  *
  * Assumes caller has already pushed us into the kernel context and is locking.
  *
- * NOTE: loghandle is write-locked upon successful return
+ * NOTE: loghandle is write-locked and referenced upon successful return
  */
-static struct llog_handle *llog_cat_current_log(struct llog_handle *cathandle,
+static struct llog_handle *llog_cat_current_log(const struct lu_env *env,
+						struct llog_handle *cathandle,
 						struct thandle *th)
 {
-	struct llog_handle *loghandle = NULL;
+	struct llog_handle *loghandle;
+	struct llog_logid lid = {.lgl_oi.oi.oi_id = 0,
+				 .lgl_oi.oi.oi_seq = 0,
+				 .lgl_ogen = 0};
 
 	ENTRY;
 
@@ -479,15 +486,13 @@ static struct llog_handle *llog_cat_current_log(struct llog_handle *cathandle,
 
 retry:
 	loghandle = cathandle->u.chd.chd_current_log;
-	if (likely(loghandle)) {
-		struct llog_log_hdr *llh;
-
+	if (!IS_ERR_OR_NULL(loghandle) && llog_handle_get(loghandle)) {
 		down_write_nested(&loghandle->lgh_lock, LLOGH_LOG);
-		llh = loghandle->lgh_hdr;
-		if (llh == NULL || !llog_is_full(loghandle))
+		if (!loghandle->lgh_destroyed && !llog_is_full(loghandle))
 			RETURN(loghandle);
-		else
-			up_write(&loghandle->lgh_lock);
+		up_write(&loghandle->lgh_lock);
+		lid = loghandle->lgh_id;
+		llog_handle_put(env, loghandle);
 	}
 
 	/* time to use next log */
@@ -495,9 +500,6 @@ next:
 	/* first, we have to make sure the state hasn't changed */
 	down_write_nested(&cathandle->lgh_lock, LLOGH_CAT);
 	if (unlikely(loghandle == cathandle->u.chd.chd_current_log)) {
-		struct llog_logid lid = {.lgl_oi.oi.oi_id = 0,
-					 .lgl_oi.oi.oi_seq = 0,
-					 .lgl_ogen = 0};
 		/* Sigh, the chd_next_log and chd_current_log is initialized
 		 * in declare phase, and we do not serialize the catlog
 		 * accessing, so it might be possible the llog creation
@@ -519,8 +521,6 @@ next:
 			}
 			GOTO(out_unlock, loghandle);
 		}
-		if (!IS_ERR_OR_NULL(loghandle))
-			lid = loghandle->lgh_id;
 
 		CDEBUG(D_OTHER, "%s: use next log "DFID"->"DFID" catalog "DFID"\n",
 		       loghandle2name(cathandle), PLOGID(&lid),
@@ -556,15 +556,20 @@ int llog_cat_add_rec(const struct lu_env *env, struct llog_handle *cathandle,
 	LASSERT(rec->lrh_len <= cathandle->lgh_ctxt->loc_chunk_size);
 
 retry:
-	loghandle = llog_cat_current_log(cathandle, th);
+	loghandle = llog_cat_current_log(env, cathandle, th);
 	if (IS_ERR(loghandle))
 		RETURN(PTR_ERR(loghandle));
 
+	LASSERT(loghandle);
+	LASSERT(!loghandle->lgh_destroyed);
 	/* loghandle is already locked by llog_cat_current_log() for us */
 	if (!llog_exist(loghandle)) {
 		rc = llog_cat_new_log(env, cathandle, loghandle, th);
 		if (rc < 0) {
 			up_write(&loghandle->lgh_lock);
+			llog_handle_put(env, loghandle);
+			if (rc == -EEXIST && retried++ == 0)
+				goto retry;
 			/* When ENOSPC happened no need to drop loghandle
 			 * a new one would be allocated anyway for next llog_add
 			 * so better to stay with the old.
@@ -579,6 +584,8 @@ retry:
 				up_write(&cathandle->lgh_lock);
 				llog_close(env, loghandle);
 			}
+			CERROR("%s: initialization error: rc = %d\n",
+			       loghandle2name(cathandle), rc);
 			RETURN(rc);
 		}
 	}
@@ -605,8 +612,10 @@ retry:
 			dt_attr_set(env, loghandle->lgh_obj, &lgi->lgi_attr, th);
 		}
 	}
-
-	up_write(&loghandle->lgh_lock);
+	/* llog_write_rec could unlock a semaphore */
+	if (!(loghandle->lgh_hdr->llh_flags & LLOG_F_UNLCK_SEM))
+		up_write(&loghandle->lgh_lock);
+	llog_handle_put(env, loghandle);
 
 	if (rc == -ENOBUFS) {
 		if (retried++ == 0)
@@ -943,7 +952,7 @@ int llog_cat_process_or_fork(const struct lu_env *env,
 	cd.lpcd_last_idx = 0;
 	cd.lpcd_read_mode = LLOG_READ_MODE_NORMAL;
 
-	if (startcat > 0 && startcat <= llog_max_idx(llh)) {
+	if (startcat > 0 && startcat <= llog_max_idx(cat_llh)) {
 		/* start from a custom catalog/llog plain indexes*/
 		d.lpd_startidx = startidx;
 		d.lpd_startcat = startcat;
@@ -1079,10 +1088,10 @@ __u32 llog_cat_free_space(struct llog_handle *cat_llh)
 		return cfs_fail_val;
 
 	if (cat_llh->lgh_hdr->llh_count == 1)
-		return llog_max_idx(cat_llh->lgh_hdr);
+		return llog_max_idx(cat_llh);
 
 	if (cat_llh->lgh_last_idx > cat_llh->lgh_hdr->llh_cat_idx)
-		return llog_max_idx(cat_llh->lgh_hdr) +
+		return llog_max_idx(cat_llh) +
 		       cat_llh->lgh_hdr->llh_cat_idx - cat_llh->lgh_last_idx;
 
 	/* catalog is presently wrapped */
@@ -1095,12 +1104,17 @@ static int llog_cat_reverse_process_cb(const struct lu_env *env,
 				       struct llog_rec_hdr *rec, void *data)
 {
 	struct llog_process_data *d = data;
-	struct llog_handle *llh;
+	struct llog_handle *llh = NULL;
 	int rc;
 
 	ENTRY;
 	rc = llog_cat_process_common(env, cat_llh, rec, &llh);
+	if (rc)
+		GOTO(out, rc);
 
+	rc = llog_reverse_process(env, llh, d->lpd_cb, d->lpd_data, NULL);
+
+out:
 	/* The empty plain log was destroyed while processing */
 	if (rc == LLOG_DEL_PLAIN) {
 		rc = llog_cat_cleanup(env, cat_llh, llh,
@@ -1112,17 +1126,9 @@ static int llog_cat_reverse_process_cb(const struct lu_env *env,
 		/* processing callback ask to skip the llog -> continue */
 		rc = 0;
 	}
-	if (rc)
-		RETURN(rc);
 
-	rc = llog_reverse_process(env, llh, d->lpd_cb, d->lpd_data, NULL);
-
-	/* The empty plain was destroyed while processing */
-	if (rc == LLOG_DEL_PLAIN)
-		rc = llog_cat_cleanup(env, cat_llh, llh,
-				      llh->u.phd.phd_cookie.lgc_index);
-
-	llog_handle_put(env, llh);
+	if (llh)
+		llog_handle_put(env, llh);
 	RETURN(rc);
 }
 
@@ -1170,45 +1176,45 @@ int llog_cat_reverse_process(const struct lu_env *env,
 }
 EXPORT_SYMBOL(llog_cat_reverse_process);
 
-static int llog_cat_set_first_idx(struct llog_handle *cathandle, int idx)
+int llog_cat_set_first_idx(struct llog_handle *cathandle, int newidx)
 {
 	struct llog_log_hdr *llh = cathandle->lgh_hdr;
-	int idx_nbr;
+	int max, idx = llh->llh_cat_idx;
 
 	ENTRY;
 
-	idx_nbr = llog_max_idx(llh) + 1;
+	max = llog_max_idx(cathandle) + 1;
+	if (find_next_bit_le((void *)LLOG_HDR_BITMAP(llh), max, 1) == max)
+		RETURN(0);
 	/*
-	 * The llh_cat_idx equals to the first used index minus 1
-	 * so if we canceled the first index then llh_cat_idx
-	 * must be renewed.
+	 * The llh_cat_idx equals to the first used index minus 1.
+	 * We scan from llh_cat_idx + 1 disregard which index
+	 * was canceled to avoid llh_cat_idx cannot go forward in
+	 * abnormal case.
 	 */
-	if (llh->llh_cat_idx == (idx - 1)) {
-		llh->llh_cat_idx = idx;
-
-		while (idx != cathandle->lgh_last_idx) {
-			idx = (idx + 1) % idx_nbr;
-			if (!test_bit_le(idx, LLOG_HDR_BITMAP(llh))) {
-				/* update llh_cat_idx for each unset bit,
-				 * expecting the next one is set */
-				llh->llh_cat_idx = idx;
-			} else if (idx == 0) {
-				/* skip header bit */
-				llh->llh_cat_idx = 0;
-				continue;
-			} else {
-				/* the first index is found */
-				break;
-			}
+	do {
+		idx = (idx + 1) % (llog_max_idx(cathandle) + 1);
+		if (newidx == idx || !test_bit_le(idx, LLOG_HDR_BITMAP(llh))) {
+			/* update llh_cat_idx for each unset bit,
+			 * expecting the next one is set */
+			llh->llh_cat_idx = idx;
+		} else if (idx == 0) {
+			/* skip header bit */
+			llh->llh_cat_idx = 0;
+			continue;
+		} else {
+			/* the first index is found */
+			break;
 		}
+	} while (idx != cathandle->lgh_last_idx);
 
-		CDEBUG(D_HA, "catlog "DFID" first idx %u, last_idx %u\n",
-		       PLOGID(&cathandle->lgh_id), llh->llh_cat_idx,
-		       cathandle->lgh_last_idx);
-	}
+	CDEBUG(D_HA, "catlog "DFID" first idx %u, last_idx %u\n",
+	       PLOGID(&cathandle->lgh_id), llh->llh_cat_idx,
+	       cathandle->lgh_last_idx);
 
 	RETURN(0);
 }
+EXPORT_SYMBOL(llog_cat_set_first_idx);
 
 /* Cleanup deleted plain llog traces from catalog */
 int llog_cat_cleanup(const struct lu_env *env, struct llog_handle *cathandle,
@@ -1235,10 +1241,15 @@ int llog_cat_cleanup(const struct lu_env *env, struct llog_handle *cathandle,
 	if (cathandle->lgh_obj == NULL)
 		return 0;
 
+	/* cancel record and decrease count, then move llh_cat_idx
+	 * llog_cat_set_first_idx() is called inside llog_cancel_arr_rec()
+	 */
 	/* remove plain llog entry from catalog by index */
-	llog_cat_set_first_idx(cathandle, index);
 	rc = llog_cancel_rec(env, cathandle, index);
-	if (!rc && loghandle)
+	if (rc < 0)
+		return rc;
+
+	if (loghandle)
 		CDEBUG(D_HA,
 		       "cancel plain log "DFID" at index %u of catalog "DFID"\n",
 		       PLOGID(&loghandle->lgh_id), index,
@@ -1269,4 +1280,36 @@ int llog_cat_retain_cb(const struct lu_env *env, struct llog_handle *cat,
 }
 EXPORT_SYMBOL(llog_cat_retain_cb);
 
+/* Modify a llog record base on llog_logid and record cookie,
+ * with valid offset.
+ */
+int llog_cat_modify_rec(const struct lu_env *env, struct llog_handle *cathandle,
+			struct llog_logid *lid, struct llog_rec_hdr *rec,
+			struct llog_cookie *cookie)
+{
+	struct llog_handle *llh;
+	int rc;
 
+	ENTRY;
+
+	rc = llog_cat_id2handle(env, cathandle, &llh, lid);
+	if (rc) {
+		CDEBUG(D_OTHER, "%s: failed to find log file "DFID": rc = %d\n",
+		       loghandle2name(llh), PLOGID(lid), rc);
+
+		RETURN(rc);
+	}
+
+	rc = llog_write_cookie(env, llh, rec, cookie, rec->lrh_index);
+	if (rc < 0) {
+		CDEBUG(D_OTHER,
+		       "%s: failed to modify record "DFID".%d: rc = %d\n",
+		       loghandle2name(llh), PLOGID(lid), rec->lrh_index, rc);
+	} else {
+		rc = 0;
+	}
+	llog_handle_put(env, llh);
+
+	RETURN(rc);
+}
+EXPORT_SYMBOL(llog_cat_modify_rec);

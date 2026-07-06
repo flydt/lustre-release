@@ -16,6 +16,10 @@
 #ifndef PTLRPC_INTERNAL_H
 #define PTLRPC_INTERNAL_H
 
+#include <linux/sched.h>
+#include <linux/sched/debug.h>
+
+#include <lustre_compat.h>
 #include "../ldlm/ldlm_internal.h"
 #include "heap.h"
 
@@ -29,12 +33,12 @@ extern struct mutex ptlrpc_all_services_mutex;
 extern struct ptlrpc_nrs_pol_conf nrs_conf_fifo;
 extern struct ptlrpc_nrs_pol_conf nrs_conf_delay;
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 extern struct ptlrpc_nrs_pol_conf nrs_conf_crrn;
 extern struct ptlrpc_nrs_pol_conf nrs_conf_orr;
 extern struct ptlrpc_nrs_pol_conf nrs_conf_trr;
 extern struct ptlrpc_nrs_pol_conf nrs_conf_tbf;
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 /**
  * \addtogoup nrs
@@ -134,20 +138,20 @@ void ptlrpc_nrs_req_add(struct ptlrpc_service_part *svcpt,
 			struct ptlrpc_request *req, bool hp);
 
 struct ptlrpc_request *
-ptlrpc_nrs_req_get_nolock0(struct ptlrpc_service_part *svcpt, bool hp,
-			   bool peek, bool force);
+__ptlrpc_nrs_req_get_nolock(struct ptlrpc_service_part *svcpt, bool hp,
+			    bool peek, bool force);
 
 static inline struct ptlrpc_request *
 ptlrpc_nrs_req_get_nolock(struct ptlrpc_service_part *svcpt, bool hp,
 			  bool force)
 {
-	return ptlrpc_nrs_req_get_nolock0(svcpt, hp, false, force);
+	return __ptlrpc_nrs_req_get_nolock(svcpt, hp, false, force);
 }
 
 static inline struct ptlrpc_request *
 ptlrpc_nrs_req_peek_nolock(struct ptlrpc_service_part *svcpt, bool hp)
 {
-	return ptlrpc_nrs_req_get_nolock0(svcpt, hp, true, true);
+	return __ptlrpc_nrs_req_get_nolock(svcpt, hp, true, true);
 }
 
 void ptlrpc_nrs_req_del_nolock(struct ptlrpc_request *req);
@@ -302,12 +306,12 @@ static inline bool ptlrpc_recoverable_error(int rc)
 	return (rc == -ENOTCONN || rc == -ENODEV);
 }
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 int tgt_mod_init(void);
 void tgt_mod_exit(void);
 int nodemap_mod_init(void);
 void nodemap_mod_exit(void);
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 /** initialise ptlrpc common fields */
 static inline void ptlrpc_req_comm_init(struct ptlrpc_request *req)

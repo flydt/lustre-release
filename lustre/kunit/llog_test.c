@@ -30,6 +30,8 @@
 #include <lustre_fid.h>
 #include <lustre_log.h>
 
+#define LUSTRE_TEST_LLOG_DEVICE "llog_test"
+
 /* This is slightly more than the number of records that can fit into a
  * single llog file, because the llog_log_header takes up some of the
  * space in the first block that cannot be used for the bitmap. */
@@ -41,7 +43,7 @@ static struct llog_logid cat_logid;
 struct llog_mini_rec {
 	struct llog_rec_hdr lmr_hdr;
 	struct llog_rec_tail lmr_tail;
-} __attribute__((packed));
+} __packed;
 
 static int verify_handle(char *test, struct llog_handle *llh, int num_recs)
 {
@@ -272,7 +274,7 @@ static int test3_check_n_add_cb(const struct lu_env *env,
 {
 	struct llog_gen_rec *lgr = (struct llog_gen_rec *)rec;
 	int *last_rec = data;
-	unsigned cur_idx = test_3_start_idx + test_3_rec_num;
+	unsigned int cur_idx = test_3_start_idx + test_3_rec_num;
 	int rc;
 
 	if (lgh->lgh_hdr->llh_flags & LLOG_F_IS_FIXSIZE) {
@@ -303,8 +305,7 @@ static int test3_check_n_add_cb(const struct lu_env *env,
 				test_3_rec_off = lgh->lgh_cur_offset;
 				test_3_paddings++;
 			} else {
-				CERROR("Wrong record offset in cur_off: %llu"
-				       ", should be %lld (rec len %u)\n",
+				CERROR("Wrong record offset in cur_off: %llu, should be %lld (rec len %u)\n",
 				       lgh->lgh_cur_offset,
 				       (long long)test_3_rec_off,
 				       rec->lrh_len);
@@ -331,8 +332,7 @@ static int test3_check_n_add_cb(const struct lu_env *env,
 	if (cur_idx == *last_rec || cur_idx == (*last_rec + 1)) {
 		rc = llog_write(env, lgh, rec, LLOG_NEXT_IDX);
 		if (rc < 0)
-			CERROR("cb_test_3: cannot add new record while "
-			       "processing\n");
+			CERROR("cb_test_3: cannot add new record while processing\n");
 	}
 	test_3_rec_num++;
 
@@ -526,9 +526,8 @@ static int llog_test_3(const struct lu_env *env, struct obd_device *obd,
 		RETURN(-ERANGE);
 	}
 
-	CWARN("3c: write records with variable size until BITMAP_SIZE, "
-	      "return -ENOSPC\n");
-	while (num_recs < LLOG_HDR_BITMAP_SIZE(llh->lgh_hdr)) {
+	CWARN("3c: write records with variable size until BITMAP_SIZE, return -ENOSPC\n");
+	while (num_recs <= llog_max_idx(llh)) {
 		if ((num_recs % 2) == 0)
 			hdr->lrh_len = 80;
 		else
@@ -584,7 +583,7 @@ static int llog_test_4(const struct lu_env *env, struct obd_device *obd)
 	if (rc) {
 		CERROR("4a: llog_create with name %s failed: %d\n", name, rc);
 		GOTO(ctxt_release, rc);
-        }
+	}
 	rc = llog_init_handle(env, cath, LLOG_F_IS_CAT, &uuid);
 	if (rc) {
 		CERROR("4a: can't init llog handle: %d\n", rc);
@@ -816,8 +815,7 @@ static int llog_test_5(const struct lu_env *env, struct obd_device *obd)
 	CWARN("5d: add 1 record to the log with many canceled empty pages\n");
 	rc = llog_cat_add(env, llh, &lmr.lmr_hdr, NULL);
 	if (rc) {
-		CERROR("5d: add record to the log with many canceled empty "
-		       "pages failed\n");
+		CERROR("5d: add record to the log with many canceled empty pages failed\n");
 		GOTO(out, rc);
 	}
 
@@ -837,8 +835,8 @@ static int llog_test_5(const struct lu_env *env, struct obd_device *obd)
 	plain_counter = 0;
 	rc = llog_cat_reverse_process(env, llh, plain_print_cb, "foobar");
 	if (rc) {
-		CERROR("5f: reversely process with plain_print_cb failed: "
-		       "%d\n", rc);
+		CERROR("5f: reversely process with plain_print_cb failed: %d\n",
+		       rc);
 		GOTO(out, rc);
 	}
 	if (plain_counter != 6) {
@@ -888,8 +886,8 @@ static int llog_test_6(const struct lu_env *env, struct obd_device *obd,
 	rc = obd_connect(NULL, &exp, mgc_obd, &uuid,
 			 NULL /* obd_connect_data */, NULL);
 	if (rc != -EALREADY) {
-		CERROR("6a: connect on connected MGC (%s) failed to return"
-		       " -EALREADY\n", mgc_obd->obd_name);
+		CERROR("6a: connect on connected MGC (%s) failed to return -EALREADY\n",
+		       mgc_obd->obd_name);
 		if (rc == 0)
 			obd_disconnect(exp);
 		GOTO(ctxt_release, rc = -EINVAL);
@@ -1172,8 +1170,8 @@ static int test_8_cb(const struct lu_env *env, struct llog_handle *llh,
 	return 0;
 }
 
-static int llog_zeroes(const struct lu_env *env, struct dt_object *o,
-		      __u64 start, __u64 end)
+static int llog_fill_bytes(const struct lu_env *env, struct dt_object *o,
+			   __u64 start, __u64 end, char byte)
 {
 	struct lu_attr la;
 	struct thandle *th;
@@ -1188,6 +1186,8 @@ static int llog_zeroes(const struct lu_env *env, struct dt_object *o,
 	OBD_ALLOC(buf, end - start);
 	if (!buf)
 		RETURN(-ENOMEM);
+
+	memset(buf, byte, end - start);
 
 	LASSERT(o);
 	d = lu2dt_dev(o->do_lu.lo_dev);
@@ -1234,13 +1234,13 @@ struct llog_test8_rec {
 	struct llog_rec_hdr ltr_hdr;
 	__u64 padding[29];
 	struct llog_rec_tail ltr_tail;
-} __attribute__((packed));
+} __packed;
 
 static int llog_test_8(const struct lu_env *env, struct obd_device *obd)
 {
 	struct llog_handle *llh = NULL;
 	char name[10];
-	int rc, rc2, i;
+	int rc, i;
 	int orig_counter;
 	struct llog_test8_rec ltr;
 	struct llog_ctxt *ctxt;
@@ -1296,11 +1296,9 @@ static int llog_test_8(const struct lu_env *env, struct obd_device *obd)
 	llog_close(env, llh->u.chd.chd_current_log);
 	llh->u.chd.chd_current_log = NULL;
 
-	rc2 = llog_cat_close(env, llh);
-	if (rc2) {
-		CERROR("8a: close log %s failed: %d\n", name, rc2);
-		if (rc == 0)
-			rc = rc2;
+	rc = llog_cat_close(env, llh);
+	if (rc) {
+		CERROR("8a: close log %s failed: %d\n", name, rc);
 		GOTO(out_put, rc);
 	}
 
@@ -1332,23 +1330,21 @@ static int llog_test_8(const struct lu_env *env, struct obd_device *obd)
 
 	/* must lost all 20 records */
 	CWARN("8b: clean first llog record in catalog\n");
-	llog_zeroes(env, llh->lgh_obj, 8192 + plain_pos,
-		    8192 + plain_pos + sizeof(struct llog_logid_rec));
+	llog_fill_bytes(env, llh->lgh_obj, 8192 + plain_pos,
+			8192 + plain_pos + sizeof(struct llog_logid_rec), 0x5a);
 
-	rc2 = llog_cat_close(env, llh);
-	if (rc2) {
-		CERROR("8b: close log %s failed: %d\n", name, rc2);
-		if (rc == 0)
-			rc = rc2;
+	rc = llog_cat_close(env, llh);
+	if (rc) {
+		CERROR("8b: close log %s failed: %d\n", name, rc);
 		GOTO(out_put, rc);
 	}
 
 	/* lost 28 records, from 5 to 32 in block */
 	CWARN("8c: corrupt first chunk in the middle\n");
-	llog_zeroes(env, obj, 8192 + reclen * 4, 8192 + reclen * 10);
+	llog_fill_bytes(env, obj, 8192 + reclen * 4, 8192 + reclen * 10, 0xff);
 	/* lost whole chunk - 32 records */
 	CWARN("8c: corrupt second chunk at start\n");
-	llog_zeroes(env, obj, 16384, 16384 + reclen);
+	llog_fill_bytes(env, obj, 16384, 16384 + reclen, 0x01);
 
 	CWARN("8d: count survived records\n");
 	rc = llog_open(env, ctxt, &llh, &cat_logid, NULL, LLOG_OPEN_EXISTS);
@@ -1381,11 +1377,9 @@ static int llog_test_8(const struct lu_env *env, struct obd_device *obd)
 
 out:
 	CWARN("8d: close re-opened catalog\n");
-	rc2 = llog_cat_close(env, llh);
-	if (rc2) {
-		CERROR("8d: close log %s failed: %d\n", name, rc2);
-		if (rc == 0)
-			rc = rc2;
+	rc = llog_cat_close(env, llh);
+	if (rc) {
+		CERROR("8d: close log %s failed: %d\n", name, rc);
 	}
 out_put:
 	llog_ctxt_put(ctxt);
@@ -1687,8 +1681,7 @@ static int llog_test_10(const struct lu_env *env, struct obd_device *obd)
 	}
 
 	if ((enospc == 0) && (enospc+eok != llog_test_recnum)) {
-		CERROR("10c: all last records adds should have failed with"
-		       " -ENOSPC\n");
+		CERROR("10c: all last records adds should have failed with -ENOSPC\n");
 		GOTO(out, rc = -EINVAL);
 	}
 
@@ -1777,8 +1770,7 @@ static int llog_test_10(const struct lu_env *env, struct obd_device *obd)
 	}
 
 	if ((enospc == 0) && (enospc+eok != llog_test_recnum)) {
-		CERROR("10e: all last records adds should have failed with"
-		       " -ENOSPC\n");
+		CERROR("10e: all last records adds should have failed with -ENOSPC\n");
 		GOTO(out, rc = -EINVAL);
 	}
 
@@ -1816,8 +1808,7 @@ static int llog_test_10(const struct lu_env *env, struct obd_device *obd)
 	}
 
 	if (la.la_size != cat_max_size) {
-		CERROR("10e: catalog size has changed after it has wrap around,"
-		       " current size = %llu, expected size = %llu\n",
+		CERROR("10e: catalog size has changed after it has wrap around, current size = %llu, expected size = %llu\n",
 		       la.la_size, cat_max_size);
 		GOTO(out, rc = -EINVAL);
 	}
@@ -1905,8 +1896,7 @@ static int llog_test_10(const struct lu_env *env, struct obd_device *obd)
 	}
 
 	if ((enospc == 0) && (enospc+eok != llog_test_recnum)) {
-		CERROR("10f: all last records adds should have failed with"
-		       " -ENOSPC\n");
+		CERROR("10f: all last records adds should have failed with -ENOSPC\n");
 		GOTO(out, rc = -EINVAL);
 	}
 
@@ -1933,8 +1923,7 @@ static int llog_test_10(const struct lu_env *env, struct obd_device *obd)
 	}
 
 	if (la.la_size != cat_max_size) {
-		CERROR("10f: catalog size has changed after it has wrap around,"
-		       " current size = %llu, expected size = %llu\n",
+		CERROR("10f: catalog size has changed after it has wrap around, current size = %llu, expected size = %llu\n",
 		       la.la_size, cat_max_size);
 		GOTO(out, rc = -EINVAL);
 	}
@@ -2137,8 +2126,7 @@ static int llog_test_10(const struct lu_env *env, struct obd_device *obd)
 	}
 
 	if ((enospc == 0) && (enospc+eok != llog_test_recnum)) {
-		CERROR("10h: all last records adds should have failed with"
-		       " -ENOSPC\n");
+		CERROR("10h: all last records adds should have failed with -ENOSPC\n");
 		GOTO(out, rc = -EINVAL);
 	}
 
@@ -2167,6 +2155,471 @@ ctxt_release:
 	llog_ctxt_put(ctxt);
 	RETURN(rc);
 }
+
+/* Test named-log reopen; returns opened log on success */
+static int llog_test_11(const struct lu_env *env, struct obd_device *obd)
+{
+	struct llog_process_data data = { .lpd_data = "test 7" };
+	struct llog_handle *llh;
+	int rc = 0, i, process_count;
+	struct llog_ctxt *ctxt;
+	struct llog_mini_rec lmr;
+	int num_recs = 0;
+	struct lu_attr la;
+	struct llog_logid  logid;
+	unsigned long old_size;
+
+	ENTRY;
+
+	ctxt = llog_get_context(obd, LLOG_TEST_ORIG_CTXT);
+	LASSERT(ctxt);
+
+	CWARN("11: create a plain nameless log\n");
+
+	rc = llog_open_create(env, ctxt, &llh, NULL, NULL);
+	if (rc) {
+		CERROR("11: create log failed\n");
+		RETURN(rc);
+	}
+
+	rc = llog_init_handle(env, llh,
+			      LLOG_F_IS_PLAIN | LLOG_F_ZAP_WHEN_EMPTY,
+			      &uuid);
+	if (rc) {
+		CERROR("11: can't init llog handle: %d\n", rc);
+		GOTO(out_close, rc);
+	}
+
+	logid = llh->lgh_id;
+	lmr.lmr_hdr.lrh_len = lmr.lmr_tail.lrt_len = LLOG_MIN_REC_SIZE;
+	lmr.lmr_hdr.lrh_type = LLOG_OP_MAGIC;
+
+	rc = llog_write(env, llh, &lmr.lmr_hdr, LLOG_NEXT_IDX);
+
+	rc = dt_attr_get(env, llh->lgh_obj, &la);
+	LASSERT(rc == 0);
+	CWARN("11: size %llu in %llu blocks after 1 rec\n",
+	      la.la_size, la.la_blocks);
+
+	CWARN("11: add few records\n");
+
+	for (i = 0; i < 100; i++) {
+		rc = llog_write(env, llh, &lmr.lmr_hdr, LLOG_NEXT_IDX);
+		if (rc == -ENOSPC) {
+			break;
+		} else if (rc < 0) {
+			CERROR("11: write recs failed at #%d: %d\n",
+			       i + 1, rc);
+			GOTO(out_close, rc);
+		}
+		num_recs++;
+	}
+
+	rc = dt_attr_get(env, llh->lgh_obj, &la);
+	LASSERT(rc == 0);
+	CWARN("11: size %llu in %llu blocks with few recs\n",
+	      la.la_size, la.la_blocks);
+	old_size = la.la_size;
+
+	plain_counter = 0;
+	rc = llog_process(env, llh, test_7_print_cb, &data, NULL);
+	if (rc) {
+		CERROR("11: llog process failed: %d\n", rc);
+		GOTO(out_close, rc);
+	}
+	process_count = plain_counter;
+
+	set_bit(LU_OBJECT_HEARD_BANSHEE, &llh->lgh_obj->do_lu.lo_header->loh_flags);
+	llog_close(env, llh);
+
+	{
+		struct file *filp;
+		char buf[16];
+
+		filp = filp_open("/proc/sys/vm/drop_caches", O_WRONLY, 0);
+		LASSERT(!IS_ERR(filp));
+		snprintf(buf, sizeof(buf), "3\n");
+		rc = kernel_write(filp, buf, 2, &filp->f_pos);
+		LASSERT(rc == 2);
+		filp_close(filp, NULL);
+	}
+
+	CWARN("11: re-open the log by LOGID and verify llh_count\n");
+	rc = llog_open(env, ctxt, &llh, &logid, NULL, LLOG_OPEN_EXISTS);
+	if (rc < 0) {
+		CERROR("11: re-open log by LOGID failed\n");
+		GOTO(out_close, rc);
+	}
+
+	rc = llog_init_handle(env, llh, LLOG_F_IS_PLAIN, &uuid);
+	if (rc < 0) {
+		CERROR("11: can't init llog handle: %d\n", rc);
+		GOTO(out_close, rc);
+	}
+	rc = dt_attr_get(env, llh->lgh_obj, &la);
+	LASSERT(rc == 0);
+	CWARN("11: size %llu in %llu blocks after re-open\n",
+	      la.la_size, la.la_blocks);
+	if (old_size != la.la_size) {
+		CERROR("11: size changed after reload - %lu != %llu\n",
+			old_size, la.la_size);
+		GOTO(out_close, rc = -EIO);
+	}
+
+out_close:
+	llog_close(env, llh);
+
+	llog_ctxt_put(ctxt);
+	RETURN(rc);
+}
+
+static int llog_obj_truncate(const struct lu_env *env,
+			     struct dt_object *obj,
+			     loff_t size)
+{
+	struct dt_device *dd;
+	struct lu_attr *attr;
+	struct thandle *th;
+	int		  rc;
+
+	ENTRY;
+
+	OBD_ALLOC_PTR(attr);
+	if (attr == NULL)
+		RETURN(-ENOMEM);
+
+	LASSERT(obj);
+	dd = lu2dt_dev(obj->do_lu.lo_dev);
+	if (IS_ERR_OR_NULL(dd))
+		GOTO(attr_free, rc = -EINVAL);
+
+	attr->la_size = size;
+	attr->la_valid = LA_SIZE;
+
+	th = dt_trans_create(env, dd);
+	if (IS_ERR(th))
+		GOTO(attr_free, rc = PTR_ERR(th));
+
+	rc = dt_declare_punch(env, obj, size, OBD_OBJECT_EOF, th);
+	if (rc)
+		GOTO(cleanup, rc);
+	rc = dt_declare_attr_set(env, obj, attr, th);
+	if (rc)
+		GOTO(cleanup, rc);
+	rc = dt_trans_start_local(env, dd, th);
+	if (rc)
+		GOTO(cleanup, rc);
+
+	rc = dt_punch(env, obj, size, OBD_OBJECT_EOF, th);
+	if (rc == 0)
+		rc = dt_attr_set(env, obj, attr, th);
+
+cleanup:
+	dt_trans_stop(env, dd, th);
+attr_free:
+	OBD_FREE_PTR(attr);
+
+	RETURN(rc);
+}
+
+/* truncate one-by-one bytes and check the catalog is still functional */
+static int llog_test_12(const struct lu_env *env, struct obd_device *obd)
+{
+	struct llog_handle *cath, *llh;
+	struct llog_mini_rec lmr;
+	struct llog_cookie cookie;
+	struct llog_logid catid;
+	int rc, rc2, i, numrecs;
+	struct llog_ctxt *ctxt;
+	struct dt_object *obj;
+	struct lu_attr *attr;
+	int bytes2trunc;
+	char name[10];
+
+	ENTRY;
+
+	OBD_ALLOC_PTR(attr);
+	if (attr == NULL)
+		RETURN(-ENOMEM);
+
+	ctxt = llog_get_context(obd, LLOG_TEST_ORIG_CTXT);
+	LASSERT(ctxt);
+
+	lmr.lmr_hdr.lrh_len = lmr.lmr_tail.lrt_len = LLOG_MIN_REC_SIZE;
+	lmr.lmr_hdr.lrh_type = LLOG_OP_MAGIC;
+
+	scnprintf(name, sizeof(name), "%x", llog_test_rand + 3);
+	CWARN("12: create a catalog log with name: %s\n", name);
+	rc = llog_open_create(env, ctxt, &cath, NULL, name);
+	if (rc) {
+		CERROR("12: llog_create failed: rc=%d\n", rc);
+		GOTO(ctxt_release, rc);
+	}
+	catid = cath->lgh_id;
+
+	rc = llog_init_handle(env, cath, LLOG_F_IS_CAT, &uuid);
+	if (rc) {
+		CERROR("12: can't init llog handle: %d\n", rc);
+		GOTO(out, rc);
+	}
+
+	numrecs = 0;
+
+	/* truncated plain llog cases */
+	for (bytes2trunc = sizeof(lmr); bytes2trunc >= 4; bytes2trunc--) {
+
+		for (i = 0; i < 10; i++) {
+			rc = llog_cat_add(env, cath, &lmr.lmr_hdr, &cookie);
+			if (rc != 1) {
+				CERROR("12: add to cat failed: rc=%d\n", rc);
+				GOTO(out, rc);
+			}
+			numrecs++;
+		}
+		plain_counter = 0;
+		rc = llog_cat_process(env, cath, plain_print_cb, "fooba", 0, 0);
+		if (rc) {
+			CERROR("12: cat process failed: rc=%d\n", rc);
+			GOTO(out, rc);
+		}
+		if (plain_counter != numrecs) {
+			CERROR("12: found %d recs, expect %d\n",
+			       plain_counter, numrecs);
+			GOTO(out, rc = -EINVAL);
+		}
+
+		llh = cath->u.chd.chd_current_log;
+		LASSERT(cath->u.chd.chd_current_log);
+
+		obj = llh->u.chd.chd_current_log->lgh_obj;
+		LASSERT(obj);
+		lu_object_get(&obj->do_lu);
+
+		rc = llog_cat_close(env, cath);
+		LASSERT(rc == 0);
+
+		rc = dt_attr_get(env, obj, attr);
+		if (rc) {
+			CERROR("12: attr_get failed: rc=%d\n", rc);
+			GOTO(out, rc);
+		}
+
+		LCONSOLE_INFO("12: truncate %d bytes\n", bytes2trunc);
+		rc = llog_obj_truncate(env, obj, attr->la_size - bytes2trunc);
+		if (rc) {
+			CERROR("12: truncate failed: rc=%d\n", rc);
+			GOTO(out, rc);
+		}
+
+		dt_object_put(env, obj);
+
+		LCONSOLE_INFO("12: re-open and process the catalog\n");
+		rc = llog_open(env, ctxt, &cath, &catid,
+			       NULL, LLOG_OPEN_EXISTS);
+		if (rc) {
+			CERROR("12: llog_create with logid failed: %d\n", rc);
+			GOTO(ctxt_release, rc);
+		}
+		rc = llog_init_handle(env, cath, LLOG_F_IS_CAT, &uuid);
+		if (rc) {
+			CERROR("12: can't init llog handle: %d\n", rc);
+			GOTO(out, rc);
+		}
+
+		plain_counter = 0;
+		rc = llog_cat_process(env, cath, plain_print_cb, "foobar", 0, 0);
+		if (rc) {
+			CERROR("12: cat process failed: rc=%d\n", rc);
+			GOTO(out, rc);
+		}
+		if (plain_counter != 0) {
+			CERROR("12: found %d recs, expect 0\n", plain_counter);
+			GOTO(out, rc = -EINVAL);
+		}
+		LCONSOLE_INFO("12: try to add to the catalog\n");
+		rc = llog_cat_add(env, cath, &lmr.lmr_hdr, &cookie);
+		if (rc != 1) {
+			CERROR("12: add to cat failed: rc=%d\n", rc);
+			GOTO(out, rc);
+		}
+		numrecs = 1;
+
+		plain_counter = 0;
+		rc = llog_cat_process(env, cath, plain_print_cb, "fooba", 0, 0);
+		if (rc) {
+			CERROR("12: cat process failed: rc=%d\n", rc);
+			GOTO(out, rc);
+		}
+		if (plain_counter != numrecs) {
+			CERROR("12: found %d recs, expect %d\n",
+			       plain_counter, numrecs);
+			GOTO(out, rc = -EINVAL);
+		}
+	}
+
+out:
+	CWARN("12: put newly-created catalog\n");
+	rc2 = llog_cat_close(env, cath);
+	if (rc2) {
+		CERROR("12: close log %s failed: %d\n", name, rc2);
+		if (rc == 0)
+			rc = rc2;
+	}
+ctxt_release:
+	llog_ctxt_put(ctxt);
+	OBD_FREE_PTR(attr);
+	RETURN(rc);
+}
+
+
+#define	MAX_FIDS	1024
+
+struct llog_test_fids {
+	int nr;
+	struct llog_logid	ids[MAX_FIDS];
+};
+
+static int cat_collect_fid_cb(const struct lu_env *env, struct llog_handle *llh,
+			struct llog_rec_hdr *rec, void *data)
+{
+	struct llog_logid_rec *lir = (struct llog_logid_rec *)rec;
+	struct llog_test_fids *ltf = data;
+
+	if (rec->lrh_type != LLOG_LOGID_MAGIC) {
+		int rc = -EINVAL;
+
+		CERROR("%s: catalog "DFID" bad record type %x != %x: rc = %d\n",
+		       "llog_test", PLOGID(&llh->lgh_id),
+		       rec->lrh_type, LLOG_LOGID_MAGIC, rc);
+		RETURN(rc);
+	}
+
+	if (ltf->nr < MAX_FIDS) {
+		ltf->ids[ltf->nr] = lir->lid_id;
+		ltf->nr++;
+	}
+
+	RETURN(0);
+}
+
+/* test llog processing with missing plain llogs */
+static int llog_test_13(const struct lu_env *env, struct obd_device *obd)
+{
+	struct llog_test_fids *ltf = NULL;
+	struct llog_handle *cath;
+	struct llog_mini_rec lmr;
+	struct llog_cookie cookie;
+	struct llog_ctxt *ctxt;
+	char name[10];
+	int i, rc, rc2;
+
+	ENTRY;
+
+	OBD_ALLOC_PTR(ltf);
+	if (ltf == NULL)
+		RETURN(-ENOMEM);
+
+	ctxt = llog_get_context(obd, LLOG_TEST_ORIG_CTXT);
+	LASSERT(ctxt);
+
+	lmr.lmr_hdr.lrh_len = lmr.lmr_tail.lrt_len = LLOG_MIN_REC_SIZE;
+	lmr.lmr_hdr.lrh_type = LLOG_OP_MAGIC;
+
+	scnprintf(name, sizeof(name), "%x", llog_test_rand + 3);
+	CWARN("13a: create a catalog log with name: %s\n", name);
+	rc = llog_open_create(env, ctxt, &cath, NULL, name);
+	if (rc) {
+		CERROR("13a: llog_create with name %s failed: %d\n", name, rc);
+		GOTO(ctxt_release, rc);
+	}
+	rc = llog_init_handle(env, cath, LLOG_F_IS_CAT, &uuid);
+	if (rc) {
+		CERROR("13a: can't init llog handle: %d\n", rc);
+		GOTO(out, rc);
+	}
+
+	cfs_fail_loc = 0x1319;
+	cfs_fail_val = 128;
+
+	for (i = 0; i < 2048; i++) {
+		CWARN("13b: write 1 record into the catalog\n");
+		rc = llog_cat_add(env, cath, &lmr.lmr_hdr, &cookie);
+		if (rc != 1) {
+			CERROR("13b: write 1 cat record failed at: %d\n", rc);
+			GOTO(out, rc);
+		}
+	}
+	cat_counter = 0;
+	/* count plain llog ids */
+	rc = llog_process(env, cath, cat_collect_fid_cb, ltf, NULL);
+	llog_cat_close(env, cath);
+	CERROR("13b: found %d plain llogs\n", ltf->nr);
+
+	CWARN("13c: erase plain llog\n");
+	rc = llog_erase(env, ctxt, ltf->ids + 2, NULL);
+	if (rc) {
+		CERROR("13c: can't erase llog: rc=%d\n", rc);
+		GOTO(ctxt_release, rc);
+	}
+
+	rc = llog_open(env, ctxt, &cath, NULL, name, LLOG_OPEN_EXISTS);
+	if (rc) {
+		CERROR("13c: can't reopen catalog: rc=%d\n", rc);
+		GOTO(ctxt_release, rc);
+	}
+	rc = llog_init_handle(env, cath, LLOG_F_IS_CAT, &uuid);
+	if (rc) {
+		CERROR("13c: can't init catalog: rc=%d\n", rc);
+		GOTO(ctxt_release, rc);
+	}
+
+	plain_counter = 0;
+	rc = llog_cat_process(env, cath, plain_print_cb, "foobar", 0, 0);
+	CWARN("13d: forward process: found=%d rc=%d\n", plain_counter, rc);
+
+	llog_cat_close(env, cath);
+
+	CWARN("13e: erase another plain llog\n");
+	rc = llog_erase(env, ctxt, ltf->ids + 4, NULL);
+	if (rc) {
+		CERROR("13e: can't erase llog: rc=%d\n", rc);
+		GOTO(ctxt_release, rc);
+	}
+
+	rc = llog_open(env, ctxt, &cath, NULL, name, LLOG_OPEN_EXISTS);
+	if (rc) {
+		CERROR("13e: can't reopen catalog: rc=%d\n", rc);
+		GOTO(ctxt_release, rc);
+	}
+	rc = llog_init_handle(env, cath, LLOG_F_IS_CAT, &uuid);
+	if (rc) {
+		CERROR("13e: can't init catalog: rc=%d\n", rc);
+		GOTO(ctxt_release, rc);
+	}
+
+	plain_counter = 0;
+	rc = llog_cat_reverse_process(env, cath, plain_print_cb, "foobar");
+	CWARN("13e: backward process: found=%d rc=%d\n", plain_counter, rc);
+
+out:
+	CWARN("13f: put newly-created catalog\n");
+	rc2 = llog_cat_close(env, cath);
+	if (rc2) {
+		CERROR("13f: close log %s failed: %d\n", name, rc2);
+		if (rc == 0)
+			rc = rc2;
+	}
+ctxt_release:
+	llog_ctxt_put(ctxt);
+
+	OBD_FREE_PTR(ltf);
+
+	cfs_fail_loc = 0;
+	cfs_fail_val = 0;
+
+	RETURN(rc);
+}
+
 
 /*
  * -------------------------------------------------------------------------
@@ -2226,6 +2679,22 @@ static int llog_run_tests(const struct lu_env *env, struct obd_device *obd)
 	if (rc)
 		GOTO(cleanup, rc);
 
+	rc = llog_test_11(env, obd);
+	if (rc)
+		GOTO(cleanup, rc);
+
+	rc = llog_test_12(env, obd);
+	if (rc)
+		GOTO(cleanup, rc);
+
+	rc = llog_test_13(env, obd);
+	if (rc)
+		GOTO(cleanup_ctxt, rc);
+
+	/*
+	 * INCREASE LIMIT OF MESSAGES IN sanity/60b ADDING A NEW TEST:
+	 * [[ $LLOG_COUNT -gt 130 ]]
+	 */
 cleanup:
 	err = llog_destroy(env, llh);
 	if (err)
@@ -2238,66 +2707,107 @@ cleanup_ctxt:
 	return rc;
 }
 
-static int llog_test_cleanup(struct obd_device *obd)
+struct llog_test_device {
+	struct lu_device	llog_lu;
+	char			llog_target_name[MAX_OBD_NAME];
+};
+
+static struct llog_test_device *llog_dev(struct lu_device *lu)
 {
-	struct obd_device *tgt;
-	struct lu_env env;
-	int rc;
-
-	ENTRY;
-
-	rc = lu_env_init(&env, LCT_LOCAL | LCT_MG_THREAD);
-	if (rc)
-		RETURN(rc);
-
-	tgt = obd->obd_lvfs_ctxt.dt->dd_lu_dev.ld_obd;
-	rc = llog_cleanup(&env, llog_get_context(tgt, LLOG_TEST_ORIG_CTXT));
-	if (rc)
-		CERROR("failed to llog_test_llog_finish: %d\n", rc);
-	lu_env_fini(&env);
-	RETURN(rc);
+	return container_of(lu, struct llog_test_device, llog_lu);
 }
 
-static int llog_test_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
+static struct lu_device *llog_test_device_alloc(const struct lu_env *env,
+						struct lu_device_type *ldt,
+						struct lustre_cfg *lcfg)
 {
-	struct obd_device *tgt;
-	struct llog_ctxt *ctxt;
-	struct dt_object *o;
-	struct lu_env env;
-	int rc;
+	struct llog_test_device *lldev;
 
 	ENTRY;
 
 	if (lcfg->lcfg_bufcount < 2) {
 		CERROR("requires a TARGET OBD name\n");
-		RETURN(-EINVAL);
+		RETURN(ERR_PTR(-EINVAL));
 	}
 
 	if (lcfg->lcfg_buflens[1] < 1) {
 		CERROR("requires a TARGET OBD name\n");
-		RETURN(-EINVAL);
+		RETURN(ERR_PTR(-EINVAL));
 	}
 
+	OBD_ALLOC_PTR(lldev);
+	if (!lldev)
+		RETURN(ERR_PTR(-ENOMEM));
+
+	strncpy(lldev->llog_target_name, lustre_cfg_string(lcfg, 1),
+		MAX_OBD_NAME);
+
+	RETURN(&lldev->llog_lu);
+}
+
+static struct lu_device *llog_test_device_free(const struct lu_env *env,
+					       struct lu_device *lu)
+{
+	struct llog_test_device *lldev = llog_dev(lu);
+
+	OBD_FREE_PTR(lldev);
+
+	return NULL;
+}
+
+static struct lu_device *llog_test_device_fini(const struct lu_env *env,
+					       struct lu_device *lu)
+{
+	struct obd_device *obd = lu->ld_obd;
+	struct obd_device *tgt;
+	struct lu_env _env;
+	int rc;
+
+	ENTRY;
+
+	rc = lu_env_init(&_env, LCT_LOCAL | LCT_MG_THREAD);
+	if (rc)
+		RETURN(NULL);
+
+	tgt = obd->obd_lvfs_ctxt.dt->dd_lu_dev.ld_obd;
+	rc = llog_cleanup(&_env, llog_get_context(tgt, LLOG_TEST_ORIG_CTXT));
+	if (rc)
+		CERROR("failed to llog_test_llog_finish: %d\n", rc);
+	lu_env_fini(&_env);
+	RETURN(NULL);
+}
+
+static int llog_test_device_init(const struct lu_env *env, struct lu_device *lu,
+				 const char *name, struct lu_device *next)
+{
+	struct llog_test_device *lldev = llog_dev(lu);
+	struct obd_device *obd = lu->ld_obd;
+	struct obd_device *tgt;
+	struct llog_ctxt *ctxt;
+	struct dt_object *o;
+	struct lu_env _env;
+	int rc;
+
 	/* disk obd */
-	tgt = class_name2obd(lustre_cfg_string(lcfg, 1));
+	tgt = class_name2obd(lldev->llog_target_name);
 	if (!tgt || !test_bit(OBDF_ATTACHED, tgt->obd_flags) ||
 	    !test_bit(OBDF_SET_UP, tgt->obd_flags)) {
 		CERROR("target device not attached or not set up (%s)\n",
-			lustre_cfg_string(lcfg, 1));
+		       lldev->llog_target_name);
 		RETURN(-EINVAL);
 	}
 
-	rc = lu_env_init(&env, LCT_LOCAL | LCT_MG_THREAD);
+	rc = lu_env_init(&_env, LCT_LOCAL | LCT_MG_THREAD);
 	if (rc)
 		RETURN(rc);
 
 	CWARN("Setup llog-test device over %s device\n",
-	      lustre_cfg_string(lcfg, 1));
+	      lldev->llog_target_name);
 
 	OBD_SET_CTXT_MAGIC(&obd->obd_lvfs_ctxt);
 	obd->obd_lvfs_ctxt.dt = lu2dt_dev(tgt->obd_lu_dev);
 
-	rc = llog_setup(&env, tgt, &tgt->obd_olg, LLOG_TEST_ORIG_CTXT, tgt,
+	rc = llog_setup(&_env, tgt, &tgt->obd_olg, LLOG_TEST_ORIG_CTXT, tgt,
 			&llog_osd_ops);
 	if (rc)
 		GOTO(cleanup_env, rc);
@@ -2315,30 +2825,45 @@ static int llog_test_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 
 	llog_test_rand = get_random_u32();
 
-	rc = llog_run_tests(&env, tgt);
+	rc = llog_run_tests(&_env, tgt);
 	if (rc)
-		llog_test_cleanup(obd);
+		llog_test_device_fini(env, lu);
 
 cleanup_env:
-	lu_env_fini(&env);
+	lu_env_fini(&_env);
 	RETURN(rc);
 }
 
+
+static const struct lu_device_type_operations llog_test_type_ops = {
+	.ldto_device_alloc	= llog_test_device_alloc,
+	.ldto_device_free	= llog_test_device_free,
+
+	.ldto_device_init	= llog_test_device_init,
+	.ldto_device_fini	= llog_test_device_fini
+};
+
+static struct lu_device_type llog_test_device_type = {
+	.ldt_tags     = LU_DEVICE_MISC,
+	.ldt_name     = LUSTRE_TEST_LLOG_DEVICE,
+	.ldt_ops      = &llog_test_type_ops,
+	.ldt_ctx_tags = LCT_LOCAL
+};
+
 static const struct obd_ops llog_obd_ops = {
 	.o_owner       = THIS_MODULE,
-	.o_setup       = llog_test_setup,
-	.o_cleanup     = llog_test_cleanup,
 };
 
 static int __init llog_test_init(void)
 {
 	return class_register_type(&llog_obd_ops, NULL, false,
-				   "llog_test", NULL);
+				   LUSTRE_TEST_LLOG_DEVICE,
+				   &llog_test_device_type);
 }
 
 static void __exit llog_test_exit(void)
 {
-	class_unregister_type("llog_test");
+	class_unregister_type(LUSTRE_TEST_LLOG_DEVICE);
 }
 
 MODULE_AUTHOR("OpenSFS, Inc. <http://www.lustre.org/>");

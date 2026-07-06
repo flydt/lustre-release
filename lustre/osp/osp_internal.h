@@ -228,6 +228,11 @@ struct osp_device {
 	/* last generated id */
 	ktime_t				 opd_sync_next_commit_cb;
 	atomic_t			 opd_commits_registered;
+	time64_t			 opd_sync_llog_checked_at;
+	int				 opd_sync_llog_plains;
+	int				 opd_sync_llog_positive_nr;
+	int				 opd_sync_llog_total_diff;
+	struct mutex			 opd_sync_health_mutex;
 
 	/*
 	 * statfs related fields: OSP maintains it on its own
@@ -358,9 +363,9 @@ struct osp_it {
 	__u64			  ooi_next;
 	struct dt_object	 *ooi_obj;
 	void			 *ooi_ent;
-	struct page		 *ooi_cur_page;
+	void			 *ooi_cur_kaddr;
 	struct lu_idxpage	 *ooi_cur_idxpage;
-	struct page		 **ooi_pages;
+	struct folio		 **ooi_folios;
 };
 
 #define OSP_THANDLE_MAGIC	0x20141214
@@ -747,6 +752,7 @@ int osp_attr_get(const struct lu_env *env, struct dt_object *dt,
 int osp_xattr_get(const struct lu_env *env, struct dt_object *dt,
 		  struct lu_buf *buf, const char *name);
 int osp_declare_xattr_set(const struct lu_env *env, struct dt_object *dt,
+			  const struct lu_attr *attr,
 			  const struct lu_buf *buf, const char *name,
 			  int flag, struct thandle *th);
 int osp_xattr_set(const struct lu_env *env, struct dt_object *dt,
@@ -840,7 +846,7 @@ static inline void osp_set_req_replay(const struct osp_device *osp,
 	 * 2. sent before the recovery thread target_recovery_thread() start,
 	 *    such as triggered by lod_sub_recovery_thread(). */
 	if (test_bit(OBDF_RECOVERING, obd->obd_flags) ||
-	    (obd->obd_replayable && obd->obd_no_conn))
+	    (test_bit(OBDF_REPLAYABLE, obd->obd_flags) && obd->obd_no_conn))
 		req->rq_allow_replay = 1;
 }
 

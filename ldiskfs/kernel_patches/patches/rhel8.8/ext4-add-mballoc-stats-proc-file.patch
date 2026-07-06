@@ -1,9 +1,6 @@
 commit a6c75eaf11032f4a3d2b3ce2265a194ac6e4a7f0
 Author:     Harshad Shirwadkar <harshadshirwadkar@gmail.com>
 AuthorDate: Thu Apr 1 10:21:25 2021 -0700
-Commit:     Theodore Ts'o <tytso@mit.edu>
-CommitDate: Fri Apr 9 11:34:59 2021 -0400
-
 ext4: add mballoc stats proc file
 
 Add new stats for measuring the performance of mballoc. This patch is
@@ -138,32 +135,32 @@ Index: linux-stage/fs/ext4/mballoc.c
 +	seq_printf(seq, "\tgroups_scanned: %u\n",  atomic_read(&sbi->s_bal_groups_scanned));
 +
 +	seq_puts(seq, "\tcr0_stats:\n");
-+	seq_printf(seq, "\t\thits: %llu\n", atomic64_read(&sbi->s_bal_cX_hits[0]));
++	seq_printf(seq, "\t\thits: %llu\n", (unsigned long long)atomic64_read(&sbi->s_bal_cX_hits[0]));
 +	seq_printf(seq, "\t\tgroups_considered: %llu\n",
-+		   atomic64_read(&sbi->s_bal_cX_groups_considered[0]));
++		   (unsigned long long)atomic64_read(&sbi->s_bal_cX_groups_considered[0]));
 +	seq_printf(seq, "\t\tuseless_loops: %llu\n",
-+		   atomic64_read(&sbi->s_bal_cX_failed[0]));
++		   (unsigned long long)atomic64_read(&sbi->s_bal_cX_failed[0]));
 +
 +	seq_puts(seq, "\tcr1_stats:\n");
-+	seq_printf(seq, "\t\thits: %llu\n", atomic64_read(&sbi->s_bal_cX_hits[1]));
++	seq_printf(seq, "\t\thits: %llu\n", (unsigned long long)atomic64_read(&sbi->s_bal_cX_hits[1]));
 +	seq_printf(seq, "\t\tgroups_considered: %llu\n",
-+		   atomic64_read(&sbi->s_bal_cX_groups_considered[1]));
++		   (unsigned long long)atomic64_read(&sbi->s_bal_cX_groups_considered[1]));
 +	seq_printf(seq, "\t\tuseless_loops: %llu\n",
-+		   atomic64_read(&sbi->s_bal_cX_failed[1]));
++		   (unsigned long long)atomic64_read(&sbi->s_bal_cX_failed[1]));
 +
 +	seq_puts(seq, "\tcr2_stats:\n");
-+	seq_printf(seq, "\t\thits: %llu\n", atomic64_read(&sbi->s_bal_cX_hits[2]));
++	seq_printf(seq, "\t\thits: %llu\n", (unsigned long long)atomic64_read(&sbi->s_bal_cX_hits[2]));
 +	seq_printf(seq, "\t\tgroups_considered: %llu\n",
-+		   atomic64_read(&sbi->s_bal_cX_groups_considered[2]));
++		   (unsigned long long)atomic64_read(&sbi->s_bal_cX_groups_considered[2]));
 +	seq_printf(seq, "\t\tuseless_loops: %llu\n",
-+		   atomic64_read(&sbi->s_bal_cX_failed[2]));
++		   (unsigned long long)atomic64_read(&sbi->s_bal_cX_failed[2]));
 +
 +	seq_puts(seq, "\tcr3_stats:\n");
-+	seq_printf(seq, "\t\thits: %llu\n", atomic64_read(&sbi->s_bal_cX_hits[3]));
++	seq_printf(seq, "\t\thits: %llu\n", (unsigned long long)atomic64_read(&sbi->s_bal_cX_hits[3]));
 +	seq_printf(seq, "\t\tgroups_considered: %llu\n",
-+		   atomic64_read(&sbi->s_bal_cX_groups_considered[3]));
++		   (unsigned long long)atomic64_read(&sbi->s_bal_cX_groups_considered[3]));
 +	seq_printf(seq, "\t\tuseless_loops: %llu\n",
-+		   atomic64_read(&sbi->s_bal_cX_failed[3]));
++		   (unsigned long long)atomic64_read(&sbi->s_bal_cX_failed[3]));
 +	seq_printf(seq, "\textents_scanned: %u\n", atomic_read(&sbi->s_bal_ex_scanned));
 +	seq_printf(seq, "\t\tgoal_hits: %u\n", atomic_read(&sbi->s_bal_goals));
 +	seq_printf(seq, "\t\t2^n_hits: %u\n", atomic_read(&sbi->s_bal_2orders));
@@ -174,7 +171,7 @@ Index: linux-stage/fs/ext4/mballoc.c
 +		   atomic_read(&sbi->s_mb_buddies_generated),
 +		   ext4_get_groups_count(sb));
 +	seq_printf(seq, "\tbuddies_time_used: %llu\n",
-+		   atomic64_read(&sbi->s_mb_generation_time));
++		   (unsigned long long)atomic64_read(&sbi->s_mb_generation_time));
 +	seq_printf(seq, "\tpreallocated: %u\n",
 +		   atomic_read(&sbi->s_mb_preallocated));
 +	seq_printf(seq, "\tdiscarded: %u\n",
@@ -223,7 +220,7 @@ Index: linux-stage/fs/ext4/mballoc.c
 -	seq_printf(seq, "\tbuddies_generated: %u\n",
 -		   atomic_read(&sbi->s_mb_buddies_generated));
 -	seq_printf(seq, "\tbuddies_time_used: %llu\n",
--		   atomic64_read(&sbi->s_mb_generation_time));
+-		   (unsigned long long)atomic64_read(&sbi->s_mb_generation_time));
 -	seq_printf(seq, "\tpreallocated: %u\n",
 -		   atomic_read(&sbi->s_mb_preallocated));
 -	seq_printf(seq, "\tdiscarded: %u\n",

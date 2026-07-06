@@ -15,10 +15,11 @@
  */
 
 #include <linux/ethtool.h>
-#include <linux/inetdevice.h>
+#include <lustre_compat/linux/inetdevice.h>
 #include <linux/kernel.h>
 #include <linux/sunrpc/addr.h>
 #include <net/addrconf.h>
+
 #include "socklnd.h"
 
 static const struct lnet_lnd the_ksocklnd;
@@ -38,7 +39,7 @@ static int ksocknal_ip2index(struct sockaddr *addr, struct lnet_ni *ni,
 
 	rcu_read_lock();
 	for_each_netdev_rcu(ni->ni_net_ns, dev) {
-		int flags = dev_get_flags(dev);
+		int flags = netif_get_flags(dev);
 		struct in_device *in_dev;
 
 		if (flags & IFF_LOOPBACK) /* skip the loopback IF */
@@ -64,7 +65,7 @@ static int ksocknal_ip2index(struct sockaddr *addr, struct lnet_ni *ni,
 		case AF_INET6: {
 			struct inet6_dev *in6_dev;
 			const struct inet6_ifaddr *ifa6;
-			struct sockaddr_in6 *addr6 = (struct sockaddr_in6*)addr;
+			struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)addr;
 
 			in6_dev = __in6_dev_get(dev);
 			if (!in6_dev)
@@ -107,21 +108,9 @@ ksocknal_create_conn_cb(struct sockaddr *addr)
 		return NULL;
 
 	refcount_set(&conn_cb->ksnr_refcount, 1);
-	conn_cb->ksnr_peer = NULL;
-	conn_cb->ksnr_retry_interval = 0;         /* OK to connect at any time */
 	rpc_copy_addr((struct sockaddr *)&conn_cb->ksnr_addr, addr);
 	rpc_set_port((struct sockaddr *)&conn_cb->ksnr_addr,
 		     rpc_get_port(addr));
-	conn_cb->ksnr_scheduled = 0;
-	conn_cb->ksnr_connecting = 0;
-	conn_cb->ksnr_connected = 0;
-	conn_cb->ksnr_deleted = 0;
-	conn_cb->ksnr_conn_count = 0;
-	conn_cb->ksnr_ctrl_conn_count = 0;
-	conn_cb->ksnr_blki_conn_count = 0;
-	conn_cb->ksnr_blko_conn_count = 0;
-	conn_cb->ksnr_max_conns = 0;
-	conn_cb->ksnr_busy_retry_count = 0;
 
 	return conn_cb;
 }
@@ -765,6 +754,19 @@ ksocknal_accept(struct lnet_ni *ni, struct socket *sock)
 	return 0;
 }
 
+static int
+ksocknal_tun_defaults(struct lnet_lnd_tunables *tunables,
+		      struct lnet_ioctl_config_lnd_cmn_tunables *cmn)
+{
+	/* sync to latest module settings */
+	ksocknal_tunables_setup(tunables, cmn);
+
+	memcpy(&tunables->lnd_tun_u.lnd_sock, &ksock_default_tunables,
+	       sizeof(ksock_default_tunables));
+
+	return 0;
+}
+
 static const struct ln_key_list ksocknal_tunables_keys = {
 	.lkl_maxattr			= LNET_NET_SOCKLND_TUNABLES_ATTR_MAX,
 	.lkl_list			= {
@@ -784,7 +786,8 @@ static const struct ln_key_list ksocknal_tunables_keys = {
 };
 
 static int
-ksocknal_nl_get(int cmd, struct sk_buff *msg, int type, void *data)
+ksocknal_nl_get(int cmd, struct sk_buff *msg, int type, void *data,
+		bool export_backup)
 {
 	struct lnet_lnd_tunables *tun;
 	struct lnet_ni *ni = data;
@@ -792,39 +795,19 @@ ksocknal_nl_get(int cmd, struct sk_buff *msg, int type, void *data)
 	if (!ni || !msg)
 		return -EINVAL;
 
-	 if (cmd != LNET_CMD_NETS || type != LNET_NET_LOCAL_NI_ATTR_LND_TUNABLES)
+	if (cmd != LNET_CMD_NETS || type != LNET_NET_LOCAL_NI_ATTR_LND_TUNABLES)
 		return -EOPNOTSUPP;
 
 	tun = &ni->ni_lnd_tunables;
 	nla_put_u16(msg, LNET_NET_SOCKLND_TUNABLES_ATTR_CONNS_PER_PEER,
 		    tun->lnd_tun_u.lnd_sock.lnd_conns_per_peer);
-	nla_put_u32(msg, LNET_NET_SOCKLND_TUNABLES_ATTR_LND_TIMEOUT,
-		    ksocknal_timeout());
+	if (!export_backup)
+		nla_put_u32(msg, LNET_NET_SOCKLND_TUNABLES_ATTR_LND_TIMEOUT,
+			    ksocknal_timeout());
 	nla_put_s16(msg, LNET_NET_SOCKLND_TUNABLES_ATTR_LND_TOS,
 		    tun->lnd_tun_u.lnd_sock.lnd_tos);
 
 	return 0;
-}
-
-static inline void
-ksocknal_nl_set_default(int cmd, int type, void *data)
-{
-	struct lnet_lnd_tunables *tunables = data;
-	struct lnet_ioctl_config_socklnd_tunables *lt;
-	struct lnet_ioctl_config_socklnd_tunables *df;
-
-	lt = &tunables->lnd_tun_u.lnd_sock;
-	df = &ksock_default_tunables;
-	switch (type) {
-	case LNET_NET_SOCKLND_TUNABLES_ATTR_CONNS_PER_PEER:
-		lt->lnd_conns_per_peer = df->lnd_conns_per_peer;
-		break;
-	case LNET_NET_SOCKLND_TUNABLES_ATTR_LND_TIMEOUT:
-		lt->lnd_timeout = df->lnd_timeout;
-		fallthrough;
-	default:
-		break;
-	}
 }
 
 static int
@@ -837,12 +820,7 @@ ksocknal_nl_set(int cmd, struct nlattr *attr, int type, void *data)
 	if (cmd != LNET_CMD_NETS)
 		return -EOPNOTSUPP;
 
-	if (!attr) {
-		ksocknal_nl_set_default(cmd, type, data);
-		return 0;
-	}
-
-	if (nla_type(attr) != LN_SCALAR_ATTR_INT_VALUE)
+	if (!attr || nla_type(attr) != LN_SCALAR_ATTR_INT_VALUE)
 		return -EINVAL;
 
 	switch (type) {
@@ -855,8 +833,7 @@ ksocknal_nl_set(int cmd, struct nlattr *attr, int type, void *data)
 			rc = -ERANGE;
 		break;
 	case LNET_NET_SOCKLND_TUNABLES_ATTR_LND_TIMEOUT:
-		num = nla_get_s64(attr);
-		tunables->lnd_tun_u.lnd_sock.lnd_timeout = num;
+		/* Ignore */
 		break;
 	case LNET_NET_SOCKLND_TUNABLES_ATTR_LND_TOS:
 		num = nla_get_s64(attr);
@@ -1199,8 +1176,7 @@ ksocknal_create_conn(struct lnet_ni *ni, struct ksock_conn_cb *conn_cb,
 	 *        socket callbacks.
 	 */
 
-	CDEBUG(D_NET, "New conn %s p %d.x %pISc -> %pIScp"
-	       " incarnation:%lld sched[%d]\n",
+	CDEBUG(D_NET, "New conn %s p %d.x %pISc -> %pIScp incarnation:%lld sched[%d]\n",
 	       libcfs_idstr(&peerid), conn->ksnc_proto->pro_version,
 	       &conn->ksnc_myaddr, &conn->ksnc_peeraddr,
 	       incarnation, cpt);
@@ -1365,7 +1341,8 @@ ksocknal_close_conn_locked(struct ksock_conn *conn, int error)
 		if (!list_empty(&peer_ni->ksnp_tx_queue)) {
 			struct ksock_tx *tx;
 
-			LASSERT(conn->ksnc_proto == &ksocknal_protocol_v3x);
+			LASSERT(conn->ksnc_proto == &ksocknal_protocol_v3x ||
+				conn->ksnc_proto == &ksocknal_protocol_v4x);
 
 			/* throw them to the last connection...,
 			 * these TXs will be send to /dev/null by scheduler
@@ -1563,11 +1540,11 @@ ksocknal_destroy_conn(struct ksock_conn *conn)
 	case SOCKNAL_RX_LNET_PAYLOAD:
 		last_rcv = conn->ksnc_rx_deadline -
 			   ksocknal_timeout();
-		CERROR("Completing partial receive from %s[%d], ip %pIScp, with error, wanted: %d, left: %d, last alive is %lld secs ago\n",
+		CERROR("Completing partial receive from %s[%d], ip %pIScp, with error, wanted: %zd, left: %d, last alive is %lld secs ago\n",
 		       libcfs_idstr(&conn->ksnc_peer->ksnp_id),
 		       conn->ksnc_type,
 		       &conn->ksnc_peeraddr,
-		       conn->ksnc_rx_nob_wanted, conn->ksnc_rx_nob_left,
+		       iov_iter_count(&conn->ksnc_rx_to), conn->ksnc_rx_nob_left,
 		       ktime_get_seconds() - last_rcv);
 		if (conn->ksnc_lnet_msg)
 			conn->ksnc_lnet_msg->msg_health_status =
@@ -2086,7 +2063,7 @@ ksocknal_handle_link_state_change(struct net_device *dev,
 		if (link_down) {
 			ni_state_before = lnet_set_link_fatal_state(ni, 1);
 		} else {
-			state = (lnet_get_link_status(dev) == 0);
+			state = (lnet_get_link_status_locked(dev) == 0);
 			ni_state_before = lnet_set_link_fatal_state(ni,
 								    state);
 		}
@@ -2171,7 +2148,7 @@ static int ksocknal_device_event(struct notifier_block *unused,
 
 	operstate = dev->operstate;
 
-	CDEBUG(D_NET, "devevent: status=%s, iface=%s ifindex %d state %u ns %p \n",
+	CDEBUG(D_NET, "devevent: status=%s, iface=%s ifindex %d state %u ns %p\n",
 	       netdev_cmd_to_name(event), dev->name, dev->ifindex, operstate,
 	       dev_netns);
 
@@ -2503,6 +2480,8 @@ ksocknal_shutdown(struct lnet_ni *ni)
 	/* Delete all peers */
 	ksocknal_del_peer(ni, NULL);
 
+	lnet_acceptor_remove_sockets(net->ksnn_interface.ksni_name);
+
 	/* Wait for all peer_ni state to clean up */
 	wait_var_event_warning(&net->ksnn_npeers,
 			       atomic_read(&net->ksnn_npeers) ==
@@ -2632,6 +2611,7 @@ ksocknal_startup(struct lnet_ni *ni)
 	struct lnet_inetdev *ifaces = NULL;
 	int rc, if_idx;
 	int dev_status;
+	__u32 ipaddr = 0;
 
 	LASSERT(ni->ni_net->net_lnd == &the_ksocklnd);
 	if (ksocknal_data.ksnd_init == SOCKNAL_INIT_NOTHING) {
@@ -2645,8 +2625,6 @@ ksocknal_startup(struct lnet_ni *ni)
 
 	net->ksnn_incarnation = ktime_get_real_ns();
 	ni->ni_data = net;
-
-	ksocknal_tunables_setup(ni);
 
 	rc = lnet_inet_enumerate(&ifaces, ni->ni_net_ns,
 				 the_lnet.ln_nis_use_large_nids);
@@ -2667,6 +2645,18 @@ ksocknal_startup(struct lnet_ni *ni)
 		if (rc < 0)
 			CWARN("ksocklnd failed to allocate ni_interface\n");
 	}
+
+	if (!ni->ni_lnd_tunables_set)
+		memcpy(&ni->ni_lnd_tunables.lnd_tun_u.lnd_sock,
+		       &ksock_default_tunables, sizeof(ksock_default_tunables));
+
+	ksocknal_tunables_setup(&ni->ni_lnd_tunables,
+				&ni->ni_net->net_tunables);
+
+	/* conns_per_peer requires access to the interface to query it. */
+	if (!ni->ni_lnd_tunables.lnd_tun_u.lnd_sock.lnd_conns_per_peer)
+		ni->ni_lnd_tunables.lnd_tun_u.lnd_sock.lnd_conns_per_peer =
+			ksocklnd_lookup_conns_per_peer(ni);
 
 	ni->ni_dev_cpt = ifaces[if_idx].li_cpt;
 	ksi->ksni_index = ifaces[if_idx].li_index;
@@ -2691,6 +2681,7 @@ ksocknal_startup(struct lnet_ni *ni)
 		ksi->ksni_netmask = ifaces[if_idx].li_netmask;
 		ni->ni_nid.nid_size = 0;
 		ni->ni_nid.nid_addr[0] = sa->sin_addr.s_addr;
+		ipaddr = sa->sin_addr.s_addr;
 	}
 	strscpy(ksi->ksni_name, ifaces[if_idx].li_name, sizeof(ksi->ksni_name));
 
@@ -2704,6 +2695,12 @@ ksocknal_startup(struct lnet_ni *ni)
 				&dev_status) < 0) ||
 	     (dev_status <= 0))
 		lnet_set_link_fatal_state(ni, 1);
+
+	rc = lnet_acceptor_add_sockets(ksi->ksni_name,
+				       (struct sockaddr *)&ksi->ksni_addr,
+				       ksi->ksni_index, ni->ni_net_ns);
+	if (rc != 0)
+		goto out_net;
 
 	list_add(&net->ksnn_list, &ksocknal_data.ksnd_nets);
 	net->ksnn_ni = ni;
@@ -2736,10 +2733,11 @@ static const struct lnet_lnd the_ksocklnd = {
 	.lnd_recv		= ksocknal_recv,
 	.lnd_notify_peer_down	= ksocknal_notify_gw_down,
 	.lnd_accept		= ksocknal_accept,
+	.lnd_tun_defaults	= ksocknal_tun_defaults,
 	.lnd_nl_get		= ksocknal_nl_get,
 	.lnd_nl_set		= ksocknal_nl_set,
-	.lnd_keys		= &ksocknal_tunables_keys,
 	.lnd_get_timeout	= ksocknal_timeout,
+	.lnd_keys		= &ksocknal_tunables_keys,
 };
 
 static int __init ksocklnd_init(void)
@@ -2765,8 +2763,8 @@ static int __init ksocklnd_init(void)
 
 MODULE_AUTHOR("OpenSFS, Inc. <http://www.lustre.org/>");
 MODULE_DESCRIPTION("TCP Socket LNet Network Driver");
-MODULE_VERSION("2.8.0");
+MODULE_VERSION(LNET_VERSION);
 MODULE_LICENSE("GPL");
 
-module_init(ksocklnd_init);
+late_initcall_sync(ksocklnd_init);
 module_exit(ksocklnd_exit);

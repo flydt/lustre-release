@@ -181,18 +181,18 @@ static int mdd_links_read_with_rec(const struct lu_env *env,
 }
 
 /**
- * Get parent FID of the directory
+ * mdd_parent_fid() - Get parent FID of the directory
+ * @env: execution environment
+ * @obj: object from which to find the parent FID
+ * @attr: attribute of the object
+ * @fid: fid to get the parent FID [out]
  *
  * Read parent FID from linkEA, if that fails, then do lookup
  * dotdot to get the parent FID.
  *
- * \param[in] env	execution environment
- * \param[in] obj	object from which to find the parent FID
- * \param[in] attr	attribute of the object
- * \param[out] fid	fid to get the parent FID
- *
- * \retval		0 if getting the parent FID succeeds.
- * \retval		negative errno if getting the parent FID fails.
+ * Return:
+ * * %0 if getting the parent FID succeeds.
+ * * %negative errno if getting the parent FID fails.
  */
 static inline int mdd_parent_fid(const struct lu_env *env,
 				 struct mdd_object *obj,
@@ -207,6 +207,7 @@ static inline int mdd_parent_fid(const struct lu_env *env,
 
 	ENTRY;
 
+	CDEBUG(D_INFO, "find parent for "DFID"\n", PFID(mdd_object_fid(obj)));
 	LASSERTF(S_ISDIR(mdd_object_type(obj)),
 		 "%s: FID "DFID" is not a directory type = %o\n",
 		 mdd_obj_dev_name(obj), PFID(mdd_object_fid(obj)),
@@ -250,8 +251,8 @@ int mdd_is_root(struct mdd_device *mdd, const struct lu_fid *fid)
 }
 
 /*
- * return 1: if \a tfid is the fid of the ancestor of \a mo;
- * return 0: if not;
+ * return 1: if @tfid is the FID of the ancestor of @mo;
+ * return 0: if they are the same FID or in a different subtree;
  * otherwise: values < 0, errors.
  */
 static int mdd_is_parent(const struct lu_env *env,
@@ -260,24 +261,39 @@ static int mdd_is_parent(const struct lu_env *env,
 			const struct lu_attr *attr,
 			const struct lu_fid *tfid)
 {
-	struct mdd_object *mp;
+	static bool dumped;
+	const struct lu_fid *mofid;
 	struct lu_fid *pfid;
+	int count;
 	int rc;
 
-	LASSERT(!lu_fid_eq(mdd_object_fid(mo), tfid));
-	pfid = &mdd_env_info(env)->mdi_fid;
+	mofid = mdd_object_fid(mo);
+	CDEBUG(D_INFO, "%s: check if "DFID" is a child of "DFID"\n",
+		mdd2obd_dev(mdd)->obd_name, PFID(mofid), PFID(tfid));
+	if (lu_fid_eq(mofid, tfid))
+		return 0;
 
-	if (mdd_is_root(mdd, mdd_object_fid(mo)))
+	if (mdd_is_root(mdd, mofid))
 		return 0;
 
 	if (mdd_is_root(mdd, tfid))
 		return 1;
 
+	pfid = &mdd_env_info(env)->mdi_fid;
 	rc = mdd_parent_fid(env, mo, attr, pfid);
 	if (rc)
 		return rc;
 
-	while (1) {
+	/* PATH_MAX / 2 would be the maximum "normal" iteration limit for a
+	 * a directory tree with single-character names "a/b/c/d/...", but
+	 * let's be accepting of potential subdirectory mount trees that may
+	 * exceed the normal pathname limits (this has been seen before).
+	 * The most important thing is not the actual limit, but that the
+	 * loop iteration is bounded (LU-12800, LU-11218, LU-10406).
+	 */
+	for (count = 0; count < PATH_MAX; count++) {
+		struct mdd_object *mp;
+
 		if (lu_fid_eq(pfid, tfid))
 			return 1;
 
@@ -299,7 +315,15 @@ static int mdd_is_parent(const struct lu_env *env,
 			return rc;
 	}
 
-	return 0;
+	rc = -ELOOP;
+	CERROR("%s: walk from "DFID" to "DFID" stuck at "DFID": rc = %d\n",
+	       mdd2obd_dev(mdd)->obd_name, PFID(mofid), PFID(tfid), PFID(pfid),
+	       rc);
+	if (!dumped) {
+		dumped = true;
+		libcfs_debug_dumplog();
+	}
+	return rc;
 }
 
 /*
@@ -332,16 +356,17 @@ static int mdd_is_subdir(const struct lu_env *env, struct md_object *mo,
 	RETURN(rc);
 }
 
-/*
- * Check that @dir contains no entries except (possibly) dot and dotdot.
+/**
+ * mdd_dir_is_empty() - Check that @dir contains no entries except (possibly)
+ * dot and dotdot.
+ * @env: execution environment
+ * @dir: dir object to check for emptyness
  *
  * Returns:
- *
- *             0        empty
- *      -ENOTDIR        not a directory object
- *    -ENOTEMPTY        not empty
- *           -ve        other error
- *
+ * * %0 on empty
+ * * %-ENOTDIR not a directory object
+ * * %-ENOTEMPTY not empty
+ * * %negative other error
  */
 int mdd_dir_is_empty(const struct lu_env *env, struct mdd_object *dir)
 {
@@ -386,19 +411,20 @@ int mdd_dir_is_empty(const struct lu_env *env, struct mdd_object *dir)
 	RETURN(result);
 }
 
-/*
+/**
+ * __mdd_may_link() - Determine if the target object can be hard linked
+ * @env: thread environment
+ * @obj: object being linked to
+ * @la: attributes of @obj
+ *
  * Determine if the target object can be hard linked, and right now it only
  * checks if the link count reach the maximum limit. Note: for ldiskfs, the
  * directory nlink count might exceed the maximum link count(see
  * osd_object_ref_add), so it only check nlink for non-directories.
  *
- * \param[in] env	thread environment
- * \param[in] obj	object being linked to
- * \param[in] la	attributes of \a obj
- *
- * \retval		0 if \a obj can be hard linked
- * \retval		negative error if \a obj is a directory or has too
- *			many links
+ * Return:
+ * * %0 if @obj can be hard linked
+ * * %negative error if @obj is a directory or has too many links
  */
 static int __mdd_may_link(const struct lu_env *env, struct mdd_object *obj,
 			  const struct lu_attr *la)
@@ -420,17 +446,16 @@ static int __mdd_may_link(const struct lu_env *env, struct mdd_object *obj,
 }
 
 /**
- * Check whether it may create the cobj under the pobj.
+ * mdd_may_create() - Check whether it may create the cobj under the pobj.
+ * @env: execution environment
+ * @pobj: the parent directory
+ * @pattr: the attribute of the parent directory
+ * @cobj: the child to be created
+ * @check_perm: if check WRITE|EXEC permission for parent
  *
- * \param[in] env	execution environment
- * \param[in] pobj	the parent directory
- * \param[in] pattr	the attribute of the parent directory
- * \param[in] cobj	the child to be created
- * \param[in] check_perm	if check WRITE|EXEC permission for parent
- *
- * \retval		= 0 create the child under this dir is allowed
- * \retval              negative errno create the child under this dir is
- *                      not allowed
+ * Return:
+ * * %0 create the child under this dir is allowed
+ * * %negative errno create the child under this dir is not allowed
  */
 int mdd_may_create(const struct lu_env *env, struct mdd_object *pobj,
 		   const struct lu_attr *pattr, struct mdd_object *cobj,
@@ -450,32 +475,6 @@ int mdd_may_create(const struct lu_env *env, struct mdd_object *pobj,
 		rc = mdd_permission_internal_locked(env, pobj, pattr,
 						    MAY_WRITE | MAY_EXEC,
 						    DT_TGT_PARENT);
-	RETURN(rc);
-}
-
-/* Check whether can unlink from the pobj in the case of "cobj == NULL". */
-int mdd_may_unlink(const struct lu_env *env, struct mdd_object *pobj,
-		   const struct lu_attr *pattr, const struct lu_attr *attr)
-{
-	int rc;
-
-	ENTRY;
-
-	if (mdd_is_dead_obj(pobj))
-		RETURN(-ENOENT);
-
-	if (attr->la_flags & (LUSTRE_APPEND_FL | LUSTRE_IMMUTABLE_FL))
-		RETURN(-EPERM);
-
-	rc = mdd_permission_internal_locked(env, pobj, pattr,
-					    MAY_WRITE | MAY_EXEC,
-					    DT_TGT_PARENT);
-	if (rc != 0)
-		RETURN(rc);
-
-	if (pattr->la_flags & LUSTRE_APPEND_FL)
-		RETURN(-EPERM);
-
 	RETURN(rc);
 }
 
@@ -589,19 +588,21 @@ int mdd_may_delete(const struct lu_env *env, struct mdd_object *tpobj,
 }
 
 /**
+ * mdd_link_sanity_check() - Check whether it can create the link file
+ * @env: execution environment
+ * @tgt_obj: the target directory
+ * @tattr: attributes of target directory
+ * @lname: the link name
+ * @src_obj: source object for link
+ * @cattr: attributes for source object
+ *
  * Check whether it can create the link file(linked to @src_obj) under
  * the target directory(@tgt_obj), and src_obj has been locked by
  * mdd_write_lock.
  *
- * \param[in] env	execution environment
- * \param[in] tgt_obj	the target directory
- * \param[in] tattr	attributes of target directory
- * \param[in] lname	the link name
- * \param[in] src_obj	source object for link
- * \param[in] cattr	attributes for source object
- *
- * \retval		= 0 it is allowed to create the link file under tgt_obj
- * \retval              negative error not allowed to create the link file
+ * Return:
+ * * %0 it is allowed to create the link file under @tgt_obj
+ * * %negative error not allowed to create the link file
  */
 static int mdd_link_sanity_check(const struct lu_env *env,
 				 struct mdd_object *tgt_obj,
@@ -767,6 +768,7 @@ int mdd_declare_changelog_store(const struct lu_env *env,
 	if (IS_ERR(llog_th))
 		GOTO(out_put, rc = PTR_ERR(llog_th));
 
+	mdd_env_info(env)->mdi_chlog_declared = 1;
 	rc = llog_declare_add(env, ctxt->loc_handle, &rec_hdr, llog_th);
 
 out_put:
@@ -775,6 +777,17 @@ out_put:
 	return rc;
 }
 
+/* The locking here is a bit tricky. For a CHANGELOG_REC the function
+ * drops loghandle->lgh_lock for a performance reasons. All dt_write()
+ * are used own offset, so it is safe.
+ * For other records general function is called and it doesnot drop
+ * a semaphore. The callers are changelog catalog records and initialisation
+ * records. llog_cat_new_log->llog_write_rec->mdd_changelog_write_rec()
+ *
+ * Since dt_record_write() could be reordered, rec1|rec2|0x0|rec4 could be
+ * at memory, reader should care about it. When the th is commited it is
+ * impossible to have a hole, since reordered records have the same th.
+ */
 int mdd_changelog_write_rec(const struct lu_env *env,
 			    struct llog_handle *loghandle,
 			    struct llog_rec_hdr *r,
@@ -782,50 +795,125 @@ int mdd_changelog_write_rec(const struct lu_env *env,
 			    int idx, struct thandle *th)
 {
 	int rc;
+	static struct thandle *saved_th;
+
+	CDEBUG(D_TRACE, "Adding rec %u type %u to "DFID" flags %x count %d\n",
+	       idx, r->lrh_type, PLOGID(&loghandle->lgh_id),
+	       loghandle->lgh_hdr->llh_flags, loghandle->lgh_hdr->llh_count);
 
 	if (r->lrh_type == CHANGELOG_REC) {
 		struct mdd_device *mdd;
 		struct llog_changelog_rec *rec;
+		size_t left;
+		__u32 chunk_size = loghandle->lgh_hdr->llh_hdr.lrh_len;
+		struct dt_object *o = loghandle->lgh_obj;
+		loff_t offset;
+		struct lu_buf lgi_buf;
+
+		left = chunk_size - (loghandle->lgh_cur_offset &
+				     (chunk_size - 1));
 
 		mdd = lu2mdd_dev(loghandle->lgh_ctxt->loc_obd->obd_lu_dev);
 		rec = container_of(r, struct llog_changelog_rec, cr_hdr);
 
+		/* Don't use padding records because it require a slot at header
+		 * so previous result of checking llog_is_full(loghandle)
+		 * would be invalid, leave zeroes at the end of block.
+		 * A reader would care about it.
+		 */
+		if (left != 0 && left < r->lrh_len)
+			loghandle->lgh_cur_offset += left;
+
+		offset = loghandle->lgh_cur_offset;
+		loghandle->lgh_cur_offset += r->lrh_len;
+		r->lrh_index = ++loghandle->lgh_last_idx;
+
 		spin_lock(&mdd->mdd_cl.mc_lock);
-		rec->cr.cr_index = mdd->mdd_cl.mc_index + 1;
+		rec->cr.cr_index = ++mdd->mdd_cl.mc_index;
 		spin_unlock(&mdd->mdd_cl.mc_lock);
 
-		rc = llog_osd_ops.lop_write_rec(env, loghandle, r,
-						cookie, idx, th);
+		/* drop the loghandle semaphore for parallel writes */
+		up_write(&loghandle->lgh_lock);
 
-		/*
-		 * if current llog is full, we will generate a new
-		 * llog, and since it's actually not an error, let's
-		 * avoid increasing index so that userspace apps
-		 * should not see a gap in the changelog sequence
-		 */
-		if (!(rc == -ENOSPC && llog_is_full(loghandle))) {
-			spin_lock(&mdd->mdd_cl.mc_lock);
-			++mdd->mdd_cl.mc_index;
-			spin_unlock(&mdd->mdd_cl.mc_lock);
+		REC_TAIL(r)->lrt_len = r->lrh_len;
+		REC_TAIL(r)->lrt_index = r->lrh_index;
+
+		lgi_buf.lb_len = rec->cr_hdr.lrh_len;
+		lgi_buf.lb_buf = rec;
+
+		if (CFS_FAIL_CHECK(OBD_FAIL_MDS_CHANGELOG_FAIL_WRITE) &&
+		    (rec->cr.cr_index % (cfs_fail_val + 1)) == 0)
+			rc = -EIO;
+		else
+			rc = dt_record_write(env, o, &lgi_buf, &offset, th);
+
+		if (rc) {
+			CERROR("%s: failed to write changelog record file "DFID" rec idx %u off %llu chnlg idx %llu: rc = %d\n",
+			       loghandle->lgh_ctxt->loc_obd->obd_name,
+			       PFID(lu_object_fid(&o->do_lu)), r->lrh_index,
+			       offset, rec->cr.cr_index, rc);
+			return rc;
 		}
+
+		/* mark index at bitmap after successful write, increment count,
+		 * and lrt_index with a last index. Use a lgh_hdr_lock for
+		 * a synchronization with llog_cancel.
+		 */
+		spin_lock(&loghandle->lgh_hdr_lock);
+		rc = __test_and_set_bit_le(r->lrh_index,
+					   LLOG_HDR_BITMAP(loghandle->lgh_hdr));
+		LASSERTF(!rc,
+			 "%s: index %u already set in llog bitmap "DFID"\n",
+			 loghandle->lgh_ctxt->loc_obd->obd_name,
+			 r->lrh_index, PLOGID(&loghandle->lgh_id));
+		loghandle->lgh_hdr->llh_count++;
+		if (LLOG_HDR_TAIL(loghandle->lgh_hdr)->lrt_index < r->lrh_index)
+			LLOG_HDR_TAIL(loghandle->lgh_hdr)->lrt_index =
+				r->lrh_index;
+		spin_unlock(&loghandle->lgh_hdr_lock);
+
+		if (unlikely(th != saved_th)) {
+			CDEBUG(D_OTHER, "%s: wrote rec %u "DFID" count %d\n",
+			       loghandle->lgh_ctxt->loc_obd->obd_name,
+			       r->lrh_index, PLOGID(&loghandle->lgh_id),
+			       loghandle->lgh_hdr->llh_count);
+			saved_th = th;
+		}
+		lgi_buf.lb_len = loghandle->lgh_hdr_size;
+		lgi_buf.lb_buf = loghandle->lgh_hdr;
+		offset = 0;
+		CDEBUG(D_TRACE, "%s: writing header "DFID"\n",
+		       loghandle->lgh_ctxt->loc_obd->obd_name,
+		       PLOGID(&loghandle->lgh_id));
+		/* full header write, it is a local. For a mapped bh
+		 * it is memcpy() only. Probably it could be delayed as work.
+		 */
+		rc = dt_record_write(env, o, &lgi_buf, &offset, th);
 	} else {
 		rc = llog_osd_ops.lop_write_rec(env, loghandle, r,
 						cookie, idx, th);
 	}
+	if (rc < 0)
+		CERROR("%s: failed to write changelog record file "DFID" count %d offset %llu: rc = %d\n",
+		       loghandle->lgh_ctxt->loc_obd->obd_name,
+		       PLOGID(&loghandle->lgh_id),
+		       loghandle->lgh_hdr->llh_count, loghandle->lgh_cur_offset,
+		       rc);
 
 	return rc;
 }
 
 /**
- * Checks that changelog consumes safe amount of space comparing
- * with FS free space
+ * mdd_changelog_is_space_safe() - Checks that changelog consumes safe amount of
+ * space comparing with FS free space
+ * @env: current lu_env
+ * @mdd: current MDD device
+ * @lgh: changelog catalog llog handle
+ * @estimate: get exact llog size or estimate it.
  *
- * \param env - current lu_env
- * \param mdd - current MDD device
- * \param lgh - changelog catalog llog handle
- * \param estimate - get exact llog size or estimate it.
- *
- * \retval true/false
+ * Return:
+ * * %true on success
+ * * %false on failure
  */
 bool mdd_changelog_is_space_safe(const struct lu_env *env,
 				 struct mdd_device *mdd,
@@ -862,39 +950,35 @@ bool mdd_changelog_is_space_safe(const struct lu_env *env,
 		llog_size = clamp_t(unsigned long long,
 				    (sfs.os_blocks * sfs.os_bsize) >> 6,
 				    2 << 20, 128 << 20);
-		/* llog_cat_free_space() gives free slots, we need occupied,
-		 * so subtruct free from total slots minus one for header
-		 */
-		llog_size *= LLOG_HDR_BITMAP_SIZE(lgh->lgh_hdr) - 1 -
-			     llog_cat_free_space(lgh);
+		/* amount of plain llogs in use plus catalog itself */
+		llog_size *= lgh->lgh_hdr->llh_count + 1;
 	} else {
 		/* get exact llog size */
 		llog_size = llog_cat_size(env, lgh);
 	}
-	CDEBUG(D_HA, "%s:%s changelog size is %lluMB, space limit is %lluMB\n",
-	       mdd2obd_dev(mdd)->obd_name, estimate ? " estimated" : "",
-	       llog_size >> 20, free_space_limit >> 20);
 
-	if (llog_size > free_space_limit) {
-		CWARN("%s: changelog uses %lluMB with %lluMB space limit\n",
-		      mdd2obd_dev(mdd)->obd_name, llog_size >> 20,
-		      free_space_limit >> 20);
-		return false;
-	}
+	if (llog_size <= free_space_limit)
+		return true;
 
-	return true;
+	CDEBUG_LIMIT(estimate ? D_HA : D_WARNING,
+		     "%s:%s changelog size %lluMB with %lluMB space limit\n",
+		     mdd2obd_dev(mdd)->obd_name, estimate ? " estimated" : "",
+		     llog_size >> 20, free_space_limit >> 20);
+
+	return false;
 }
 
 /**
+ * mdd_changelog_emrg_cleanup() - Checks if there is enough space in changelog
+ * @env: current lu_env
+ * @mdd: current MDD device
+ * @lgh: changelog catalog llog handle
+ *
  * Checks if there is enough space in changelog itself and in FS and force
  * emergency changelog cleanup if needed. It will purge users one by one
  * from the oldest one while emergency conditions are true.
  *
- * \param env - current lu_env
- * \param mdd - current MDD device
- * \param lgh - changelog catalog llog handle
- *
- * \retval true if emergency cleanup is needed for changelog
+ * Return %true if emergency cleanup is needed for changelog
  */
 static bool mdd_changelog_emrg_cleanup(const struct lu_env *env,
 				       struct mdd_device *mdd,
@@ -966,6 +1050,10 @@ int mdd_changelog_store(const struct lu_env *env, struct mdd_device *mdd,
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_CHANGELOG_REORDER, cfs_fail_val);
 	/* nested journal transaction */
 	rc = llog_add(env, ctxt->loc_handle, &rec->cr_hdr, NULL, llog_th);
+	if (unlikely(!(mdd->mdd_cl.mc_flags & CLM_ON))) {
+		/* tolerate errors if changelog was turned off */
+		GOTO(out_put, rc = 0);
+	}
 
 	/* time to recover some space ?? */
 	if (likely(!mdd->mdd_changelog_gc ||
@@ -1085,18 +1173,21 @@ void mdd_changelog_rec_extra_xattr(struct changelog_rec *rec,
 }
 
 /**
- * Set the parent FID at \a pfid for a namespace change changelog record, using
+ * mdd_changelog_ns_pfid_set() - Set the parent FID at @pfid for a namespace
+ * change changelog record
+ * @env: execution environment
+ * @mdd: mdd device
+ * @parent: parent object
+ * @pattr: parent attribute
+ * @pfid: parent fid
+ *
+ * Set the parent FID at @pfid for a namespace change changelog record, using
  * XATTR_NAME_LMV and linkEA from the remote object to obtain the correct
  * parent FID for striped directories
  *
- * \param[in] env - environment
- * \param[in] mdd - mdd device
- * \param[in] parent - parent object
- * \param[in] pattr - parent attribute
- * \param[out] pfid - parent fid
- *
- * \retval 0 success
- * \retval -errno failure
+ * Return:
+ * * %0 success
+ * % %-errno failure
  */
 static int mdd_changelog_ns_pfid_set(const struct lu_env *env,
 				     struct mdd_device *mdd,
@@ -1152,21 +1243,21 @@ struct changelog_digest_filename {
 };
 
 /**
- * Utility function to process filename in changelog
- *
- * \param[in] name     file name
- * \param[in] namelen  file name len
- * \param[in] fid      file FID
- * \param[in] enc      is object encrypted?
- * \param[out]ln       pointer to the struct lu_name to hold the real name
+ * changelog_name2digest() - Utility function to process filename in changelog
+ * @name: file name
+ * @namelen: file name len
+ * @fid: file FID
+ * @enc: is object encrypted?
+ * @ln: pointer to the struct lu_name to hold the real name
  *
  * If file is not encrypted, output name is just the file name.
  * If file is encrypted, file name needs to be decoded then digested if the name
  * is also encrypted. In this case a new buffer is allocated, and ln->ln_name
  * needs to be freed by the caller.
  *
- * \retval   0, on success
- * \retval -ve, on error
+ * Return:
+ * * %0 on success
+ * * %negative on error
  */
 static int changelog_name2digest(const char *name, int namelen,
 				 const struct lu_fid *fid,
@@ -1256,18 +1347,29 @@ out:
 	RETURN(rc);
 }
 
-/** Store a namespace change changelog record
+/**
+ * mdd_changelog_ns_store() - Store a namespace change into changelog record
+ * @env: execution environment
+ * @mdd: metadata device
+ * @type: changelog record types
+ * @clf_flags: current flags
+ * @target: mdd_object of change
+ * @parent: target parent object
+ * @pattr: target parent attribute
+ * @sfid: source object fid
+ * @sparent: source parent object
+ * @spattr: source parent attribute
+ * @tname: target name string
+ * @sname: source name string
+ * @handle: transaction handle
+ *
+ * Store namespace changes (Eg create, mkdir) that modify the filesystem.
  * If this fails, we must fail the whole transaction; we don't
  * want the change to commit without the log entry.
- * \param target - mdd_object of change
- * \param parent - target parent object
- * \param pattr - target parent attribute
- * \param sfid - source object fid
- * \param sparent - source parent object
- * \param spattr - source parent attribute
- * \param tname - target name string
- * \param sname - source name string
- * \param handle - transaction handle
+ *
+ * Return:
+ * * %0 on success
+ * * %errno on failure
  */
 int mdd_changelog_ns_store(const struct lu_env *env,
 			   struct mdd_device *mdd,
@@ -1296,7 +1398,11 @@ int mdd_changelog_ns_store(const struct lu_env *env,
 
 	ENTRY;
 
-	if (!mdd_changelog_enabled(env, mdd, type))
+	/*
+	 * we can't use mdd_changelog_enabled() here as the changelog
+	 * can get enabled between declaration and execution.
+	 */
+	if (mdd_env_info(env)->mdi_chlog_declared == 0)
 		RETURN(0);
 
 	LASSERT(S_ISDIR(mdd_object_type(parent)));
@@ -1315,7 +1421,13 @@ int mdd_changelog_ns_store(const struct lu_env *env,
 		} else {
 			enc = info->mdi_pattr.la_valid & LA_FLAGS &&
 				info->mdi_pattr.la_flags & LUSTRE_ENCRYPT_FL;
-			tfid = (struct lu_fid *)mdd_object_fid(target);
+			if (!target) {
+				/* this is lfs rm_entry with no target fid */
+				tfid = &info->mdi_fid2;
+				memset(tfid, 0, sizeof(*tfid));
+			} else {
+				tfid = (struct lu_fid *)mdd_object_fid(target);
+			}
 		}
 		rc = changelog_name2digest(tname->ln_name, tname->ln_namelen,
 					   tfid, enc, ltname);
@@ -2005,11 +2117,10 @@ static int mdd_declare_unlink(const struct lu_env *env, struct mdd_device *mdd,
 		rc = mdd_declare_finish_unlink(env, c, handle);
 		if (rc)
 			return rc;
-
-		/* FIXME: need changelog for remove entry */
-		rc = mdd_declare_changelog_store(env, mdd, CL_UNLINK, name,
-						 NULL, handle);
 	}
+
+	rc = mdd_declare_changelog_store(env, mdd, CL_UNLINK, name,
+					 NULL, handle);
 
 	return rc;
 }
@@ -2047,7 +2158,14 @@ static bool mdd_hsm_archive_exists(const struct lu_env *env,
 }
 
 /**
- * Delete name entry and the object.
+ * mdd_unlink() - Delete name entry and the object.
+ * @env: execution environment
+ * @pobj: the directory(parent) to delete files
+ * @cobj: file(child object) to be deleted
+ * @lname: the name of the deleted file/dir
+ * @ma: create specification
+ * @no_name: flag for destroy (see notes below)
+ *
  * Note: no_name == 1 means it only destory the object, i.e. name_entry
  * does not exist for this object, and it could only happen during resending
  * of remote unlink. see the comments in mdt_reint_unlink. Unfortunately, lname
@@ -2296,7 +2414,7 @@ static int mdd_create_data(const struct lu_env *env, struct md_object *pobj,
 		buf = &LU_BUF_NULL;
 	}
 
-	rc = dt_declare_xattr_set(env, mdd_object_child(son), buf,
+	rc = dt_declare_xattr_set(env, mdd_object_child(son), NULL, buf,
 				  XATTR_NAME_LOV, 0, handle);
 	if (rc)
 		GOTO(stop, rc);
@@ -2381,21 +2499,21 @@ static int mdd_object_initialize(const struct lu_env *env,
 }
 
 /**
+ * mdd_create_sanity_check() - sanity check while creating file/dir
+ * @env: execution environment
+ * @pobj: the directory to create files
+ * @pattr: the attributes of the directory
+ * @lname: the name of the created file/dir
+ * @cattr: the attributes of the file/dir
+ * @spec: create specification
+ *
  * This function checks whether it can create a file/dir under the
  * directory(@pobj). The directory(@pobj) is not being locked by
  * mdd lock.
  *
- * \param[in] env	execution environment
- * \param[in] pobj	the directory to create files
- * \param[in] pattr	the attributes of the directory
- * \param[in] lname	the name of the created file/dir
- * \param[in] cattr	the attributes of the file/dir
- * \param[in] spec	create specification
- *
- * \retval		= 0 it is allowed to create file/dir under
- *                      the directory
- * \retval              negative error not allowed to create file/dir
- *                      under the directory
+ * Return:
+ * * %0 it is allowed to create file/dir under the directory
+ * * %negative error not allowed to create file/dir under the directory
  */
 static int mdd_create_sanity_check(const struct lu_env *env,
 				   struct md_object *pobj,
@@ -2441,12 +2559,14 @@ static int mdd_create_sanity_check(const struct lu_env *env,
 	    unlikely(spec != NULL && spec->sp_cr_flags & MDS_OPEN_HAS_EA) &&
 	    spec->u.sp_ea.eadata != NULL && spec->u.sp_ea.eadatalen > 0) {
 		const struct lmv_user_md *lum = spec->u.sp_ea.eadata;
+		s32 stripe_count;
 
 		if (!lmv_user_magic_supported(le32_to_cpu(lum->lum_magic)) &&
 		    !(spec->sp_replay &&
 		      lum->lum_magic == cpu_to_le32(LMV_MAGIC_V1))) {
 			rc = -EINVAL;
-			CERROR("%s: invalid lmv_user_md: magic=%x hash=%x stripe_offset=%d stripe_count=%u: rc = %d\n",
+out_err:
+			CERROR("%s: invalid lmv_user_md: magic=%x hash=%x stripe_offset=%d stripe_count=%d: rc = %d\n",
 			       mdd2obd_dev(m)->obd_name,
 			       le32_to_cpu(lum->lum_magic),
 			       le32_to_cpu(lum->lum_hash_type),
@@ -2454,6 +2574,10 @@ static int mdd_create_sanity_check(const struct lu_env *env,
 			       le32_to_cpu(lum->lum_stripe_count), rc);
 			RETURN(rc);
 		}
+		stripe_count = le32_to_cpu(lum->lum_stripe_count);
+		if (stripe_count > LMV_MAX_STRIPE_COUNT ||
+		    stripe_count < LMV_OVERSTRIPE_COUNT_MAX)
+			GOTO(out_err, rc = -EOVERFLOW);
 	}
 
 	rc = mdd_may_create(env, obj, pattr, NULL, check_perm);
@@ -2528,6 +2652,7 @@ static int mdd_declare_create_object(const struct lu_env *env,
 				     struct lu_buf *def_acl_buf,
 				     struct lu_buf *acl_buf,
 				     struct lu_buf *hsm_buf,
+				     struct lu_buf *pin_buf,
 				     struct dt_allocation_hint *hint)
 {
 	const struct lu_buf *buf;
@@ -2620,6 +2745,15 @@ static int mdd_declare_create_object(const struct lu_env *env,
 		if (rc < 0)
 			GOTO(out, rc);
 	}
+
+	/* Declare inheritance of parent's lustre.pin, if any. */
+	if (pin_buf && pin_buf->lb_len > 0 &&
+	    (S_ISREG(attr->la_mode) || S_ISDIR(attr->la_mode))) {
+		rc = mdo_declare_xattr_set(env, c, pin_buf,
+					   XATTR_NAME_PIN, 0, handle);
+		if (rc)
+			GOTO(out, rc);
+	}
 out:
 	return rc;
 }
@@ -2634,12 +2768,14 @@ static int mdd_declare_create(const struct lu_env *env, struct mdd_device *mdd,
 			      struct lu_buf *def_acl_buf,
 			      struct lu_buf *acl_buf,
 			      struct lu_buf *hsm_buf,
+			      struct lu_buf *pin_buf,
 			      struct dt_allocation_hint *hint)
 {
 	int rc;
 
 	rc = mdd_declare_create_object(env, mdd, p, c, attr, handle, spec,
-				       def_acl_buf, acl_buf, hsm_buf, hint);
+				       def_acl_buf, acl_buf, hsm_buf,
+				       pin_buf, hint);
 	if (rc)
 		GOTO(out, rc);
 
@@ -2733,14 +2869,82 @@ static int mdd_acl_init(const struct lu_env *env, struct mdd_object *pobj,
 	RETURN(rc);
 }
 
-/**
+#define XATTR_SIZE_MIN 256U
+
+/*
+ * Fetch parent directory lustre.pin (trusted.pin) value so it can be
+ * inherited by newly created children.
+ *
+ * If the parent has no pin xattr or the backend does not support it,
+ * this returns 0 and leaves @pin_buf empty. On other errors a negative
+ * errno is returned.
+ *
+ * When a pin xattr is present, this helper allocates memory for @pin_buf
+ * (via lu_buf_alloc()); it is the caller's responsibility to free that
+ * buffer with lu_buf_free().
+ */
+static int mdd_pin_init(const struct lu_env *env, struct mdd_object *pobj,
+			struct lu_buf *pin_buf)
+{
+	struct mdd_device *mdd = mdo2mdd(&pobj->mod_obj);
+	unsigned int buf_size;
+	int rc;
+
+	ENTRY;
+
+	LASSERT(pin_buf != NULL);
+
+	/* Only directories can carry a default pin for their children. */
+	if (!S_ISDIR(mdd_object_type(pobj)))
+		RETURN(0);
+
+	/*
+	 * Start with a fixed buffer size; if that is too small (-ERANGE),
+	 * grow to the maximum allowed EA size for this backend (capped by
+	 * XATTR_SIZE_MAX) and retry once.
+	 */
+	buf_size = XATTR_SIZE_MIN;
+
+retry:
+	lu_buf_alloc(pin_buf, buf_size);
+	if (pin_buf->lb_buf == NULL)
+		RETURN(-ENOMEM);
+
+	rc = mdo_xattr_get(env, pobj, pin_buf, XATTR_NAME_PIN);
+	if (rc == -ERANGE && buf_size < XATTR_SIZE_MAX) {
+		/* Buffer too small: enlarge it and retry. */
+		lu_buf_free(pin_buf);
+		pin_buf->lb_buf = NULL;
+		pin_buf->lb_len = 0;
+		buf_size =  min_t(unsigned int,
+				  mdd->mdd_dt_conf.ddp_max_ea_size,
+				  XATTR_SIZE_MAX);
+		goto retry;
+	}
+	if (rc < 0) {
+		/* Parent pin disappeared or backend stopped supporting it. */
+		lu_buf_free(pin_buf);
+		pin_buf->lb_buf = NULL;
+		pin_buf->lb_len = 0;
+		if (rc == -ENODATA || rc == -EOPNOTSUPP)
+			/* No parent pin to inherit. */
+			RETURN(0);
+		RETURN(rc);
+	}
+	lu_buf_check_and_shrink(pin_buf, rc);
+
+	RETURN(0);
+}
+
+/*
  * Create a metadata object and initialize it, set acl, xattr.
- **/
+ */
 static int mdd_create_object(const struct lu_env *env, struct mdd_object *pobj,
 			     struct mdd_object *son, struct lu_attr *attr,
 			     struct md_op_spec *spec, struct lu_buf *acl_buf,
 			     struct lu_buf *def_acl_buf,
 			     struct lu_buf *hsm_buf,
+			     struct lu_buf *pin_buf,
 			     struct dt_allocation_hint *hint,
 			     struct thandle *handle, bool initial_create)
 {
@@ -2828,6 +3032,15 @@ static int mdd_create_object(const struct lu_env *env, struct mdd_object *pobj,
 	}
 #endif
 
+	/* Inherit parent's lustre.pin (trusted.pin) if present. */
+	if (pin_buf && pin_buf->lb_len > 0 &&
+	    (S_ISREG(attr->la_mode) || S_ISDIR(attr->la_mode))) {
+		rc = mdo_xattr_set(env, son, pin_buf,
+				   XATTR_NAME_PIN, 0, handle);
+		if (rc)
+			GOTO(err_destroy, rc);
+	}
+
 	if (S_ISLNK(attr->la_mode)) {
 		struct dt_object *dt = mdd_object_child(son);
 		const char *target_name = spec->u.sp_symname.ln_name;
@@ -2845,8 +3058,9 @@ static int mdd_create_object(const struct lu_env *env, struct mdd_object *pobj,
 	if (initial_create && spec->sp_cr_file_secctx_name != NULL) {
 		buf = mdd_buf_get_const(env, spec->sp_cr_file_secctx,
 					spec->sp_cr_file_secctx_size);
-		rc = mdo_xattr_set(env, son, buf, spec->sp_cr_file_secctx_name,
-				   0, handle);
+		rc = mdo_xattr_set(env, son, buf,
+				   spec->sp_cr_file_secctx_name, 0,
+				   handle);
 		if (rc < 0)
 			GOTO(err_initlized, rc);
 	}
@@ -2861,21 +3075,29 @@ static int mdd_create_object(const struct lu_env *env, struct mdd_object *pobj,
 			GOTO(err_initlized, rc);
 	}
 
-	if (initial_create &&
-	    spec->sp_cr_job_xattr[0] != '\0' &&
+	/* removes enclosing quotes from JobID before storing in xattr */
+	if (initial_create && spec->sp_cr_job_xattr[0] != '\0' &&
 	    jobid[0] != '\0' &&
 	    (S_ISREG(attr->la_mode) || S_ISDIR(attr->la_mode))) {
 		jobid_len = strnlen(jobid, LUSTRE_JOBID_SIZE);
-		buf = mdd_buf_get_const(env, jobid, jobid_len);
-
-		rc = mdo_xattr_set(env, son, buf, spec->sp_cr_job_xattr, 0,
-				   handle);
-		/* this xattr is nonessential, so ignore errors. */
-		if (rc != 0) {
-			CDEBUG(D_INODE,
-			       DFID" failed to set xattr '%s': rc = %d\n",
-			       PFID(son_fid), spec->sp_cr_job_xattr, rc);
-			rc = 0;
+		if (jobid[0] == '"' && jobid[jobid_len - 1] == '"' &&
+		    jobid_len >= 2) {
+			jobid++;
+			jobid_len -= 2;
+		}
+		if (jobid_len > 0) {
+			buf = mdd_buf_get_const(env, jobid, jobid_len);
+			rc = mdo_xattr_set(env, son, buf,
+					   spec->sp_cr_job_xattr, 0,
+					   handle);
+			/* this xattr is nonessential, ignore errors. */
+			if (rc != 0) {
+				CDEBUG(D_INODE, DFID
+				       " failed to set '%s': rc = %d\n",
+				       PFID(son_fid),
+				       spec->sp_cr_job_xattr, rc);
+				rc = 0;
+			}
 		}
 	}
 
@@ -2884,7 +3106,7 @@ err_initlized:
 		int rc2;
 
 		if (S_ISDIR(attr->la_mode)) {
-			/* Drop the reference, no need to delete "."/"..",
+			/* Drop reference, no need to delete "."/"..",
 			 * because the object to be destroyed directly.
 			 */
 			rc2 = mdo_ref_del(env, son, handle);
@@ -2947,7 +3169,13 @@ stop:
 }
 
 /**
- * Create object and insert it into namespace.
+ * mdd_create() - Create object and insert it into namespace.
+ * @env: execution environment
+ * @pobj: parent object
+ * @lname: name of child being created
+ * @child: child object being created [in, out]
+ * @spec: additional create parameters
+ * @ma: attributes for new child object
  *
  * Two operations have to be performed:
  *
@@ -2979,14 +3207,9 @@ stop:
  * 1. create            (mdd_create_object_internal())
  * 2. insert            (__mdd_index_insert(), lookup again)
  *
- * \param[in] pobj	parent object
- * \param[in] lname	name of child being created
- * \param[in,out] child	child object being created
- * \param[in] spec	additional create parameters
- * \param[in] ma	attributes for new child object
- *
- * \retval		0 on success
- * \retval		negative errno on failure
+ * Return:
+ * * %0 on success
+ * * %negative errno on failure
  */
 int mdd_create(const struct lu_env *env, struct md_object *pobj,
 		      const struct lu_name *lname, struct md_object *child,
@@ -3003,6 +3226,7 @@ int mdd_create(const struct lu_env *env, struct md_object *pobj,
 	struct lu_buf acl_buf;
 	struct lu_buf def_acl_buf;
 	struct lu_buf hsm_buf;
+	struct lu_buf pin_buf = { NULL, 0 };
 	struct linkea_data *ldata = &info->mdi_link_data;
 	const char *name = lname->ln_name;
 	struct dt_allocation_hint *hint = &mdd_env_info(env)->mdi_hint;
@@ -3055,6 +3279,13 @@ use_bigger_buffer:
 	if (rc < 0)
 		GOTO(out_stop, rc);
 
+	/* Prepare inheritance of parent's lustre.pin for new files/dirs. */
+	if (S_ISREG(attr->la_mode) || S_ISDIR(attr->la_mode)) {
+		rc = mdd_pin_init(env, mdd_pobj, &pin_buf);
+		if (rc < 0)
+			GOTO(out_stop, rc);
+	}
+
 	/* adjust stripe count to 0 for 'lfs mkdir -c 1 ...' to avoid creating
 	 * 1-stripe directory, MDS_OPEN_DEFAULT_LMV means ea is default LMV.
 	 */
@@ -3096,7 +3327,7 @@ use_bigger_buffer:
 
 	rc = mdd_declare_create(env, mdd, mdd_pobj, son, lname, attr,
 				handle, spec, ldata, &def_acl_buf, &acl_buf,
-				&hsm_buf, hint);
+				&hsm_buf, &pin_buf, hint);
 	if (rc)
 		GOTO(out_stop, rc);
 
@@ -3105,7 +3336,8 @@ use_bigger_buffer:
 		GOTO(out_stop, rc);
 
 	rc = mdd_create_object(env, mdd_pobj, son, attr, spec, &acl_buf,
-			       &def_acl_buf, &hsm_buf, hint, handle, true);
+			       &def_acl_buf, &hsm_buf, &pin_buf,
+			       hint, handle, true);
 	if (rc != 0)
 		GOTO(out_stop, rc);
 
@@ -3204,6 +3436,8 @@ out_free:
 
 	if (spec->sp_cr_flags & MDS_OPEN_PCC)
 		lu_buf_free(&hsm_buf);
+	if (pin_buf.lb_buf)
+		lu_buf_free(&pin_buf);
 
 	/* The child object shouldn't be cached anymore */
 	if (rc)
@@ -3736,12 +3970,13 @@ out_pending:
 	return rc;
 }
 
-/**
+/*
  * Check whether we should migrate the file/dir
- * return val
- *	< 0  permission check failed or other error.
- *	= 0  the file can be migrated.
- **/
+ *
+ * Return:
+ * * %negative permission check failed or other error.
+ * * %0 the file can be migrated.
+ */
 static int mdd_migrate_sanity_check(const struct lu_env *env,
 				    struct mdd_device *mdd,
 				    struct mdd_object *spobj,
@@ -3820,11 +4055,13 @@ static inline void mdd_xattrs_fini(struct mdd_xattrs *xattrs)
 static int mdd_xattrs_migrate_prep(const struct lu_env *env,
 				   struct mdd_xattrs *xattrs,
 				   struct mdd_object *sobj,
+				   struct mdd_object *tobj,
 				   bool skip_linkea,
 				   bool skip_dmv)
 {
 	struct lu_attr *attr = MDD_ENV_VAR(env, cattr);
 	struct mdd_xattr_entry *entry;
+	struct ost_id oi = {0, };
 	bool needencxattr = false;
 	bool encxattrfound = false;
 	char *xname;
@@ -3835,6 +4072,13 @@ static int mdd_xattrs_migrate_prep(const struct lu_env *env,
 	int rc;
 
 	ENTRY;
+
+	if (S_ISREG(mdd_object_type(sobj))) {
+		LASSERT(tobj != NULL);
+
+		fid_to_lmm_oi(mdd_object_fid(tobj), &oi);
+		lmm_oi_cpu_to_le(&oi, &oi);
+	}
 
 	list_xsize = mdo_xattr_list(env, sobj, &LU_BUF_NULL);
 	if (list_xsize == -ENODATA)
@@ -3902,6 +4146,13 @@ reloop:
 			if (rc == -ENODATA)
 				continue;
 			GOTO(fini, rc);
+		}
+
+		if (S_ISREG(attr->la_mode) &&
+		    strcmp(XATTR_NAME_LOV, xname) == 0) {
+			struct lov_mds_md *lmm = entry->mxe_buf.lb_buf;
+
+			mdd_set_lmm_oi(lmm, &oi);
 		}
 
 		entry->mxe_name = xname;
@@ -4147,13 +4398,25 @@ static int mdd_iterate_linkea(const struct lu_env *env,
 }
 
 /**
+ * mdd_migrate_linkea_prepare() - Prepare linkea
+ * @env: execution environment
+ * @mdd: MDD metadata device
+ * @spobj: source parent object
+ * @tpobj: target parent object
+ * @sobj: source object
+ * @sname: source name
+ * @tname: target name
+ * @attr: source attributes
+ * @ldata: pointer to linkea_data
+ *
  * Prepare linkea, and check whether file needs migrate: if source still has
  * link on source MDT, no need to migrate, just update namespace on source and
  * target parents.
  *
- * \retval	0 do migrate
- * \retval	1 don't migrate
- * \retval	-errno on failure
+ * Return:
+ * * %0 do migrate
+ * * %1 don't migrate
+ * * %-errno on failure
  */
 static int mdd_migrate_linkea_prepare(const struct lu_env *env,
 				      struct mdd_device *mdd,
@@ -4305,7 +4568,7 @@ static int mdd_declare_migrate_create(const struct lu_env *env,
 
 	rc = mdd_declare_create(env, mdo2mdd(&tpobj->mod_obj), tpobj, tobj,
 				tname, attr, handle, spec, ldata, NULL, NULL,
-				NULL, hint);
+				NULL, NULL, hint);
 	if (rc)
 		return rc;
 
@@ -4393,9 +4656,9 @@ static int mdd_declare_migrate_create(const struct lu_env *env,
 	return rc;
 }
 
-/**
- * migrate dirent from \a spobj to \a tpobj.
- **/
+/*
+ * migrate dirent from @spobj to @tpobj.
+ */
 static int mdd_migrate_update(const struct lu_env *env,
 			      struct mdd_object *spobj,
 			      struct mdd_object *tpobj,
@@ -4456,27 +4719,31 @@ static int mdd_migrate_update(const struct lu_env *env,
 }
 
 /**
- * Migrate file/dir to target MDT.
+ * mdd_migrate_create() - Migrate file/dir to target MDT.
+ * @env: execution environment
+ * @spobj: source parent object
+ * @tpobj: target parent object
+ * @sobj: source object
+ * @tobj: target object
+ * @sname: source name
+ * @tname: target name
+ * @spattr: source parent attributes
+ * @tpattr: target parent attributes
+ * @attr: source attributes
+ * @sbuf: source LMV buf
+ * @ldata: pointer to linkea_data
+ * @xattrs: extended attributes
+ * @ma: pointer to md_attr struct
+ * @spec: migrate create spec
+ * @hint: target creation hint
+ * @handle: tranasction handle
  *
- * Create target according to \a spec, and then migrate xattrs, if it's
+ * Create target according to @spec, and then migrate xattrs, if it's
  * directory, migrate source stripes to target.
  *
- * \param[in] env	execution environment
- * \param[in] spobj	source parent object
- * \param[in] tpobj	target parent object
- * \param[in] sobj	source object
- * \param[in] tobj	target object
- * \param[in] lname	file name
- * \param[in] spattr	source parent attributes
- * \param[in] tpattr	target parent attributes
- * \param[in] attr	source attributes
- * \param[in] sbuf	source LMV buf
- * \param[in] spec	migrate create spec
- * \param[in] hint	target creation hint
- * \param[in] handle	tranasction handle
- *
- * \retval	0 on success
- * \retval	-errno on failure
+ * Return:
+ * * %0 on success
+ * * %-errno on failure
  **/
 static int mdd_migrate_create(const struct lu_env *env,
 			      struct mdd_object *spobj,
@@ -4523,7 +4790,7 @@ static int mdd_migrate_create(const struct lu_env *env,
 	attr->la_valid &= ~LA_NLINK;
 
 	rc = mdd_create_object(env, tpobj, tobj, attr, spec, NULL, NULL, NULL,
-			       hint, handle, false);
+			       NULL, hint, handle, false);
 	if (rc)
 		RETURN(rc);
 
@@ -4596,7 +4863,7 @@ static int mdd_migrate_cmd_check(const struct lu_env *env, struct mdd_device *md
 				 size_t lum_len, const struct lu_name *lname)
 {
 	struct mdd_thread_info *info = mdd_env_info(env);
-	__u32 lum_stripe_count = lum->lum_stripe_count;
+	__s32 lum_stripe_count = lum->lum_stripe_count;
 	__u32 lum_hash_type = lum->lum_hash_type &
 			      cpu_to_le32(LMV_HASH_TYPE_MASK);
 	struct md_layout_change *mlc = &info->mdi_mlc;
@@ -4606,6 +4873,9 @@ static int mdd_migrate_cmd_check(const struct lu_env *env, struct mdd_device *md
 
 	if (lmv && !lmv_is_sane(lmv))
 		RETURN(-EBADF);
+
+	if (lum_stripe_count > LMV_MAX_STRIPE_COUNT)
+		RETURN(-EOVERFLOW);
 
 	/* If stripe_count unspecified, set to 1 */
 	if (!lum_stripe_count)
@@ -4666,7 +4936,17 @@ static int mdd_migrate_cmd_check(const struct lu_env *env, struct mdd_device *md
 }
 
 /**
- * Internal function to migrate directory or file between MDTs.
+ * mdd_migrate_object() - Internal function to migrate directory or file between
+ * MDTs.
+ * @env: execution environment
+ * @spobj: source parent object
+ * @tpobj: target parent object
+ * @sobj: source object
+ * @tobj: target object
+ * @sname: source name
+ * @tname: target name
+ * @spec: target creation spec
+ * @ma: used to update @tpobj mtime and ctime [out]
  *
  * migrate source to target in following steps:
  *   1. create target, append source stripes after target's if it's directory,
@@ -4674,18 +4954,9 @@ static int mdd_migrate_cmd_check(const struct lu_env *env, struct mdd_device *md
  *   2. update namespace: migrate dirent from source parent to target parent,
  *      update file linkea, and destroy source if it's not needed any more.
  *
- * \param[in] env	execution environment
- * \param[in] spobj	source parent object
- * \param[in] tpobj	target parent object
- * \param[in] sobj	source object
- * \param[in] tobj	target object
- * \param[in] sname	source file name
- * \param[in] tname	target file name
- * \param[in] spec	target creation spec
- * \param[in] ma	used to update \a pobj mtime and ctime
- *
- * \retval		0 on success
- * \retval		-errno on failure
+ * Return:
+ * * %0 on success
+ * * %-errno on failure
  */
 static int mdd_migrate_object(const struct lu_env *env,
 			      struct mdd_object *spobj,
@@ -4803,7 +5074,8 @@ retry:
 	 * RPCs inside transaction.
 	 */
 	if (!spec->sp_migrate_nsonly) {
-		rc = mdd_xattrs_migrate_prep(env, &xattrs, sobj, true, true);
+		rc = mdd_xattrs_migrate_prep(env, &xattrs, sobj, tobj,
+					     true, true);
 		if (rc)
 			GOTO(out, rc);
 	}
@@ -4867,19 +5139,19 @@ out:
 }
 
 /**
- * Migrate directory or file between MDTs.
+ * mdd_migrate() - Migrate directory or file between MDTs.
+ * @env: execution environment
+ * @md_spobj: source parent object
+ * @md_tpobj: target parent object
+ * @md_sobj: source object
+ * @lname: file name
+ * @md_tobj: target object
+ * @spec: target creation spec
+ * @ma: used to update @md_tpobj mtime and ctime [out]
  *
- * \param[in] env	execution environment
- * \param[in] md_spobj	source parent object
- * \param[in] md_tpobj	target parent object
- * \param[in] md_sobj	source object
- * \param[in] lname	file name
- * \param[in] md_tobj	target object
- * \param[in] spec	target creation spec
- * \param[in] ma	used to update \a pobj mtime and ctime
- *
- * \retval		0 on success
- * \retval		-errno on failure
+ * Return:
+ * * %0 on success
+ * * %-errno on failure
  */
 static int mdd_migrate(const struct lu_env *env, struct md_object *md_spobj,
 		       struct md_object *md_tpobj, struct md_object *md_sobj,
@@ -5127,8 +5399,8 @@ int mdd_dir_layout_shrink(const struct lu_env *env,
 		}
 
 		if (!lmv_is_fixed(lmv))
-			rc = mdd_xattrs_migrate_prep(env, &xattrs, obj, false,
-						     false);
+			rc = mdd_xattrs_migrate_prep(env, &xattrs, obj, NULL,
+						     false, false);
 	}
 
 	handle = mdd_trans_create(env, mdd);
@@ -5225,7 +5497,7 @@ static int mdd_dir_declare_split_plain(const struct lu_env *env,
 			     hint);
 	rc = mdd_declare_create(env, mdo2mdd(&pobj->mod_obj), pobj, tobj,
 				lname, mlc->mlc_attr, handle, mlc->mlc_spec,
-				ldata, NULL, NULL, NULL, hint);
+				ldata, NULL, NULL, NULL, NULL, hint);
 	if (rc)
 		return rc;
 
@@ -5283,11 +5555,20 @@ static int mdd_dir_declare_split_plain(const struct lu_env *env,
 }
 
 /**
- * plain directory split:
- * 1. create \a tobj as plain directory.
- * 2. append \a obj as first stripe of \a tobj.
- * 3. migrate xattrs from \a obj to \a tobj.
- * 4. split \a tobj to specific stripe count.
+ * mdd_dir_split_plain() - plain directory split
+ * @env: execution environment
+ * @mdd: MDD (metadata device)
+ * @pobj: Parent dir being split
+ * @obj: first stripe (shard 0) of @tobj
+ * @tobj: Newly created plain dir (shard 1)
+ * @xattrs: extended attribute from @obj to @tobj
+ * @mlc: pointer to object's layout
+ * @hint: performance hint
+ * @handle: operations callback
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on errno
  */
 static int mdd_dir_split_plain(const struct lu_env *env,
 				struct mdd_device *mdd,
@@ -5322,7 +5603,7 @@ static int mdd_dir_split_plain(const struct lu_env *env,
 	mlc->mlc_attr->la_valid &= ~LA_NLINK;
 
 	rc = mdd_create_object(env, pobj, tobj, mlc->mlc_attr, mlc->mlc_spec,
-			       NULL, NULL, NULL, hint, handle, false);
+			       NULL, NULL, NULL, NULL, hint, handle, false);
 	if (rc)
 		RETURN(rc);
 
@@ -5397,7 +5678,8 @@ int mdd_dir_layout_split(const struct lu_env *env, struct md_object *o,
 
 	mdd_xattrs_init(&xattrs);
 	if (is_plain)
-		rc = mdd_xattrs_migrate_prep(env, &xattrs, obj, true, true);
+		rc = mdd_xattrs_migrate_prep(env, &xattrs, obj, tobj,
+					     true, true);
 
 	handle = mdd_trans_create(env, mdd);
 	if (IS_ERR(handle))

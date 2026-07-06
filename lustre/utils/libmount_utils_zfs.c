@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
-
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License version 2 for more details.  A copy is
- * included in the COPYING file that accompanied this code.
-
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2012, 2017, Intel Corporation.
  * Use is subject to license terms.
@@ -506,8 +486,8 @@ int zfs_read_ldd(char *ds,  struct lustre_disk_data *ldd)
 		uint64_t mh = zpool_get_prop_int(pool, ZPOOL_PROP_MULTIHOST,
 						 NULL);
 		if (!mh)
-			fprintf(stderr, "%s: %s is configured for failover "
-				"but zpool does not have multihost enabled\n",
+			fprintf(stderr,
+				"%s: warning: %s is configured for failover, but zpool does not have multihost enabled\n",
 				progname, ds);
 	}
 
@@ -900,6 +880,24 @@ int zfs_label_lustre(struct mount_opts *mop)
 	return ret;
 }
 
+int zfs_label_read(char *dev, struct lustre_disk_data *ldd)
+{
+	zfs_handle_t *zhp;
+	int ret;
+
+	if (osd_check_zfs_setup() == 0)
+		return EINVAL;
+
+	zhp = zfs_open(g_zfs, dev, ZFS_TYPE_FILESYSTEM);
+	if (zhp == NULL)
+		return EINVAL;
+
+	ret = zfs_get_prop_str(zhp, LDD_SVNAME_PROP, ldd->ldd_svname);
+	zfs_close(zhp);
+
+	return ret;
+}
+
 int zfs_rename_fsname(struct mkfs_opts *mop, const char *oldname)
 {
 	struct mount_opts opts;
@@ -1014,6 +1012,7 @@ struct module_backfs_ops zfs_ops = {
 	.prepare_lustre		= zfs_prepare_lustre,
 	.tune_lustre		= zfs_tune_lustre,
 	.label_lustre		= zfs_label_lustre,
+	.label_read		= zfs_label_read,
 	.enable_quota		= zfs_enable_quota,
 	.rename_fsname		= zfs_rename_fsname,
 };

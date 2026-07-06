@@ -1,24 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- *
  * Copyright 2020, DataDirect Networks Storage.
  *
  * This file is part of Lustre, http://www.lustre.org/
@@ -674,7 +655,10 @@ static void usage(void)
 "  -l, --list                     print YAML list of available access logs\n"
 "  -d, --debug[=FILE]             print debug messages to FILE (stderr)\n"
 "  -s, --stats=FILE               print stats messages to FILE (stderr)\n"
-"  -t, --trace[=FILE]             print trace messages to FILE (stderr)\n",
+"  -t, --trace[=FILE]             print trace messages to FILE (stderr)\n"
+"\n"
+"Enable access logs by setting obdfilter.TARGET.access_log_size > 0\n"
+"after which TARGET will appear when the --list option is used.\n",
 		program_invocation_short_name);
 }
 

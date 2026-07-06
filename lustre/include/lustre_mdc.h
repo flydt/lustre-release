@@ -29,7 +29,6 @@
 #endif /* CONFIG_LUSTRE_FS_POSIX_ACL */
 #include <lustre_handles.h>
 #include <lustre_intent.h>
-#include <libcfs/libcfs.h>
 #include <obd_class.h>
 #include <uapi/linux/lustre/lustre_idl.h>
 #include <lustre_lib.h>
@@ -73,7 +72,7 @@ static inline void mdc_update_max_ea_from_body(struct obd_export *exp,
 
 
 /* mdc/mdc_locks.c */
-int it_open_error(int phase, struct lookup_intent *it);
+int it_open_error(enum lustre_disposition phase, struct lookup_intent *it);
 
 static inline bool cl_is_lov_delay_create(enum mds_open_flags flags)
 {

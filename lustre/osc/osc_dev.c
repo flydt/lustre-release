@@ -149,30 +149,37 @@ static const struct lu_device_operations osc_lu_ops = {
         .ldo_recovery_complete = NULL
 };
 
-int osc_device_init(const struct lu_env *env, struct lu_device *d,
-		    const char *name, struct lu_device *next)
+static int osc_device_init(const struct lu_env *env, struct lu_device *d,
+			   const char *name, struct lu_device *next)
 {
         RETURN(0);
 }
-EXPORT_SYMBOL(osc_device_init);
 
-struct lu_device *osc_device_fini(const struct lu_env *env,
-				  struct lu_device *d)
+static struct lu_device *osc_device_fini(const struct lu_env *env,
+					 struct lu_device *d)
 {
-	return NULL;
-}
-EXPORT_SYMBOL(osc_device_fini);
+	struct obd_device *obd = d->ld_obd;
 
-struct lu_device *osc_device_free(const struct lu_env *env,
-				  struct lu_device *d)
+	ENTRY;
+
+	ptlrpc_lprocfs_unregister_obd(obd);
+	osc_precleanup_common(obd);
+
+	RETURN(NULL);
+}
+
+static struct lu_device *osc_device_free(const struct lu_env *env,
+					 struct lu_device *d)
 {
 	struct osc_device *oc = lu2osc_dev(d);
+	struct obd_device *obd = d->ld_obd;
 
 	cl_device_fini(lu2cl_dev(d));
+	if (obd)
+		osc_cleanup_common(obd);
 	OBD_FREE_PTR(oc);
 	return NULL;
 }
-EXPORT_SYMBOL(osc_device_free);
 
 static struct lu_device *osc_device_alloc(const struct lu_env *env,
 					  struct lu_device_type *t,
@@ -194,6 +201,8 @@ static struct lu_device *osc_device_alloc(const struct lu_env *env,
 	/* Setup OSC OBD */
 	obd = class_name2obd(lustre_cfg_string(cfg, 0));
 	LASSERT(obd != NULL);
+	obd->obd_lu_dev = d;
+	d->ld_obd = obd;
 	rc = osc_setup(obd, cfg);
 	if (rc) {
 		osc_device_free(env, d);

@@ -21,8 +21,6 @@
 
 #include <linux/crc32.h>
 
-#include <libcfs/libcfs.h>
-
 #include <llog_swab.h>
 #include <lustre_disk.h>
 #include <lustre_net.h>
@@ -30,6 +28,7 @@
 #include <obd_cksum.h>
 #include <obd_class.h>
 #include <obd_support.h>
+
 #include "ptlrpc_internal.h"
 
 static inline __u32 lustre_msg_hdr_size_v2(__u32 count)
@@ -711,9 +710,9 @@ static inline __u32 lustre_msg_buflen_v2(struct lustre_msg_v2 *m, __u32 n)
 }
 
 /**
- * lustre_msg_buflen - return the length of buffer \a n in message \a m
- * \param m lustre_msg (request or reply) to look at
- * \param n message index (base 0)
+ * lustre_msg_buflen() - return the length of buffer @n in message @m
+ * @m: lustre_msg (request or reply) to look at
+ * @n: message index (base 0)
  *
  * returns zero for non-existent message indices
  */
@@ -762,10 +761,12 @@ __u32 lustre_msg_bufcount(struct lustre_msg *m)
 	}
 }
 
+/*
+ * max_len == 0 means the string should fill the buffer
+ */
 char *lustre_msg_string(struct lustre_msg *m, __u32 index, __u32 max_len)
 {
-	/* max_len == 0 means the string should fill the buffer */
-	char *str;
+	char *str = NULL;
 	__u32 slen, blen;
 
 	switch (m->lm_magic) {
@@ -1703,9 +1704,21 @@ void ptlrpc_request_set_replen(struct ptlrpc_request *req)
 EXPORT_SYMBOL(ptlrpc_request_set_replen);
 
 /**
- * Send a remote set_info_async.
+ * do_set_info_async() - Send a remote set_info_async.
+ * @imp: import object
+ * @opcode: operation type
+ * @version: operation version
+ * @keylen: length of key
+ * @key: pointer to key
+ * @vallen: length of value
+ * @val: pointer to value
+ * @set: pointer to ptlrpc_request_set (request to be added)
  *
  * This may go from client to server or server to client.
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 int do_set_info_async(struct obd_import *imp,
 		      int opcode, int version,
@@ -1947,7 +1960,7 @@ void lustre_swab_generic_32s(__u32 *val)
 	__swab32s(val);
 }
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 void lustre_swab_gl_lquota_desc(struct ldlm_gl_lquota_desc *desc)
 {
 	lustre_swab_lu_fid(&desc->gl_id.qid_fid);
@@ -1967,7 +1980,7 @@ void lustre_swab_gl_barrier_desc(struct ldlm_gl_barrier_desc *desc)
 	BUILD_BUG_ON(offsetof(typeof(*desc), lgbd_padding) == 0);
 }
 EXPORT_SYMBOL(lustre_swab_gl_barrier_desc);
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 void lustre_swab_ost_lvb_v1(struct ost_lvb_v1 *lvb)
 {
@@ -2075,6 +2088,13 @@ void lustre_swab_mgs_target_info(struct mgs_target_info *mti)
 
 	for (i = 0; i < MTI_NIDS_MAX; i++)
 		__swab64s(&mti->mti_nids[i]);
+}
+
+void lustre_swab_mgs_target_nidlist(struct mgs_target_nidlist *mtn)
+{
+	__swab32s(&mtn->mtn_flags);
+	__swab32s(&mtn->mtn_nids);
+	BUILD_BUG_ON(MTN_NIDSTR_SIZE != 64);
 }
 
 void lustre_swab_mgs_nidtbl_entry_header(struct mgs_nidtbl_entry *entry)
@@ -2239,13 +2259,13 @@ void lustre_swab_mdt_rec_reint (struct mdt_rec_reint *rr)
 	__swab32s(&rr->rr_opcode);
 	__swab32s(&rr->rr_cap);
 	__swab32s(&rr->rr_fsuid);
-	/* rr_fsuid_h is unused */
+	__swab32s(&rr->rr_padding_1_h);
 	__swab32s(&rr->rr_fsgid);
-	/* rr_fsgid_h is unused */
+	/* rr_padding_2_h is unused */
 	__swab32s(&rr->rr_suppgid1);
-	/* rr_suppgid1_h is unused */
+	/* rr_padding_3_h is unused */
 	__swab32s(&rr->rr_suppgid2);
-	/* rr_suppgid2_h is unused */
+	/* rr_padding_4_h is unused */
 	lustre_swab_lu_fid(&rr->rr_fid1);
 	lustre_swab_lu_fid(&rr->rr_fid2);
 	__swab64s(&rr->rr_mtime);
@@ -2434,9 +2454,18 @@ void lustre_print_user_md(unsigned int lvl, struct lov_user_md *lum,
 		CDEBUG(lvl, "\tentry %d:\n", i);
 		CDEBUG(lvl, "\tlcme_id: %#x\n", ent->lcme_id);
 		CDEBUG(lvl, "\tlcme_flags: %#x\n", ent->lcme_flags);
-		if (ent->lcme_flags & LCME_FL_NOSYNC)
+		if (ent->lcme_timestamp)
 			CDEBUG(lvl, "\tlcme_timestamp: %llu\n",
-					ent->lcme_timestamp);
+					(u64)ent->lcme_timestamp);
+		if (ent->lcme_mirror_link_id != 0)
+			CDEBUG(lvl, "\tlcme_mirror_link_id: %#x\n",
+			       ent->lcme_mirror_link_id);
+		if (ent->lcme_flags & LCME_FL_PARITY) {
+			CDEBUG(lvl, "\tlcme_dstripe_count: %u\n",
+			       ent->lcme_dstripe_count);
+			CDEBUG(lvl, "\tlcme_cstripe_count: %u\n",
+			       ent->lcme_cstripe_count);
+		}
 		CDEBUG(lvl, "\tlcme_extent.e_start: %llu\n",
 		       ent->lcme_extent.e_start);
 		CDEBUG(lvl, "\tlcme_extent.e_end: %llu\n",
@@ -2547,7 +2576,7 @@ void lustre_swab_lov_comp_md_v1(struct lov_comp_md_v1 *lum)
 		}
 		__swab32s(&ent->lcme_id);
 		__swab32s(&ent->lcme_flags);
-		__swab64s(&ent->lcme_timestamp);
+		__swab64s(&ent->lcme_time_and_id);
 		__swab64s(&ent->lcme_extent.e_start);
 		__swab64s(&ent->lcme_extent.e_end);
 		__swab32s(&ent->lcme_offset);
@@ -3044,9 +3073,21 @@ void lustre_swab_but_update_buffer(struct but_update_buffer *bub)
 }
 EXPORT_SYMBOL(lustre_swab_but_update_buffer);
 
-void lustre_swab_swap_layouts(struct mdc_swap_layouts *msl)
+int lustre_swab_swap_layouts(struct mdc_swap_layouts *msl, __u32 size)
 {
 	__swab64s(&msl->msl_flags);
+#if LUSTRE_VERSION_CODE < OBD_OCD_VERSION(3, 4, 53, 0)
+	/* Only swab dv1/dv2 fields if WITH_DV12 flag is sent by client, to
+	 * avoid access beyond the end of struct mdc_swap_layouts_217.
+	 */
+	if (!(msl->msl_flags & SWAP_LAYOUTS_WITH_DV12) ||
+	    size < offsetof(struct mdc_swap_layouts, msl_dv2) + sizeof(msl->msl_dv2))
+		return 0;
+ #endif
+	__swab64s(&msl->msl_dv1);
+	__swab64s(&msl->msl_dv2);
+
+	return 0;
 }
 
 void lustre_swab_close_data(struct close_data *cd)
@@ -3110,7 +3151,7 @@ void lustre_swab_lfsck_reply(struct lfsck_reply *lr)
 	__swab64s(&lr->lr_repaired);
 }
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 static void lustre_swab_orphan_rec(struct lu_orphan_rec *rec)
 {
 	lustre_swab_lu_fid(&rec->lor_fid);
@@ -3145,7 +3186,7 @@ void lustre_swab_orphan_ent_v3(struct lu_orphan_ent_v3 *ent)
 	BUILD_BUG_ON(offsetof(typeof(ent->loe_rec), lor_padding_2) == 0);
 }
 EXPORT_SYMBOL(lustre_swab_orphan_ent_v3);
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 void lustre_swab_ladvise(struct lu_ladvise *ladvise)
 {

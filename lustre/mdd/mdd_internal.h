@@ -62,6 +62,8 @@
 #define CLM_PURGE 0x40000
 /** changelog cleanup done, to prevent double cleanup */
 #define CLM_CLEANUP_DONE 0x80000
+/** changelog has been initialized */
+#define CLM_INIT_DONE	0x100000
 
 #define LLOG_CHANGELOG_HDR_SZ (sizeof(struct llog_changelog_rec) - \
 			       sizeof(struct changelog_rec))
@@ -149,6 +151,8 @@ struct mdd_device {
 	struct kobject			 mdd_kobj;
 	struct kobj_type		 mdd_ktype;
 	struct completion		 mdd_kobj_unregister;
+					 /* to serialize init/fini vs access */
+	struct mutex			 mdd_changelog_mutex;
 };
 
 enum mod_flags {
@@ -205,6 +209,7 @@ struct mdd_thread_info {
 	struct dt_insert_rec	  mdi_dt_rec;
 	struct lu_seq_range	  mdi_range;
 	struct md_layout_change	  mdi_mlc;
+	int			  mdi_chlog_declared;
 };
 
 int mdd_la_get(const struct lu_env *env, struct mdd_object *obj,
@@ -243,8 +248,6 @@ int mdd_write_locked(const struct lu_env *env, struct mdd_object *obj);
 int mdd_may_create(const struct lu_env *env, struct mdd_object *pobj,
 		   const struct lu_attr *pattr, struct mdd_object *cobj,
 		   bool check_perm);
-int mdd_may_unlink(const struct lu_env *env, struct mdd_object *pobj,
-		   const struct lu_attr *pattr, const struct lu_attr *attr);
 int mdd_may_delete(const struct lu_env *env, struct mdd_object *tpobj,
 		   const struct lu_attr *tpattr, struct mdd_object *tobj,
 		   const struct lu_attr *tattr, const struct lu_attr *cattr,
@@ -381,6 +384,17 @@ int mdd_changelog_data_store_xattr(const struct lu_env *env,
 				   struct thandle *handle);
 int mdd_dom_fixup(const struct lu_env *env, struct mdd_device *mdd,
 		  struct mdd_object *mo, struct mdd_object *vo);
+int mdd_lmm_oi(struct lov_mds_md *lmm, struct ost_id *oi, bool set);
+
+static inline int mdd_get_lmm_oi(struct lov_mds_md *lmm, struct ost_id *oi)
+{
+	return mdd_lmm_oi(lmm, oi, false);
+}
+
+static inline int mdd_set_lmm_oi(struct lov_mds_md *lmm, struct ost_id *oi)
+{
+	return mdd_lmm_oi(lmm, oi, true);
+}
 
 /* mdd_trans.c */
 void mdd_object_make_hint(const struct lu_env *env, struct mdd_object *parent,
@@ -443,14 +457,20 @@ int mdd_compat_fixes(const struct lu_env *env, struct mdd_device *mdd);
 extern int lustre_posix_acl_permission(struct lu_ucred *mu,
 				       const struct lu_attr *la,
 				       unsigned int may_mask,
-				       posix_acl_xattr_entry *entry,
+				       struct posix_acl_xattr_entry *entry,
 				       int count);
-extern int lustre_posix_acl_chmod_masq(posix_acl_xattr_entry *entry,
-				       __u32 mode, int count);
-extern int lustre_posix_acl_create_masq(posix_acl_xattr_entry *entry,
-					__u32 *pmode, int count);
-extern int lustre_posix_acl_equiv_mode(posix_acl_xattr_entry *entry,
+extern int lustre_posix_acl_chmod_masq(struct posix_acl_xattr_entry *entry,
+				       u32 mode, int count);
+extern int lustre_posix_acl_create_masq(struct posix_acl_xattr_entry *entry,
+					u32 *pmode, int count);
+extern int lustre_posix_acl_equiv_mode(struct posix_acl_xattr_entry *entry,
 				       mode_t *mode_p, int count);
+
+/* mdd_mask.c */
+int mdd_changelog_user_lookup(const struct lu_env *env,
+			      struct mdd_device *mdd,
+			      const struct changelog_filter *req,
+			      struct changelog_filter *reply);
 
 /* inline functions */
 static inline int lu_device_is_mdd(struct lu_device *d)
@@ -627,7 +647,7 @@ static inline int mdo_declare_xattr_set(const struct lu_env *env,
 	struct dt_object *next = mdd_object_child(obj);
 	int rc;
 
-	rc = dt_declare_xattr_set(env, next, buf, name, fl, handle);
+	rc = dt_declare_xattr_set(env, next, NULL, buf, name, fl, handle);
 	if (rc >= 0 &&
 	    (strcmp(name, LL_XATTR_NAME_ENCRYPTION_CONTEXT) == 0 ||
 	     strcmp(name, LL_XATTR_NAME_ENCRYPTION_CONTEXT_OLD) == 0)) {

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 #
 # Run select tests by setting ONLY, or as arguments to the script.
 # Skip specific tests by setting EXCEPT.
@@ -204,16 +204,14 @@ test_sanity()
 
 	# Fallocate tests
 	(( $MDS1_VERSION >= $(version_code 2.14.52) )) &&
-		testlist+=" 150b 150bb 150c 150d 150f 150g"
+		testlist+=" 150b 150bb 150c 150d 150f 150g 150ia 150ib 150ic"
 
 	SANITY_ONLY=${SANITY_ONLY:-$testlist}
 	SANITY_REPEAT=${SANITY_REPEAT:-1}
 	# XXX: to fix 45. Add 42a, c when LU-9693 fixed.
 	# Add 42b when LU-6493 fixed
 	ONLY=$SANITY_ONLY ONLY_REPEAT=$SANITY_REPEAT OSC="mdc" DOM="yes" \
-		bash sanity.sh
-
-	return 0
+		bash sanity.sh || error "sanity-dom failed sanity"
 }
 run_test sanity "Run sanity with Data-on-MDT files"
 
@@ -222,17 +220,14 @@ test_sanityn()
 	local testlist="1 2 4 5 6 7 8 9 10 11 12 14 17 19 20 \
 			23 27 39 51a 51c 51d"
 
-	if [[ $MDS1_VERSION -ge $(version_code 2.13.55) ]]; then
+	(( $MDS1_VERSION >= $(version_code 2.13.55) )) &&
 		testlist+=" 107"
-	fi
 
 	SANITYN_ONLY=${SANITYN_ONLY:-$testlist}
 	SANITYN_REPEAT=${SANITYN_REPEAT:-1}
 	# XXX: to fix 60
 	ONLY=$SANITYN_ONLY ONLY_REPEAT=$SANITYN_REPEAT OSC="mdc" DOM="yes" \
-		bash sanityn.sh
-
-	return 0
+		bash sanityn.sh || error "sanity-dom failed sanityn"
 }
 run_test sanityn "Run sanityn with Data-on-MDT files"
 

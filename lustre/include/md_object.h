@@ -16,9 +16,9 @@
 #ifndef _LUSTRE_MD_OBJECT_H
 #define _LUSTRE_MD_OBJECT_H
 
-#ifndef HAVE_SERVER_SUPPORT
+#ifndef CONFIG_LUSTRE_FS_SERVER
 # error "client code should not depend on md_object.h"
-#endif /* !HAVE_SERVER_SUPPORT */
+#endif /* !CONFIG_LUSTRE_FS_SERVER */
 
 /* md Sub-class of lu_object with methods common for "meta-data" objects in MDT
  * stack.
@@ -158,6 +158,7 @@ enum md_layout_opc {
 	MD_LAYOUT_DETACH,	/* detach stripes */
 	MD_LAYOUT_SHRINK,	/* shrink striped directory (destroy stripes) */
 	MD_LAYOUT_SPLIT,	/* split directory (allocate new stripes) */
+	MD_LAYOUT_VERSION,	/* check layout version */
 	MD_LAYOUT_MAX,
 };
 
@@ -166,7 +167,10 @@ enum md_layout_opc {
  */
 struct md_layout_change {
 	enum md_layout_opc			 mlc_opc;
-	struct lu_buf				 mlc_buf;
+	union {
+		struct lu_buf			 mlc_buf;
+		__u32				 mlc_layout_ver;
+	};
 	union {
 		struct {
 			__u16			 mlc_mirror_id;
@@ -691,6 +695,10 @@ struct lu_ucred {
 	unsigned int		 uc_rbac_ignore_root_prjquota:1;
 	unsigned int		 uc_rbac_hsm_ops:1;
 	unsigned int		 uc_rbac_local_admin:1;
+	unsigned int		 uc_rbac_pool_quota_ops:1;
+	unsigned int		 uc_rbac_lqa_quota_ops:1;
+	unsigned int		 uc_rbac_projid_set:1;
+	unsigned int		 uc_rbac_foreign_ops:1;
 };
 
 struct lu_ucred *lu_ucred(const struct lu_env *env);

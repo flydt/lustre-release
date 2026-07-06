@@ -17,7 +17,6 @@
 #include <linux/delay.h>
 #include <linux/uidgid.h>
 
-#include <libcfs/linux/linux-mem.h>
 #include <obd.h>
 #include <obd_class.h>
 #include <obd_cksum.h>
@@ -96,7 +95,10 @@ static int tgt_mdt_body_unpack(struct tgt_session_info *tsi, __u32 flags)
 }
 
 /**
- * Validate oa from client.
+ * tgt_validate_obdo() - Validate oa from client.
+ * @tsi: current client session
+ * @oa: obdo struct from client (client-provided object metadata)
+ *
  * If the request comes from 2.0 clients, currently only RSVD seq and IDIF
  * req are valid.
  *    a. objects in Single MDT FS  seq = FID_SEQ_OST_MDT0, oi_id != 0
@@ -109,6 +111,10 @@ static int tgt_mdt_body_unpack(struct tgt_session_info *tsi, __u32 flags)
  *
  * And also oi_id/f_oid should always start from 1. oi_id/f_oid = 0 will
  * be used for LAST_ID file, and only being accessed inside OST now.
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 int tgt_validate_obdo(struct tgt_session_info *tsi, struct obdo *oa)
 {
@@ -116,6 +122,7 @@ int tgt_validate_obdo(struct tgt_session_info *tsi, struct obdo *oa)
 	u64		 seq	= ostid_seq(oi);
 	u64		 id	= ostid_id(oi);
 	int		 rc;
+
 	ENTRY;
 
 	if (unlikely(!(exp_connect_flags(tsi->tsi_exp) & OBD_CONNECT_FID) &&
@@ -163,7 +170,7 @@ EXPORT_SYMBOL(tgt_validate_obdo);
 
 static int tgt_io_data_unpack(struct tgt_session_info *tsi, struct ost_id *oi)
 {
-	unsigned		 max_brw;
+	unsigned int max_brw;
 	struct niobuf_remote	*rnb;
 	struct obd_ioobj	*ioo;
 	int			 obj_count;
@@ -538,6 +545,8 @@ static int tgt_filter_recovery_request(struct ptlrpc_request *req,
  */
 static int tgt_handle_recovery(struct ptlrpc_request *req, int reply_fail_id)
 {
+	int rc;
+
 	ENTRY;
 
 	switch (lustre_msg_get_opc(req->rq_reqmsg)) {
@@ -550,12 +559,13 @@ static int tgt_handle_recovery(struct ptlrpc_request *req, int reply_fail_id)
 		RETURN(+1);
 	}
 
-	if (!req->rq_export->exp_obd->obd_replayable)
+	if (!test_bit(OBDF_REPLAYABLE, req->rq_export->exp_obd->obd_flags))
 		RETURN(+1);
 
 	/* sanity check: if the xid matches, the request must be marked as a
 	 * resent or replayed */
-	if (req_can_reconstruct(req, NULL) == 1) {
+	rc = req_can_reconstruct(req, NULL);
+	if (rc == 1) {
 		if (!(lustre_msg_get_flags(req->rq_reqmsg) &
 		      (MSG_RESENT | MSG_REPLAY))) {
 			DEBUG_REQ(D_WARNING, req,
@@ -565,7 +575,14 @@ static int tgt_handle_recovery(struct ptlrpc_request *req, int reply_fail_id)
 			req->rq_status = -ENOTCONN;
 			RETURN(-ENOTCONN);
 		}
+	} else if (rc) {
+		DEBUG_REQ(D_WARNING, req,
+			  "obsoleted, rq_xid=%llu, exp_last_xid=%llu",
+			  req->rq_xid, req->rq_export->exp_last_xid);
+		req->rq_status = rc;
+		RETURN(rc);
 	}
+
 	/* else: note the opposite is not always true; a RESENT req after a
 	 * failover will usually not match the last_xid, since it was likely
 	 * never committed. A REPLAYed request will almost never match the
@@ -574,7 +591,6 @@ static int tgt_handle_recovery(struct ptlrpc_request *req, int reply_fail_id)
 
 	/* Check for aborted recovery... */
 	if (unlikely(test_bit(OBDF_RECOVERING, req->rq_export->exp_obd->obd_flags))) {
-		int rc;
 		int should_process;
 
 		DEBUG_REQ(D_INFO, req, "Got new replay");
@@ -663,6 +679,7 @@ static int process_req_last_xid(struct ptlrpc_request *req)
 	struct obd_export *exp = req->rq_export;
 	struct tg_export_data *ted = &exp->exp_target_data;
 	bool need_lock = tgt_is_multimodrpcs_client(exp);
+
 	ENTRY;
 
 	if (need_lock)
@@ -743,6 +760,7 @@ int tgt_request_handle(struct ptlrpc_request *req)
 	struct obd_device	*obd;
 	int			 rc;
 	bool			 is_connect = false;
+
 	ENTRY;
 
 	if (unlikely(CFS_FAIL_CHECK(OBD_FAIL_TGT_RECOVERY_REQ_RACE))) {
@@ -788,6 +806,30 @@ int tgt_request_handle(struct ptlrpc_request *req)
 		CDEBUG(D_HA, "operation %d on unconnected OST from %s\n",
 		       opc, libcfs_idstr(&req->rq_peer));
 		req->rq_status = -ENOTCONN;
+		rc = ptlrpc_error(req);
+		GOTO(out, rc);
+	}
+
+	if (req->rq_export->exp_banned && opc != OBD_PING &&
+	    opc != OST_CONNECT && opc != OST_DISCONNECT &&
+	    opc != MDS_CONNECT && opc != MDS_DISCONNECT &&
+	    opc != MDS_CLOSE && opc != OST_CLOSE) {
+		struct lu_nodemap *nodemap;
+
+		nodemap = nodemap_get_from_exp(req->rq_export);
+		if (!IS_ERR_OR_NULL(nodemap)) {
+			LCONSOLE_WARN(
+				"operation %d from peer %s banned by nodemap %s: rc=%d\n",
+				opc, libcfs_idstr(&req->rq_peer),
+				nodemap->nm_name,  -EPERM);
+			nodemap_putref(nodemap);
+		} else {
+			LCONSOLE_WARN(
+				"operation %d from banned peer %s: rc=%d\n",
+				opc, libcfs_idstr(&req->rq_peer),
+				-EPERM);
+		}
+		req->rq_status = -EPERM;
 		rc = ptlrpc_error(req);
 		GOTO(out, rc);
 	}
@@ -952,13 +994,14 @@ int tgt_connect_check_sptlrpc(struct ptlrpc_request *req, struct obd_export *exp
 		if ((strcmp(exp->exp_obd->obd_type->typ_name,
 			    LUSTRE_MGS_NAME) == 0) &&
 		    (exp->exp_flvr.sf_rpc == SPTLRPC_FLVR_NULL ||
-		     LNetIsPeerLocal(&exp->exp_connection->c_peer.nid)))
+		     (exp->exp_connection &&
+		      LNetIsPeerLocal(&exp->exp_connection->c_peer.nid))))
 			exp->exp_flvr.sf_rpc = SPTLRPC_FLVR_ANY;
 
 		if (exp->exp_flvr.sf_rpc != SPTLRPC_FLVR_ANY &&
 		    exp->exp_flvr.sf_rpc != req->rq_flvr.sf_rpc) {
-			CERROR("%s: unauthorized rpc flavor %x from %s, "
-			       "expect %x\n", tgt_name(tgt),
+			CERROR("%s: unauthorized rpc flavor %x from %s, expect %x\n",
+			       tgt_name(tgt),
 			       req->rq_flvr.sf_rpc,
 			       libcfs_nidstr(&req->rq_peer.nid),
 			       exp->exp_flvr.sf_rpc);
@@ -1122,7 +1165,7 @@ int tgt_obd_ping(struct tgt_session_info *tsi)
 	 *
 	 * Valid only for replayable targets, e.g. MDT and OFD
 	 */
-	if (tsi->tsi_exp->exp_obd->obd_replayable)
+	if (test_bit(OBDF_REPLAYABLE, tsi->tsi_exp->exp_obd->obd_flags))
 		tgt_fmd_expire(tsi->tsi_exp);
 
 	rc = req_capsule_server_pack(tsi->tsi_pill);
@@ -1203,7 +1246,8 @@ int tgt_sendpage(struct tgt_session_info *tsi, struct lu_rdpg *rdpg, int nob)
 	for (i = 0, tmpcount = nob; i < rdpg->rp_npages && tmpcount > 0;
 	     i++, tmpcount -= tmpsize) {
 		tmpsize = min_t(int, tmpcount, PAGE_SIZE);
-		desc->bd_frag_ops->add_kiov_frag(desc, rdpg->rp_pages[i], 0,
+		desc->bd_frag_ops->add_kiov_frag(desc,
+					 folio_page(rdpg->rp_folios[i], 0), 0,
 						 tmpsize);
 	}
 
@@ -1266,13 +1310,15 @@ static int tgt_obd_idx_read(struct tgt_session_info *tsi)
 	rdpg->rp_npages = (rdpg->rp_count + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
 	/* allocate pages to store the containers */
-	OBD_ALLOC_PTR_ARRAY(rdpg->rp_pages, rdpg->rp_npages);
-	if (rdpg->rp_pages == NULL)
+	OBD_ALLOC_PTR_ARRAY(rdpg->rp_folios, rdpg->rp_npages);
+	if (rdpg->rp_folios == NULL)
 		GOTO(out, rc = -ENOMEM);
 	for (i = 0; i < rdpg->rp_npages; i++) {
-		rdpg->rp_pages[i] = alloc_page(GFP_NOFS);
-		if (rdpg->rp_pages[i] == NULL)
+		rdpg->rp_folios[i] = folio_alloc(GFP_NOFS, 0);
+		if (IS_ERR_OR_NULL(rdpg->rp_folios[i])) {
+			rdpg->rp_folios[i] = NULL;
 			GOTO(out, rc = -ENOMEM);
+		}
 	}
 
 	/* populate pages with key/record pairs */
@@ -1280,8 +1326,8 @@ static int tgt_obd_idx_read(struct tgt_session_info *tsi)
 	if (rc < 0)
 		GOTO(out, rc);
 
-	LASSERTF(rc <= rdpg->rp_count, "dt_index_read() returned more than "
-		 "asked %d > %d\n", rc, rdpg->rp_count);
+	LASSERTF(rc <= rdpg->rp_count, "dt_index_read() returned more than asked %d > %d\n",
+		 rc, rdpg->rp_count);
 
 	/* send pages to client */
 	rc = tgt_sendpage(tsi, rdpg, rc);
@@ -1289,18 +1335,18 @@ static int tgt_obd_idx_read(struct tgt_session_info *tsi)
 		GOTO(out, rc);
 	EXIT;
 out:
-	if (rdpg->rp_pages) {
+	if (rdpg->rp_folios) {
 		for (i = 0; i < rdpg->rp_npages; i++)
-			if (rdpg->rp_pages[i])
-				__free_page(rdpg->rp_pages[i]);
-		OBD_FREE_PTR_ARRAY(rdpg->rp_pages, rdpg->rp_npages);
+			if (rdpg->rp_folios[i])
+				folio_put(rdpg->rp_folios[i]);
+		OBD_FREE_PTR_ARRAY(rdpg->rp_folios, rdpg->rp_npages);
 	}
 	return rc;
 }
 
 struct tgt_handler tgt_obd_handlers[] = {
-TGT_OBD_HDL    (0,	OBD_PING,		tgt_obd_ping),
-TGT_OBD_HDL    (0,	OBD_IDX_READ,		tgt_obd_idx_read)
+TGT_OBD_HDL(0,	OBD_PING,		tgt_obd_ping),
+TGT_OBD_HDL(0,	OBD_IDX_READ,		tgt_obd_idx_read)
 };
 EXPORT_SYMBOL(tgt_obd_handlers);
 
@@ -1313,6 +1359,7 @@ int tgt_sync(const struct lu_env *env, struct lu_target *tgt,
 
 	/* if no objid is specified, it means "sync whole filesystem" */
 	if (obj == NULL) {
+		lu_objects_destroy_delayed();
 		rc = dt_sync(env, tgt->lut_bottom);
 	} else if (dt_version_get(env, obj) >
 		   tgt->lut_obd->obd_last_committed) {
@@ -1328,19 +1375,20 @@ EXPORT_SYMBOL(tgt_sync);
  */
 
 /**
- * Unified target BAST
+ * tgt_blocking_ast() - Unified target BAST
+ * @lock: server side lock
+ * @desc: lock desc
+ * @data: ldlm_cb_set_arg
+ * @flag: indicates whether this cancelling or blocking callback
  *
  * Ensure data and metadata are synced to disk when lock is canceled if Sync on
  * Cancel (SOC) is enabled. If it's extent lock, normally sync obj is enough,
  * but if it's cross-MDT lock, because remote object version is not set, a
  * filesystem sync is needed.
  *
- * \param lock server side lock
- * \param desc lock desc
- * \param data ldlm_cb_set_arg
- * \param flag	indicates whether this cancelling or blocking callback
- * \retval	0 on success
- * \retval	negative number on error
+ * Return:
+ * * %0 on success
+ * * %negative number on error
  */
 int tgt_blocking_ast(struct ldlm_lock *lock, struct ldlm_lock_desc *desc,
 		     void *data, int flag)
@@ -1392,8 +1440,7 @@ int tgt_blocking_ast(struct ldlm_lock *lock, struct ldlm_lock_desc *desc,
 
 		rc = tgt_sync(&env, tgt, obj, start, end);
 		if (rc < 0) {
-			CERROR("%s: syncing "DFID" (%llu-%llu) on lock "
-			       "cancel: rc = %d\n",
+			CERROR("%s: syncing "DFID" (%llu-%llu) on lock cancel: rc = %d\n",
 			       tgt_name(tgt), PFID(&fid),
 			       lock->l_policy_data.l_extent.start,
 			       lock->l_policy_data.l_extent.end, rc);
@@ -1536,10 +1583,10 @@ EXPORT_SYMBOL(tgt_llog_prev_block);
 
 /* generic llog target handler */
 struct tgt_handler tgt_llog_handlers[] = {
-TGT_LLOG_HDL    (0,	LLOG_ORIGIN_HANDLE_CREATE,	tgt_llog_open),
-TGT_LLOG_HDL    (0,	LLOG_ORIGIN_HANDLE_NEXT_BLOCK,	tgt_llog_next_block),
-TGT_LLOG_HDL    (0,	LLOG_ORIGIN_HANDLE_READ_HEADER,	tgt_llog_read_header),
-TGT_LLOG_HDL    (0,	LLOG_ORIGIN_HANDLE_PREV_BLOCK,	tgt_llog_prev_block),
+TGT_LLOG_HDL(0,	LLOG_ORIGIN_HANDLE_CREATE,	tgt_llog_open),
+TGT_LLOG_HDL(0,	LLOG_ORIGIN_HANDLE_NEXT_BLOCK,	tgt_llog_next_block),
+TGT_LLOG_HDL(0,	LLOG_ORIGIN_HANDLE_READ_HEADER,	tgt_llog_read_header),
+TGT_LLOG_HDL(0,	LLOG_ORIGIN_HANDLE_PREV_BLOCK,	tgt_llog_prev_block),
 };
 EXPORT_SYMBOL(tgt_llog_handlers);
 
@@ -1573,9 +1620,9 @@ void tgt_register_lfsck_in_notify_local(int (*notify)(const struct lu_env *,
 }
 EXPORT_SYMBOL(tgt_register_lfsck_in_notify_local);
 
-int (*tgt_lfsck_in_notify)(const struct lu_env *env,
-			   struct dt_device *key,
-			   struct lfsck_request *lr) = NULL;
+static int (*tgt_lfsck_in_notify)(const struct lu_env *env,
+				  struct dt_device *key,
+				  struct lfsck_request *lr) = NULL;
 
 void tgt_register_lfsck_in_notify(int (*notify)(const struct lu_env *,
 						struct dt_device *,
@@ -1608,6 +1655,7 @@ static int tgt_handle_lfsck_notify(struct tgt_session_info *tsi)
 	struct dt_device	*key = tsi->tsi_tgt->lut_bottom;
 	struct lfsck_request	*lr;
 	int			 rc;
+
 	ENTRY;
 
 	lr = req_capsule_client_get(tsi->tsi_pill, &RMF_LFSCK_REQUEST);
@@ -1624,6 +1672,7 @@ static int tgt_handle_lfsck_query(struct tgt_session_info *tsi)
 	struct lfsck_request	*request;
 	struct lfsck_reply	*reply;
 	int			 rc;
+
 	ENTRY;
 
 	request = req_capsule_client_get(tsi->tsi_pill, &RMF_LFSCK_REQUEST);
@@ -1691,8 +1740,19 @@ void tgt_io_thread_done(struct ptlrpc_thread *thread)
 EXPORT_SYMBOL(tgt_io_thread_done);
 
 /**
+ * tgt_mdt_data_lock() - Get Data-on-MDT file server DLM lock
+ * @ns: LDLM namespace
+ * @res_id: The resource name for the DLM request
+ * @lh: Pointer to lustre_handle (to uniquely identify lock)
+ * @mode: lock types
+ * @flags:  flags sent on wire on ldlm requests
+ *
  * Helper function for getting Data-on-MDT file server DLM lock
  * if asked by client.
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 int tgt_mdt_data_lock(struct ldlm_namespace *ns, struct ldlm_res_id *res_id,
 		      struct lustre_handle *lh, int mode, __u64 *flags)
@@ -1718,8 +1778,23 @@ int tgt_mdt_data_lock(struct ldlm_namespace *ns, struct ldlm_res_id *res_id,
 EXPORT_SYMBOL(tgt_mdt_data_lock);
 
 /**
+ * tgt_extent_lock() - Helper function for getting server side
+ *                     [start, start+count] DLM lock if asked by client.
+ * @env: Lustre environment
+ * @ns: LDLM namespace
+ * @res_id: The resource name for the DLM request
+ * @start: Start server side DLM lock
+ * @end: Number of Lock Count
+ * @lh: Pointer to lustre_handle (to uniquely identify lock)
+ * @mode: lock types
+ * @flags:  flags sent on wire on ldlm requests
+ *
  * Helper function for getting server side [start, start+count] DLM lock
  * if asked by client.
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 int tgt_extent_lock(const struct lu_env *env, struct ldlm_namespace *ns,
 		    struct ldlm_res_id *res_id, __u64 start, __u64 end,
@@ -1844,22 +1919,23 @@ static int tgt_checksum_niobuf(struct lu_target *tgt,
 		    CFS_FAIL_CHECK(OBD_FAIL_OST_CHECKSUM_RECEIVE)) {
 			int off = local_nb[i].lnb_page_offset & ~PAGE_MASK;
 			int len = local_nb[i].lnb_len;
-			struct page *np = tgt_page_to_corrupt;
+			struct folio *np = tgt_page_to_corrupt;
 
 			if (np) {
-				char *ptr = kmap_atomic(local_nb[i].lnb_page);
-				char *ptr2 = page_address(np);
+				char *ptr = kmap_local_page(local_nb[i].lnb_page);
+				char *ptr2 = kmap_local_folio(np, 0);
 
 				memcpy(ptr2 + off, ptr + off, len);
 				memcpy(ptr2 + off, "bad3", min(4, len));
-				kunmap_atomic(ptr);
+				kunmap_local(ptr2);
+				kunmap_local(ptr);
 
 				/* LU-8376 to preserve original index for
 				 * display in dump_all_bulk_pages() */
 				np->index = i;
 
-				cfs_crypto_hash_update_page(req, np, off,
-							    len);
+				cfs_crypto_hash_update_page(req, fpgptr(np),
+							    off, len);
 				continue;
 			} else {
 				CERROR("%s: can't alloc page for corruption\n",
@@ -1876,22 +1952,23 @@ static int tgt_checksum_niobuf(struct lu_target *tgt,
 		    CFS_FAIL_CHECK(OBD_FAIL_OST_CHECKSUM_SEND)) {
 			int off = local_nb[i].lnb_page_offset & ~PAGE_MASK;
 			int len = local_nb[i].lnb_len;
-			struct page *np = tgt_page_to_corrupt;
+			struct folio *np = tgt_page_to_corrupt;
 
 			if (np) {
-				char *ptr = kmap_atomic(local_nb[i].lnb_page);
-				char *ptr2 = page_address(np);
+				char *ptr = kmap_local_page(local_nb[i].lnb_page);
+				char *ptr2 = kmap_local_folio(np, 0);
 
 				memcpy(ptr2 + off, ptr + off, len);
 				memcpy(ptr2 + off, "bad4", min(4, len));
-				kunmap_atomic(ptr);
+				kunmap_local(ptr2);
+				kunmap_local(ptr);
 
 				/* LU-8376 to preserve original index for
 				 * display in dump_all_bulk_pages() */
 				np->index = i;
 
-				cfs_crypto_hash_update_page(req, np, off,
-							    len);
+				cfs_crypto_hash_update_page(req, fpgptr(np),
+							    off, len);
 				continue;
 			} else {
 				CERROR("%s: can't alloc page for corruption\n",
@@ -1938,30 +2015,32 @@ static void dump_all_bulk_pages(struct obdo *oa, int count,
 	if (IS_ERR(filp)) {
 		rc = PTR_ERR(filp);
 		if (rc == -EEXIST)
-			CDEBUG(D_INFO, "%s: can't open to dump pages with "
-			       "checksum error: rc = %d\n", dbgcksum_file_name,
+			CDEBUG(D_INFO, "%s: can't open to dump pages with checksum error: rc = %d\n",
+			       dbgcksum_file_name,
 			       rc);
 		else
-			CERROR("%s: can't open to dump pages with checksum "
-			       "error: rc = %d\n", dbgcksum_file_name, rc);
+			CERROR("%s: can't open to dump pages with checksum error: rc = %d\n",
+			       dbgcksum_file_name, rc);
 		OBD_FREE(dbgcksum_file_name, PATH_MAX);
 		return;
 	}
 
 	for (i = 0; i < count; i++) {
+		void *addr = kmap(local_nb[i].lnb_page);
+
 		len = local_nb[i].lnb_len;
-		buf = kmap(local_nb[i].lnb_page);
+		buf = addr;
 		while (len != 0) {
-			rc = cfs_kernel_write(filp, buf, len, &filp->f_pos);
+			rc = kernel_write(filp, buf, len, &filp->f_pos);
 			if (rc < 0) {
-				CERROR("%s: wanted to write %u but got %d "
-				       "error\n", dbgcksum_file_name, len, rc);
+				CERROR("%s: wanted to write %u but got %d error\n",
+				       dbgcksum_file_name, len, rc);
 				break;
 			}
 			len -= rc;
 			buf += rc;
 		}
-		kunmap(local_nb[i].lnb_page);
+		kunmap(kmap_to_page(addr));
 	}
 
 	rc = vfs_fsync_range(filp, 0, LLONG_MAX, 1);
@@ -2038,9 +2117,9 @@ static int tgt_pages2shortio(struct niobuf_local *local, int npages,
 		if (len > size)
 			return -EINVAL;
 
-		ptr = kmap_atomic(local[i].lnb_page);
+		ptr = kmap_local_page(local[i].lnb_page);
 		memcpy(buf, ptr + off, len);
-		kunmap_atomic(ptr);
+		kunmap_local(ptr);
 		buf += len;
 		size -= len;
 	}
@@ -2059,7 +2138,7 @@ static int tgt_checksum_niobuf_t10pi(struct lu_target *tgt,
 	const char *obd_name = tgt->lut_obd->obd_name;
 	struct ahash_request *req;
 	unsigned char *buffer;
-	struct page *__page;
+	struct folio *__folio;
 	__be16 *guard_start;
 	int guard_number;
 	int used_number = 0;
@@ -2069,8 +2148,8 @@ static int tgt_checksum_niobuf_t10pi(struct lu_target *tgt,
 	int used;
 	int i;
 
-	__page = alloc_page(GFP_KERNEL);
-	if (__page == NULL)
+	__folio = folio_alloc(GFP_KERNEL, 0);
+	if (IS_ERR_OR_NULL(__folio))
 		return -ENOMEM;
 
 	req = cfs_crypto_hash_init(cfs_alg, NULL, 0);
@@ -2081,7 +2160,7 @@ static int tgt_checksum_niobuf_t10pi(struct lu_target *tgt,
 		goto out;
 	}
 
-	buffer = kmap(__page);
+	buffer = ll_kmap_local_folio(__folio, 0);
 	guard_start = (__be16 *)buffer;
 	guard_number = PAGE_SIZE / sizeof(*guard_start);
 	if (unlikely(resend))
@@ -2094,7 +2173,7 @@ static int tgt_checksum_niobuf_t10pi(struct lu_target *tgt,
 					(off / sector_size);
 
 		if (guards_needed > guard_number - used_number) {
-			cfs_crypto_hash_update_page(req, __page, 0,
+			cfs_crypto_hash_update_page(req, fpgptr(__folio), 0,
 				used_number * sizeof(*guard_start));
 			used_number = 0;
 		}
@@ -2103,22 +2182,23 @@ static int tgt_checksum_niobuf_t10pi(struct lu_target *tgt,
 		 * simulate a client->OST data error */
 		if (i == 0 && opc == OST_WRITE &&
 		    CFS_FAIL_CHECK(OBD_FAIL_OST_CHECKSUM_RECEIVE)) {
-			struct page *np = tgt_page_to_corrupt;
+			struct folio *np = tgt_page_to_corrupt;
 
 			if (np) {
-				char *ptr = kmap_atomic(local_nb[i].lnb_page);
-				char *ptr2 = page_address(np);
+				char *ptr = kmap_local_page(local_nb[i].lnb_page);
+				char *ptr2 = kmap_local_folio(np, 0);
 
 				memcpy(ptr2 + off, ptr + off, len);
 				memcpy(ptr2 + off, "bad3", min(4, len));
-				kunmap_atomic(ptr);
+				kunmap_local(ptr2);
+				kunmap_local(ptr);
 
 				/* LU-8376 to preserve original index for
 				 * display in dump_all_bulk_pages() */
 				np->index = i;
 
-				cfs_crypto_hash_update_page(req, np, off,
-							    len);
+				cfs_crypto_hash_update_page(req, fpgptr(np),
+							    off, len);
 				continue;
 			} else {
 				CERROR("%s: can't alloc page for corruption\n",
@@ -2158,6 +2238,8 @@ static int tgt_checksum_niobuf_t10pi(struct lu_target *tgt,
 				       guard_start + used_number);
 		}
 		if (!use_t10_grd || unlikely(resend)) {
+			struct folio *folio;
+			s32 pgno;
 			__be16 guard_tmp[MAX_GUARD_NUMBER];
 			__be16 *guards = guard_start + used_number;
 			int used_tmp = -1, *usedp = &used;
@@ -2166,8 +2248,10 @@ static int tgt_checksum_niobuf_t10pi(struct lu_target *tgt,
 				guards = guard_tmp;
 				usedp = &used_tmp;
 			}
+			folio = page_folio(local_nb[i].lnb_page);
+			pgno = folio_page_idx(folio, local_nb[i].lnb_page);
 			rc = obd_page_dif_generate_buffer(obd_name,
-				local_nb[i].lnb_page,
+				folio, pgno,
 				local_nb[i].lnb_page_offset & ~PAGE_MASK,
 				local_nb[i].lnb_len, guards,
 				guard_number - used_number, usedp, sector_size,
@@ -2223,22 +2307,23 @@ static int tgt_checksum_niobuf_t10pi(struct lu_target *tgt,
 		 * simulate an OST->client data error */
 		if (unlikely(i == 0 && opc == OST_READ &&
 			     CFS_FAIL_CHECK(OBD_FAIL_OST_CHECKSUM_SEND))) {
-			struct page *np = tgt_page_to_corrupt;
+			struct folio *np = tgt_page_to_corrupt;
 
 			if (np) {
-				char *ptr = kmap_atomic(local_nb[i].lnb_page);
-				char *ptr2 = page_address(np);
+				char *ptr = kmap_local_page(local_nb[i].lnb_page);
+				char *ptr2 = kmap_local_folio(np, 0);
 
 				memcpy(ptr2 + off, ptr + off, len);
 				memcpy(ptr2 + off, "bad4", min(4, len));
-				kunmap_atomic(ptr);
+				kunmap_local(ptr2);
+				kunmap_local(ptr);
 
 				/* LU-8376 to preserve original index for
 				 * display in dump_all_bulk_pages() */
 				np->index = i;
 
-				cfs_crypto_hash_update_page(req, np, off,
-							    len);
+				cfs_crypto_hash_update_page(req, fpgptr(np),
+							    off, len);
 				continue;
 			} else {
 				CERROR("%s: can't alloc page for corruption\n",
@@ -2246,12 +2331,12 @@ static int tgt_checksum_niobuf_t10pi(struct lu_target *tgt,
 			}
 		}
 	}
-	kunmap(__page);
+	ll_kunmap_local(buffer);
 	if (rc)
 		GOTO(out_hash, rc);
 
 	if (used_number != 0)
-		cfs_crypto_hash_update_page(req, __page, 0,
+		cfs_crypto_hash_update_page(req, fpgptr(__folio), 0,
 					    used_number * sizeof(*guard_start));
 out_hash:
 	rc2 = cfs_crypto_hash_final(req, (unsigned char *)&cksum, &bufsize);
@@ -2260,7 +2345,7 @@ out_hash:
 	if (rc == 0)
 		*check_sum = cksum;
 out:
-	__free_page(__page);
+	folio_put(__folio);
 	return rc;
 }
 
@@ -2409,8 +2494,6 @@ int tgt_brw_read(struct tgt_session_info *tsi)
 					    &ptlrpc_bulk_kiov_nopin_ops);
 		if (desc == NULL)
 			GOTO(out_commitrw, rc = -ENOMEM);
-		/* client may have MD handling requirements  */
-		desc->bd_md_offset = ioobj_page_interop_offset(ioo);
 	}
 
 	npages_read = npages;
@@ -2530,8 +2613,7 @@ out_lock:
 		req->rq_no_reply = 1;
 		/* reply out callback would free */
 		ptlrpc_req_drop_rs(req);
-		LCONSOLE_WARN("%s: Bulk IO read error with %s (at %s), "
-			      "client will retry: rc %d\n",
+		LCONSOLE_WARN("%s: Bulk IO read error with %s (at %s), client will retry: rc %d\n",
 			      obd_name,
 			      obd_uuid2str(&exp->exp_client_uuid),
 			      obd_export_nid2str(exp), rc);
@@ -2580,11 +2662,9 @@ static int tgt_shortio2pages(struct niobuf_local *local, int npages,
 
 		CDEBUG(D_PAGE, "index %d offset = %d len = %d left = %d\n",
 		       i, off, len, size);
-		ptr = kmap_atomic(local[i].lnb_page);
-		if (ptr == NULL)
-			return -EINVAL;
+		ptr = kmap_local_page(local[i].lnb_page);
 		memcpy(ptr + off, buf, len < size ? len : size);
-		kunmap_atomic(ptr);
+		kunmap_local(ptr);
 		buf += len;
 		size -= len;
 	}
@@ -2737,7 +2817,8 @@ int tgt_brw_write(struct tgt_session_info *tsi)
 		RETURN(err_serious(-EPROTO));
 
 	if ((remote_nb[0].rnb_flags & OBD_BRW_MEMALLOC) &&
-	    ptlrpc_connection_is_local(exp->exp_connection))
+	    exp->exp_connection &&
+	    LNetIsPeerLocal(&exp->exp_connection->c_peer.nid))
 		mpflags = memalloc_noreclaim_save();
 
 	/* it is incorrect to return ENOSPC when granted space has been used */
@@ -2806,8 +2887,8 @@ int tgt_brw_write(struct tgt_session_info *tsi)
 						     RCL_CLIENT);
 		short_io_buf = req_capsule_client_get(&req->rq_pill,
 						      &RMF_SHORT_IO);
-		CDEBUG(D_INFO, "Client use short io for data transfer,"
-			       " size = %d\n", short_io_size);
+		CDEBUG(D_INFO, "Client use short io for data transfer, size = %d\n",
+			       short_io_size);
 
 		/* Copy short io buf to pages */
 		rc = tgt_shortio2pages(local_nb, npages, short_io_buf,
@@ -2820,9 +2901,6 @@ int tgt_brw_write(struct tgt_session_info *tsi)
 					    &ptlrpc_bulk_kiov_nopin_ops);
 		if (desc == NULL)
 			GOTO(skip_transfer, rc = -ENOMEM);
-		/* client may have MD handling requirements  */
-		desc->bd_md_offset = ioobj_page_interop_offset(ioo);
-
 		/* NB Having prepped, we must commit... */
 		for (i = 0; i < npages; i++)
 			desc->bd_frag_ops->add_kiov_frag(desc,
@@ -2943,8 +3021,7 @@ out:
 		/* reply out callback would free */
 		ptlrpc_req_drop_rs(req);
 		if (!exp->exp_obd->obd_no_transno)
-			LCONSOLE_WARN("%s: Bulk IO write error with %s (at %s),"
-				      " client will retry: rc = %d\n",
+			LCONSOLE_WARN("%s: Bulk IO write error with %s (at %s), client will retry: rc = %d\n",
 				      obd_name,
 				      obd_uuid2str(&exp->exp_client_uuid),
 				      obd_export_nid2str(exp), rc);
@@ -2958,16 +3035,16 @@ out:
 EXPORT_SYMBOL(tgt_brw_write);
 
 /**
- * Common request handler for OST_SEEK RPC.
+ * tgt_lseek() - Common request handler for OST_SEEK RPC.
+ * @tsi: target session environment for this request
  *
  * Unified request handling for OST_SEEK RPC.
  * It takes object by its FID, does needed lseek and packs result
  * into reply. Only SEEK_HOLE and SEEK_DATA are supported.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 int tgt_lseek(struct tgt_session_info *tsi)
 {
@@ -3073,7 +3150,7 @@ bool tgt_check_resent(struct ptlrpc_request *req, struct tg_reply_data *trd)
 	if (likely(!(lustre_msg_get_flags(req->rq_reqmsg) & MSG_RESENT)))
 		return false;
 
-	if (req_can_reconstruct(req, trd)) {
+	if (req_can_reconstruct(req, trd) == 1) {
 		lrd = &trd->trd_reply;
 		req->rq_transno = lrd->lrd_transno;
 		req->rq_status = lrd->lrd_result;

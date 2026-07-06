@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 # SPDX-License-Identifier: GPL-2.0
 
 #
@@ -17,7 +17,6 @@
 # $5 : $arch
 # $6 : $source_tree
 # $7 : $dkms_tree
-# $8 : $kmoddir
 #
 # This script ensure that ALL Lustre kernel modules that have been built
 # during DKMS build step of lustre[-client]-dkms module will be moved in
@@ -67,24 +66,10 @@ mkdir -p ${kapi}/$5/$flavor
 ln -s $7/$1/$2/$3/$5/config.h ${kapi}/$5/$flavor
 ln -s $7/$1/$2/$3/$5/Module.symvers ${kapi}/$5/$flavor
 
-# LNet headers:
-for fname in $(find lnet/include -type f -name \*.h); do
-    target=$(echo ${fname} | sed -e 's:^lnet/include/::g')
-    if [[ ${target} == uapi/* ]]; then
-        header=$(echo ${target} | sed -e 's:^uapi/linux/lnet/::g')
-        install -D -m 0644 ${fname} ${kapi}/uapi/linux/lnet/${header}
-        install -D -m 0644 ${fname} ${kapi}/linux/lnet/${header}
-        >&2 echo "installing ${fname} => ${kapi}/uapi/linux/lnet/${header}"
-        >&2 echo "installing ${fname} => ${kapi}/linux/lnet/${header}"
-    else
-        install -D -m 0644 ${fname} ${kapi}/${target}
-        >&2 echo "installing ${fname} => ${kapi}/${target}"
-    fi
-done
-
-## Lustre headers:
-for fname in $(find libcfs/include/libcfs -type f -name \*.h); do
-    target=$(echo ${fname} | sed -e 's:^libcfs/include/::g')
+# LNet / Lustre headers:
+# LNet / Lustre kernel headers:
+for fname in $(find include/{linux/uapi} -type f -name \*.h); do
+    target=$(echo ${fname} | sed -e 's:^/include/::g')
     install -D -m 0644 ${fname} ${kapi}/${target}
     >&2 echo "installing ${fname} => ${kapi}/${target}"
 done

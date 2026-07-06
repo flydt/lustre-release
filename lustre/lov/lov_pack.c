@@ -70,12 +70,22 @@ void lov_dump_lmm_v1(int level, struct lov_mds_md_v1 *lmm)
 }
 
 /**
+ * lov_lsm_pack_v1v3() - Pack layout metadata
+ * @lsm: Striping info
+ * @buf: Destination buffer [out]
+ * @buf_size: Size of @buf
+ *
  * Pack LOV striping metadata for disk storage format (in little
  * endian byte order).
  *
- * This follows the getxattr() conventions. If \a buf_size is zero
- * then return the size needed. If \a buf_size is too small then
+ * This follows the getxattr() conventions. If @buf_size is zero
+ * then return the size needed. If @buf_size is too small then
  * return -ERANGE. Otherwise return the size of the result.
+ *
+ * Returns:
+ * * %>0 (Bytes written to @buf) Size of the packed metadata.
+ * * %0 If @buf_size was 0 then return the size needed only. (Dont update @buf)
+ * * %-ERANGE If @buf_size is too small.
  */
 static ssize_t lov_lsm_pack_v1v3(const struct lov_stripe_md *lsm, void *buf,
 				 size_t buf_size)
@@ -262,9 +272,11 @@ ssize_t lov_lsm_pack(const struct lov_stripe_md *lsm, void *buf,
 
 		lcme->lcme_id = cpu_to_le32(lsme->lsme_id);
 		lcme->lcme_flags = cpu_to_le32(lsme->lsme_flags);
-		if (lsme->lsme_flags & LCME_FL_NOSYNC)
-			lcme->lcme_timestamp =
-				cpu_to_le64(lsme->lsme_timestamp);
+		lcme->lcme_time_and_id = cpu_to_le64(
+			lcme_timestamp_and_id_pack(lsme->lsme_timestamp,
+				     lsme->lsme_mirror_link_id));
+		lcme->lcme_dstripe_count = lsme->lsme_dstripe_count;
+		lcme->lcme_cstripe_count = lsme->lsme_cstripe_count;
 		lcme->lcme_extent.e_start =
 			cpu_to_le64(lsme->lsme_extent.e_start);
 		lcme->lcme_extent.e_end =

@@ -16,8 +16,6 @@
 
 #define DEBUG_SUBSYSTEM S_LDLM
 
-#include <libcfs/libcfs.h>
-
 #include <lustre_swab.h>
 #include <obd_class.h>
 
@@ -116,7 +114,7 @@ const char *ldlm_it2str(enum ldlm_intent_flags it)
 }
 EXPORT_SYMBOL(ldlm_it2str);
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 static ldlm_processing_policy ldlm_processing_policy_table[] = {
 	[LDLM_PLAIN]	= ldlm_process_plain_lock,
 	[LDLM_EXTENT]	= ldlm_process_extent_lock,
@@ -142,7 +140,7 @@ ldlm_reprocessing_policy ldlm_get_reprocessing_policy(struct ldlm_resource *res)
 	return ldlm_reprocessing_policy_table[res->lr_type];
 }
 
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 void ldlm_register_intent(struct ldlm_namespace *ns, ldlm_res_policy arg)
 {
@@ -232,19 +230,14 @@ EXPORT_SYMBOL(ldlm_lock_put);
  */
 int ldlm_lock_remove_from_lru_nolock(struct ldlm_lock *lock)
 {
+	struct ldlm_namespace *ns;
 	int rc = 0;
 
-	if (!list_empty(&lock->l_lru)) {
-		struct ldlm_namespace *ns = ldlm_lock_to_ns(lock);
+	ns = ldlm_lock_to_ns(lock);
+	if (ns->ns_lock_cache_ops &&
+	    ns->ns_lock_cache_ops->llco_remove_lock)
+		rc = ns->ns_lock_cache_ops->llco_remove_lock(ns, lock);
 
-		LASSERT(lock->l_resource->lr_type != LDLM_FLOCK);
-		if (ns->ns_last_pos == &lock->l_lru)
-			ns->ns_last_pos = lock->l_lru.prev;
-		list_del_init(&lock->l_lru);
-		LASSERT(ns->ns_nr_unused > 0);
-		ns->ns_nr_unused--;
-		rc = 1;
-	}
 	return rc;
 }
 
@@ -259,7 +252,8 @@ int ldlm_lock_remove_from_lru_nolock(struct ldlm_lock *lock)
  *           otherwise, the lock hasn't been in the LRU list.
  * \retval 1 the lock was in LRU list and removed.
  */
-int ldlm_lock_remove_from_lru_check(struct ldlm_lock *lock, ktime_t last_use)
+int ldlm_lock_remove_from_lru_check(struct ldlm_lock *lock, ktime_t last_use,
+				    bool reuse)
 {
 	struct ldlm_namespace *ns = ldlm_lock_to_ns(lock);
 	int rc = 0;
@@ -272,8 +266,15 @@ int ldlm_lock_remove_from_lru_check(struct ldlm_lock *lock, ktime_t last_use)
 
 	spin_lock(&ns->ns_lock);
 	if (!ktime_compare(last_use, ktime_set(0, 0)) ||
-	    !ktime_compare(last_use, lock->l_last_used))
+	    !ktime_compare(last_use, lock->l_last_used)) {
 		rc = ldlm_lock_remove_from_lru_nolock(lock);
+		if (rc && reuse) {
+			lprocfs_counter_incr(ns->ns_stats, LDLM_NSS_LRU_HITS);
+			if (lock->l_lru_type == LRU_PRIV)
+				lprocfs_counter_incr(ns->ns_stats,
+						     LDLM_NSS_LRU_PRIV_HITS);
+		}
+	}
 	spin_unlock(&ns->ns_lock);
 
 	RETURN(rc);
@@ -282,14 +283,15 @@ int ldlm_lock_remove_from_lru_check(struct ldlm_lock *lock, ktime_t last_use)
 /* Adds LDLM lock \a lock to namespace LRU. Assumes LRU is already locked.  */
 void ldlm_lock_add_to_lru_nolock(struct ldlm_lock *lock)
 {
-	struct ldlm_namespace *ns = ldlm_lock_to_ns(lock);
+	struct ldlm_namespace *ns;
 
-	lock->l_last_used = ktime_get();
 	LASSERT(list_empty(&lock->l_lru));
 	LASSERT(lock->l_resource->lr_type != LDLM_FLOCK);
-	list_add_tail(&lock->l_lru, &ns->ns_unused_list);
-	LASSERT(ns->ns_nr_unused >= 0);
-	ns->ns_nr_unused++;
+	ns = ldlm_lock_to_ns(lock);
+
+	if (ns->ns_lock_cache_ops &&
+	    ns->ns_lock_cache_ops->llco_add_lock)
+		ns->ns_lock_cache_ops->llco_add_lock(ns, lock);
 }
 
 /* Adds LDLM lock \a lock to namespace LRU. Obtains necessary LRU locks first */
@@ -439,6 +441,8 @@ static struct ldlm_lock *ldlm_lock_new(struct ldlm_resource *resource)
 	RCU_INIT_POINTER(lock->l_resource, resource);
 
 	refcount_set(&lock->l_handle.h_ref, 2);
+	lock->l_lru_score = 0;
+	lock->l_lru_type = LRU_NORMAL_LIST;
 	INIT_LIST_HEAD(&lock->l_res_link);
 	INIT_LIST_HEAD(&lock->l_lru);
 	INIT_LIST_HEAD(&lock->l_pending_chain);
@@ -759,7 +763,7 @@ EXPORT_SYMBOL(ldlm_lock_addref);
 void ldlm_lock_addref_internal_nolock(struct ldlm_lock *lock,
 				      enum ldlm_mode mode)
 {
-	ldlm_lock_remove_from_lru(lock);
+	ldlm_lock_remove_from_lru_check(lock, ktime_set(0, 0), true);
 	if (mode & (LCK_NL | LCK_CR | LCK_PR)) {
 		lock->l_readers++;
 	}
@@ -767,6 +771,7 @@ void ldlm_lock_addref_internal_nolock(struct ldlm_lock *lock,
 		lock->l_writers++;
 	}
 	ldlm_lock_get(lock);
+	lock->l_last_used = ktime_get();
 	LDLM_DEBUG(lock, "ldlm_lock_addref(%s)", ldlm_lockname[mode]);
 }
 
@@ -1296,7 +1301,7 @@ struct ldlm_lock *search_itree(struct ldlm_resource *res,
 	for (idx = 0; idx < LCK_MODE_NUM; idx++) {
 		struct ldlm_interval_tree *tree = &res->lr_itree[idx];
 
-		if (INTERVAL_TREE_EMPTY(&tree->lit_root))
+		if (RB_EMPTY_ROOT(&tree->lit_root.rb_root))
 			continue;
 
 		if (!(tree->lit_mode & *data->lmd_mode))
@@ -1525,8 +1530,8 @@ out_fail_match:
 
 	/* less verbose for test-only */
 	if (!matched && !(flags & LDLM_FL_TEST_LOCK)) {
-		LDLM_DEBUG_NOLOCK("not matched ns %p type %u mode %u res "
-				  "%llu/%llu (%llu %llu)", ns,
+		LDLM_DEBUG_NOLOCK("not matched ns %p type %u mode %u res %llu/%llu (%llu %llu)",
+				  ns,
 				  type, mode, res_id->name[0], res_id->name[1],
 				  (type == LDLM_PLAIN || type == LDLM_IBITS) ?
 				  res_id->name[2] : policy->l_extent.start,
@@ -1741,7 +1746,7 @@ out:
 	RETURN(ERR_PTR(rc));
 }
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 static enum ldlm_error ldlm_lock_enqueue_helper(struct ldlm_lock *lock,
 					     __u64 *flags)
 {
@@ -1784,7 +1789,7 @@ enum ldlm_error ldlm_lock_enqueue(const struct lu_env *env,
 	struct ldlm_resource *res;
 	int local = ns_is_client(ns);
 	enum ldlm_error rc = ELDLM_OK;
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	bool reconstruct = false;
 #endif
 	ENTRY;
@@ -1838,7 +1843,7 @@ enum ldlm_error ldlm_lock_enqueue(const struct lu_env *env,
 		RETURN(ELDLM_OK);
 	}
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	reconstruct = !local && lock->l_resource->lr_type == LDLM_FLOCK &&
 		      !(*flags & LDLM_FL_TEST_LOCK);
 	if (reconstruct) {
@@ -1908,7 +1913,7 @@ enum ldlm_error ldlm_lock_enqueue(const struct lu_env *env,
 		else
 			ldlm_grant_lock(lock, NULL);
 		GOTO(out, rc = ELDLM_OK);
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	} else if (*flags & LDLM_FL_REPLAY) {
 		if (*flags & LDLM_FL_BLOCK_WAIT) {
 			ldlm_resource_add_lock(res, &res->lr_waiting, lock);
@@ -1932,7 +1937,7 @@ enum ldlm_error ldlm_lock_enqueue(const struct lu_env *env,
 out:
 	unlock_res_and_lock(lock);
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	if (reconstruct) {
 		struct ptlrpc_request *req = cookie;
 
@@ -1944,7 +1949,7 @@ out:
 	return rc;
 }
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 /**
  * Iterate through all waiting locks on a given resource queue and attempt to
  * grant them.
@@ -2330,7 +2335,7 @@ int ldlm_run_ast_work(struct ldlm_namespace *ns, struct list_head *rpc_list,
 		arg->type = LDLM_CP_CALLBACK;
 		work_ast_lock = ldlm_work_cp_ast_lock;
 		break;
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	case LDLM_WORK_BL_AST:
 		arg->type = LDLM_BL_CALLBACK;
 		work_ast_lock = ldlm_work_bl_ast_lock;
@@ -2381,7 +2386,7 @@ static void __ldlm_reprocess_all(struct ldlm_resource *res,
 				 enum mds_ibits_locks hint)
 {
 	LIST_HEAD(rpc_list);
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	ldlm_reprocessing_policy reprocess;
 	struct obd_device *obd;
 	int rc;
@@ -2569,7 +2574,7 @@ static void ldlm_cancel_lock_for_export(struct obd_export *exp,
 
 	ldlm_lvbo_update(res, lock, NULL, 1);
 	ldlm_lock_cancel(lock);
-	if (!exp->exp_obd->obd_stopping)
+	if (!test_bit(OBDF_STOPPING, exp->exp_obd->obd_flags))
 		ldlm_reprocess_all(res, lock->l_policy_data.l_inodebits.bits);
 	ldlm_resource_putref(res);
 
@@ -2676,7 +2681,7 @@ int ldlm_export_cancel_locks(struct obd_export *exp)
 
 	if (ecl.ecl_loop > 0 &&
 	    atomic_read(&exp->exp_lock_hash->hs_count) == 0 &&
-	    exp->exp_obd->obd_stopping)
+	    test_bit(OBDF_STOPPING, exp->exp_obd->obd_flags))
 		ldlm_reprocess_recovery_done(exp->exp_obd->obd_namespace);
 
 	lu_env_fini(&env);
@@ -2706,7 +2711,7 @@ int ldlm_export_cancel_locks(struct obd_export *exp)
  */
 void ldlm_lock_mode_downgrade(struct ldlm_lock *lock, enum ldlm_mode new_mode)
 {
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	ENTRY;
 
 	LASSERT(new_mode == LCK_COS || new_mode == LCK_TXN ||
@@ -2822,7 +2827,7 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
 	switch (resource->lr_type) {
 	case LDLM_EXTENT:
 		libcfs_debug_msg(msgdata,
-				 "%pV ns: %s lock: %p/%#llx lrc: %d/%d,%d mode: %s/%s res: " DLDLMRES " rrc: %d type: %s [%llu->%llu] (req %llu->%llu) gid %llu flags: %#llx nid: %s remote: %#llx expref: %d pid: %u timeout: %lld lvb_type: %d\n",
+				 "%pV ns: %s lock: %p/%#llx lrc: %d/%d,%d mode: %s/%s res: " DLDLMRES " rrc: %d type: %s [%llu->%llu] (req %llu->%llu) gid %llu flags: %#llx nid: %s remote: %#llx expref: %d pid: %u timeout: %lld lvb_type: %d lru_score: %d lru_type: %d\n",
 				 &vaf,
 				 ldlm_lock_to_ns_name(lock), lock,
 				 lock->l_handle.h_cookie,
@@ -2841,7 +2846,8 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
 				 lock->l_remote_handle.cookie,
 				 exp ? refcount_read(&exp->exp_handle.h_ref) : -99,
 				 lock->l_pid, lock->l_callback_timestamp,
-				 lock->l_lvb_type);
+				 lock->l_lvb_type, lock->l_lru_score,
+				 lock->l_lru_type);
 		break;
 
 	case LDLM_FLOCK:
@@ -2869,7 +2875,7 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
 	case LDLM_IBITS:
 		if (!lock->l_remote_handle.cookie)
 			libcfs_debug_msg(msgdata,
-				 "%pV ns: %s lock: %p/%#llx lrc: %d/%d,%d mode: %s/%s res: " DLDLMRES " bits %#lx/%#lx rrc: %d type: %s flags: %#llx pid: %u initiator: MDT%d\n",
+				 "%pV ns: %s lock: %p/%#llx lrc: %d/%d,%d mode: %s/%s res: " DLDLMRES " bits %#lx/%#lx rrc: %d type: %s flags: %#llx pid: %u initiator: MDT%d lru_score: %d lru_type: %d\n",
 				 &vaf,
 				 ldlm_lock_to_ns_name(lock),
 				 lock, lock->l_handle.h_cookie,
@@ -2883,10 +2889,11 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
 				 refcount_read(&resource->lr_refcount),
 				 ldlm_typename[resource->lr_type],
 				 lock->l_flags, lock->l_pid,
-				 lock->l_policy_data.l_inodebits.li_initiator_id);
+				 lock->l_policy_data.l_inodebits.li_initiator_id,
+				 lock->l_lru_score, lock->l_lru_type);
 		else
 			libcfs_debug_msg(msgdata,
-				 "%pV ns: %s lock: %p/%#llx lrc: %d/%d,%d mode: %s/%s res: " DLDLMRES " bits %#lx/%#lx rrc: %d type: %s gid %llu flags: %#llx nid: %s remote: %#llx expref: %d pid: %u timeout: %lld lvb_type: %d\n",
+				 "%pV ns: %s lock: %p/%#llx lrc: %d/%d,%d mode: %s/%s res: " DLDLMRES " bits %#lx/%#lx rrc: %d type: %s gid %llu flags: %#llx nid: %s remote: %#llx expref: %d pid: %u timeout: %lld lvb_type: %d lru_score: %d lru_type: %d\n",
 				 &vaf,
 				 ldlm_lock_to_ns_name(lock),
 				 lock, lock->l_handle.h_cookie,
@@ -2904,12 +2911,13 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
 				 lock->l_remote_handle.cookie,
 				 exp ? refcount_read(&exp->exp_handle.h_ref) : -99,
 				 lock->l_pid, lock->l_callback_timestamp,
-				 lock->l_lvb_type);
+				 lock->l_lvb_type, lock->l_lru_score,
+				 lock->l_lru_type);
 		break;
 
 	default:
 		libcfs_debug_msg(msgdata,
-				 "%pV ns: %s lock: %p/%#llx lrc: %d/%d,%d mode: %s/%s res: " DLDLMRES " rrc: %d type: %s flags: %#llx nid: %s remote: %#llx expref: %d pid: %u timeout: %lld lvb_type: %d\n",
+				 "%pV ns: %s lock: %p/%#llx lrc: %d/%d,%d mode: %s/%s res: " DLDLMRES " rrc: %d type: %s flags: %#llx nid: %s remote: %#llx expref: %d pid: %u timeout: %lld lvb_type: %d lru_score: %d lru_type: %d\n",
 				 &vaf,
 				 ldlm_lock_to_ns_name(lock),
 				 lock, lock->l_handle.h_cookie,
@@ -2924,7 +2932,8 @@ void _ldlm_lock_debug(struct ldlm_lock *lock,
 				 lock->l_remote_handle.cookie,
 				 exp ? refcount_read(&exp->exp_handle.h_ref) : -99,
 				 lock->l_pid, lock->l_callback_timestamp,
-				 lock->l_lvb_type);
+				 lock->l_lvb_type, lock->l_lru_score,
+				 lock->l_lru_type);
 		break;
 	}
 	va_end(args);

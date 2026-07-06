@@ -6,16 +6,16 @@
  * Author: Marc Vef <mvef@whamcloud.com>
  */
 
-#include <linux/rbtree.h>
+#include <lustre_compat/linux/rbtree.h>
+
 #include <lustre_net.h>
 #include "nodemap_internal.h"
 
 /**
- * Allocate a lu_fileset_alt structure with a given fileset size.
+ * fileset_alt_init() - Allocate lu_fileset_alt struct with a given fileset size
+ * @fileset_size: size of the fileset path
  *
- * \param	fileset_size	size of the fileset path
- *
- * \retval	allocated lu_fileset_alt structure on success, NULL otherwise
+ * Returns allocated lu_fileset_alt structure on success, NULL otherwise
  */
 struct lu_fileset_alt *fileset_alt_init(unsigned int fileset_size)
 {
@@ -27,6 +27,7 @@ struct lu_fileset_alt *fileset_alt_init(unsigned int fileset_size)
 
 	fileset->nfa_path_size = fileset_size;
 	fileset->nfa_id = 0; /* is set later on tree insertion */
+	fileset->nfa_ro = false;
 
 	OBD_ALLOC(fileset->nfa_path, fileset->nfa_path_size);
 	if (fileset->nfa_path == NULL) {
@@ -39,21 +40,23 @@ struct lu_fileset_alt *fileset_alt_init(unsigned int fileset_size)
 EXPORT_SYMBOL(fileset_alt_init);
 
 /**
- * Create a lu_fileset_alt structure with a given fileset path.
+ * fileset_alt_create() - Create lu_fileset_alt struct with given fileset path.
+ * @fileset_path: fileset path
+ * @read_only: true if the fileset is read-only
  *
- * \param	fileset_path	fileset path
- *
- * \retval	allocated lu_fileset_alt structure on success, NULL otherwise
+ * Returns allocated lu_fileset_alt structure on success, NULL otherwise
  */
-struct lu_fileset_alt *fileset_alt_create(const char *fileset_path)
+struct lu_fileset_alt *fileset_alt_create(const char *fileset_path,
+					  bool read_only)
 {
 	struct lu_fileset_alt *fileset;
 
 	fileset = fileset_alt_init(strlen(fileset_path) + 1);
-	if (fileset == NULL)
+	if (!fileset)
 		RETURN(NULL);
 
 	memcpy(fileset->nfa_path, fileset_path, fileset->nfa_path_size);
+	fileset->nfa_ro = read_only;
 
 	return fileset;
 }
@@ -66,8 +69,9 @@ void fileset_alt_destroy(struct lu_fileset_alt *fileset)
 }
 EXPORT_SYMBOL(fileset_alt_destroy);
 
-void fileset_alt_destroy_tree(struct rb_root *root)
+void fileset_alt_destroy_tree(struct lu_nodemap *nodemap)
 {
+	struct rb_root *root = &nodemap->nm_fileset_alt;
 	struct lu_fileset_alt *fileset;
 	struct lu_fileset_alt *tmp;
 
@@ -75,15 +79,17 @@ void fileset_alt_destroy_tree(struct rb_root *root)
 		fileset_alt_destroy(fileset);
 
 	*root = RB_ROOT;
+	nodemap->nm_fileset_alt_sz = 0;
 }
 EXPORT_SYMBOL(fileset_alt_destroy_tree);
 
 /**
+ * get_first_free_id() - find the first free id in the rb tree on insertion.
+ * @root: pointer to the root of the rb tree
+ *
  * Helper function to find the first free id in the rb tree on insertion.
  *
- * \param	root	pointer to the root of the rb tree
- *
- * \retval	>0	first free id
+ * Return first free id found on success
  */
 static unsigned int get_first_free_id(struct rb_root *root)
 {
@@ -105,20 +111,22 @@ static unsigned int get_first_free_id(struct rb_root *root)
 }
 
 /**
- * Insert a fileset into the rb tree. If fileset->nfa_id is 0, the first free
- * id is assigned and used. The caller is free to set its own fileset->nfa_id
- * as long as it is not 0.
+ * fileset_alt_add() - Insert an alt fileset into a nodemap
  *
- * \param	root		pointer to the root of the rb tree
- * \param	fileset		fileset to insert
+ * @nodemap: pointer to the nodemap
+ * @fileset: fileset to insert
  *
- * \retval	0		on success
- * \retval	-EEXIST		if the fileset id already exists
- * \retval	-ENOSPC		if the fileset id exceeds
- *				LUSTRE_NODEMAP_FILESET_NUM_MAX
+ * If fileset->nfa_id is 0, the first free id is assigned and used. The caller
+ * is free to set its own fileset->nfa_id as long as it is not 0.
+ *
+ * Return:
+ * * %0 on success
+ * * %-EEXIST if the fileset id already exists
+ * * %-ENOSPC if the fileset id exceeds LUSTRE_NODEMAP_FILESET_NUM_MAX
  */
-int fileset_alt_add(struct rb_root *root, struct lu_fileset_alt *fileset)
+int fileset_alt_add(struct lu_nodemap *nodemap, struct lu_fileset_alt *fileset)
 {
+	struct rb_root *root = &nodemap->nm_fileset_alt;
 	struct rb_node **new = &(root->rb_node);
 	struct rb_node *parent = NULL;
 	struct lu_fileset_alt *this = NULL;
@@ -144,21 +152,26 @@ int fileset_alt_add(struct rb_root *root, struct lu_fileset_alt *fileset)
 	/* insert the new node and rebalance tree */
 	rb_link_node(&fileset->nfa_rb, parent, new);
 	rb_insert_color(&fileset->nfa_rb, root);
+	nodemap->nm_fileset_alt_sz++;
 
 	return 0;
 }
 EXPORT_SYMBOL(fileset_alt_add);
 
 /**
- * Delete a fileset from the rb tree.
+ * fileset_alt_delete() - Delete an alt fileset from a nodemap
  *
- * \param	root		pointer to the root of the rb tree
- * \param	fileset		fileset to delete
- * \retval	>0		id of the deleted fileset
- * \retval	-EINVAL		fileset is NULL
+ * @nodemap: pointer to the nodemap
+ * @fileset: fileset to delete
+ *
+ * Return:
+ * * %0 id of the deleted fileset
+ * * %-EINVAL fileset is NULL
  */
-int fileset_alt_delete(struct rb_root *root, struct lu_fileset_alt *fileset)
+int fileset_alt_delete(struct lu_nodemap *nodemap,
+		       struct lu_fileset_alt *fileset)
 {
+	struct rb_root *root = &nodemap->nm_fileset_alt;
 	unsigned int fset_id;
 
 	if (fileset == NULL)
@@ -166,6 +179,7 @@ int fileset_alt_delete(struct rb_root *root, struct lu_fileset_alt *fileset)
 
 	fset_id = fileset->nfa_id;
 	rb_erase(&fileset->nfa_rb, root);
+	nodemap->nm_fileset_alt_sz--;
 	fileset_alt_destroy(fileset);
 
 	return fset_id;
@@ -192,12 +206,11 @@ static int compare_by_id(const void *key, const struct rb_node *node)
 }
 
 /**
- * Search for a fileset by its fileset id.
+ * fileset_alt_search_id() - Search for a fileset by its fileset id.
+ * @root: pointer to the root of the rb tree
+ * @fileset_id: id of the fileset to search
  *
- * \param	root		pointer to the root of the rb tree
- * \param	fileset_id	id of the fileset to search
- *
- * \retval	lu_fileset_alt structure on success, NULL otherwise
+ * Returns lu_fileset_alt structure on success, NULL otherwise
  */
 struct lu_fileset_alt *fileset_alt_search_id(struct rb_root *root,
 					 unsigned int fileset_id)
@@ -214,47 +227,70 @@ struct lu_fileset_alt *fileset_alt_search_id(struct rb_root *root,
 EXPORT_SYMBOL(fileset_alt_search_id);
 
 /**
- * Search for a fileset by its fileset path.
+ * fileset_alt_search_path() - Search for a fileset by its fileset path.
+ * @root: pointer to the root of the rb tree
+ * @fileset_path: path of the fileset to search
+ * @prefix_search: search for a fileset that is the closest prefix to
+ *		   fileset_path rather than an exact match
  *
- * \param	root		pointer to the root of the rb tree
- * \param	fileset_path	path of the fileset to search
- *
- * \retval	lu_fileset_alt structure on success, NULL otherwise
+ * Return lu_fileset_alt structure on success, NULL otherwise
  */
 struct lu_fileset_alt *fileset_alt_search_path(struct rb_root *root,
-					   const char *fileset_path)
+					       const char *fileset_path,
+					       bool prefix_search)
 {
 	struct rb_node *node;
-	struct lu_fileset_alt *fileset;
-	bool found = false;
+	struct lu_fileset_alt *tmp;
+	struct lu_fileset_alt *fileset = NULL;
+	size_t fileset_len = 0;
+	size_t tmp_len;
 	int rc;
 
 	/* search the full tree for a fileset with the given path */
 	for (node = rb_first(root); node; node = rb_next(node)) {
-		fileset = rb_entry(node, struct lu_fileset_alt, nfa_rb);
-		rc = strcmp(fileset_path, fileset->nfa_path);
-		if (!rc) {
-			found = true;
-			break;
+		tmp = rb_entry(node, struct lu_fileset_alt, nfa_rb);
+		if (prefix_search) {
+			/* accepted (rc = 0) if fileset_path starts like alt
+			 * fileset, and is followed by '/' (subdirectory)
+			 * or '\0' (identical)
+			 */
+			rc = (strstr(fileset_path, tmp->nfa_path) !=
+				      fileset_path ||
+			      (fileset_path[strlen(tmp->nfa_path)] != '/' &&
+			       fileset_path[strlen(tmp->nfa_path)] != '\0'));
+			if (!rc) {
+				tmp_len = strlen(tmp->nfa_path);
+				if (tmp_len > fileset_len) {
+					fileset = tmp;
+					fileset_len = tmp_len;
+				}
+			}
+		} else {
+			rc = strcmp(fileset_path, tmp->nfa_path);
+			if (!rc) {
+				fileset = tmp;
+				break;
+			}
 		}
 	}
-	return found ? fileset : NULL;
+	return fileset;
 }
 EXPORT_SYMBOL(fileset_alt_search_path);
 
 bool fileset_alt_path_exists(struct rb_root *root, const char *path)
 {
-	return fileset_alt_search_path(root, path) != NULL;
+	return fileset_alt_search_path(root, path, false) != NULL;
 }
 EXPORT_SYMBOL(fileset_alt_path_exists);
 
 /**
+ * fileset_alt_resize() - Resize fileset to the actual needed size
+ * @root: pointer to the root of the rb tree
+ *
  * Iterate over all rb tree entries and shrink the memory requirements
  * for the fileset to the actual needed size. This is required when the
  * fileset fragments are read from the nodemap IAM, and so the preallocated
  * size may be larger than needed.
- *
- * \param root	pointer to the root of the rb tree
  */
 void fileset_alt_resize(struct rb_root *root)
 {

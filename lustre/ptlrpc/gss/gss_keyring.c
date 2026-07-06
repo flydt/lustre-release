@@ -16,6 +16,7 @@
 #define DEBUG_SUBSYSTEM S_SEC
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/atomic.h>
 #include <linux/slab.h>
 #include <linux/dcache.h>
 #include <linux/fs.h>
@@ -24,9 +25,9 @@
 #include <linux/keyctl.h>
 #include <linux/key-type.h>
 #include <linux/mutex.h>
-#include <asm/atomic.h>
+#include <linux/list.h>
+#include <lustre_compat/linux/timer.h>
 
-#include <libcfs/linux/linux-list.h>
 #include <obd.h>
 #include <obd_class.h>
 #include <obd_support.h>
@@ -289,15 +290,7 @@ static int ctx_unlist_kr(struct ptlrpc_cli_ctx *ctx, int locked)
 static void *
 key_get_payload(struct key *key, unsigned int index)
 {
-	void *key_ptr = NULL;
-
-#ifdef HAVE_KEY_PAYLOAD_DATA_ARRAY
-	key_ptr = key->payload.data[index];
-#else
-	if (!index)
-		key_ptr = key->payload.data;
-#endif
-	return key_ptr;
+	return key->payload.data[index];
 }
 
 /*
@@ -308,13 +301,8 @@ static int key_set_payload(struct key *key, unsigned int index,
 {
 	int rc = -EINVAL;
 
-#ifdef HAVE_KEY_PAYLOAD_DATA_ARRAY
 	if (index < 4) {
 		key->payload.data[index] = ctx;
-#else
-	if (!index) {
-		key->payload.data = ctx;
-#endif
 		rc = 0;
 	}
 	return rc;
@@ -327,7 +315,7 @@ static int key_set_payload(struct key *key, unsigned int index,
 static void bind_key_ctx(struct key *key, struct ptlrpc_cli_ctx *ctx)
 {
 	LASSERT(atomic_read(&ctx->cc_refcount) > 0);
-	LASSERT(ll_read_key_usage(key) > 0);
+	LASSERT(refcount_read(&key->usage) > 0);
 	LASSERT(ctx2gctx_keyring(ctx)->gck_key == NULL);
 	LASSERT(!key_get_payload(key, 0));
 
@@ -739,7 +727,7 @@ static int construct_get_dest_keyring(struct key **_dest_keyring)
 			break;
 		fallthrough;
 	case KEY_REQKEY_DEFL_SESSION_KEYRING:
-		dest_keyring = get_session_keyring(cred);
+		dest_keyring = key_get(cred->session_keyring);
 		if (dest_keyring) {
 			if (!test_bit(KEY_FLAG_REVOKED, &dest_keyring->flags))
 				break;
@@ -840,6 +828,175 @@ search:
 	}
 }
 
+/* SSK key desc is in the form "lustre:<fsname>:<client uuid>" */
+#define GSS_SK_KEY_DESC_SZ (9 + MTI_NAME_MAXLEN + UUID_MAX)
+
+/* Rename SSK key that was inserted in the kernel keyring at mount specifically
+ * for this client, so that it uses a key description in the form
+ * "lustre:<fsname>:<client uuid>". Having the client UUID in the key desc
+ * allows request_key() to find this client-specific key by putting the UUID
+ * into the callout info for context negotiation that happens in userspace.
+ */
+int gss_rename_sk_key(key_serial_t skid, const char *fsname, const char *uuid)
+{
+	key_ref_t orig_key_ref, user_keyring_ref, new_key_ref;
+	const struct user_key_payload *ukp;
+	struct key *orig_key, *user_kr;
+	char desc[GSS_SK_KEY_DESC_SZ];
+	size_t buflen;
+	ssize_t plen;
+	void *buf;
+	int rc = 0;
+
+	ENTRY;
+
+	/* no key id, nothing to do */
+	if (likely(!skid))
+		RETURN(0);
+
+	/* find original key, knowing its serial */
+	orig_key_ref = lookup_user_key(skid, 0, KEY_NEED_SEARCH);
+	if (IS_ERR(orig_key_ref)) {
+		rc = PTR_ERR(orig_key_ref);
+		CDEBUG(D_SEC, "%s:%s: lookup_user_key(%d) failed: rc = %d\n",
+		       fsname, uuid, skid, rc);
+		/* ignore error in case original key is not found */
+		RETURN(0);
+	}
+	orig_key = key_ref_to_ptr(orig_key_ref);
+
+	buflen = sizeof(struct sk_keyfile_config);
+	OBD_ALLOC(buf, buflen);
+	if (!buf)
+		GOTO(out_put1, rc = -ENOMEM);
+
+	/* read and copy payload safely under RCU */
+	rcu_read_lock();
+	ukp = user_key_payload_rcu(orig_key);
+	if (!ukp) {
+		rcu_read_unlock();
+		CDEBUG(D_SEC, "%s:%s: no payload on key %d\n",
+		       fsname, uuid, skid);
+		GOTO(out_free, rc = -ENODATA);
+	}
+	plen = ukp->datalen;
+	if (plen > buflen) {
+		rcu_read_unlock();
+		CERROR("%s:%s: key %d: invalid SSK payload size %zd > %zu\n",
+		       fsname, uuid, skid, plen, buflen);
+		GOTO(out_free, rc = -EINVAL);
+	}
+	memcpy(buf, ukp->data, plen);
+	rcu_read_unlock();
+
+	/* get ref to user keyring */
+	user_keyring_ref = lookup_user_key(KEY_SPEC_USER_KEYRING, 0,
+					   KEY_NEED_WRITE);
+	if (IS_ERR(user_keyring_ref)) {
+		rc = PTR_ERR(user_keyring_ref);
+		CDEBUG(D_SEC, "%s:%s: lookup_user_keyring failed: rc = %d\n",
+		       fsname, uuid, rc);
+		GOTO(out_free, rc);
+	}
+	user_kr = key_ref_to_ptr(user_keyring_ref);
+
+	/* create key with original payload and new desc
+	 * in the form "lustre:<fsname>:<client uuid>"
+	 */
+	snprintf(desc, sizeof(desc), "lustre:%s:%s", fsname, uuid);
+	new_key_ref = key_create_or_update(user_keyring_ref, "user", desc,
+					   buf, (size_t)plen,
+					   KEY_POS_ALL | KEY_USR_ALL |
+					   KEY_GRP_ALL | KEY_OTH_ALL,
+					   0);
+
+	if (IS_ERR(new_key_ref)) {
+		rc = PTR_ERR(new_key_ref);
+		CDEBUG(D_SEC,
+		       "key_create_or_update(%d) with desc %s failed: rc= %d\n",
+		       skid, desc, rc);
+		GOTO(out_put2, rc);
+	}
+	CDEBUG(D_SEC, "installed key %d with desc %s\n",
+	       key_ref_to_ptr(new_key_ref)->serial, desc);
+	key_ref_put(new_key_ref);
+
+	/* now original key can be removed */
+	rc = key_unlink(user_kr, orig_key);
+	CDEBUG(D_SEC, "%s:%s: key_unlink(%d) %s: rc = %d\n",
+	       fsname, uuid, skid, rc ? "failed" : "success", rc);
+	/* ignore error in case original key is not removed */
+	rc = 0;
+
+out_put2:
+	key_put(user_kr);
+out_free:
+	OBD_FREE(buf, buflen);
+out_put1:
+	key_put(orig_key);
+	RETURN(rc);
+}
+EXPORT_SYMBOL(gss_rename_sk_key);
+
+/* Cleanup SSK key that was inserted in the kernel keyring specifically
+ * for this client, in the form "lustre:<fsname>:<client uuid>".
+ */
+void gss_cleanup_sk_key(key_serial_t skid, const char *fsname, const char *uuid)
+{
+	key_ref_t orig_key_ref, user_keyring_ref, key_ref;
+	struct key *orig_key, *target_key, *user_kr;
+	char desc[GSS_SK_KEY_DESC_SZ];
+	int rc;
+
+	ENTRY;
+
+	/* no key id, nothing to do */
+	if (likely(!skid))
+		RETURN_EXIT;
+
+	snprintf(desc, sizeof(desc), "lustre:%s:%s", fsname, uuid);
+
+	/* get ref to user keyring */
+	user_keyring_ref = lookup_user_key(KEY_SPEC_USER_KEYRING, 0,
+					   KEY_NEED_WRITE);
+	if (IS_ERR(user_keyring_ref)) {
+		CDEBUG(D_SEC, "%s:%s: lookup_user_keyring failed: rc = %ld\n",
+		       fsname, uuid, PTR_ERR(user_keyring_ref));
+		RETURN_EXIT;
+	}
+	user_kr = key_ref_to_ptr(user_keyring_ref);
+
+	/* find key to remove */
+#ifdef HAVE_KEYRING_SEARCH_4ARGS
+	key_ref = keyring_search(user_keyring_ref, &key_type_user, desc, false);
+#else
+	key_ref = keyring_search(user_keyring_ref, &key_type_user, desc);
+#endif
+
+	if (!IS_ERR(key_ref)) {
+		/* unlink the key */
+		target_key = key_ref_to_ptr(key_ref);
+		rc = key_unlink(user_kr, target_key);
+		CDEBUG(D_SEC, "key_unlink(%d) with desc %s %s: rc = %d\n",
+		       target_key->serial, desc, rc ? "failed" : "success", rc);
+		key_put(target_key);
+	}
+
+	/* find and remove original key, in case it was left behind */
+	orig_key_ref = lookup_user_key(skid, 0, KEY_NEED_SEARCH);
+	if (!IS_ERR(orig_key_ref)) {
+		orig_key = key_ref_to_ptr(orig_key_ref);
+		rc = key_unlink(user_kr, orig_key);
+		CDEBUG(D_SEC, "%s:%s: key_unlink(%d) %s: rc = %d\n",
+		       fsname, uuid, skid, rc ? "failed" : "success", rc);
+		key_put(orig_key);
+	}
+
+	key_put(user_kr);
+	RETURN_EXIT;
+}
+EXPORT_SYMBOL(gss_cleanup_sk_key);
+
 /**
  * \retval a valid context on success
  * \retval -ev error number or NULL on error
@@ -849,6 +1006,8 @@ struct ptlrpc_cli_ctx * gss_sec_lookup_ctx_kr(struct ptlrpc_sec *sec,
                                               struct vfs_cred *vcred,
                                               int create, int remove_dead)
 {
+	const size_t sizeof_u32 = sizeof(u32) * 2 + 3; /* string + : */
+	const size_t sizeof_u64 = sizeof(u64) * 2 + 3; /* string + : */
 	struct obd_import *imp = sec->ps_import;
 	struct gss_sec_keyring *gsec_kr = sec2gsec_keyring(sec);
 	struct ptlrpc_cli_ctx *ctx = NULL;
@@ -956,11 +1115,21 @@ struct ptlrpc_cli_ctx * gss_sec_lookup_ctx_kr(struct ptlrpc_sec *sec,
 
 	construct_key_desc(desc, sizeof(desc), sec, vcred->vc_uid);
 
-	/* callout info format:
-	 * secid:mech:uid:gid:sec_flags:svc_flag:svc_type:peer_nid:target_uuid:
-	 * self_nid:pid
-	 */
-	coinfo_size = sizeof(struct obd_uuid) + MAX_OBD_NAME + 64;
+	/* callout info format */
+	coinfo_size = sizeof_u32        /* secid */ +
+		      8                 /* mech */ +
+		      sizeof_u32        /* uid */ +
+		      sizeof_u32        /* gid */ +
+		      4                 /* sec_flags */ +
+		      2                 /* svc_flag */ +
+		      sizeof_u32        /* svc_type */ +
+		      sizeof_u64        /* peer_nid */ +
+		      MAX_OBD_NAME + 1  /* target_uuid */ +
+		      sizeof_u64        /* self_nid */ +
+		      sizeof_u32        /* pid */ +
+		      UUID_MAX + 1      /* client_uuid */ +
+		      1;
+
 	OBD_ALLOC(coinfo, coinfo_size);
 	if (coinfo == NULL)
 		goto out;
@@ -981,35 +1150,29 @@ struct ptlrpc_cli_ctx * gss_sec_lookup_ctx_kr(struct ptlrpc_sec *sec,
 		/* Do not switch namespace in gss keyring upcall. */
 		caller_pid = 0;
 	}
-	primary = imp->imp_connection->c_self;
-	LNetPrimaryNID(&primary);
+
+	LNetLocalPrimaryNID(&primary);
 
 	/* FIXME !! Needs to support larger NIDs */
-	snprintf(coinfo, coinfo_size, "%d:%s:%u:%u:%s:%c:%d:%#llx:%s:%#llx:%d",
+	snprintf(coinfo, coinfo_size,
+		 "%d:%s:%u:%u:%s:%c:%d:%#llx:%s:%#llx:%d:%s",
 		 sec->ps_id, sec2gsec(sec)->gs_mech->gm_name,
 		 vcred->vc_uid, vcred->vc_gid,
 		 sec_part_flags, svc_flag, import_to_gss_svc(imp),
 		 lnet_nid_to_nid4(&imp->imp_connection->c_peer.nid),
 		 imp->imp_obd->obd_name,
 		 lnet_nid_to_nid4(&primary),
-		 caller_pid);
+		 caller_pid, obd_uuid2str(&imp->imp_obd->obd_uuid));
 
 	CDEBUG(D_SEC, "requesting key for %s\n", desc);
 
 	if (vcred->vc_uid) {
-		/* If the session keyring is revoked, it must not be used by
-		 * request_key(), otherwise we would get -EKEYREVOKED and
-		 * the user keyring would not even be searched.
-		 * So prepare new creds with no session keyring.
-		 */
-		if (current_cred()->session_keyring &&
-		    test_bit(KEY_FLAG_REVOKED,
-			     &current_cred()->session_keyring->flags)) {
-			new_cred = prepare_creds();
-			if (new_cred) {
-				new_cred->session_keyring = NULL;
-				old_cred = override_creds(new_cred);
-			}
+		new_cred = prepare_creds();
+		if (new_cred) {
+			new_cred->thread_keyring =
+				get_user_keyring(current_cred());
+			new_cred->jit_keyring = KEY_REQKEY_DEFL_THREAD_KEYRING;
+			old_cred = override_creds(new_cred);
 		}
 	}
 
@@ -1043,7 +1206,7 @@ struct ptlrpc_cli_ctx * gss_sec_lookup_ctx_kr(struct ptlrpc_sec *sec,
 	if (likely(ctx)) {
 		LASSERT(atomic_read(&ctx->cc_refcount) >= 1);
 		LASSERT(ctx2gctx_keyring(ctx)->gck_key == key);
-		LASSERT(ll_read_key_usage(key) >= 2);
+		LASSERT(refcount_read(&key->usage) >= 2);
 
 		/* simply take a ref and return. it's upper layer's
 		 * responsibility to detect & replace dead ctx.
@@ -1069,19 +1232,18 @@ struct ptlrpc_cli_ctx * gss_sec_lookup_ctx_kr(struct ptlrpc_sec *sec,
 			key_invalidate_locked(key);
 		}
 
-		create_new = 1;
+		if (is_root)
+			create_new = 1;
 	}
 
 	up_write(&key->sem);
 
-	/* We want user keys to be linked to the user keyring (see call to
-	 * keyctl_instantiate() from prepare_and_instantiate() in userspace).
-	 * But internally request_key() links the key to the session or
-	 * user session keyring, depending on jit_keyring value. Avoid that by
-	 * unlinking the key from this keyring. It will spare
-	 * us pain when we need to remove the key later on.
+	/* We want root keys to be linked to the session keyring.
+	 * But internally request_key() links the key to an independent, newly
+	 * created session keyring. Avoid that by unlinking the key from this
+	 * keyring, to save us pain when we need to remove the key later on.
 	 */
-	if (!is_root || create_new)
+	if (create_new)
 		request_key_unlink(key, true);
 
 	key_put(key);
@@ -1123,19 +1285,12 @@ static void flush_user_ctx_cache_kr(struct ptlrpc_sec *sec, uid_t uid,
 	construct_key_desc(desc, sizeof(desc), sec, uid);
 
 	if (uid) {
-		/* If the session keyring is revoked, it must not be used by
-		 * request_key(), otherwise we would get -EKEYREVOKED and
-		 * the user keyring would not even be searched.
-		 * So prepare new creds with no session keyring.
-		 */
-		if (current_cred()->session_keyring &&
-		    test_bit(KEY_FLAG_REVOKED,
-			     &current_cred()->session_keyring->flags)) {
-			new_cred = prepare_creds();
-			if (new_cred) {
-				new_cred->session_keyring = NULL;
-				old_cred = override_creds(new_cred);
-			}
+		new_cred = prepare_creds();
+		if (new_cred) {
+			new_cred->thread_keyring =
+				get_user_keyring(current_cred());
+			new_cred->jit_keyring = KEY_REQKEY_DEFL_THREAD_KEYRING;
+			old_cred = override_creds(new_cred);
 		}
 	}
 
@@ -1325,7 +1480,7 @@ int gss_sec_display_kr(struct ptlrpc_sec *sec, struct seq_file *seq)
 			   ctx->cc_expire ?  ctx->cc_expire - now : 0,
 			   flags_str, atomic_read(&gctx->gc_seq),
 			   gctx->gc_win, key ? key->serial : 0,
-			   key ? ll_read_key_usage(key) : 0,
+			   key ? refcount_read(&key->usage) : 0,
 			   gss_handle_to_u64(&gctx->gc_handle),
 			   gss_handle_to_u64(&gctx->gc_svc_handle),
 			   mech);
@@ -1522,15 +1677,10 @@ int gss_svc_install_rctx_kr(struct obd_import *imp,
  ****************************************/
 
 static
-#ifdef HAVE_KEY_TYPE_INSTANTIATE_2ARGS
 int gss_kt_instantiate(struct key *key, struct key_preparsed_payload *prep)
 {
 	const void *data = prep->data;
 	size_t datalen = prep->datalen;
-#else
-int gss_kt_instantiate(struct key *key, const void *data, size_t datalen)
-{
-#endif
 	struct key *keyring;
 	int uid, rc;
 
@@ -1558,29 +1708,37 @@ int gss_kt_instantiate(struct key *key, const void *data, size_t datalen)
 	 * the session keyring is created upon upcall, and don't change all
 	 * the way until upcall finished, so rcu lock is not needed here.
 	 *
-	 * But for end users, link to the user keyring. This simplifies key
-	 * management, makes them shared accross all user sessions, and avoids
-	 * unfortunate key leak if lfs flushctx is not called at user logout.
+	 * But for end users, we want the key to be linked to the user keyring.
+	 * This simplifies key management, makes them shared across all user
+	 * sessions, and avoids unfortunate key leak if lfs flushctx is not
+	 * called at user logout.
 	 */
 	uid = from_kuid(&init_user_ns, current_uid());
-	if (uid == 0)
-		keyring = get_session_keyring(current_cred());
-	else
-		keyring = get_user_keyring(current_cred());
+	if (uid) {
+		/* Linking user keys to the user keyring is already done at this
+		 * point by request_key() internally, thanks to the
+		 * 'thread keyring' trick used in gss_sec_lookup_ctx_kr().
+		 */
+		CDEBUG(D_SEC,
+		       "key %08x (%p) instantiated, ctx %p\n",
+		       key->serial, key, key_get_payload(key, 0));
+		RETURN(0);
+	}
 
+	/* At this point we are dealing with keys for root */
+	keyring = get_session_keyring(current_cred());
 	lockdep_off();
 	rc = key_link(keyring, key);
 	lockdep_on();
-	if (unlikely(rc)) {
+	if (unlikely(rc))
 		CERROR("failed to link key %08x to keyring %08x: %d\n",
 		       key->serial, keyring->serial, rc);
-		GOTO(out, rc);
-	}
+	else
+		CDEBUG(D_SEC,
+		       "key %08x (%p) linked to keyring %08x and instantiated, ctx %p\n",
+		       key->serial, key, keyring->serial,
+		       key_get_payload(key, 0));
 
-	CDEBUG(D_SEC,
-	      "key %08x (%p) linked to keyring %08x and instantiated, ctx %p\n",
-	       key->serial, key, keyring->serial, key_get_payload(key, 0));
-out:
 	key_put(keyring);
 	RETURN(rc);
 }
@@ -1590,16 +1748,10 @@ out:
  * on the context without fear of loosing refcount.
  */
 static
-#ifdef HAVE_KEY_TYPE_INSTANTIATE_2ARGS
 int gss_kt_update(struct key *key, struct key_preparsed_payload *prep)
 {
 	const void *data = prep->data;
-	__u32 datalen32 = (__u32) prep->datalen;
-#else
-int gss_kt_update(struct key *key, const void *data, size_t datalen)
-{
-	__u32 datalen32 = (__u32) datalen;
-#endif
+	u32 datalen32 = (u32)prep->datalen;
 	struct ptlrpc_cli_ctx *ctx = key_get_payload(key, 0);
 	struct gss_cli_ctx *gctx;
 	rawobj_t tmpobj = RAWOBJ_EMPTY;
@@ -1670,6 +1822,8 @@ int gss_kt_update(struct key *key, const void *data, size_t datalen)
 		CERROR("negotiation: rpc err %d, gss err %x\n",
 		       nego_rpc_err, nego_gss_err);
 
+		gctx->gc_gss_err = nego_gss_err;
+
 		rc = nego_rpc_err ? nego_rpc_err : -EACCES;
 	} else {
 		rc = rawobj_extract_local_alloc(&gctx->gc_handle,
@@ -1722,14 +1876,6 @@ out:
 	RETURN(0);
 }
 
-#ifndef HAVE_KEY_MATCH_DATA
-static int
-gss_kt_match(const struct key *key, const void *desc)
-{
-	return strcmp(key->description, (const char *) desc) == 0 &&
-		!test_bit(KEY_FLAG_REVOKED, &key->flags);
-}
-#else /* ! HAVE_KEY_MATCH_DATA */
 static bool
 gss_kt_match(const struct key *key, const struct key_match_data *match_data)
 {
@@ -1748,7 +1894,6 @@ static int gss_kt_match_preparse(struct key_match_data *match_data)
 	match_data->cmp = gss_kt_match;
 	return 0;
 }
-#endif /* HAVE_KEY_MATCH_DATA */
 
 static
 void gss_kt_destroy(struct key *key)
@@ -1771,10 +1916,10 @@ void gss_kt_describe(const struct key *key, struct seq_file *s)
 static void gss_kt_revoke(struct key *key)
 {
 	CDEBUG(D_SEC, "revoking key %08x (%p) ref %d\n",
-	       key->serial, key, ll_read_key_usage(key));
+	       key->serial, key, refcount_read(&key->usage));
 	kill_key_locked(key);
 	CDEBUG(D_SEC, "key %08x (%p) revoked ref %d\n",
-	       key->serial, key, ll_read_key_usage(key));
+	       key->serial, key, refcount_read(&key->usage));
 }
 
 static struct key_type gss_key_type =
@@ -1783,11 +1928,7 @@ static struct key_type gss_key_type =
 	.def_datalen	= 0,
 	.instantiate	= gss_kt_instantiate,
 	.update		= gss_kt_update,
-#ifdef HAVE_KEY_MATCH_DATA
 	.match_preparse = gss_kt_match_preparse,
-#else
-	.match		= gss_kt_match,
-#endif
 	.destroy	= gss_kt_destroy,
 	.describe	= gss_kt_describe,
 	.revoke		= gss_kt_revoke,

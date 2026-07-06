@@ -36,7 +36,7 @@
 
 struct kmem_cache *upd_kmem;
 
-struct lu_kmem_descr qsd_caches[] = {
+static struct lu_kmem_descr qsd_caches[] = {
 	{
 		.ckd_cache = &upd_kmem,
 		.ckd_name  = "upd_kmem",
@@ -73,13 +73,15 @@ static int qsd_state_seq_show(struct seq_file *m, void *data)
 	/* TODO: further pool ID should be removed or
 	 * replaced with pool Name */
 	seq_printf(m, "target name:    %s\n"
-		   "pool ID:        %d\n"
-		   "type:           %s\n"
-		   "quota enabled:  %s\n"
-		   "conn to master: %s\n",
+		   "pool ID:         %d\n"
+		   "type:            %s\n"
+		   "quota enabled:   %s\n"
+		   "conn to master:  %s\n"
+		   "glimpse_refresh: %d\n",
 		   qsd->qsd_svname, 0,
 		   qsd->qsd_is_md ? "md" : "dt", enabled,
-		   qsd->qsd_exp_valid ? "setup" : "not setup yet");
+		   qsd->qsd_exp_valid ? "setup" : "not setup yet",
+		   qsd->qsd_glimpse_refresh);
 
 	if (qsd->qsd_prepared) {
 		memset(enabled, 0, sizeof(enabled));
@@ -220,6 +222,7 @@ LPROC_SEQ_FOPS_WR_ONLY(qsd, force_reint);
 static int qsd_timeout_seq_show(struct seq_file *m, void *data)
 {
 	struct qsd_instance *qsd = m->private;
+
 	LASSERT(qsd != NULL);
 
 	seq_printf(m, "%d\n", qsd_wait_timeout(qsd));
@@ -247,6 +250,38 @@ qsd_timeout_seq_write(struct file *file, const char __user *buffer,
 	return count;
 }
 LPROC_SEQ_FOPS(qsd_timeout);
+
+static int qsd_ver_reint_timeout_seq_show(struct seq_file *m, void *data)
+{
+	struct qsd_instance *qsd = m->private;
+
+	LASSERT(qsd != NULL);
+
+	seq_printf(m, "%d\n", qsd->qsd_ver_reint_timeout);
+	return 0;
+}
+
+static ssize_t
+qsd_ver_reint_timeout_seq_write(struct file *file, const char __user *buffer,
+				size_t count, loff_t *off)
+{
+	struct seq_file *m = file->private_data;
+	struct qsd_instance *qsd = m->private;
+	time64_t timeout;
+	int rc;
+
+	LASSERT(qsd != NULL);
+	rc = kstrtoll_from_user(buffer, count, 0, &timeout);
+	if (rc)
+		return rc;
+
+	if (timeout < 0)
+		return -EINVAL;
+
+	qsd->qsd_ver_reint_timeout = timeout;
+	return count;
+}
+LPROC_SEQ_FOPS(qsd_ver_reint_timeout);
 
 static int qsd_root_prj_enable_seq_show(struct seq_file *m, void *data)
 {
@@ -285,6 +320,8 @@ static struct lprocfs_vars lprocfs_quota_qsd_vars[] = {
 	  .fops	=	&qsd_force_reint_fops	},
 	{ .name	=	"timeout",
 	  .fops	=	&qsd_timeout_fops	},
+	{ .name	=	"verion_mismatch_timeout",
+	  .fops	=	&qsd_ver_reint_timeout_fops	},
 	{ .name	=	"root_prj_enable",
 	  .fops	=	&qsd_root_prj_enable_fops	},
 	{ NULL }
@@ -302,6 +339,7 @@ static int qsd_conn_callback(void *data)
 {
 	struct qsd_instance *qsd = (struct qsd_instance *)data;
 	int                  type;
+
 	ENTRY;
 
 	/* qsd_exp should now be valid */
@@ -353,6 +391,7 @@ static void qsd_qtype_fini(const struct lu_env *env, struct qsd_instance *qsd,
 {
 	struct qsd_qtype_info	*qqi;
 	int repeat = 0;
+
 	ENTRY;
 
 	if (qsd->qsd_type_array[qtype] == NULL)
@@ -473,6 +512,7 @@ static int qsd_qtype_init(const struct lu_env *env, struct qsd_instance *qsd,
 	struct qsd_qtype_info	*qqi;
 	int			 rc;
 	struct obd_uuid		 uuid;
+
 	ENTRY;
 
 	LASSERT(qsd->qsd_type_array[qtype] == NULL);
@@ -559,6 +599,9 @@ static int qsd_qtype_init(const struct lu_env *env, struct qsd_instance *qsd,
 		       qsd->qsd_svname, rc);
 		GOTO(out, rc);
 	}
+
+	qqi->qqi_last_version_update_time = ktime_get_seconds();
+
 	EXIT;
 out:
 	if (rc)
@@ -578,6 +621,7 @@ out:
 void qsd_fini(const struct lu_env *env, struct qsd_instance *qsd)
 {
 	int	qtype;
+
 	ENTRY;
 
 	if (unlikely(qsd == NULL))
@@ -665,6 +709,7 @@ struct qsd_instance *qsd_init(const struct lu_env *env, char *svname,
 	struct qsd_thread_info	*qti = qsd_info(env);
 	struct qsd_instance	*qsd;
 	int			 rc, type, idx;
+
 	ENTRY;
 
 	/* only configure qsd for MDT & OST */
@@ -688,6 +733,7 @@ struct qsd_instance *qsd_init(const struct lu_env *env, char *svname,
 	qsd->qsd_is_md = is_md;
 	qsd->qsd_updating = false;
 	qsd->qsd_exclusive = excl;
+	qsd->qsd_ver_reint_timeout = 3 * obd_timeout;
 
 	/* copy service name */
 	rc = strscpy(qsd->qsd_svname, svname, sizeof(qsd->qsd_svname));
@@ -736,7 +782,7 @@ struct qsd_instance *qsd_init(const struct lu_env *env, char *svname,
 		CERROR("%s: fail to create quota slave proc entry (%d)\n",
 		       svname, rc);
 		GOTO(out, rc);
-        }
+	}
 	EXIT;
 out:
 	if (rc) {
@@ -766,6 +812,7 @@ int qsd_prepare(const struct lu_env *env, struct qsd_instance *qsd)
 {
 	struct qsd_thread_info	*qti = qsd_info(env);
 	int			 qtype, rc = 0;
+
 	ENTRY;
 
 	if (unlikely(qsd == NULL))
@@ -819,10 +866,8 @@ int qsd_prepare(const struct lu_env *env, struct qsd_instance *qsd)
 
 		if (qsd_type_enabled(qsd, qtype) &&
 		    qqi->qqi_acct_failed) {
-			LCONSOLE_ERROR("%s: can't enable quota enforcement "
-				       "since space accounting isn't functional"
-				       ". Please run tunefs.lustre --quota on "
-				       "an unmounted filesystem if not done "
+			LCONSOLE_ERROR("%s: can't enable quota enforcement since space accounting isn't functional"
+				       ". Please run tunefs.lustre --quota on an unmounted filesystem if not done "
 				       "already\n", qsd->qsd_svname);
 			continue;
 		}
@@ -878,6 +923,7 @@ EXPORT_SYMBOL(qsd_prepare);
 int qsd_start(const struct lu_env *env, struct qsd_instance *qsd)
 {
 	int	type, rc = 0;
+
 	ENTRY;
 
 	if (unlikely(qsd == NULL))
@@ -885,8 +931,8 @@ int qsd_start(const struct lu_env *env, struct qsd_instance *qsd)
 
 	write_lock(&qsd->qsd_lock);
 	if (!qsd->qsd_prepared) {
-		CERROR("%s: can't start qsd instance since it wasn't properly "
-		       "initialized\n", qsd->qsd_svname);
+		CERROR("%s: can't start qsd instance since it wasn't properly initialized\n",
+		       qsd->qsd_svname);
 		rc = -EFAULT;
 	} else if (qsd->qsd_started) {
 		CERROR("%s: qsd instance already started\n", qsd->qsd_svname);

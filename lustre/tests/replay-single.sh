@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 
 set -e
 
@@ -1676,15 +1676,14 @@ run_test 61b "test race mds llog sync vs llog cleanup"
 #test race  cancel cookie cb vs llog cleanup
 test_61c() {
 	remote_ost_nodsh && skip "remote OST with nodsh" && return 0
-	local osts=$(osts_nodes)
 
 	#   OBD_FAIL_OST_CANCEL_COOKIE_TIMEOUT 0x222
 	touch $DIR/$tfile || error "touch $DIR/$tfile failed"
-	set_nodes_failloc $osts 0x80000222
+	set_nodes_failloc $(osts_nodes) 0x80000222
 	rm $DIR/$tfile
 	sleep 10
 	fail ost1
-	set_nodes_failloc $osts 0x0
+	set_nodes_failloc $(osts_nodes) 0x0
 }
 run_test 61c "test race mds llog sync vs llog cleanup"
 
@@ -1966,10 +1965,14 @@ test_68 () #bug 13813
     remote_ost_nodsh && skip "remote OST with nodsh" && return 0
 
     at_start || return 0
-    local ldlm_enqueue_min=$(find /sys -name ldlm_enqueue_min)
-    [ -z "$ldlm_enqueue_min" ] && skip "missing /sys/.../ldlm_enqueue_min" && return 0
-    local ldlm_enqueue_min_r=$(do_facet ost1 "find /sys -name ldlm_enqueue_min")
-    [ -z "$ldlm_enqueue_min_r" ] && skip "missing /sys/.../ldlm_enqueue_min in the ost1" && return 0
+    local ldlm_enqueue_min=$(find /sys/module -name ldlm_enqueue_min)
+    [ -z "$ldlm_enqueue_min" ] &&
+	    skip "missing /sys/module/.../ldlm_enqueue_min" && return 0
+    local ldlm_enqueue_min_r=$(do_facet ost1 "find /sys/module \
+			       -name ldlm_enqueue_min")
+    [ -z "$ldlm_enqueue_min_r" ] &&
+	    skip "missing /sys/module/.../ldlm_enqueue_min in the ost1" &&
+	    return 0
     local ENQ_MIN=$(cat $ldlm_enqueue_min)
     local ENQ_MIN_R=$(do_facet ost1 "cat $ldlm_enqueue_min_r")
 	echo $TIMEOUT >> $ldlm_enqueue_min
@@ -3259,6 +3262,8 @@ test_89() {
 	(( $write_size >= 1024 )) || write_size=1024
 	dd if=/dev/zero bs=${write_size}k count=10 of=$DIR/$tdir/$tfile
 	sync
+	# Acquire the OST lock so we can delete while the OST is offline
+	ls -la $DIR/$tdir/$tfile
 	stop ost1
 	facet_failover $SINGLEMDS
 	rm $DIR/$tdir/$tfile
@@ -5330,10 +5335,8 @@ test_201() {
 
 	# delay DISCONNECT for 8 seconds, on all OSTs and MDTs
 #define OBD_FAIL_OST_DISCONNECT_DELAY	 0x245
-	do_nodes $(comma_list $(mdts_nodes)) "$LCTL set_param \
-					      fail_loc=0x245 fail_val=8"
-	do_nodes $(comma_list $(osts_nodes)) "$LCTL set_param \
-					      fail_loc=0x245 fail_val=8"
+	do_nodes $(mdts_nodes) "$LCTL set_param fail_loc=0x245 fail_val=8"
+	do_nodes $(osts_nodes) "$LCTL set_param fail_loc=0x245 fail_val=8"
 
 	local start_time=$SECONDS
 
@@ -5345,8 +5348,9 @@ test_201() {
 			error "mount mds2 failed"
 	echo "Umount took $duration seconds"
 
-	#Valid timeout is 8 for MDTs + 8 for OSTs + 4 some for other umount
-	(( duration < 20 )) || error "Cascading timeouts on disconnect"
+	# Valid timeout is 8s for MDT0000-lwp-MDT0001
+	# + 8s for osp devices MDTs/OSTs + (4s + OSTCOUNTs) for other umount
+	(( duration <= (20 + OSTCOUNT) )) || error "Cascading timeouts on disconnect"
 }
 run_test 201 "MDT umount cascading disconnects timeouts"
 
@@ -5381,6 +5385,31 @@ test_202() {
 }
 run_test 202 "pfl replay should recovery layout generation"
 
+test_203() {
+	mount_client $MOUNT2
+	stack_trap "umount_client $MOUNT2"
+
+	local start=$SECONDS
+#define OBD_FAIL_MDS_PAUSE_GETATTR		0x2403
+	do_facet mds1 "$LCTL set_param fail_loc=0x80002403 fail_val=2"
+	echo "STAT"
+	stat $MOUNT/$tfile &
+	local PID=$!
+
+	sleep 0.5
+
+	echo "SETSTRIPE"
+	$LFS setstripe -E 1MB -c -1 -E 2MB -c -1 -E 3MB -c -1 -E 4MB -c -1 \
+		-E 5MB -c -1 -E 6MB -c -1 -E 7MB -c -1 -E 8MB -c -1 \
+		-E 9MB -c -1 -E 10MB -c -1 -E 11MB -c -1 -E eof -c -1 \
+		$MOUNT2/$tfile
+
+	wait $PID
+	do_facet mds1 "$LCTL set_param fail_loc=0 fail_val=0"
+	(( SECONDS-start < TIMEOUT/2 )) ||
+		error "took too long: $((SECONDS-start)) >= $((TIMEOUT/2))"
+}
+run_test 203 "resend can hit original request"
 
 complete_test $SECONDS
 check_and_cleanup_lustre

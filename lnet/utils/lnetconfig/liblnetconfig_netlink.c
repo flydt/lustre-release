@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LGPL-2.1
+// SPDX-License-Identifier: LGPL-2.1+
 
 /*
  * Copyright (c) 2021  UT-Battelle, LLC
@@ -19,187 +19,6 @@
 
 #include <linux/lnet/lnet-nl.h>
 #include "liblnetconfig.h"
-
-#ifndef fallthrough
-#define fallthrough do {} while (0)  /* fallthrough */
-#endif
-
-#ifndef SOL_NETLINK /* for glibc < 2.24 */
-# define SOL_NETLINK 270
-#endif
-
-#ifndef NETLINK_EXT_ACK
-#define NETLINK_EXT_ACK	11
-#endif
-
-#ifndef NLM_F_ACK_TLVS
-#define NLM_F_ACK_TLVS	0x200	/* extended ACK TVLs were included */
-#endif
-
-#ifndef NLA_S8
-# define NLA_S8 12
-#endif
-
-#ifndef NLA_S16
-# define NLA_S16 13
-#endif
-
-#ifndef HAVE_NLA_GET_S32
-
-#define NLA_S32	14
-
-/**
- * Return payload of 32 bit signed integer attribute.
- *
- * @arg nla		32 bit integer attribute.
- *
- * @return Payload as 32 bit integer.
- */
-int32_t nla_get_s32(const struct nlattr *nla)
-{
-	return *(const int32_t *) nla_data(nla);
-}
-#endif /* ! HAVE_NLA_GET_S32 */
-
-#ifndef HAVE_NLA_GET_S64
-
-#define NLA_S64	15
-
-/**
- * Return payload of s64 attribute
- *
- * @arg nla	s64 netlink attribute
- *
- * @return Payload as 64 bit integer.
- */
-int64_t nla_get_s64(const struct nlattr *nla)
-{
-	int64_t tmp = 0;
-
-	if (nla && nla_len(nla) >= sizeof(tmp))
-		memcpy(&tmp, nla_data(nla), sizeof(tmp));
-
-	return tmp;
-}
-
-#define NLA_PUT_S64(msg, attrtype, value) \
-	NLA_PUT_TYPE(msg, int64_t, attrtype, value)
-
-#ifndef NLA_NUL_STRING
-#define NLA_NUL_STRING 10
-#endif
-
-enum nla_types {
-	LNET_NLA_UNSPEC		= NLA_UNSPEC,
-	LNET_NLA_U8		= NLA_U8,
-	LNET_NLA_U16		= NLA_U16,
-	LNET_NLA_U32		= NLA_U32,
-	LNET_NLA_U64		= NLA_U64,
-	LNET_NLA_STRING		= NLA_STRING,
-	LNET_NLA_FLAG		= NLA_FLAG,
-	LNET_NLA_MSECS		= NLA_MSECS,
-	LNET_NLA_NESTED		= NLA_NESTED,
-	LNET_NLA_NESTED_COMPAT	= NLA_NESTED + 1,
-	LNET_NLA_NUL_STRING	= NLA_NUL_STRING,
-	LNET_NLA_BINARY		= NLA_NUL_STRING + 1,
-	LNET_NLA_S8		= NLA_S8,
-	LNET_NLA_S16		= NLA_S16,
-	LNET_NLA_S32		= NLA_S32,
-	LNET_NLA_S64		= NLA_S64,
-	__LNET_NLA_TYPE_MAX,
-};
-
-#define LNET_NLA_TYPE_MAX (__LNET_NLA_TYPE_MAX - 1)
-
-static uint16_t nla_attr_minlen[LNET_NLA_TYPE_MAX+1] = {
-	[NLA_U8]        = sizeof(uint8_t),
-	[NLA_U16]       = sizeof(uint16_t),
-	[NLA_U32]       = sizeof(uint32_t),
-	[NLA_U64]       = sizeof(uint64_t),
-	[NLA_STRING]    = 1,
-	[NLA_FLAG]      = 0,
-};
-
-static int lnet_validate_nla(const struct nlattr *nla, int maxtype,
-			     const struct nla_policy *policy)
-{
-	const struct nla_policy *pt;
-	unsigned int minlen = 0;
-	int type = nla_type(nla);
-
-	if (type < 0 || type > maxtype)
-		return 0;
-
-	pt = &policy[type];
-
-	if (pt->type > NLA_TYPE_MAX)
-		return -NLE_INVAL;
-
-	if (pt->minlen)
-		minlen = pt->minlen;
-	else if (pt->type != NLA_UNSPEC)
-		minlen = nla_attr_minlen[pt->type];
-
-	if (nla_len(nla) < minlen)
-		return -NLE_RANGE;
-
-	if (pt->maxlen && nla_len(nla) > pt->maxlen)
-		return -NLE_RANGE;
-
-	if (pt->type == NLA_STRING) {
-		const char *data = nla_data(nla);
-
-		if (data[nla_len(nla) - 1] != '\0')
-			return -NLE_INVAL;
-	}
-
-	return 0;
-}
-
-int lnet_nla_parse(struct nlattr *tb[], int maxtype, struct nlattr *head,
-		   int len, const struct nla_policy *policy)
-{
-	struct nlattr *nla;
-	int rem, err;
-
-	memset(tb, 0, sizeof(struct nlattr *) * (maxtype + 1));
-
-	nla_for_each_attr(nla, head, len, rem) {
-		int type = nla_type(nla);
-
-		if (type > maxtype)
-			continue;
-
-		if (policy) {
-			err = lnet_validate_nla(nla, maxtype, policy);
-			if (err < 0)
-				return err;
-		}
-
-		tb[type] = nla;
-	}
-
-	return 0;
-}
-
-int lnet_genlmsg_parse(struct nlmsghdr *nlh, int hdrlen, struct nlattr *tb[],
-		       int maxtype, const struct nla_policy *policy)
-{
-	struct genlmsghdr *ghdr;
-
-	if (!genlmsg_valid_hdr(nlh, hdrlen))
-		return -NLE_MSG_TOOSHORT;
-
-	ghdr = nlmsg_data(nlh);
-	return lnet_nla_parse(tb, maxtype, genlmsg_attrdata(ghdr, hdrlen),
-			      genlmsg_attrlen(ghdr, hdrlen), policy);
-}
-
-#else /* !HAVE_NLA_GET_S64 */
-
-#define lnet_genlmsg_parse	genlmsg_parse
-
-#endif /* HAVE_NLA_GET_S64 */
 
 /**
  * Set NETLINK_BROADCAST_ERROR flags on socket to report ENOBUFS errors.
@@ -897,7 +716,7 @@ not_first:
 		case NLA_S64:
 			len = snprintf(data->buffer, *size, "%jd",
 				       nla_get_s64(attr));
-			fallthrough;
+			/* fallthrough */
 		default:
 			break;
 		}
@@ -963,8 +782,8 @@ static int yaml_netlink_msg_parse(struct nl_msg *msg, void *arg)
 		struct genlmsghdr *ghdr = genlmsg_hdr(nlh);
 		struct nlattr *attrs[LN_SCALAR_MAX + 1];
 
-		if (lnet_genlmsg_parse(nlh, 0, attrs, LN_SCALAR_MAX,
-				       scalar_attr_policy))
+		if (genlmsg_parse(nlh, 0, attrs, LN_SCALAR_MAX,
+				  scalar_attr_policy))
 			return NL_SKIP;
 
 		/* If root already exists this means we are updating the
@@ -1008,7 +827,7 @@ static int yaml_netlink_msg_parse(struct nl_msg *msg, void *arg)
 		for (i = 1; i < maxtype; i++)
 			policy[i].type = data->cur->keys.lkl_list[i].lkp_data_type;
 
-		if (lnet_genlmsg_parse(nlh, 0, attrs, maxtype, policy))
+		if (genlmsg_parse(nlh, 0, attrs, maxtype, policy))
 			return NL_SKIP;
 
 		size = data->end - data->buffer;
@@ -1050,7 +869,6 @@ static int yaml_netlink_parse_msg_error(struct nlmsgerr *errmsg,
 		const char *errstr = nl_geterror(nl_syserr2nlerr(errmsg->error));
 		struct yaml_netlink_input *data = parser->read_handler_data;
 
-#ifdef HAVE_USRSPC_NLMSGERR
 		/* Newer kernels support NLM_F_ACK_TLVS in nlmsg_flags
 		 * which gives greater detail why we failed.
 		 */
@@ -1065,9 +883,8 @@ static int yaml_netlink_parse_msg_error(struct nlmsgerr *errmsg,
 					errstr = nla_strdup(tb[NLMSGERR_ATTR_MSG]);
 			}
 		}
-#endif /* HAVE_USRSPC_NLMSGERR */
+
 		parser->error = YAML_READER_ERROR;
-		data = parser->read_handler_data;
 		data->errmsg = errstr;
 		data->error = errmsg->error;
 		data->complete = true;
@@ -1168,6 +985,7 @@ static int yaml_netlink_read_handler(void *arg, unsigned char *buffer,
 		data->read += size;
 	} else if (data->complete) {
 		free(data->start);
+		data->start = NULL;
 	}
 	*size_read = size;
 	return 1;
@@ -1387,7 +1205,7 @@ static int yaml_fill_scalar_data(struct nl_msg *msg,
 	}
 
 	if (fmt & LNKF_MAPPING && sep) {
-		char *end = strchr(sep, '\n');
+		char *end;
 		int len;
 
 		/* restore ':' */
@@ -1396,6 +1214,7 @@ static int yaml_fill_scalar_data(struct nl_msg *msg,
 		while (isspace(*sep))
 			++sep;
 
+		end = strchr(sep, '\n');
 		len = end ? end - sep : strlen(sep);
 		if (len <= 0)
 			goto nla_put_failure;
@@ -1877,6 +1696,22 @@ yaml_emitter_set_streaming_output_netlink(yaml_emitter_t *sender,
 	return true;
 }
 
+/**
+ * yaml_emitter_set_output_netlink() - Set output to Netlink socket and not any
+ * YAML document. This is wrapper to yaml_emitter_set_streaming_output_netlink()
+ * @sender: emitter object
+ * @nl: netlink socket
+ * @family: name of socket (lnet)
+ * @version: version number
+ * @cmd: command identifier
+ * @flags: netlink flags (NLM_F_* under liblnetconfig.h)
+ *
+ * Note: Emitter object setup with this function should always call
+ * yaml_emitter_cleanup() and not yaml_emitter_delete(). Otherwise it will
+ * result in memory leak
+ *
+ * Return TRUE on success and FALSE on failure
+ */
 YAML_DECLARE(int)
 yaml_emitter_set_output_netlink(yaml_emitter_t *sender, struct nl_sock *nl,
 				char *family, int version, int cmd, int flags)
@@ -1901,6 +1736,50 @@ void yaml_emitter_log_error(yaml_emitter_t *emitter, FILE *log)
 		fprintf(log, "Emitter error: %s\n", emitter->problem);
 	default:
 		break;
+	}
+}
+
+/*
+ * yaml_emitter_cleanup - Cleanup request & all memory held by request
+ */
+void yaml_emitter_cleanup(yaml_emitter_t *request)
+{
+	struct yaml_netlink_output *out = NULL;
+
+	if (!request || !request->write_handler_data)
+		return;
+
+	out = request->write_handler_data;
+
+	/* first destroy emitter */
+	yaml_emitter_delete(request);
+
+	if (out)
+		free(out);
+}
+
+/*
+ * yaml_parser_cleanup - Cleanup parser & all memory held by parser
+ */
+void yaml_parser_cleanup(yaml_parser_t *reply)
+{
+	struct yaml_netlink_input *input = NULL;
+
+	if (!reply || !reply->read_handler_data)
+		return;
+
+	input = reply->read_handler_data;
+
+	/* delete parser first */
+	yaml_parser_delete(reply);
+
+	if (input) {
+		if (input->start) {
+			free(input->start);
+			input->start = NULL;
+		}
+
+		free(input);
 	}
 }
 
@@ -1947,7 +1826,7 @@ void yaml_parser_log_error(yaml_parser_t *parser, FILE *log, const char *errmsg)
 			fprintf(log, "Reader error: '%s' at %ld\n",
 				extra, (long)parser->problem_offset);
 		}
-		fallthrough;
+		/* fallthrough */
 	default:
 		break;
 	}

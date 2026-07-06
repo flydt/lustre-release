@@ -86,15 +86,17 @@
 
 #define DEBUG_SUBSYSTEM S_LLITE
 
-#include "pcc.h"
-#include <linux/namei.h>
 #include <linux/file.h>
-#include <lustre_compat.h>
-#include "llite_internal.h"
-
+#include <lustre_compat/linux/fs.h>
+#include <lustre_compat/linux/dcache.h>
 #ifdef HAVE_FILEATTR_GET
 #include <linux/fileattr.h>
 #endif
+#include <linux/namei.h>
+#include <linux/mount.h>
+
+#include "llite_internal.h"
+#include "pcc.h"
 
 struct kmem_cache *pcc_inode_slab;
 
@@ -381,14 +383,14 @@ static int pcc_expr_time_parse(char *str, struct pcc_expression *expr)
 	unsigned long mtime;
 	int len = strlen(str);
 	unsigned int mult = 1;
-	char buf[10];
+	char buf[11]; /* +1 for NUL */
 	int rc;
 
 	if (expr->pe_opc == PCC_FIELD_OP_EQ)
 		return -EOPNOTSUPP;
 
 	/* 1B seconds is enough, and avoids the need for overflow checking */
-	if (len > 10)
+	if (len >= sizeof(buf))
 		return -EOVERFLOW;
 
 	strncpy(buf, str, sizeof(buf));
@@ -1580,7 +1582,7 @@ static struct dentry *pcc_lookup(struct dentry *base, char *pathname)
 
 		/* look up the current component */
 		inode_lock(parent->d_inode);
-		child = lookup_one_len(component, parent, strlen(component));
+		child = lookup_noperm(&QSTR(component), parent);
 		inode_unlock(parent->d_inode);
 
 		/* repair the path string: put '/' back in place of the NUL */
@@ -1652,8 +1654,8 @@ static int pcc_try_dataset_attach(struct inode *inode, __u32 gen,
 		GOTO(out, rc = 0);
 	}
 
-	rc = ll_vfs_getxattr(pcc_dentry, pcc_dentry->d_inode, pcc_xattr_layout,
-			     &pcc_gen, sizeof(pcc_gen));
+	rc = __vfs_getxattr(pcc_dentry, pcc_dentry->d_inode, pcc_xattr_layout,
+			    &pcc_gen, sizeof(pcc_gen));
 	if (rc < 0)
 		/* ignore this error */
 		GOTO(out_put_pcc_dentry, rc = 0);
@@ -2461,41 +2463,6 @@ out:
 	RETURN_EXIT;
 }
 
-static ssize_t
-__pcc_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
-{
-	struct file *file = iocb->ki_filp;
-
-#ifdef HAVE_FILE_OPERATIONS_READ_WRITE_ITER
-	return file->f_op->read_iter(iocb, iter);
-#else
-	struct iovec iov;
-	struct iov_iter i;
-	ssize_t bytes = 0;
-
-	iov_for_each(iov, i, *iter) {
-		ssize_t res;
-
-		res = file->f_op->aio_read(iocb, &iov, 1, iocb->ki_pos);
-		if (-EIOCBQUEUED == res)
-			res = wait_on_sync_kiocb(iocb);
-		if (res <= 0) {
-			if (bytes == 0)
-				bytes = res;
-			break;
-		}
-
-		bytes += res;
-		if (res < iov.iov_len)
-			break;
-	}
-
-	if (bytes > 0)
-		iov_iter_advance(iter, bytes);
-	return bytes;
-#endif
-}
-
 ssize_t pcc_file_read_iter(struct kiocb *iocb,
 			   struct iov_iter *iter, bool *cached)
 {
@@ -2520,7 +2487,7 @@ ssize_t pcc_file_read_iter(struct kiocb *iocb,
 
 	/* Fake I/O error on PCC-RO */
 	if (CFS_FAIL_CHECK(OBD_FAIL_LLITE_PCC_FAKE_ERROR))
-		GOTO(out, result = -EIO);
+		GOTO(out, rc = -EIO);
 
 	iocb->ki_filp = pccf->pccf_file;
 	if (!IS_ENCRYPTED(inode)) {
@@ -2528,8 +2495,8 @@ ssize_t pcc_file_read_iter(struct kiocb *iocb,
 		 * __pcc_file_read_iter uses ->aio_read hook directly
 		 * to add support for ext4-dax.
 		 */
-		result = __pcc_file_read_iter(iocb, iter);
-		GOTO(out, result);
+		result = iocb->ki_filp->f_op->read_iter(iocb, iter);
+		GOTO(out_filp, result);
 	}
 
 	/* from this point, we are dealing with an encrypted inode */
@@ -2546,54 +2513,56 @@ ssize_t pcc_file_read_iter(struct kiocb *iocb,
 	/* Proceed to decryption of PCC-RO page cache pages */
 	for (index = start_index; index <= end_index; index++) {
 		struct address_space *mapping;
-		struct page *vmpage = NULL;
+		struct folio *folio = NULL;
 		unsigned int offs = 0;
 
 		mapping = file_inode(pccf->pccf_file)->i_mapping;
-		vmpage = grab_cache_page(mapping, index);
-		if (vmpage == NULL)
+		folio = get_folio_grab(mapping, index,
+				       FGP_LOCK | FGP_ACCESSED | FGP_CREAT,
+				       mapping_gfp_mask(mapping));
+		if (IS_ERR_OR_NULL(folio))
 			continue;
 
 		/* vmpage has already been decrypted */
-		if (PagePrivate2(vmpage))
+		if (folio_test_private_2(folio))
 			goto out_pageprivate2;
 
-		if (PageDirty(vmpage))
+		if (folio_test_dirty(folio))
 			/* this should not happen with PCC-RO */
 			GOTO(out_pageprivate2, rc = -EIO);
-		if (!PageUptodate(vmpage)) {
+		if (!folio_test_uptodate(folio)) {
 #ifdef HAVE_AOPS_READ_FOLIO
 			rc = mapping->a_ops->read_folio(pccf->pccf_file,
-							page_folio(vmpage));
+							folio);
 #else
-			rc = mapping->a_ops->readpage(pccf->pccf_file, vmpage);
+			rc = mapping->a_ops->readpage(pccf->pccf_file,
+						      fpgptr(folio));
 #endif
 			if (rc) {
-				put_page(vmpage);
+				folio_put(folio);
 				continue;
 			}
-			lock_page(vmpage);
-			if (!PageUptodate(vmpage))
+			folio_lock(folio);
+			if (!folio_test_uptodate(folio))
 				GOTO(out_pageprivate2, rc = -EIO);
 		}
 
 		while (offs < PAGE_SIZE) {
-			u64 lblk_num = ((u64)vmpage->index <<
+			u64 lblk_num = ((u64)folio->index <<
 					(PAGE_SHIFT - blockbits)) +
 				       (offs >> blockbits);
 			unsigned int i;
 
 			/* do not decrypt if page is all 0s */
-			if (memchr_inv(page_address(vmpage) + offs, 0,
-				       LUSTRE_ENCRYPTION_UNIT_SIZE) ==
-			    NULL)
+			if (is_empty_folio(folio, offs,
+					   LUSTRE_ENCRYPTION_UNIT_SIZE))
 				break;
 
 			for (i = offs;
 			     i < offs + LUSTRE_ENCRYPTION_UNIT_SIZE;
 			     i += blocksize, lblk_num++) {
 				rc = llcrypt_decrypt_block_inplace(inode,
-								   vmpage,
+								fpgptr(folio),
 								   blocksize, i,
 								   lblk_num);
 				if (rc)
@@ -2607,57 +2576,24 @@ ssize_t pcc_file_read_iter(struct kiocb *iocb,
 		/* set PagePrivate2 flag so that we know
 		 * this page is now decrypted
 		 */
-		SetPagePrivate2(vmpage);
+		folio_set_private_2(folio);
 
 out_pageprivate2:
-		unlock_page(vmpage);
-		put_page(vmpage);
-
+		folio_unlock(folio);
+		folio_put(folio);
 	}
 
-	result = __pcc_file_read_iter(iocb, iter);
+	result = iocb->ki_filp->f_op->read_iter(iocb, iter);
 	if (iocb->ki_pos > i_size_read(inode) && result > 0)
 		result -= iocb->ki_pos - i_size_read(inode);
 
-out:
+out_filp:
 	iocb->ki_filp = file;
-	pcc_io_fini(inode, PIT_READ, result, cached);
-	RETURN(result);
-}
-
-static ssize_t
-__pcc_file_write_iter(struct kiocb *iocb, struct iov_iter *iter)
-{
-	struct file *file = iocb->ki_filp;
-
-#ifdef HAVE_FILE_OPERATIONS_READ_WRITE_ITER
-	return file->f_op->write_iter(iocb, iter);
-#else
-	struct iovec iov;
-	struct iov_iter i;
-	ssize_t bytes = 0;
-
-	iov_for_each(iov, i, *iter) {
-		ssize_t res;
-
-		res = file->f_op->aio_write(iocb, &iov, 1, iocb->ki_pos);
-		if (-EIOCBQUEUED == res)
-			res = wait_on_sync_kiocb(iocb);
-		if (res <= 0) {
-			if (bytes == 0)
-				bytes = res;
-			break;
-		}
-
-		bytes += res;
-		if (res < iov.iov_len)
-			break;
-	}
-
-	if (bytes > 0)
-		iov_iter_advance(iter, bytes);
-	return bytes;
-#endif
+	if (result < 0)
+		rc = result;
+out:
+	pcc_io_fini(inode, PIT_READ, rc, cached);
+	RETURN(result > 0 ? result : rc);
 }
 
 ssize_t pcc_file_write_iter(struct kiocb *iocb,
@@ -2687,7 +2623,7 @@ ssize_t pcc_file_write_iter(struct kiocb *iocb,
 	 * the normal vfs interface to the local PCC file system,
 	 * the inode lock is not needed.
 	 */
-	result = __pcc_file_write_iter(iocb, iter);
+	result = iocb->ki_filp->f_op->write_iter(iocb, iter);
 	iocb->ki_filp = file;
 out:
 	pcc_io_fini(inode, PIT_WRITE, result, cached);
@@ -2792,10 +2728,10 @@ int pcc_inode_getattr(struct inode *inode, u32 request_mask,
 	if (IS_ENCRYPTED(inode) && pcci->pcci_type == LU_PCC_READONLY) {
 		loff_t encsize;
 
-		rc = ll_vfs_getxattr(pcci->pcci_path.dentry,
-				     pcci->pcci_path.dentry->d_inode,
-				     pcc_xattr_encsize,
-				     &encsize, sizeof(encsize));
+		rc = __vfs_getxattr(pcci->pcci_path.dentry,
+				    pcci->pcci_path.dentry->d_inode,
+				    pcc_xattr_encsize,
+				    &encsize, sizeof(encsize));
 		if (rc > 0)
 			size = encsize;
 	}
@@ -2826,23 +2762,32 @@ ssize_t pcc_file_splice_read(struct file *in_file, loff_t *ppos,
 {
 	struct inode *inode = file_inode(in_file);
 	struct file *pcc_file = ll_file2pccf(in_file)->pccf_file;
+	ktime_t kstart = ktime_get();
 	bool cached = false;
 	ssize_t result;
 
 	ENTRY;
 	in_file->f_ra.ra_pages = 0;
-	if (!pcc_file)
-		RETURN(do_sys_splice_read(in_file, ppos, pipe,
-					  count, flags));
+	if (!pcc_file) {
+		result = do_sys_splice_read(in_file, ppos, pipe,
+					    count, flags);
+		GOTO(out, result);
+	}
 
 	pcc_io_init(inode, PIT_SPLICE_READ, in_file, &cached);
-	if (!cached)
-		RETURN(do_sys_splice_read(in_file, ppos, pipe,
-					  count, flags));
+	if (!cached) {
+		result = do_sys_splice_read(in_file, ppos, pipe,
+					    count, flags);
+		GOTO(out, result);
+	}
 
 	result = do_sys_splice_read(pcc_file, ppos, pipe, count, flags);
 
 	pcc_io_fini(inode, PIT_SPLICE_READ, result, &cached);
+
+out:
+	ll_stats_ops_tally(ll_i2sbi(inode), LPROC_LL_SPLICE,
+			   ktime_us_delta(ktime_get(), kstart));
 	RETURN(result);
 }
 
@@ -2990,7 +2935,7 @@ static int pcc_mmap_pages_convert(struct inode *inode,
 	unsigned int nr;
 	int rc = 0;
 
-	ll_folio_batch_init(&fbatch, 0);
+	ll_folio_batch_init(&fbatch);
 	for ( ; ; ) {
 		struct page *page;
 		int i;
@@ -3001,11 +2946,7 @@ static int pcc_mmap_pages_convert(struct inode *inode,
 			break;
 
 		for (i = 0; i < nr; i++) {
-#if defined(HAVE_FOLIO_BATCH) && defined(HAVE_FILEMAP_GET_FOLIOS)
-			page = &fbatch.folios[i]->page;
-#else
-			page = fbatch.pages[i];
-#endif
+			page = fpgptr(fbatch_at(&fbatch, i));
 			lock_page(page);
 			wait_on_page_writeback(page);
 
@@ -3019,7 +2960,8 @@ static int pcc_mmap_pages_convert(struct inode *inode,
 			cfs_delete_from_page_cache(page);
 			/* Add the page into the mapping of the Lustre file. */
 			rc = add_to_page_cache_locked(page, inode->i_mapping,
-						      page->index, GFP_KERNEL);
+						      folio_index_page(page),
+						      GFP_KERNEL);
 			if (rc) {
 				unlock_page(page);
 				folio_batch_release(&fbatch);
@@ -3029,7 +2971,7 @@ static int pcc_mmap_pages_convert(struct inode *inode,
 			unlock_page(page);
 		}
 
-		index = page->index + 1;
+		index = folio_index_page(page) + 1;
 		folio_batch_release(&fbatch);
 		cond_resched();
 	}
@@ -3308,12 +3250,7 @@ int pcc_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf,
 	if (CFS_FAIL_CHECK(OBD_FAIL_LLITE_PCC_DETACH_MKWRITE))
 		GOTO(out, rc = VM_FAULT_SIGBUS);
 
-#ifdef HAVE_VM_OPS_USE_VM_FAULT_ONLY
 	rc = pccv->pccv_vm_ops->page_mkwrite(vmf);
-#else
-	rc = pccv->pccv_vm_ops->page_mkwrite(vma, vmf);
-#endif
-
 out:
 	pcc_io_fini(inode, PIT_PAGE_MKWRITE, rc, cached);
 
@@ -3359,12 +3296,7 @@ int pcc_fault(struct vm_area_struct *vma, struct vm_fault *vmf,
 	if (CFS_FAIL_CHECK(OBD_FAIL_LLITE_PCC_FAKE_ERROR))
 		GOTO(out, rc = VM_FAULT_SIGBUS);
 
-#ifdef HAVE_VM_OPS_USE_VM_FAULT_ONLY
 	rc = pccv->pccv_vm_ops->fault(vmf);
-#else
-	rc = pccv->pccv_vm_ops->fault(vma, vmf);
-#endif
-
 out:
 	pcc_io_fini(inode, PIT_FAULT, rc, cached);
 
@@ -3398,24 +3330,18 @@ static int pcc_inode_remove(struct inode *inode, struct dentry *pcc_dentry)
 static struct dentry *
 pcc_mkdir(struct dentry *base, const char *name, umode_t mode)
 {
-	int rc;
 	struct dentry *dentry;
 	struct inode *dir = base->d_inode;
 
 	inode_lock(dir);
-	dentry = lookup_one_len(name, base, strlen(name));
+	dentry = lookup_noperm(&QSTR(name), base);
 	if (IS_ERR(dentry))
 		goto out;
 
 	if (d_is_positive(dentry))
 		goto out;
 
-	rc = vfs_mkdir(&nop_mnt_idmap, dir, dentry, mode);
-	if (rc) {
-		dput(dentry);
-		dentry = ERR_PTR(rc);
-		goto out;
-	}
+	dentry = ll_vfs_mkdir(&nop_mnt_idmap, dir, dentry, mode);
 out:
 	inode_unlock(dir);
 	return dentry;
@@ -3459,14 +3385,14 @@ pcc_create(struct dentry *base, const char *name, umode_t mode)
 	struct inode *dir = base->d_inode;
 
 	inode_lock(dir);
-	dentry = lookup_one_len(name, base, strlen(name));
+	dentry = lookup_noperm(&QSTR(name), base);
 	if (IS_ERR(dentry))
 		goto out;
 
 	if (d_is_positive(dentry))
 		goto out;
 
-	rc = vfs_create(&nop_mnt_idmap, dir, dentry, mode, false);
+	rc = vfs_create(&nop_mnt_idmap, dentry, mode, NULL);
 	if (rc) {
 		dput(dentry);
 		dentry = ERR_PTR(rc);
@@ -3542,7 +3468,7 @@ static int pcc_inode_reset_iattr(struct inode *lustre_inode,
 static int __pcc_file_reset_projid(struct file *file, __u32 projid)
 {
 #ifdef HAVE_FILEATTR_GET
-	struct fileattr fa = { .fsx_projid = projid };
+	struct file_kattr fa = { .fsx_projid = projid };
 	struct dentry *dentry = file->f_path.dentry;
 	struct inode *inode = d_inode(dentry);
 	int rc;
@@ -3732,7 +3658,7 @@ static int pcc_filp_write(struct file *filp, const void *buf, ssize_t count,
 	while (count > 0) {
 		ssize_t size;
 
-		size = cfs_kernel_write(filp, buf, count, offset);
+		size = kernel_write(filp, buf, count, offset);
 		if (size < 0)
 			return size;
 		count -= size;
@@ -3752,14 +3678,12 @@ static ssize_t pcc_copy_data(struct file *src, struct file *dst)
 
 	ENTRY;
 
-#ifdef FMODE_CAN_READ
 	/* Need to add FMODE_CAN_READ flags here, otherwise the check in
 	 * kernel_read() during open() for auto PCC-RO attach will fail.
 	 */
 	if ((src->f_mode & FMODE_READ) &&
 	    likely(src->f_op->read || src->f_op->read_iter))
 		src->f_mode |= FMODE_CAN_READ;
-#endif
 
 	OBD_ALLOC_LARGE(buf, buf_len);
 	if (buf == NULL)
@@ -3777,7 +3701,7 @@ static ssize_t pcc_copy_data(struct file *src, struct file *dst)
 			 * S_PCCCOPY flag is removed in ll_prepare_close().
 			 */
 			inode->i_flags |= S_PCCCOPY;
-		rc2 = cfs_kernel_read(src, buf, buf_len, &pos);
+		rc2 = kernel_read(src, buf, buf_len, &pos);
 		if (rc2 < 0)
 			GOTO(out_free, rc = rc2);
 		else if (rc2 == 0)

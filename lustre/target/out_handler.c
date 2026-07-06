@@ -31,7 +31,7 @@ static void out_reconstruct(const struct lu_env *env, struct dt_device *dt,
 			    struct object_update_reply *reply,
 			    int index)
 {
-	CDEBUG(D_HA, "%s: fork reply reply %p index %d: rc = %d\n",
+	CDEBUG(D_HA, "%s: fork reply %p index %d: rc = %d\n",
 	       dt_obd_name(dt), reply, index, 0);
 
 	object_update_result_insert(reply, NULL, 0, index, 0);
@@ -45,30 +45,26 @@ typedef void (*out_reconstruct_t)(const struct lu_env *env,
 
 static int out_create(struct tgt_session_info *tsi)
 {
-	struct tgt_thread_info	*tti = tgt_th_info(tsi->tsi_env);
-	struct object_update	*update = tti->tti_u.update.tti_update;
-	struct dt_object        *obj = tti->tti_u.update.tti_dt_object;
-	struct dt_object_format	*dof = &tti->tti_u.update.tti_update_dof;
-	struct obdo		*lobdo = &tti->tti_u.update.tti_obdo;
-	struct lu_attr		*attr = &tti->tti_attr;
-	struct lu_fid		*fid = NULL;
-	struct obdo		*wobdo;
-	size_t			size;
-	int			rc;
+	struct tgt_thread_info *tti = tgt_th_info(tsi->tsi_env);
+	struct object_update *update = tti->tti_u.update.tti_update;
+	struct dt_object *obj = tti->tti_u.update.tti_dt_object;
+	struct dt_object_format *dof = &tti->tti_u.update.tti_update_dof;
+	struct obdo *lobdo = &tti->tti_u.update.tti_obdo;
+	struct lu_attr *attr = &tti->tti_attr;
+	struct lu_fid *fid = NULL;
+	struct obdo *wobdo;
+	size_t size;
+	int rc;
 
 	ENTRY;
 
-	wobdo = object_update_param_get(update, 0, &size);
+	size = sizeof(*wobdo);
+	wobdo = object_update_param_get(update, 0, &size,
+					tgt_name(tsi->tsi_tgt), "obdo");
 	if (IS_ERR(wobdo)) {
 		rc = PTR_ERR(wobdo);
 		CERROR("%s: obdo is NULL, invalid RPC: rc = %d\n",
 		       tgt_name(tsi->tsi_tgt), rc);
-		RETURN(rc);
-	}
-	if (size != sizeof(*wobdo)) {
-		rc = -EPROTO;
-		CERROR("%s: wrong size for obdo %zu != %zu, invalid RPC: rc = %d\n",
-		       tgt_name(tsi->tsi_tgt), size, sizeof(*wobdo), rc);
 		RETURN(rc);
 	}
 
@@ -79,17 +75,13 @@ static int out_create(struct tgt_session_info *tsi)
 
 	dof->dof_type = dt_mode_to_dft(attr->la_mode);
 	if (update->ou_params_count > 1) {
-		fid = object_update_param_get(update, 1, &size);
+		size = sizeof(*fid);
+		fid = object_update_param_get(update, 1, &size,
+					      tgt_name(tsi->tsi_tgt), "lu_fid");
 		if (IS_ERR(fid)) {
 			rc = PTR_ERR(fid);
 			CERROR("%s: invalid fid: rc = %d\n",
 			       tgt_name(tsi->tsi_tgt), rc);
-			RETURN(rc);
-		}
-		if (size != sizeof(*fid)) {
-			rc = -EPROTO;
-			CERROR("%s: wrong size for fid %zu != %zu: rc = %d\n",
-			       tgt_name(tsi->tsi_tgt), size, sizeof(*fid), rc);
 			RETURN(rc);
 		}
 		if (req_capsule_req_need_swab(tsi->tsi_pill))
@@ -114,28 +106,24 @@ static int out_create(struct tgt_session_info *tsi)
 
 static int out_attr_set(struct tgt_session_info *tsi)
 {
-	struct tgt_thread_info	*tti = tgt_th_info(tsi->tsi_env);
-	struct object_update	*update = tti->tti_u.update.tti_update;
-	struct lu_attr		*attr = &tti->tti_attr;
-	struct dt_object        *obj = tti->tti_u.update.tti_dt_object;
-	struct obdo		*lobdo = &tti->tti_u.update.tti_obdo;
-	struct obdo		*wobdo;
-	size_t			 size;
-	int			 rc;
+	struct tgt_thread_info *tti = tgt_th_info(tsi->tsi_env);
+	struct object_update *update = tti->tti_u.update.tti_update;
+	struct lu_attr *attr = &tti->tti_attr;
+	struct dt_object *obj = tti->tti_u.update.tti_dt_object;
+	struct obdo *lobdo = &tti->tti_u.update.tti_obdo;
+	struct obdo *wobdo;
+	size_t size;
+	int rc;
 
 	ENTRY;
 
-	wobdo = object_update_param_get(update, 0, &size);
+	size = sizeof(*wobdo);
+	wobdo = object_update_param_get(update, 0, &size,
+					tgt_name(tsi->tsi_tgt), "obdo");
 	if (IS_ERR(wobdo)) {
 		rc = PTR_ERR(wobdo);
 		CERROR("%s: empty obdo in the update: rc = %d\n",
 		       tgt_name(tsi->tsi_tgt), rc);
-		RETURN(rc);
-	}
-	if (size != sizeof(*wobdo)) {
-		rc = -EPROTO;
-		CERROR("%s: wrong size for obdo %zu != %zu in the update: rc = %d\n",
-		       tgt_name(tsi->tsi_tgt), size, sizeof(*wobdo), rc);
 		RETURN(rc);
 	}
 
@@ -157,14 +145,14 @@ static int out_attr_set(struct tgt_session_info *tsi)
 
 static int out_attr_get(struct tgt_session_info *tsi)
 {
-	const struct lu_env	*env = tsi->tsi_env;
-	struct tgt_thread_info	*tti = tgt_th_info(env);
-	struct object_update	*update = tti->tti_u.update.tti_update;
-	struct obdo		*obdo = &tti->tti_u.update.tti_obdo;
-	struct lu_attr		*la = &tti->tti_attr;
-	struct dt_object        *obj = tti->tti_u.update.tti_dt_object;
-	int			idx = tti->tti_u.update.tti_update_reply_index;
-	int			rc;
+	const struct lu_env *env = tsi->tsi_env;
+	struct tgt_thread_info *tti = tgt_th_info(env);
+	struct object_update *update = tti->tti_u.update.tti_update;
+	struct obdo *obdo = &tti->tti_u.update.tti_obdo;
+	struct lu_attr *la = &tti->tti_attr;
+	struct dt_object *obj = tti->tti_u.update.tti_dt_object;
+	int idx = tti->tti_u.update.tti_update_reply_index;
+	int rc;
 
 	ENTRY;
 
@@ -204,16 +192,16 @@ out_unlock:
 
 static int out_xattr_get(struct tgt_session_info *tsi)
 {
-	const struct lu_env	   *env = tsi->tsi_env;
-	struct tgt_thread_info	   *tti = tgt_th_info(env);
-	struct object_update	   *update = tti->tti_u.update.tti_update;
-	struct lu_buf		   *lbuf = &tti->tti_buf;
+	const struct lu_env *env = tsi->tsi_env;
+	struct tgt_thread_info *tti = tgt_th_info(env);
+	struct object_update *update = tti->tti_u.update.tti_update;
+	struct lu_buf *lbuf = &tti->tti_buf;
 	struct object_update_reply *reply = tti->tti_u.update.tti_update_reply;
-	struct dt_object           *obj = tti->tti_u.update.tti_dt_object;
-	char			   *name;
+	struct dt_object *obj = tti->tti_u.update.tti_dt_object;
+	char *name;
 	struct object_update_result *update_result;
-	int			idx = tti->tti_u.update.tti_update_reply_index;
-	int			   rc;
+	int idx = tti->tti_u.update.tti_update_reply_index;
+	int rc;
 
 	ENTRY;
 
@@ -223,7 +211,7 @@ static int out_xattr_get(struct tgt_session_info *tsi)
 		RETURN(-ENOENT);
 	}
 
-	name = object_update_param_get(update, 0, NULL);
+	name = object_update_param_get(update, 0, NULL, NULL, NULL);
 	if (IS_ERR(name)) {
 		CERROR("%s: empty name for xattr get: rc = %ld\n",
 		       tgt_name(tsi->tsi_tgt), PTR_ERR(name));
@@ -319,12 +307,12 @@ static int out_xattr_list(struct tgt_session_info *tsi)
 
 static int out_index_lookup(struct tgt_session_info *tsi)
 {
-	const struct lu_env	*env = tsi->tsi_env;
-	struct tgt_thread_info	*tti = tgt_th_info(env);
-	struct object_update	*update = tti->tti_u.update.tti_update;
-	struct dt_object	*obj = tti->tti_u.update.tti_dt_object;
-	char			*name;
-	int			 rc;
+	const struct lu_env *env = tsi->tsi_env;
+	struct tgt_thread_info *tti = tgt_th_info(env);
+	struct object_update *update = tti->tti_u.update.tti_update;
+	struct dt_object *obj = tti->tti_u.update.tti_dt_object;
+	char *name;
+	int rc;
 
 	ENTRY;
 
@@ -334,7 +322,7 @@ static int out_index_lookup(struct tgt_session_info *tsi)
 	if (!lu_object_exists(&obj->do_lu))
 		RETURN(-ENOENT);
 
-	name = object_update_param_get(update, 0, NULL);
+	name = object_update_param_get(update, 0, NULL, NULL, NULL);
 	if (IS_ERR(name)) {
 		CERROR("%s: empty name for lookup: rc = %ld\n",
 		       tgt_name(tsi->tsi_tgt), PTR_ERR(name));
@@ -373,20 +361,21 @@ out_unlock:
 
 static int out_xattr_set(struct tgt_session_info *tsi)
 {
-	struct tgt_thread_info	*tti = tgt_th_info(tsi->tsi_env);
-	struct object_update	*update = tti->tti_u.update.tti_update;
-	struct dt_object	*obj = tti->tti_u.update.tti_dt_object;
-	struct lu_buf		*lbuf = &tti->tti_buf;
-	char			*name;
-	char			*buf;
-	__u32			*tmp;
-	size_t			 buf_len = 0;
-	int			 flag;
-	size_t			 size = 0;
-	int			 rc;
+	struct tgt_thread_info *tti = tgt_th_info(tsi->tsi_env);
+	struct object_update *update = tti->tti_u.update.tti_update;
+	struct dt_object *obj = tti->tti_u.update.tti_dt_object;
+	struct lu_buf *lbuf = &tti->tti_buf;
+	char *name;
+	char *buf;
+	__u32 *tmp;
+	size_t buf_len = 0;
+	int flag;
+	size_t size = 0;
+	int rc;
+
 	ENTRY;
 
-	name = object_update_param_get(update, 0, NULL);
+	name = object_update_param_get(update, 0, NULL, NULL, NULL);
 	if (IS_ERR(name)) {
 		CERROR("%s: empty name for xattr set: rc = %ld\n",
 		       tgt_name(tsi->tsi_tgt), PTR_ERR(name));
@@ -394,24 +383,21 @@ static int out_xattr_set(struct tgt_session_info *tsi)
 	}
 
 	/* If buffer == NULL (-ENODATA), then it might mean delete xattr */
-	buf = object_update_param_get(update, 1, &buf_len);
+	buf = object_update_param_get(update, 1, &buf_len,
+				      tgt_name(tsi->tsi_tgt), "char");
 	if (IS_ERR(buf) && PTR_ERR(buf) != -ENODATA)
 		RETURN(PTR_ERR(buf));
 
 	lbuf->lb_buf = buf;
 	lbuf->lb_len = buf_len;
 
-	tmp = object_update_param_get(update, 2, &size);
+	size = sizeof(*tmp);
+	tmp = object_update_param_get(update, 2, &size,
+				      tgt_name(tsi->tsi_tgt), "__u32");
 	if (IS_ERR(tmp)) {
 		rc = PTR_ERR(tmp);
 		CERROR("%s: emptry flag: rc = %d\n",
 		       tgt_name(tsi->tsi_tgt), rc);
-		RETURN(rc);
-	}
-	if (size != sizeof(*tmp)) {
-		rc = -EPROTO;
-		CERROR("%s: wrong size for flag %zu != %zu: rc = %d\n",
-		       tgt_name(tsi->tsi_tgt), size, sizeof(*tmp), rc);
 		RETURN(rc);
 	}
 
@@ -433,9 +419,10 @@ static int out_xattr_del(struct tgt_session_info *tsi)
 	struct dt_object	*obj = tti->tti_u.update.tti_dt_object;
 	char			*name;
 	int			 rc;
+
 	ENTRY;
 
-	name = object_update_param_get(update, 0, NULL);
+	name = object_update_param_get(update, 0, NULL, NULL, NULL);
 	if (IS_ERR(name)) {
 		CERROR("%s: empty name for xattr set: rc = %ld\n",
 		       tgt_name(tsi->tsi_tgt), PTR_ERR(name));
@@ -449,9 +436,9 @@ static int out_xattr_del(struct tgt_session_info *tsi)
 	RETURN(rc);
 }
 
-/**
+/*
  * increase ref of the object
- **/
+ */
 static int out_ref_add(struct tgt_session_info *tsi)
 {
 	struct tgt_thread_info	*tti = tgt_th_info(tsi->tsi_env);
@@ -487,35 +474,32 @@ static int out_ref_del(struct tgt_session_info *tsi)
 
 static int out_index_insert(struct tgt_session_info *tsi)
 {
-	struct tgt_thread_info	*tti	= tgt_th_info(tsi->tsi_env);
-	struct object_update	*update	= tti->tti_u.update.tti_update;
-	struct dt_object	*obj	= tti->tti_u.update.tti_dt_object;
-	struct dt_insert_rec	*rec	= &tti->tti_rec;
-	struct lu_fid		*fid;
-	char			*name;
-	__u32			*ptype;
-	int			 rc	= 0;
-	size_t			 size;
+	struct tgt_thread_info *tti = tgt_th_info(tsi->tsi_env);
+	struct object_update *update = tti->tti_u.update.tti_update;
+	struct dt_object *obj = tti->tti_u.update.tti_dt_object;
+	struct dt_insert_rec *rec = &tti->tti_rec;
+	struct lu_fid *fid;
+	char *name;
+	__u32 *ptype;
+	int rc = 0;
+	size_t size;
+
 	ENTRY;
 
-	name = object_update_param_get(update, 0, NULL);
+	name = object_update_param_get(update, 0, NULL, NULL, NULL);
 	if (IS_ERR(name)) {
 		CERROR("%s: empty name for index insert: rc = %ld\n",
 		       tgt_name(tsi->tsi_tgt), PTR_ERR(name));
 		RETURN(PTR_ERR(name));
 	}
 
-	fid = object_update_param_get(update, 1, &size);
+	size = sizeof(*fid);
+	fid = object_update_param_get(update, 1, &size,
+				      tgt_name(tsi->tsi_tgt), "lu_fid");
 	if (IS_ERR(fid)) {
 		rc = PTR_ERR(fid);
 		CERROR("%s: invalid fid: rc = %d\n",
 		       tgt_name(tsi->tsi_tgt), rc);
-		RETURN(rc);
-	}
-	if (size != sizeof(*fid)) {
-		rc = -EPROTO;
-		CERROR("%s: wrong size for fid %zu != %zu: rc = %d\n",
-		       tgt_name(tsi->tsi_tgt), size, sizeof(*fid), rc);
 		RETURN(rc);
 	}
 
@@ -528,17 +512,13 @@ static int out_index_insert(struct tgt_session_info *tsi)
 		RETURN(-EPROTO);
 	}
 
-	ptype = object_update_param_get(update, 2, &size);
+	size = sizeof(*ptype);
+	ptype = object_update_param_get(update, 2, &size,
+					tgt_name(tsi->tsi_tgt), "__u32");
 	if (IS_ERR(ptype)) {
 		rc = PTR_ERR(ptype);
 		CERROR("%s: invalid type for index insert: rc = %d\n",
 		       tgt_name(tsi->tsi_tgt), rc);
-		RETURN(rc);
-	}
-	if (size != sizeof(*ptype)) {
-		rc = -EPROTO;
-		CERROR("%s: wrong size for index insert %zu != %zu: rc = %d\n",
-		       tgt_name(tsi->tsi_tgt), size, sizeof(*ptype), rc);
 		RETURN(rc);
 	}
 
@@ -563,16 +543,16 @@ static int out_index_insert(struct tgt_session_info *tsi)
 
 static int out_index_delete(struct tgt_session_info *tsi)
 {
-	struct tgt_thread_info	*tti = tgt_th_info(tsi->tsi_env);
-	struct object_update	*update = tti->tti_u.update.tti_update;
-	struct dt_object	*obj = tti->tti_u.update.tti_dt_object;
-	char			*name;
-	int			 rc = 0;
+	struct tgt_thread_info *tti = tgt_th_info(tsi->tsi_env);
+	struct object_update *update = tti->tti_u.update.tti_update;
+	struct dt_object *obj = tti->tti_u.update.tti_dt_object;
+	char *name;
+	int rc = 0;
 
 	if (!lu_object_exists(&obj->do_lu))
 		RETURN(-ENOENT);
 
-	name = object_update_param_get(update, 0, NULL);
+	name = object_update_param_get(update, 0, NULL, NULL, NULL);
 	if (IS_ERR(name)) {
 		CERROR("%s: empty name for index delete: rc = %ld\n",
 		       tgt_name(tsi->tsi_tgt), PTR_ERR(name));
@@ -588,11 +568,12 @@ static int out_index_delete(struct tgt_session_info *tsi)
 
 static int out_destroy(struct tgt_session_info *tsi)
 {
-	struct tgt_thread_info	*tti = tgt_th_info(tsi->tsi_env);
-	struct object_update	*update = tti->tti_u.update.tti_update;
-	struct dt_object	*obj = tti->tti_u.update.tti_dt_object;
-	struct lu_fid		*fid;
-	int			 rc;
+	struct tgt_thread_info *tti = tgt_th_info(tsi->tsi_env);
+	struct object_update *update = tti->tti_u.update.tti_update;
+	struct dt_object *obj = tti->tti_u.update.tti_dt_object;
+	struct lu_fid *fid;
+	int rc;
+
 	ENTRY;
 
 	fid = &update->ou_fid;
@@ -618,45 +599,37 @@ static int out_destroy(struct tgt_session_info *tsi)
 
 static int out_write(struct tgt_session_info *tsi)
 {
-	struct tgt_thread_info	*tti = tgt_th_info(tsi->tsi_env);
-	struct object_update	*update = tti->tti_u.update.tti_update;
-	struct dt_object	*obj = tti->tti_u.update.tti_dt_object;
-	struct lu_buf		*lbuf = &tti->tti_buf;
-	char			*buf;
-	__u64			*tmp;
-	size_t			size = 0;
-	size_t			buf_len = 0;
-	loff_t			pos;
-	int			 rc;
+	struct tgt_thread_info *tti = tgt_th_info(tsi->tsi_env);
+	struct object_update *update = tti->tti_u.update.tti_update;
+	struct dt_object *obj = tti->tti_u.update.tti_dt_object;
+	struct lu_buf *lbuf = &tti->tti_buf;
+	char *buf;
+	__u64 *tmp;
+	size_t size = 0;
+	size_t buf_len = 0;
+	loff_t pos;
+	int rc;
+
 	ENTRY;
 
-	buf = object_update_param_get(update, 0, &buf_len);
+	buf = object_update_param_get(update, 0, &buf_len,
+				      tgt_name(tsi->tsi_tgt), "char");
 	if (IS_ERR(buf)) {
 		rc = PTR_ERR(buf);
 		CERROR("%s: empty buf for xattr set: rc = %d\n",
 		       tgt_name(tsi->tsi_tgt), rc);
 		RETURN(rc);
 	}
-	if (buf_len == 0) {
-		rc = -EPROTO;
-		CERROR("%s: wrong buf_len %zu != 0 for xattr set: rc = %d\n",
-		       tgt_name(tsi->tsi_tgt), buf_len, rc);
-		RETURN(rc);
-	}
 	lbuf->lb_buf = buf;
 	lbuf->lb_len = buf_len;
 
-	tmp = object_update_param_get(update, 1, &size);
+	size = sizeof(*tmp);
+	tmp = object_update_param_get(update, 1, &size,
+				      tgt_name(tsi->tsi_tgt), "__u64");
 	if (IS_ERR(tmp)) {
 		rc = PTR_ERR(tmp);
 		CERROR("%s: empty pos: rc = %d\n",
 		       tgt_name(tsi->tsi_tgt), rc);
-		RETURN(rc);
-	}
-	if (size != sizeof(*tmp)) {
-		rc = -EPROTO;
-		CERROR("%s: wrong size for pos %zu != %zu: rc = %d\n",
-		       tgt_name(tsi->tsi_tgt), size, sizeof(*tmp), rc);
 		RETURN(rc);
 	}
 
@@ -673,15 +646,15 @@ static int out_write(struct tgt_session_info *tsi)
 
 static int out_read(struct tgt_session_info *tsi)
 {
-	const struct lu_env	*env = tsi->tsi_env;
-	struct tgt_thread_info	*tti = tgt_th_info(env);
-	struct object_update	*update = tti->tti_u.update.tti_update;
-	struct dt_object	*obj = tti->tti_u.update.tti_dt_object;
+	const struct lu_env *env = tsi->tsi_env;
+	struct tgt_thread_info *tti = tgt_th_info(env);
+	struct object_update *update = tti->tti_u.update.tti_update;
+	struct dt_object *obj = tti->tti_u.update.tti_dt_object;
 	struct object_update_reply *reply = tti->tti_u.update.tti_update_reply;
 	int index = tti->tti_u.update.tti_update_reply_index;
-	struct lu_rdbuf	*rdbuf;
+	struct lu_rdbuf *rdbuf;
 	struct object_update_result *update_result;
-	struct out_read_reply	*orr;
+	struct out_read_reply *orr;
 	void *tmp;
 	size_t size;
 	size_t total_size = 0;
@@ -689,6 +662,7 @@ static int out_read(struct tgt_session_info *tsi)
 	unsigned int i;
 	unsigned int nbufs;
 	int rc = 0;
+
 	ENTRY;
 
 	update_result = object_update_result_get(reply, index, NULL);
@@ -698,7 +672,7 @@ static int out_read(struct tgt_session_info *tsi)
 	if (!lu_object_exists(&obj->do_lu))
 		GOTO(out, rc = -ENOENT);
 
-	tmp = object_update_param_get(update, 0, NULL);
+	tmp = object_update_param_get(update, 0, NULL, NULL, NULL);
 	if (IS_ERR(tmp)) {
 		CERROR("%s: empty size for read: rc = %ld\n",
 		       tgt_name(tsi->tsi_tgt), PTR_ERR(tmp));
@@ -706,7 +680,7 @@ static int out_read(struct tgt_session_info *tsi)
 	}
 	size = le64_to_cpu(*(size_t *)(tmp));
 
-	tmp = object_update_param_get(update, 1, NULL);
+	tmp = object_update_param_get(update, 1, NULL, NULL, NULL);
 	if (IS_ERR(tmp)) {
 		CERROR("%s: empty pos for read: rc = %ld\n",
 		       tgt_name(tsi->tsi_tgt), PTR_ERR(tmp));
@@ -886,9 +860,10 @@ static int out_tx_end(const struct lu_env *env, struct thandle_exec_args *ta,
 		      int declare_ret)
 {
 	struct tgt_session_info	*tsi = tgt_ses_info(env);
-	int			i;
-	int			rc;
-	int			rc1;
+	int i;
+	int rc;
+	int rc1;
+
 	ENTRY;
 
 	if (ta->ta_handle == NULL)
@@ -945,6 +920,9 @@ stop:
 }
 
 /**
+ * out_handle() - Object updates between Targets.
+ * @tsi: session related info
+ *
  * Object updates between Targets. Because all the updates has been
  * dis-assemblied into object updates at sender side, so OUT will
  * call OSD API directly to execute these updates.
@@ -954,29 +932,33 @@ stop:
  *
  * Please refer to lustre/include/lustre/lustre_idl.h for req/reply
  * format.
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 int out_handle(struct tgt_session_info *tsi)
 {
-	const struct lu_env		*env = tsi->tsi_env;
-	struct tgt_thread_info		*tti = tgt_th_info(env);
-	struct thandle_exec_args	*ta = &tti->tti_tea;
-	struct req_capsule		*pill = tsi->tsi_pill;
-	struct dt_device		*dt = tsi->tsi_tgt->lut_bottom;
-	struct out_update_header	*ouh;
-	struct out_update_buffer	*oub = NULL;
-	struct object_update		*update;
-	struct object_update_reply	*reply;
-	struct ptlrpc_bulk_desc		*desc = NULL;
+	const struct lu_env *env = tsi->tsi_env;
+	struct tgt_thread_info *tti = tgt_th_info(env);
+	struct thandle_exec_args *ta = &tti->tti_tea;
+	struct req_capsule *pill = tsi->tsi_pill;
+	struct dt_device *dt = tsi->tsi_tgt->lut_bottom;
+	struct out_update_header *ouh;
+	struct out_update_buffer *oub = NULL;
+	struct object_update *update;
+	struct object_update_reply *reply;
+	struct ptlrpc_bulk_desc *desc = NULL;
 	struct tg_reply_data *trd = NULL;
-	void				**update_bufs;
-	int				current_batchid = -1;
-	__u32				update_buf_count;
-	unsigned int			i;
-	unsigned int			reply_index = 0;
-	int				rc = 0;
-	int				rc1 = 0;
-	int				ouh_size, reply_size;
-	int				updates;
+	void **update_bufs;
+	int current_batchid = -1;
+	__u32 update_buf_count;
+	unsigned int i;
+	unsigned int reply_index = 0;
+	int rc = 0;
+	int rc1 = 0;
+	int ouh_size, reply_size;
+	int updates;
 	bool need_reconstruct;
 
 	ENTRY;
@@ -992,8 +974,8 @@ int out_handle(struct tgt_session_info *tsi)
 		RETURN(err_serious(-EPROTO));
 
 	if (ouh->ouh_magic != OUT_UPDATE_HEADER_MAGIC) {
-		CERROR("%s: invalid update buffer magic %x expect %x: "
-		       "rc = %d\n", tgt_name(tsi->tsi_tgt), ouh->ouh_magic,
+		CERROR("%s: invalid update buffer magic %x expect %x: rc = %d\n",
+		       tgt_name(tsi->tsi_tgt), ouh->ouh_magic,
 		       UPDATE_REQUEST_MAGIC, -EPROTO);
 		RETURN(err_serious(-EPROTO));
 	}
@@ -1064,8 +1046,7 @@ int out_handle(struct tgt_session_info *tsi)
 			lustre_swab_object_update_request(our, 0);
 
 		if (our->ourq_magic != UPDATE_REQUEST_MAGIC) {
-			CERROR("%s: invalid update buffer magic %x"
-			       " expect %x: rc = %d\n",
+			CERROR("%s: invalid update buffer magic %x expect %x: rc = %d\n",
 			       tgt_name(tsi->tsi_tgt), our->ourq_magic,
 			       UPDATE_REQUEST_MAGIC, -EPROTO);
 			GOTO(out_free, rc = err_serious(-EPROTO));
@@ -1093,7 +1074,7 @@ int out_handle(struct tgt_session_info *tsi)
 			reply_size += sizeof(struct object_update_result);
 			reply_size += update->ou_result_size;
 		}
- 	}
+	}
 	reply_size += sizeof(*reply);
 
 	if (unlikely(reply_size > ouh->ouh_reply_size)) {
@@ -1129,11 +1110,11 @@ int out_handle(struct tgt_session_info *tsi)
 
 	/* Walk through updates in the request to execute them */
 	for (i = 0; i < update_buf_count; i++) {
-		struct tgt_handler	*h;
-		struct dt_object	*dt_obj;
-		int			update_count;
+		struct tgt_handler *h;
+		struct dt_object *dt_obj;
+		int update_count;
 		struct object_update_request *our;
-		int			j;
+		int j;
 
 		our = update_bufs[i];
 		update_count = our->ourq_count;
@@ -1145,6 +1126,9 @@ int out_handle(struct tgt_session_info *tsi)
 				conf.loc_flags = LOC_F_NEW;
 			else
 				conf.loc_flags = 0;
+			CDEBUG(D_INFO, "%s: opc: 0x%x "DFID"\n",
+			       tgt_name(tsi->tsi_tgt), update->ou_type,
+			       PFID(&update->ou_fid));
 
 			dt_obj = dt_locate_at(env, dt, &update->ou_fid,
 				dt->dd_lu_dev.ld_site->ls_top_dev, &conf);

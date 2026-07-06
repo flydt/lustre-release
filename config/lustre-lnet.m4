@@ -99,7 +99,7 @@ case $with_o2ib in
 			O2IBDIR+="|/openib"
 
 			O2IBDIR_PATH=$(eval $LSPKG $O2IBPKG 2>/dev/null |
-				       egrep "${O2IBDIR}$" |
+				       grep -E "${O2IBDIR}$" |
 				       grep -v /ofed_scripts/ | head -n1)
 
 			# Nowadays, path should always be
@@ -107,11 +107,17 @@ case $with_o2ib in
 			# and we could clean all that complexity
 			# but I don't know how far we should be retro-compatible.
 
-			if test -n "$O2IBDIR_PATH"; then
-				if test -d $O2IBDIR_PATH/${target_cpu}/${LINUXRELEASE}; then
-					O2IBDIR_PATH=$O2IBDIR_PATH/${target_cpu}/${LINUXRELEASE}
+			# The steps above cannot retrieve the path in some cases
+			# (e.g mlnx-ofa_kernel-source and mlnx-ofa_kernel-dksm),
+			# so set it to a default value if it is NULL.
+			if test -z "$O2IBDIR_PATH"; then
+				O2IBDIR_PATH="/usr/src/ofa_kernel"
+			fi
+			if test -d $O2IBDIR_PATH; then
+				if test -d $O2IBDIR_PATH/$(uname -m)/${LINUXRELEASE}; then
+					O2IBDIR_PATH=$O2IBDIR_PATH/$(uname -m)/${LINUXRELEASE}
 				fi
-				EXT_O2IBPATHS=$(find $O2IBDIR_PATH -name rdma_cm.h |
+				EXT_O2IBPATHS=$(find -H $O2IBDIR_PATH -name rdma_cm.h |
 					sed -e 's/\/include\/rdma\/rdma_cm.h//')
 			fi
 
@@ -197,7 +203,7 @@ AS_IF([test $ENABLEO2IB = "no"], [
 		])
 	done
 	if ! $ext_o2ib_found; then
-		case $EXT_ENABLEO2IB in
+		case $ENABLEO2IB in
 			"withpath") AC_MSG_ERROR([bad --with-o2ib path]) ;;
 			*) 	AC_MSG_WARN([
 Auto detection of external O2IB failed. Build of external o2ib disabled.])
@@ -283,7 +289,11 @@ Auto detection of external O2IB failed. Build of external o2ib disabled.])
 			rdma_destroy_id(NULL);
 		],[
 			EXT_O2IBLND="o2iblnd"
-			EXT_O2IB_VER=$(ofed_info -n | tr . -)
+			EXT_O2IB_VER="None"
+			EXT_OFED_INFO=$(command -v ofed_info)
+			if test -n "$EXT_OFED_INFO" ; then
+				EXT_O2IB_VER=$(ofed_info -n | tr . -)
+			fi
 		],[
 			case $ENABLEO2IB in
 			"yes") AC_MSG_ERROR([cannot compile with OpenIB gen2 headers]) ;;
@@ -346,27 +356,6 @@ NOTE: --enable-multiple-lnds is needed to enable both o2iblnd drivers.
 		BUILT_IN_KO2IBLND="no"
 	fi
 
-	LB_CHECK_COMPILE([if Linux kernel has kthread_worker],
-	linux_kthread_worker, [
-		#ifdef HAVE_OFED_COMPAT_RDMA
-		#undef PACKAGE_NAME
-		#undef PACKAGE_TARNAME
-		#undef PACKAGE_VERSION
-		#undef PACKAGE_STRING
-		#undef PACKAGE_BUGREPORT
-		#undef PACKAGE_URL
-		#include <linux/compat-2.6.h>
-		#endif
-		#include <linux/kthread.h>
-	],[
-		struct kthread_work *kth_wrk = NULL;
-		flush_kthread_work(kth_wrk);
-	],[
-		AC_DEFINE(HAVE_KTHREAD_WORK, 1, [kthread_worker found])
-		if test -z "$COMPAT_AUTOCONF"; then
-			EXTRA_OFED_INCLUDE="$EXTRA_OFED_INCLUDE -DCONFIG_COMPAT_IS_KTHREAD"
-		fi
-	])
 	EXTRA_CHECK_INCLUDE=""
 ])
 AC_SUBST(EXT_O2IB_VER)
@@ -386,317 +375,6 @@ AS_IF([test $ENABLEO2IB != "no"], [
 	if test ! $EXT_O2IBPATH -ef $LINUX_OBJ; then
 		EXTERNAL_KO2IBLND="yes"
 	fi
-
-	# In RHEL 6.2, rdma_create_id() takes the queue-pair type as a fourth argument
-	AC_DEFUN([LN_SRC_O2IB_RDMA_CREATE_ID_4A], [
-		LB2_OFED_TEST_SRC([rdma_create_id_4args], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/rdma_cm.h>
-		],[
-			rdma_create_id(NULL, NULL, 0, 0);
-		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	AC_DEFUN([LN_O2IB_RDMA_CREATE_ID_4A], [
-		LB2_OFED_TEST_RESULTS(
-			['rdma_create_id' wants four args],
-			[rdma_create_id_4args],
-			[HAVE_OFED_RDMA_CREATE_ID_4ARG])
-	])
-
-	# 4.4 added network namespace parameter for rdma_create_id()
-	AC_DEFUN([LN_SRC_O2IB_RDMA_CREATE_ID_5A], [
-		LB2_OFED_TEST_SRC([rdma_create_id_5args], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/rdma_cm.h>
-		],[
-			rdma_create_id(NULL, NULL, NULL, 0, 0);
-		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	AC_DEFUN([LN_O2IB_RDMA_CREATE_ID_5A], [
-		LB2_OFED_TEST_RESULTS(
-			['rdma_create_id' wants five args],
-			[rdma_create_id_5args],
-			[HAVE_OFED_RDMA_CREATE_ID_5ARG])
-	])
-
-	# 4.2 introduced struct ib_cq_init_attr which is used
-	# by ib_create_cq(). Note some OFED stacks only keep
-	# their headers in sync with latest kernels but not
-	# the functionality which means for infiniband testing
-	# we need to always test functionality testings.
-	AC_DEFUN([LN_SRC_O2IB_IB_CQ_INIT_ATTR], [
-		LB2_OFED_TEST_SRC([ib_cq_init_attr], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/ib_verbs.h>
-		],[
-			struct ib_cq_init_attr cq_attr;
-
-			ib_create_cq(NULL, NULL, NULL, NULL, &cq_attr);
-		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	AC_DEFUN([LN_O2IB_IB_CQ_INIT_ATTR], [
-		LB2_OFED_TEST_RESULTS(
-			['struct ib_cq_init_attr' is used by ib_create_cq],
-			[ib_cq_init_attr],
-			[HAVE_OFED_IB_CQ_INIT_ATTR])
-	])
-
-	# 4.3 removed ib_alloc_fast_reg_mr()
-	AC_DEFUN([LN_SRC_O2IB_IB_ALLOC_FAST_REG_MR], [
-		LB2_OFED_TEST_SRC([ib_alloc_fast_reg_mr], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/ib_verbs.h>
-		],[
-			ib_alloc_fast_reg_mr(NULL, 0);
-		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	AC_DEFUN([LN_O2IB_IB_ALLOC_FAST_REG_MR], [
-		LB2_OFED_TEST_RESULTS(
-			['ib_alloc_fast_reg_mr' exists],
-			[ib_alloc_fast_reg_mr],
-			[HAVE_OFED_IB_ALLOC_FAST_REG_MR])
-	])
-
-	# 4.9 must stop using ib_get_dma_mr and the global MR
-	# We then have to use FMR/Fastreg for all RDMA.
-	AC_DEFUN([LN_SRC_O2IB_IB_GET_DMA_MR], [
-		LB2_OFED_TEST_SRC([ib_get_dma_mr], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/ib_verbs.h>
-		],[
-			ib_get_dma_mr(NULL, 0);
-		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	AC_DEFUN([LN_O2IB_IB_GET_DMA_MR], [
-		LB2_OFED_TEST_RESULTS(
-			['ib_get_dma_mr' exists],
-			[ib_get_dma_mr],
-			[HAVE_OFED_IB_GET_DMA_MR])
-	])
-
-	# In v4.4 Linux kernel,
-	# commit e622f2f4ad2142d2a613a57fb85f8cf737935ef5
-	# split up struct ib_send_wr so that all non-trivial verbs
-	# use their own structure which embedds struct ib_send_wr.
-	AC_DEFUN([LN_SRC_O2IB_IB_RDMA_WR], [
-		LB2_OFED_TEST_SRC([ib_rdma_wr], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/ib_verbs.h>
-		],[
-			const struct ib_rdma_wr *wr __attribute__ ((unused));
-
-			wr = rdma_wr(NULL);
-		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	AC_DEFUN([LN_O2IB_IB_RDMA_WR], [
-		LB2_OFED_TEST_RESULTS(
-			['struct ib_rdma_wr' is defined],
-			[ib_rdma_wr],
-			[HAVE_OFED_IB_RDMA_WR])
-	])
-
-	# new fast registration API introduced in 4.4
-	AC_DEFUN([LN_SRC_O2IB_IB_MAP_MR_SG_4A], [
-		LB2_OFED_TEST_SRC([ib_map_mr_sg_4args], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/ib_verbs.h>
-		],[
-			ib_map_mr_sg(NULL, NULL, 0, 0);
-		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	# new fast registration API introduced in 4.4
-	AC_DEFUN([LN_O2IB_IB_MAP_MR_SG_4A], [
-		LB2_OFED_TEST_RESULTS(
-			['ib_map_mr_sg' with 4 args exists],
-			[ib_map_mr_sg_4args],
-			[HAVE_OFED_IB_MAP_MR_SG])
-	])
-
-	# ib_map_mr_sg changes from 4 to 5 args (adding sg_offset_p)
-	# in kernel 4.7 (and RHEL 7.3)
-	AC_DEFUN([LN_SRC_O2IB_IB_MAP_MR_SG_5A], [
-		LB2_OFED_TEST_SRC([ib_map_mr_sg_5args], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/ib_verbs.h>
-		],[
-			ib_map_mr_sg(NULL, NULL, 0, NULL, 0);
-		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	AC_DEFUN([LN_O2IB_IB_MAP_MR_SG_5A], [
-		LB2_OFED_TEST_RESULTS(
-			[struct ib_reg_wr exists],
-			[ib_map_mr_sg_5args],
-			[HAVE_OFED_IB_MAP_MR_SG])
-		LB2_OFED_TEST_RESULTS(
-			['ib_map_mr_sg()' with 5 args exists],
-			[ib_map_mr_sg_5args],
-			[HAVE_OFED_IB_MAP_MR_SG_5ARGS])
-	])
-
-	# ib_query_device() removed in 4.5
-	AC_DEFUN([LN_SRC_O2IB_IB_DEVICE_ATTRS], [
-		LB2_OFED_TEST_SRC([ib_device_attrs], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/ib_verbs.h>
-		],[
-			struct ib_device dev;
-			struct ib_device_attr dev_attr = {};
-			dev.attrs = dev_attr;
-		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	AC_DEFUN([LN_O2IB_IB_DEVICE_ATTRS], [
-		LB2_OFED_TEST_RESULTS(
-			['struct ib_device' has member 'attrs'],
-			[ib_device_attrs],
-			[HAVE_OFED_IB_DEVICE_ATTRS])
-	])
-
-	# A flags argument was added to ib_alloc_pd() in Linux 4.9,
-	# commit ed082d36a7b2c27d1cda55fdfb28af18040c4a89
-	AC_DEFUN([LN_SRC_O2IB_IB_ALLOC_PD], [
-		LB2_OFED_TEST_SRC([ib_alloc_pd], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/ib_verbs.h>
-		],[
-			ib_alloc_pd(NULL, 0);
-		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	AC_DEFUN([LN_O2IB_IB_ALLOC_PD], [
-		LB2_OFED_TEST_RESULTS(
-			[2arg 'ib_alloc_pd' exists],
-			[ib_alloc_pd],
-			[HAVE_OFED_IB_ALLOC_PD_2ARGS])
-	])
-
-	AC_DEFUN([LN_SRC_O2IB_IB_INC_RKEY], [
-		LB2_OFED_TEST_SRC([ib_inc_rkey], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/ib_verbs.h>
-		],[
-			(void)ib_inc_rkey(0);
-		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	AC_DEFUN([LN_O2IB_IB_INC_RKEY], [
-		LB2_OFED_TEST_RESULTS(
-			[function 'ib_inc_rkey' is defined],
-			[ib_inc_rkey],
-			[HAVE_OFED_IB_INC_RKEY])
-	])
-
-	# In MOFED 4.6, the second and third parameters for
-	# ib_post_send() and ib_post_recv() are declared with
-	# 'const'.
-	AC_DEFUN([LN_SRC_O2IB_IB_POST_SEND_CONST], [
-		LB2_OFED_TEST_SRC([ib_post_send_recv_const], [
-			#ifdef HAVE_OFED_COMPAT_RDMA
-			#undef PACKAGE_NAME
-			#undef PACKAGE_TARNAME
-			#undef PACKAGE_VERSION
-			#undef PACKAGE_STRING
-			#undef PACKAGE_BUGREPORT
-			#undef PACKAGE_URL
-			#include <linux/compat-2.6.h>
-			#endif
-			#include <rdma/ib_verbs.h>
-		],[
-			ib_post_send(NULL, (const struct ib_send_wr *)NULL,
-				     (const struct ib_send_wr **)NULL);
-		],[-Werror],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-	])
-	AC_DEFUN([LN_O2IB_IB_POST_SEND_CONST], [
-		LB2_OFED_TEST_RESULTS(
-			['ib_post_send() and ib_post_recv()' have const parameters],
-			[ib_post_send_recv_const],
-			[HAVE_OFED_IB_POST_SEND_RECV_CONST])
-	])
 
 	# MOFED 5.5 fails with:
 	#   ERROR: "ib_dma_virt_map_sg" [.../ko2iblnd.ko] undefined!
@@ -843,50 +521,150 @@ AS_IF([test $ENABLEO2IB != "no"], [
 			[HAVE_OFED_RDMA_CONNECT_LOCKED])
 	]) # LN_O2IB_RDMA_CONNECT_LOCKED
 
+	#
+	# LN_O2IB_IBK_SG_GAPS_REG
+	#
+	# IB_DEVICE_SG_GAPS_REG was renamed to IBK_SG_GAPS_REG
+	# in Linux 5.15 commit e945c653c8e972d.
+	AC_DEFUN([LN_SRC_O2IB_IBK_SG_GAPS_REG], [
+		LB2_OFED_TEST_SRC([ibk_sg_gaps_reg], [
+			#include <rdma/ib_verbs.h>
+		],[
+			int f = IBK_SG_GAPS_REG;
+			(void)f;
+		],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
+	])
+	AC_DEFUN([LN_O2IB_IBK_SG_GAPS_REG], [
+		LB2_OFED_TEST_RESULTS(
+			['IBK_SG_GAPS_REG' exists],
+			[ibk_sg_gaps_reg],
+			[HAVE_IBK_SG_GAPS_REG])
+	]) # LN_O2IB_IBK_SG_GAPS_REG
+
 	EXTRA_CHECK_INCLUDE=""
 
 	AC_DEFUN([LN_CONFIG_O2IB_SRC], [
-		LN_SRC_O2IB_RDMA_CREATE_ID_4A
-		LN_SRC_O2IB_RDMA_CREATE_ID_5A
-		LN_SRC_O2IB_IB_CQ_INIT_ATTR
-		LN_SRC_O2IB_IB_ALLOC_FAST_REG_MR
-		LN_SRC_O2IB_IB_GET_DMA_MR
-		LN_SRC_O2IB_IB_RDMA_WR
-		LN_SRC_O2IB_IB_MAP_MR_SG_4A
-		LN_SRC_O2IB_IB_MAP_MR_SG_5A
-		LN_SRC_O2IB_IB_DEVICE_ATTRS
-		LN_SRC_O2IB_IB_ALLOC_PD
-		LN_SRC_O2IB_IB_INC_RKEY
-		LN_SRC_O2IB_IB_POST_SEND_CONST
 		LN_SRC_SANE_IB_DMA_MAP_SG
 		LN_SRC_O2IB_IB_DEVICE_OPS_EXISTS
 		LN_SRC_O2IB_IB_SG_DMA_ADDRESS_EXISTS
 		LN_SRC_O2IB_RDMA_REJECT
 		LN_SRC_O2IB_IB_FMR
 		LN_SRC_O2IB_RDMA_CONNECT_LOCKED
+		LN_SRC_O2IB_IBK_SG_GAPS_REG
 	])
 	AC_DEFUN([LN_CONFIG_O2IB_RESULTS], [
-		LN_O2IB_RDMA_CREATE_ID_4A
-		LN_O2IB_RDMA_CREATE_ID_5A
-		LN_O2IB_IB_CQ_INIT_ATTR
-		LN_O2IB_IB_ALLOC_FAST_REG_MR
-		LN_O2IB_IB_GET_DMA_MR
-		LN_O2IB_IB_RDMA_WR
-		LN_O2IB_IB_MAP_MR_SG_4A
-		LN_O2IB_IB_MAP_MR_SG_5A
-		LN_O2IB_IB_DEVICE_ATTRS
-		LN_O2IB_IB_ALLOC_PD
-		LN_O2IB_IB_INC_RKEY
-		LN_O2IB_IB_POST_SEND_CONST
 		LN_SANE_IB_DMA_MAP_SG
 		LN_O2IB_IB_DEVICE_OPS_EXISTS
 		LN_O2IB_IB_SG_DMA_ADDRESS_EXISTS
 		LN_O2IB_RDMA_REJECT
 		LN_O2IB_IB_FMR
 		LN_O2IB_RDMA_CONNECT_LOCKED
+		LN_O2IB_IBK_SG_GAPS_REG
 	])
 ]) # ENABLEO2IB != "no"
 ]) # LN_CONFIG_O2IB
+
+#
+# LN_CONFIG_EFALND
+#
+# check whether to use the EFA Network Interface lnd
+#
+AC_DEFUN([LN_CONFIG_EFALND], [
+AC_MSG_CHECKING([whether to enable EFA LND])
+AC_ARG_ENABLE([efa],
+	AS_HELP_STRING([--enable-efa=[yes|no|<path>]],
+		       [enable EFA LND]),
+	[], [enable_efa="no"])
+
+AS_CASE([$enable_efa],
+	[yes],
+	[
+		AS_IF([test x$uses_dpkg = xyes], [
+			LS_PKG="dpkg --listfiles"
+		], [
+			LS_PKG="rpm -ql"
+		])
+
+		EFA_PKG="efa"
+		EFA_HEADER="efa_verbs.h"
+		EFA_HEADER_PATH=$(eval "$LS_PKG $EFA_PKG" | grep -E "$EFA_HEADER" | head -n1)
+		AS_IF([test -n "$EFA_HEADER_PATH"], [
+			EFA_INCLUDE_PATH=$(dirname $EFA_HEADER_PATH)
+		])
+
+		KERNEL_RDMA_INCLUDE="$LINUX/include/rdma"
+		AS_IF([test -z "$EFA_INCLUDE_PATH" && test -f "$KERNEL_RDMA_INCLUDE/$EFA_HEADER"], [
+			EFA_INCLUDE_PATH=$KERNEL_RDMA_INCLUDE
+		])
+
+		AS_IF([test -z "$EFA_INCLUDE_PATH"], [
+			AC_MSG_ERROR([Could not find a supported EFA driver. For custom built driver, the path to header files can be supplied using --enable-efa=<path>.])
+		])
+
+		ENABLE_EFA="yes"
+	],
+	[no],
+	[
+		ENABLE_EFA="no"
+	],
+	[
+		EFA_INCLUDE_PATH=$enable_efa
+		ENABLE_EFA="yes"
+	])
+
+AS_IF([test $ENABLE_EFA = "no"], [
+	AC_MSG_RESULT([no])
+], [
+	AC_MSG_RESULT([yes])
+
+	# Check mandatory kernel definitions
+
+	LB_CHECK_COMPILE([if 'ib_device_get_by_name' exists],
+	ib_device_get_by_name, [
+		#include <rdma/ib_verbs.h>
+	],[
+		ib_device_get_by_name(NULL, 0);
+	],[],[
+		AC_MSG_ERROR([EFA LND is not supported with this Linux kerenel])
+	])
+
+	LB_CHECK_COMPILE([if 'RDMA_DRIVER_EFA' exists],
+	rdma_driver_efa, [
+		#include <rdma/ib_verbs.h>
+	],[
+		int x = RDMA_DRIVER_EFA;
+	],[],[
+		AC_MSG_ERROR([EFA LND is not supported with this Linux kerenel])
+	])
+
+	LB_CHECK_COMPILE([if ib_device 'kverbs_provider' flag exists],
+	rdma_driver_efa, [
+		#include <rdma/ib_verbs.h>
+	],[
+		struct ib_device dev = {
+			.kverbs_provider = 0,
+		};
+	],[],[
+		AC_MSG_ERROR([EFA LND is not supported with this Linux kerenel])
+	])
+
+	# Check optional kernel definitions
+
+	LB_CHECK_COMPILE([if 'ibdev_to_node' exists],
+	ibdev_to_node, [
+		#include <rdma/ib_verbs.h>
+	],[
+		ibdev_to_node(NULL);
+	],[
+		AC_DEFINE(HAVE_IBDEV_TO_NODE, 1,
+			[ibdev_to_node() is defined])
+	])
+
+	EFALND="efalnd"
+	AC_SUBST(EFALND)
+	AC_SUBST(EFA_INCLUDE_PATH)
+])
+]) # LN_CONFIG_EFALND
 
 #
 # LN_CONFIG_GNILND
@@ -945,6 +723,7 @@ AS_IF([test "x$enable_gni" = xyes], [
 	])
 	EXTRA_KCFLAGS="$EXTRA_KCFLAGS_save"
 
+	AC_DEFINE(HAVE_GNILND, 1, [support gemini LND])
 	AC_SUBST(ENABLE_GNI, yes)
 ], [
 	AC_SUBST(ENABLE_GNI, no)
@@ -1000,204 +779,24 @@ AC_ARG_WITH([kfi],
 			AC_DEFINE(HAVE_KFI_CXI_DOM_OPS, 1,
 				[kfi_cxi domain ops are available])
 		])
+		LB_CHECK_COMPILE([if KFI_SGL IOV type is supported],
+		KFABRIC_KFI_SGL, [
+			#include <kfabric.h>
+			#include <kfi_rma.h>
+		],[
+			struct kfi_msg_rma rma = {
+				.type = KFI_SGL,
+			};
+		],[
+			AC_DEFINE(HAVE_KFI_SGL, 1,
+				  [KFI_SGL IOV type is supported])
+		])
 	],[])
 AC_DEFINE(HAVE_KFILND, 1, [support kfabric LND])
 AC_SUBST(KFICPPFLAGS)
 AC_SUBST(KFILND)
 AC_SUBST(EXTRA_SYMBOLS)
 ]) # LN_CONFIG_KFILND
-
-#
-# LN_CONFIG_SOCK_CREATE_KERN
-#
-# 4.x sock_create_kern() added a first parameter as 'struct net *'
-# instead of int.
-#
-AC_DEFUN([LN_SRC_CONFIG_SOCK_CREATE_KERN], [
-	LB2_LINUX_TEST_SRC([sock_create_kern_net], [
-		#include <linux/net.h>
-		#include <net/net_namespace.h>
-	],[
-		sock_create_kern((struct net*)0, 0, 0, 0, NULL);
-	],[-Werror])
-])
-AC_DEFUN([LN_CONFIG_SOCK_CREATE_KERN], [
-	LB2_MSG_LINUX_TEST_RESULT([if 'sock_create_kern' first parameter is net],
-	[sock_create_kern_net], [
-		AC_DEFINE(HAVE_SOCK_CREATE_KERN_USE_NET, 1,
-			[sock_create_kern use net as first parameter])
-	])
-]) # LN_CONFIG_SOCK_CREATE_KERN
-
-#
-# LN_CONFIG_SOCK_INUSE_ADD
-#
-# Linux v5.17-rc1-gd477eb900484 added helper function sock_inuse_add()
-# for socket statistics.
-#
-AC_DEFUN([LN_SRC_CONFIG_SOCK_INUSE_ADD], [
-	LB2_LINUX_TEST_SRC([sock_inuse_add], [
-		#include <net/sock.h>
-	],[
-		sock_inuse_add((struct net*)0, 0);
-	],[-Werror])
-])
-AC_DEFUN([LN_CONFIG_SOCK_INUSE_ADD], [
-	LB2_MSG_LINUX_TEST_RESULT([if 'sock_inuse_add()' is available],
-	[sock_inuse_add], [
-		AC_DEFINE(HAVE_SOCK_INUSE_ADD, 1,
-			[sock_inuse_add() is available])
-	])
-]) # LN_CONFIG_SOCK_INUSE_ADD
-
-#
-# LN_CONFIG_SOCK_NOT_OWNED_BY_ME
-#
-# Linux upstream v6.11-rc3-g151c9c724d05d5b0d changes TCP socket orphan
-# cleanup, requiring a change in ksocklnd if present. This has been back-ported
-# to 4.* and 5.* Linux distributions.
-#
-AC_DEFUN([LN_SRC_CONFIG_SOCK_NOT_OWNED_BY_ME], [
-	LB2_LINUX_TEST_SRC([sock_not_owned_by_me], [
-		#include <net/sock.h>
-	],[
-		sock_not_owned_by_me((const struct sock *)0);
-	],[-Werror])
-])
-AC_DEFUN([LN_CONFIG_SOCK_NOT_OWNED_BY_ME], [
-	LB2_MSG_LINUX_TEST_RESULT([if Linux kernel has 'sock_not_owned_by_me'],
-	[sock_not_owned_by_me], [
-		AC_DEFINE(HAVE_SOCK_NOT_OWNED_BY_ME, 1,
-			[sock_not_owned_by_me is defined in sock.h])
-	])
-]) # LN_CONFIG_SOCK_NOT_OWNED_BY_ME
-
-#
-# LN_CONFIG_SK_DATA_READY
-#
-# 3.15 for struct sock the *sk_data_ready() field only takes one argument now
-#
-AC_DEFUN([LN_SRC_CONFIG_SK_DATA_READY], [
-	LB2_LINUX_TEST_SRC([sk_data_ready], [
-		#include <linux/net.h>
-		#include <net/sock.h>
-	],[
-		((struct sock *)0)->sk_data_ready(NULL);
-	],[-Werror])
-])
-AC_DEFUN([LN_CONFIG_SK_DATA_READY], [
-	LB2_MSG_LINUX_TEST_RESULT([if 'sk_data_ready' takes only one argument],
-	[sk_data_ready], [
-	AC_DEFINE(HAVE_SK_DATA_READY_ONE_ARG, 1,
-		[sk_data_ready uses only one argument])
-	])
-]) # LN_CONFIG_SK_DATA_READY
-
-#
-# LN_ETHTOOL_LINK_SETTINGS
-#
-# ethtool_link_settings was added in Linux 4.6
-#
-AC_DEFUN([LN_SRC_ETHTOOL_LINK_SETTINGS], [
-	LB2_LINUX_TEST_SRC([ethtool_link_settings], [
-		#include <linux/ethtool.h>
-	],[
-		struct ethtool_link_ksettings cmd;
-	],[],[$EXTRA_OFED_CONFIG $EXTRA_OFED_INCLUDE])
-])
-AC_DEFUN([LN_ETHTOOL_LINK_SETTINGS], [
-	LB2_MSG_LINUX_TEST_RESULT([if 'ethtool_link_settings' exists],
-	[ethtool_link_settings], [
-		AC_DEFINE(HAVE_ETHTOOL_LINK_SETTINGS, 1,
-			[ethtool_link_settings is defined])
-	])
-]) # LN_ETHTOOL_LINK_SETTINGS
-
-#
-# LN_HAVE_HYPERVISOR_IS_TYPE
-#
-# 4.14 commit 79cc74155218316b9a5d28577c7077b2adba8e58
-# x86/paravirt: Provide a way to check for hypervisors
-#
-AC_DEFUN([LN_SRC_HAVE_HYPERVISOR_IS_TYPE], [
-	LB2_LINUX_TEST_SRC([hypervisor_is_type_exists], [
-		#include <asm/hypervisor.h>
-	],[
-		(void)hypervisor_is_type(X86_HYPER_NATIVE);
-	],[-Werror])
-])
-AC_DEFUN([LN_HAVE_HYPERVISOR_IS_TYPE], [
-	LB2_MSG_LINUX_TEST_RESULT([if hypervisor_is_type function is available],
-	[hypervisor_is_type_exists], [
-		AC_DEFINE(HAVE_HYPERVISOR_IS_TYPE, 1,
-			[hypervisor_is_type function exists])
-	])
-]) # LN_HAVE_HYPERVISOR_IS_TYPE
-
-#
-# LN_HAVE_ORACLE_OFED_EXTENSIONS
-#
-# Oracle UEK 5
-#
-AC_DEFUN([LN_SRC_HAVE_ORACLE_OFED_EXTENSIONS], [
-	LB2_LINUX_TEST_SRC([oracle_ofed_ext], [
-		#include <rdma/ib_fmr_pool.h>
-	],[
-		struct ib_fmr_pool_param param = {
-			.relaxed           = 0
-		};
-		(void)param;
-	])
-])
-AC_DEFUN([LN_HAVE_ORACLE_OFED_EXTENSIONS], [
-	LB2_MSG_LINUX_TEST_RESULT([if Oracle OFED Extensions are enabled],
-	[oracle_ofed_ext], [
-		AC_DEFINE(HAVE_ORACLE_OFED_EXTENSIONS, 1,
-			[if Oracle OFED Extensions are enabled])
-	])
-]) # LN_HAVE_ORACLE_OFED_EXTENSIONS
-
-#
-# LN_SRC_HAVE_NETDEV_CMD_TO_NAME
-#
-# 4.16-rc6 commit ede2762d93ff16e0974f7446516b46b1022db213
-# created netdev_cmd_to_name() to map NETDEV events to char names
-#
-AC_DEFUN([LN_SRC_HAVE_NETDEV_CMD_TO_NAME], [
-	LB2_LINUX_TEST_SRC([netdev_cmd_to_name], [
-		#include <linux/netdevice.h>
-	],[
-		netdev_cmd_to_name(NETDEV_UP);
-	],[-Werror])
-])
-AC_DEFUN([LN_HAVE_NETDEV_CMD_TO_NAME], [
-	LB2_MSG_LINUX_TEST_RESULT([if 'netdev_cmd_to_name' exist],
-	[netdev_cmd_to_name], [
-		AC_DEFINE(HAVE_NETDEV_CMD_TO_NAME, 1,
-			['netdev_cmd_to_name' is present])
-	])
-]) # LN_SRC_HAVE_NETDEV_CMD_TO_NAME
-
-#
-# LN_CONFIG_SOCK_GETNAME
-#
-# 4.17 commit 9b2c45d479d0fb8647c9e83359df69162b5fbe5f getname()
-# does not take the length *int argument and returns the length
-#
-AC_DEFUN([LN_SRC_CONFIG_SOCK_GETNAME], [
-	LB2_LINUX_TEST_SRC([kern_sock_getname_2args], [
-		#include <linux/net.h>
-	],[
-		kernel_getsockname(NULL, NULL);
-	],[-Werror])
-])
-AC_DEFUN([LN_CONFIG_SOCK_GETNAME], [
-	LB2_MSG_LINUX_TEST_RESULT([if 'getname' has two args],
-	[kern_sock_getname_2args], [
-		AC_DEFINE(HAVE_KERN_SOCK_GETNAME_2ARGS, 1,
-			['getname' has two args])
-	])
-]) # LN_CONFIG_SOCK_GETNAME
 
 #
 # LN_HAVE_IN_DEV_FOR_EACH_IFA_RTNL
@@ -1227,64 +826,149 @@ AC_DEFUN([LN_HAVE_IN_DEV_FOR_EACH_IFA_RTNL], [
 ]) # LN_HAVE_IN_DEV_FOR_EACH_IFA_RTNL
 
 #
-# LN_USR_RDMA
+# LN_CONFIG_SOCK_INUSE_ADD
 #
+# Linux v5.17-rc1-gd477eb900484 added helper function sock_inuse_add()
+# for socket statistics.
 #
-AC_DEFUN([LN_USR_RDMA], [
-AC_MSG_CHECKING([if RDMA_PS_TCP exists])
-AC_COMPILE_IFELSE([AC_LANG_SOURCE([
-	#include <rdma/rdma_user_cm.h>
-
-	int main(void) {
-		int x = (int)RDMA_PS_TCP;
-		return x;
-	}
-])],[
-	AC_DEFINE(HAVE_USRSPC_RDMA_PS_TCP, 1,
-		[RDMA_PS_TCP exists])
+AC_DEFUN([LN_SRC_CONFIG_SOCK_INUSE_ADD], [
+	LB2_LINUX_TEST_SRC([sock_inuse_add], [
+		#include <net/sock.h>
+	],[
+		sock_inuse_add((struct net*)0, 0);
+	],[-Werror])
 ])
-]) # LN_USR_RDMA
+AC_DEFUN([LN_CONFIG_SOCK_INUSE_ADD], [
+	LB2_MSG_LINUX_TEST_RESULT([if 'sock_inuse_add()' is available],
+	[sock_inuse_add], [
+		AC_DEFINE(HAVE_SOCK_INUSE_ADD, 1,
+			[sock_inuse_add() is available])
+	])
+]) # LN_CONFIG_SOCK_INUSE_ADD
+
+#
+# LN_CONFIG_SOCK_NOT_OWNED_BY_ME
+#
+# Linux upstream v6.11-rc3-g151c9c724d05d5b0d changes TCP socket orphan
+# cleanup, requiring a change in ksocklnd if present. This has been back-ported
+# to 4.* and 5.* Linux distributions.
+#
+# Kernel 6.8 commit 151c9c724d05 added sock_not_owned_by_me()
+#
+AC_DEFUN([LN_SRC_CONFIG_SOCK_NOT_OWNED_BY_ME], [
+	LB2_LINUX_TEST_SRC([sock_not_owned_by_me], [
+		#include <net/sock.h>
+	],[
+		sock_not_owned_by_me((const struct sock *)0);
+	],[-Werror])
+])
+AC_DEFUN([LN_CONFIG_SOCK_NOT_OWNED_BY_ME], [
+	LB2_MSG_LINUX_TEST_RESULT([if Linux kernel has 'sock_not_owned_by_me'],
+	[sock_not_owned_by_me], [
+		AC_DEFINE(HAVE_SOCK_NOT_OWNED_BY_ME, 1,
+			[sock_not_owned_by_me is defined in sock.h])
+	])
+]) # LN_CONFIG_SOCK_NOT_OWNED_BY_ME
+
+#
+# LN_SRC_HAVE_NETDEV_LOCK_OPS
+#
+# netdev_lock_ops() added in v6.14-rc4-1113-gd4c22ec680 to lock ethtool changes
+#
+AC_DEFUN([LN_SRC_HAVE_NETDEV_LOCK_OPS], [
+	LB2_LINUX_TEST_SRC([netdev_lock_ops], [
+		#include <net/netdev_lock.h>
+	],[
+		netdev_lock_ops(NULL);
+	],[-Werror])
+])
+AC_DEFUN([LN_HAVE_NETDEV_LOCK_OPS], [
+	LB2_MSG_LINUX_TEST_RESULT([if 'netdev_lock_ops' exist],
+	[netdev_lock_ops], [
+		AC_DEFINE(HAVE_NETDEV_LOCK_OPS, 1,
+			['netdev_lock_ops' is present])
+	])
+]) # LN_SRC_HAVE_NETDEV_LOCK_OPS
+
+#
+# LN_CONFIG_SENDPAGE_OK
+#
+# kernel commit v5.9-rc6-325-gc381b07941 added sendpage_ok() helper
+# check if sendpage_ok() is available
+#
+AC_DEFUN([LN_SRC_CONFIG_SENDPAGE_OK], [
+	LB2_LINUX_TEST_SRC([sendpage_ok], [
+		#include <linux/net.h>
+	],[
+		struct page *page = NULL;
+		(void)sendpage_ok(page);
+	],[-Werror])
+])
+AC_DEFUN([LN_CONFIG_SENDPAGE_OK], [
+	LB2_MSG_LINUX_TEST_RESULT([if sendpage_ok() is available],
+	[sendpage_ok], [
+		AC_DEFINE(HAVE_SENDPAGE_OK, 1,
+			[sendpage_ok() is available])
+	])
+]) # LN_CONFIG_SENDPAGE_OK
+
+#
+## LN_HAVE_STRUCT_SOCKADDR_UNSIZED
+#
+# Linux commit v6.18-rc3-603-gbf33247a90d3e
+#   net: Add struct sockaddr_unsized for sockaddr of unknown length
+#
+AC_DEFUN([LN_SRC_HAVE_STRUCT_SOCKADDR_UNSIZED],[
+	LB2_LINUX_TEST_SRC([struct_sockaddr_unsized], [
+		#include <linux/socket.h>
+		#include <linux/net.h>
+	],[
+		struct sockaddr_unsized *addr = NULL;
+
+		(void)kernel_bind(NULL, addr, 0);
+	],[-Werror])
+])
+AC_DEFUN([LN_HAVE_STRUCT_SOCKADDR_UNSIZED],[
+	LB2_MSG_LINUX_TEST_RESULT([if struct sockaddr_unsized exists],
+	[struct_sockaddr_unsized], [
+		AC_DEFINE(HAVE_STRUCT_SOCKADDR_UNSIZED, 1,
+			  [struct sockaddr_unsized exists])
+	], [
+		AC_DEFINE([sockaddr_unsized], [sockaddr],
+			  [struct sockaddr_unsized does not exist])
+	])
+]) # LN_HAVE_STRUCT_SOCKADDR_UNSIZED
 
 AC_DEFUN([LN_PROG_LINUX_SRC], [
 	LN_CONFIG_O2IB_SRC
-	# 3.15
-	LN_SRC_CONFIG_SK_DATA_READY
-	# 4.x
-	LN_SRC_CONFIG_SOCK_CREATE_KERN
-	LN_SRC_CONFIG_SOCK_INUSE_ADD
-	LN_SRC_CONFIG_SOCK_NOT_OWNED_BY_ME
-	# 4.6
-	LN_SRC_ETHTOOL_LINK_SETTINGS
-	# 4.14
-	LN_SRC_HAVE_HYPERVISOR_IS_TYPE
-	LN_SRC_HAVE_ORACLE_OFED_EXTENSIONS
-	# 4.16
-	LN_SRC_HAVE_NETDEV_CMD_TO_NAME
-	# 4.17
-	LN_SRC_CONFIG_SOCK_GETNAME
 	# 5.3 and 4.18.0-193.el8
 	LN_SRC_HAVE_IN_DEV_FOR_EACH_IFA_RTNL
+	# 5.9
+	LN_SRC_CONFIG_SENDPAGE_OK
+	# 5.17
+	LN_SRC_CONFIG_SOCK_INUSE_ADD
+	# 6.8
+	LN_SRC_CONFIG_SOCK_NOT_OWNED_BY_ME
+	# 6.15
+	LN_SRC_HAVE_NETDEV_LOCK_OPS
+	# 6.19
+	LN_SRC_HAVE_STRUCT_SOCKADDR_UNSIZED
 ])
 
 AC_DEFUN([LN_PROG_LINUX_RESULTS], [
 	LN_CONFIG_O2IB_RESULTS
-	# 3.15
-	LN_CONFIG_SK_DATA_READY
-	# 4.x
-	LN_CONFIG_SOCK_CREATE_KERN
-	LN_CONFIG_SOCK_INUSE_ADD
-	LN_CONFIG_SOCK_NOT_OWNED_BY_ME
-	# 4.6
-	LN_ETHTOOL_LINK_SETTINGS
-	# 4.14
-	LN_HAVE_HYPERVISOR_IS_TYPE
-	LN_HAVE_ORACLE_OFED_EXTENSIONS
-	# 4.16
-	LN_HAVE_NETDEV_CMD_TO_NAME
-	# 4.17
-	LN_CONFIG_SOCK_GETNAME
 	# 5.3 and 4.18.0-193.el8
 	LN_HAVE_IN_DEV_FOR_EACH_IFA_RTNL
+	# 5.9
+	LN_CONFIG_SENDPAGE_OK
+	# 5.17
+	LN_CONFIG_SOCK_INUSE_ADD
+	# 6.8
+	LN_CONFIG_SOCK_NOT_OWNED_BY_ME
+	# 6.15
+	LN_HAVE_NETDEV_LOCK_OPS
+	# 6.19
+	LN_HAVE_STRUCT_SOCKADDR_UNSIZED
 ])
 
 #
@@ -1298,6 +982,7 @@ AC_MSG_NOTICE([LNet kernel checks
 
 LN_CONFIG_BACKOFF
 LN_CONFIG_O2IB
+LN_CONFIG_EFALND
 LN_CONFIG_GNILND
 LN_CONFIG_KFILND
 ]) # LN_PROG_LINUX
@@ -1321,13 +1006,13 @@ AC_MSG_NOTICE([LNet core checks
 
 AC_ARG_WITH([cuda],
 	AS_HELP_STRING([--with-cuda=path],
-			[Path to the CUDA sources. Set to 'no' to disable.]),
+			[Path to the CUDA sources.]),
 			[cudapath="$withval"],
 			[cudapath1=`ls -d1 /usr/src/nvidia-*/nvidia/ 2>/dev/null | tail -1`])
 
 AC_ARG_WITH([gds],
 	AS_HELP_STRING([--with-gds=path],
-			[Path to the GDS sources. Set to 'no' to disable.]),
+			[Path to the GDS sources.]),
 			[gdspath="$withval"],
 			[gdspath1=`ls -d1 /usr/src/nvidia-fs*/ 2>/dev/null | tail -1`])
 
@@ -1365,7 +1050,7 @@ AS_IF([test -e "${cudapath}" && test -e "${gdspath}"],[
 			AC_MSG_RESULT([GDS path is ${gdspath}])
 			[GDS_PATH=${gdspath}]
 			AC_SUBST(GDS_PATH)
-			AC_DEFINE(WITH_GDS, 1, "GDS build enabled")
+			AC_DEFINE(WITH_EXTERNAL_GDS_HEADER, 1, "GDS build enabled")
 		], [
 		    AC_MSG_RESULT([GDS sources not found: config-host.h does not exist])
         ])
@@ -1373,7 +1058,7 @@ AS_IF([test -e "${cudapath}" && test -e "${gdspath}"],[
 		AC_MSG_RESULT([GDS sources not found: nvfs-dma.h does not exist])
     ])
 ],[
-	AC_MSG_WARN([CUDA or GDS sources not found. GDS support disabled])
+	AC_MSG_WARN([CUDA or GDS sources not found. Using embedded GDS headers.])
 ])
 
 # lnet/utils/lnetconfig/liblnetconfig_netlink.c
@@ -1395,24 +1080,6 @@ AC_CHECK_LIB([nl-3], [nla_get_s64], [
 		[libnl3 supports nla_get_s64])
 	], [
 ])
-
-#
-# LN_USR_NLMSGERR
-#
-AC_DEFUN([LN_USR_NLMSGERR], [
-AC_MSG_CHECKING([if 'enum nlmsgerr_attrs' exists])
-AC_COMPILE_IFELSE([AC_LANG_SOURCE([
-	#include <linux/netlink.h>
-
-	int main(void) {
-		int x = (int)NLMSGERR_ATTR_MAX;
-		return x;
-	}
-])],[
-	AC_DEFINE(HAVE_USRSPC_NLMSGERR, 1,
-		['enum nlmsgerr_attrs' exists])
-])
-]) # LN_USR_NLMGSERR
 
 # lnet/utils/portals.c
 AC_CHECK_HEADERS([netdb.h])
@@ -1441,8 +1108,6 @@ AS_IF([test "$enable_efence" = yes], [
 AC_SUBST(LIBEFENCE)
 
 LN_CONFIG_DLC
-LN_USR_RDMA
-LN_USR_NLMSGERR
 ]) # LN_CONFIGURE
 
 #
@@ -1453,6 +1118,7 @@ LN_USR_NLMSGERR
 AC_DEFUN([LN_CONDITIONALS], [
 AM_CONDITIONAL(EXTERNAL_KO2IBLND,  test x$EXTERNAL_KO2IBLND = "xyes")
 AM_CONDITIONAL(BUILT_IN_KO2IBLND,  test x$BUILT_IN_KO2IBLND = "xyes")
+AM_CONDITIONAL(BUILD_EFALND,	   test x$EFALND = "xefalnd")
 AM_CONDITIONAL(BUILD_GNILND,       test x$GNILND  = "xgnilnd")
 AM_CONDITIONAL(BUILD_KFILND,       test x$KFILND  = "xkfilnd")
 ]) # LN_CONDITIONALS
@@ -1464,28 +1130,6 @@ AM_CONDITIONAL(BUILD_KFILND,       test x$KFILND  = "xkfilnd")
 #
 AC_DEFUN([LN_CONFIG_FILES], [
 AC_CONFIG_FILES([
-lnet/Makefile
-lnet/autoMakefile
-lnet/doc/Makefile
-lnet/include/Makefile
-lnet/include/lnet/Makefile
-lnet/include/uapi/linux/lnet/Makefile
-lnet/klnds/Makefile
-lnet/klnds/autoMakefile
-lnet/klnds/o2iblnd/Makefile
-lnet/klnds/o2iblnd/autoMakefile
-lnet/klnds/in-kernel-o2iblnd/Makefile
-lnet/klnds/in-kernel-o2iblnd/autoMakefile
-lnet/klnds/gnilnd/Makefile
-lnet/klnds/gnilnd/autoMakefile
-lnet/klnds/socklnd/Makefile
-lnet/klnds/socklnd/autoMakefile
-lnet/klnds/kfilnd/Makefile
-lnet/klnds/kfilnd/autoMakefile
-lnet/lnet/Makefile
-lnet/lnet/autoMakefile
-lnet/selftest/Makefile
-lnet/selftest/autoMakefile
 lnet/utils/Makefile
 lnet/utils/lnetconfig/Makefile
 ])

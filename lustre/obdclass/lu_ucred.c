@@ -19,7 +19,6 @@
 
 #define DEBUG_SUBSYSTEM S_CLASS
 
-#include <libcfs/libcfs.h>
 #include <obd_support.h>
 #include <lu_object.h>
 #include <md_object.h>
@@ -34,8 +33,10 @@ static struct lu_context_key lu_ucred_key = {
 };
 
 /**
- * Get ucred key if session exists and ucred key is allocated on it.
- * Return NULL otherwise.
+ * lu_ucred() - Get ucred key if session exists and allocated
+ * @env: current lustre environment
+ *
+ * Returns valid lu_ucred struct(UID, GID) on success or NULL on failure
  */
 struct lu_ucred *lu_ucred(const struct lu_env *env)
 {
@@ -46,8 +47,10 @@ struct lu_ucred *lu_ucred(const struct lu_env *env)
 EXPORT_SYMBOL(lu_ucred);
 
 /**
- * Get ucred key and check if it is properly initialized.
- * Return NULL otherwise.
+ * lu_ucred_check() - Get ucred key and check if it is properly initialized.
+ * @env: current lustre environment
+ *
+ * Returns valid lu_ucred struct(UID, GID) on success or NULL on failure
  */
 struct lu_ucred *lu_ucred_check(const struct lu_env *env)
 {
@@ -59,8 +62,13 @@ struct lu_ucred *lu_ucred_check(const struct lu_env *env)
 EXPORT_SYMBOL(lu_ucred_check);
 
 /**
+ * lu_ucred_assert() - Get ucred (user credentials) key
+ * @env: current lustre environment
+ *
  * Get ucred key, which must exist and must be properly initialized.
  * Assert otherwise.
+ *
+ * Returns valid lu_ucred struct(UID, GID) on success
  */
 struct lu_ucred *lu_ucred_assert(const struct lu_env *env)
 {

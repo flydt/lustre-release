@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 #
 # Run select tests by setting ONLY, or as arguments to the script.
 # Skip specific tests by setting EXCEPT.
@@ -56,10 +56,13 @@ fi
 
 if [[ -r /etc/redhat-release ]]; then
 	rhel_version=$(sed -e 's/[^0-9.]*//g' /etc/redhat-release)
-	if (( $(version_code $rhel_version) >= $(version_code 9.3.0) )); then
+	if (( $(version_code $rhel_version) >= $(version_code 9.7.0) )); then
+		always_except LU-19430 6 7b 35 102
+	elif (( $(version_code $rhel_version) >= $(version_code 9.3.0) )); then
 		always_except LU-17289 102          # fio io_uring
 		always_except LU-17781 33	    # inconsistent LSOM
 	elif (( $(version_code $rhel_version) >= $(version_code 8.9.0) )); then
+		always_except EX-8739 6 7a 7b 23 35 # PCC-RW
 		always_except LU-17781 33	    # inconsistent LSOM
 	fi
 fi
@@ -3807,6 +3810,9 @@ test_48() {
 	local file=$DIR/$tfile
 	local -a lpcc_path
 
+	$LCTL get_param -n mdc.*.connect_flags | grep -q pcc_ro ||
+		skip "Server does not support PCC-RO"
+
 	setup_loopdev client $loopfile $mntpt 60
 	mkdir $hsm_root || error "mkdir $hsm_root failed"
 	setup_pcc_mapping client \
@@ -4217,6 +4223,9 @@ test_99b() {
 	local hsm_root="$mntpt/$tdir"
 	local file=$DIR/$tfile
 	local cnt=50
+
+	$LCTL get_param -n mdc.*.connect_flags | grep -q pcc_ro ||
+		skip "Server does not support PCC-RO"
 
 	setup_loopdev $SINGLEAGT $loopfile $mntpt 200
 	do_facet $SINGLEAGT mkdir $hsm_root || error "mkdir $hsm_root failed"

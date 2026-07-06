@@ -56,6 +56,16 @@ extern struct kset *ldlm_svc_kset;
 #define LDLM_DEFAULT_LRU_SHRINK_BATCH (16)
 #define LDLM_DEFAULT_SLV_RECALC_PCT (10)
 
+/* Min threshold. Only locks with score greater than this thresh could to be
+ * promoted to LFRU priv list.
+ */
+#define LDLM_LFRU_MIN_PRIV_THRESH (1)
+#define LDLM_LFRU_PRIV_LIST_RATIO_LIMIT (30)
+#define LDLM_LFRU_PRIV_PER_ROUND_LIMIT (10)
+#define LDLM_LFRU_UPDATE_WINDOW_DIV (10)
+/* An arbitrary cap for the LFRU score to prevent integer overflow. */
+#define LDLM_LFRU_PRIV_THRESH_CAP (254)
+
 /**
  * LDLM non-error return states
  */
@@ -323,13 +333,10 @@ enum ldlm_appetite {
 	LDLM_NAMESPACE_MODEST = BIT(1),
 };
 
-/**
- * Default values for the "max_nolock_size", "contention_time" and
- * "contended_locks" namespace tunables.
- */
-#define NS_DEFAULT_MAX_NOLOCK_BYTES 0
-#define NS_DEFAULT_CONTENTION_SECONDS 2
-#define NS_DEFAULT_CONTENDED_LOCKS 32
+/* Default lock contention detection window */
+#define NS_DEFAULT_CONTENTION_SECONDS 4
+#define NS_DEFAULT_CONTENTION_HOLD_SECONDS 30
+#define NS_DEFAULT_CONTENDED_LOCKS    16
 
 struct ldlm_ns_bucket {
 	/** back pointer to namespace */
@@ -351,6 +358,8 @@ struct ldlm_ns_bucket {
 enum {
 	/** LDLM namespace lock stats */
 	LDLM_NSS_LOCKS          = 0,
+	LDLM_NSS_LRU_PRIV_HITS	= 1,
+	LDLM_NSS_LRU_HITS	= 2,
 	LDLM_NSS_LAST
 };
 
@@ -381,6 +390,33 @@ enum ldlm_namespace_flags {
 	 /* lru_size is set even before connection */
 	LDLM_NS_LRU_SIZE_SET_BEFORE_CONN,
 	LDLM_NS_NUM_FLAGS
+};
+
+/* lock cache policy used on client side */
+enum ldlm_lock_cache_policy {
+	LDLM_LOCK_CACHE_LRU = 0,
+	LDLM_LOCK_CACHE_LFRU,
+};
+
+struct ldlm_lock_cache_ops {
+	/* Prereq: hold ns->ns_lock */
+	void (*llco_add_lock)(struct ldlm_namespace *ns,
+			      struct ldlm_lock *lock);
+	/* Prereq: hold ns->ns_lock */
+	int (*llco_remove_lock)(struct ldlm_namespace *ns,
+				struct ldlm_lock *lock);
+	/**
+	 *  (optional) demote lock from priv list to normal list.
+	 *  Prereq: hold ns->ns_lock
+	 */
+	void (*llco_demote_lock)(struct ldlm_namespace *ns,
+				 struct ldlm_lock *lock);
+	/**
+	 * (optional) try to demote @batch_size locks.
+	 * Prereq: hold ns->ns_lock
+	 */
+	int (*llco_try_batch_demote_locks)(struct ldlm_namespace *ns,
+					   int batch_size);
 };
 
 /*
@@ -451,10 +487,31 @@ struct ldlm_namespace {
 	 * to release from the head of this list.
 	 * Locks are linked via l_lru field in \see struct ldlm_lock.
 	 */
-	struct list_head	ns_unused_list;
-	/** Number of locks in the LRU list above */
-	int			ns_nr_unused;
+	struct list_head	ns_unused_normal_list;
 	struct list_head	*ns_last_pos;
+	/**
+	 * Implements a Least-Frequently/Recently-Used (LFRU) policy.
+	 * This scheme separates locks into a privileged list and a normal
+	 * list, promoting frequently accessed locks to the privileged list.
+	 * See https://arxiv.org/abs/1702.04078 for details.
+	 *
+	 * Scan-resistant behavior:
+	 * When running `ls -l $dir` on a large directory, the algorithm
+	 * limits cache pollution through dynamic threshold adjustment:
+	 * - Starting threshold: 1
+	 * - Lock scores are incremented on each LRU insertion
+	 * - Example: scores 3, 3, 4, 4, 4, ...
+	 *   * First lock (score=3 > threshold=1) → promoted, threshold → 3
+	 *   * Second lock (score=4 > threshold=3) → promoted, threshold → 4
+	 *   * Remaining locks (score≤4) → stay in normal list
+	 * Result: Only ~2 items promoted during the scan, minimal impact on
+	 * cache performance for frequently-used locks.
+	 */
+	struct list_head	ns_unused_priv_list;
+
+	/** Number of locks in both the normal and priv list */
+	unsigned int		ns_nr_unused;
+	unsigned int		ns_nr_priv;
 
 	/**
 	 * Maximum number of locks permitted in the LRU. If 0, means locks
@@ -462,6 +519,37 @@ struct ldlm_namespace {
 	 * controlled by available memory on this client and on server.
 	 */
 	unsigned int		ns_max_unused;
+	/**
+	 * Tracks the number of accesses in the current window. When it reaches
+	 * `ns_lfru_check_window_size`, we update the privilege threshold
+	 * based on the maximum access frequency observed in this window.
+	 */
+	unsigned int		ns_lfru_access_window_cnt;
+	unsigned int		ns_lfru_check_window_size;
+	/**
+	 * The threshold for promoting locks into the privileged list.
+	 */
+	__u8			ns_lfru_priv_score_threshold;
+	/**
+	 * The maximum access frequency observed for any lock within the
+	 * current window.
+	 * This is used to determine the threshold for promoting locks to
+	 * the privilege list.
+	 */
+	__u8			ns_lfru_max_freq;
+	/**
+	 * A cap on the proportion of privileged locks in the LRU list. The
+	 * value is a fraction of 256, allowing for fast bitwise right shift
+	 * instead of a slower division operation.
+	 */
+	__u8			ns_lfru_priv_ratio_limit_256;
+
+	enum ldlm_lock_cache_policy ns_lock_cache_policy : 3;
+	/**
+	 * LRU cache operations for this namespace.
+	 * \see struct ldlm_lock_cache_ops
+	 */
+	struct ldlm_lock_cache_ops *ns_lock_cache_ops;
 
 	/**
 	 * Cancel batch, if unused lock count exceed lru_size
@@ -529,26 +617,38 @@ struct ldlm_namespace {
 	/** Definition of how eagerly unused locks will be released from LRU */
 	enum ldlm_appetite	ns_appetite;
 
-	/**
-	 * If more than \a ns_contended_locks are found, the resource is
-	 * considered to be contended. Lock enqueues might specify that no
-	 * contended locks should be granted
+	/*
+	 * If more than \a ns_contended_locks contention events occur in the
+	 * ns_contention_seconds interval, a resource is considered to be
+	 * contended. We inform the client of this so it can potentially change
+	 * its behavior.
 	 */
 	unsigned int		ns_contended_locks;
 
-	/**
-	 * The resources in this namespace remember contended state during
-	 * \a ns_contention_time, in seconds.
+	/*
+	 * Time window (in seconds) for detecting lock contention.
+	 * Power-of-2 values use the optimized rolling counter path.
+	 * If more than \a ns_contended_locks contention events occur within
+	 * this time window, the resource is flagged as contended.
 	 */
-	timeout_t		ns_contention_time;
+	unsigned int		ns_contention_seconds;
 
-	/**
-	 * Limit size of contended extent locks, in bytes.
-	 * If extended lock is requested for more then this many bytes and
-	 * caller instructs us not to grant contended locks, we would disregard
-	 * such a request.
+	/*
+	 * Count of conflicting lock requests observed while a resource in this
+	 * namespace is in the contended state (see ldlm_update_contention()).
 	 */
-	unsigned int		ns_max_nolock_size;
+	atomic_t		ns_contention_events;
+
+	/*
+	 * Contention state hold duration (in seconds).
+	 * Once a resource is flagged as contended, it remains in the contended
+	 * state for this duration, even if contention events drop below the
+	 * threshold. This prevents rapid state oscillation and provides stable
+	 * feedback to clients about resource contention patterns.
+	 */
+	u8			ns_contention_hold_seconds;
+
+	/* u8			ns_contention_unused_padding[3]; */
 
 	/** Limit of parallel AST RPC count. */
 	unsigned int		ns_max_parallel_ast;
@@ -696,7 +796,7 @@ struct ldlm_interval_tree {
 	/** Tree size. */
 	int				lit_size;
 	enum ldlm_mode			lit_mode;  /* lock mode */
-	struct interval_tree_root	lit_root; /* actual interval tree */
+	struct rb_root_cached	lit_root; /* actual interval tree */
 };
 
 /**
@@ -715,7 +815,7 @@ struct ldlm_ibits_node {
 struct ldlm_flock_node {
 	atomic_t		lfn_unlock_pending;
 	bool			lfn_needs_reprocess;
-	struct interval_tree_root lfn_root;
+	struct rb_root_cached	lfn_root;
 };
 
 /** Whether to track references to exports by LDLM locks. */
@@ -763,6 +863,11 @@ enum lvb_type {
  * LDLM_GID_ANY is used to match any group id in ldlm_lock_match().
  */
 #define LDLM_GID_ANY  ((__u64)-1)
+
+enum lru_list_type {
+	LRU_NORMAL_LIST = 0,
+	LRU_PRIV = 1,
+};
 
 /**
  * LDLM lock structure
@@ -863,7 +968,14 @@ struct ldlm_lock {
 
 	/* content type for lock value block */
 	enum lvb_type		l_lvb_type:3;
-	/* unsigned int		l_unused_bits:10; */
+	/* which list the lock is in */
+	enum lru_list_type	l_lru_type:1;
+	/* unsigned int		l_unused_bits:1; */
+	/**
+	 * Recent access frequency score used in the LFRU algorithm.
+	 * Increased when lock is added to LRU list.
+	 */
+	u8			l_lru_score;
 	u16			l_lvb_len;
 	/* u16			l_unused; */
 
@@ -1028,22 +1140,12 @@ enum ldlm_match_flags {
 	LDLM_MATCH_SKIP_UNUSED = BIT(5),
 };
 
-#ifdef HAVE_INTERVAL_TREE_CACHED
 #define extent_last(tree) rb_entry_safe(rb_last(&tree->lit_root.rb_root),\
 					struct ldlm_lock, l_rb)
 #define extent_first(tree) rb_entry_safe(rb_first(&tree->lit_root.rb_root),\
 					 struct ldlm_lock, l_rb)
 #define extent_top(tree) rb_entry_safe(tree->lit_root.rb_root.rb_node,	\
 				       struct ldlm_lock, l_rb)
-#else
-#define extent_last(tree) rb_entry_safe(rb_last(&tree->lit_root),	\
-					struct ldlm_lock, l_rb)
-#define extent_first(tree) rb_entry_safe(rb_first(&tree->lit_root),	\
-					 struct ldlm_lock, l_rb)
-#define extent_top(tree) rb_entry_safe(tree->lit_root.rb_node,		\
-				       struct ldlm_lock, l_rb)
-#endif
-
 #define extent_next(lock) rb_entry_safe(rb_next(&lock->l_rb),		\
 					struct ldlm_lock, l_rb)
 #define extent_prev(lock) rb_entry_safe(rb_prev(&lock->l_rb),		\
@@ -1131,8 +1233,12 @@ struct ldlm_resource {
 	};
 
 	union {
-		 /* resource considered as contended, used only on server side*/
-		time64_t	lr_contention_time;
+		/**
+		 * Store infomation about lock contention of this resource
+		 * by using fixed time-based sliding windows to account the
+		 * rating of lock contention events.
+		 */
+		struct obd_counter_instance	lr_contention_hist;
 		/**
 		 * Associated inode, used only on client side.
 		 */
@@ -1310,11 +1416,7 @@ struct ldlm_flock_info {
 	struct file_lock	fa_flc; /* lock copy */
 	enum ldlm_flock_flags	fa_flags;
 	enum ldlm_mode		fa_mode;
-#ifdef HAVE_LM_GRANT_2ARGS
 	int (*fa_notify)(struct file_lock *, int);
-#else
-	int (*fa_notify)(struct file_lock *, struct file_lock *, int);
-#endif
 	int			fa_err;
 	int			fa_ready;
 	wait_queue_head_t       fa_waitq;
@@ -1481,7 +1583,7 @@ struct ldlm_callback_suite {
 };
 
 /* ldlm_lockd.c */
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 /** \defgroup ldlm_srv_ast Server AST handlers
  * These are AST handlers used by server code.
  * Their property is that they are just preparing RPCs to be sent to clients.
@@ -1525,7 +1627,7 @@ void ldlm_destroy_export(struct obd_export *exp);
 struct ldlm_lock *ldlm_request_lock(struct ptlrpc_request *req);
 
 /* ldlm_lock.c */
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 ldlm_processing_policy ldlm_get_processing_policy(struct ldlm_resource *res);
 ldlm_reprocessing_policy
 ldlm_get_reprocessing_policy(struct ldlm_resource *res);
@@ -1538,6 +1640,7 @@ struct ldlm_lock *__ldlm_handle2lock(const struct lustre_handle *lh,
 void ldlm_cancel_callback(struct ldlm_lock *ll);
 int ldlm_lock_remove_from_lru(struct ldlm_lock *ll);
 int ldlm_lock_set_data(const struct lustre_handle *lockh, void *data);
+struct ldlm_lock *ldlm_lock_new_testing(struct ldlm_resource *resource);
 
 /**
  * Obtain a lock reference by its handle.

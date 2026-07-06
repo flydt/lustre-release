@@ -242,6 +242,10 @@ int mdt_getxattr(struct mdt_thread_info *info)
 	if (reqbody == NULL)
 		RETURN(err_serious(-EFAULT));
 
+	rc = mdt_check_resource_ids(info, info->mti_object);
+	if (unlikely(rc))
+		RETURN(err_serious(rc));
+
 	rc = mdt_init_ucred(info, reqbody);
 	if (rc)
 		RETURN(err_serious(rc));
@@ -337,9 +341,8 @@ int mdt_dir_layout_update(struct mdt_thread_info *info)
 	 * permission or capability checks
 	 */
 	if (!uc->uc_rbac_dne_ops ||
-	    (!cap_raised(uc->uc_cap, CAP_SYS_ADMIN) &&
-	     uc->uc_gid != mdt->mdt_enable_remote_dir_gid &&
-	     mdt->mdt_enable_remote_dir_gid != -1))
+	    mdt_enable_gid_deny(uc, CAP_SYS_ADMIN,
+				mdt->mdt_enable_remote_dir_gid))
 		RETURN(-EPERM);
 
 	obj = mdt_object_find(env, mdt, rr->rr_fid1);
@@ -593,9 +596,8 @@ int mdt_reint_setxattr(struct mdt_thread_info *info,
 		struct mdt_device *mdt = info->mti_mdt;
 		struct lu_ucred *uc = mdt_ucred(info);
 
-		if (!cap_raised(uc->uc_cap, CAP_SYS_RESOURCE) &&
-		    !lustre_in_group_p(uc, mdt->mdt_enable_pin_gid) &&
-		    !(mdt->mdt_enable_pin_gid == -1))
+		if (mdt_enable_gid_deny(uc, CAP_SYS_RESOURCE,
+					mdt->mdt_enable_pin_gid))
 			GOTO(out, rc = -EPERM);
 
 		xattr_name = XATTR_NAME_PIN;
@@ -616,6 +618,10 @@ int mdt_reint_setxattr(struct mdt_thread_info *info,
 	obj = mdt_object_find_lock(info, rr->rr_fid1, lh, lockpart, LCK_EX);
 	if (IS_ERR(obj))
 		GOTO(out, rc = PTR_ERR(obj));
+
+	rc = mdt_check_resource_ids(info, obj);
+	if (unlikely(rc))
+		GOTO(out_unlock, rc);
 
 	tgt_vbr_obj_set(env, mdt_obj2dt(obj));
 	rc = mdt_version_get_check_save(info, obj, 0);

@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
@@ -116,6 +96,8 @@ static struct nss_module g_nss_modules[NSS_MODULES_MAX_NR];
  */
 
 static char *progname;
+static char *mdtname;
+static int stderr_valid;
 
 static void usage(void)
 {
@@ -132,7 +114,7 @@ static void errlog(const char *fmt, ...)
 {
 	va_list args;
 
-	openlog(progname, LOG_PERROR | LOG_PID, LOG_AUTHPRIV);
+	openlog(progname, LOG_PID | stderr_valid, LOG_AUTHPRIV);
 
 	va_start(args, fmt);
 	vsyslog(LOG_WARNING, fmt, args);
@@ -438,8 +420,10 @@ static int get_groups_nss(struct identity_downcall_data *data,
 
 	pw = getpwuid_nss(data->idd_uid);
 	if (pw == NULL) {
-		data->idd_err = errno ? errno : EIDRM;
-		errlog("no such user %u\n", data->idd_uid);
+		data->idd_err = errno ? -errno : -EIDRM;
+		/* This error is checked in sanity-sec test_5 */
+		errlog("%s: no such user %u\n", mdtname ?: "unknown",
+		       data->idd_uid);
 		return -1;
 	}
 
@@ -481,8 +465,10 @@ int get_groups_local(struct identity_downcall_data *data,
 
 	pw = getpwuid(data->idd_uid);
 	if (!pw) {
-		errlog("no such user %u\n", data->idd_uid);
-		data->idd_err = errno ? errno : EIDRM;
+		/* This error is checked in sanity-sec test_5 */
+		errlog("%s: no such user %u\n", mdtname ?: "unknown",
+		       data->idd_uid);
+		data->idd_err = errno ? -errno : -EIDRM;
 		return -1;
 	}
 
@@ -496,8 +482,8 @@ int get_groups_local(struct identity_downcall_data *data,
 	 */
 	groups_tmp = malloc(maxgroups * sizeof(gid_t));
 	if (!groups_tmp) {
-		data->idd_err = errno ? errno : ENOMEM;
-		errlog("malloc error=%u\n", data->idd_err);
+		data->idd_err = errno ? -errno : -ENOMEM;
+		errlog("malloc error=%u\n", -data->idd_err);
 		return -1;
 	}
 
@@ -505,9 +491,9 @@ int get_groups_local(struct identity_downcall_data *data,
 	if (getgrouplist(pw->pw_name, pw->pw_gid, groups_tmp, &ngroups_tmp) <
 	    0) {
 		free(groups_tmp);
-		data->idd_err = errno ? errno : EIDRM;
+		data->idd_err = errno ? -errno : -EIDRM;
 		errlog("getgrouplist() error for uid %u: error=%u\n",
-		       data->idd_uid, data->idd_err);
+		       data->idd_uid, -data->idd_err);
 		return -1;
 	}
 
@@ -866,7 +852,7 @@ int get_perms(struct identity_downcall_data *data, struct timeval *start)
 			return 0;
 		errlog("open %s failed: %s\n",
 		       PERM_PATHNAME, strerror(errno));
-		data->idd_err = errno;
+		data->idd_err = -errno;
 		return -1;
 	}
 
@@ -878,7 +864,7 @@ int get_perms(struct identity_downcall_data *data, struct timeval *start)
 			continue;
 		if (parse_perm_line(data, line, sizeof(line))) {
 			errlog("parse line %s failed!\n", line);
-			data->idd_err = EINVAL;
+			data->idd_err = -EINVAL;
 			fclose(fp);
 			return -1;
 		}
@@ -894,7 +880,7 @@ static void show_result(struct identity_downcall_data *data)
 
 	if (data->idd_err) {
 		errlog("failed to get identity for uid %d: %s\n",
-		       data->idd_uid, strerror(data->idd_err));
+		       data->idd_uid, strerror(-data->idd_err));
 		return;
 	}
 
@@ -929,13 +915,19 @@ int main(int argc, char **argv)
 	int fd, rc = -EINVAL, size, maxgroups;
 	bool alreadyfailed = false;
 
+	/* Cleanup errno after calling isatty() */
+	stderr_valid = isatty(STDERR_FILENO) ? LOG_PERROR : 0;
+	errno = 0;
+
 	progname = basename(argv[0]);
 	if (argc != 3) {
 		usage();
 		goto out_no_nss;
 	}
 
-	errno = 0;
+	if (strcmp(argv[1], "-d") != 0 && !getenv("L_GETIDENTITY_TEST"))
+		mdtname = argv[1];
+
 	uid = strtoul(argv[2], &end, 0);
 	if (*end != '\0' || end == argv[2] || errno != 0) {
 		errlog("%s: invalid uid '%s'\n", progname, argv[2]);
@@ -988,13 +980,13 @@ retry:
 
 	gettimeofday(&idgot, NULL);
 downcall:
-	if (strcmp(argv[1], "-d") == 0 || getenv("L_GETIDENTITY_TEST")) {
+	if (!mdtname) {
 		show_result(data);
 		rc = 0;
 		goto out;
 	}
 
-	rc = cfs_get_param_paths(&path, "mdt/%s/identity_info", argv[1]);
+	rc = cfs_get_param_paths(&path, "mdt/%s/identity_info", mdtname);
 	if (rc != 0) {
 		rc = -errno;
 		goto out;

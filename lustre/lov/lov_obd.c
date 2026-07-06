@@ -17,7 +17,6 @@
  */
 
 #define DEBUG_SUBSYSTEM S_LOV
-#include <libcfs/libcfs.h>
 
 #include <cl_object.h>
 #include <lustre_dlm.h>
@@ -126,7 +125,7 @@ static int lov_connect_osc(struct obd_device *obd, u32 index, int activate,
 	imp = tgt_obd->u.cli.cl_import;
 
 	if (activate) {
-		tgt_obd->obd_no_recov = 0;
+		clear_bit(OBDF_NO_RECOV, tgt_obd->obd_flags);
 		/* FIXME this is probably supposed to be
 		   ptlrpc_set_import_active.  Horrible naming. */
 		ptlrpc_activate_import(imp, false);
@@ -139,7 +138,7 @@ static int lov_connect_osc(struct obd_device *obd, u32 index, int activate,
 		RETURN(rc);
 	}
 
-	if (imp->imp_invalid) {
+	if (test_bit(IMPF_INVALID, imp->imp_flags)) {
 		CDEBUG(D_CONFIG, "%s: not connecting - administratively disabled\n",
 		       obd_uuid2str(tgt_uuid));
 		RETURN(0);
@@ -263,9 +262,18 @@ static int lov_disconnect_obd(struct obd_device *obd, struct lov_tgt_desc *tgt)
 		 * XXX This should be an argument to disconnect,
 		 * XXX not a back-door flag on the OBD.  Ah well.
 		 */
-		osc_obd->obd_force = obd->obd_force;
-		osc_obd->obd_fail = obd->obd_fail;
-		osc_obd->obd_no_recov = obd->obd_no_recov;
+		if (test_bit(OBDF_FORCE, obd->obd_flags))
+			set_bit(OBDF_FORCE, osc_obd->obd_flags);
+		else
+			clear_bit(OBDF_FORCE, osc_obd->obd_flags);
+		if (test_bit(OBDF_FAIL, obd->obd_flags))
+			set_bit(OBDF_FAIL, osc_obd->obd_flags);
+		else
+			clear_bit(OBDF_FAIL, osc_obd->obd_flags);
+		if (test_bit(OBDF_NO_RECOV, obd->obd_flags))
+			set_bit(OBDF_NO_RECOV, osc_obd->obd_flags);
+		else
+			clear_bit(OBDF_NO_RECOV, osc_obd->obd_flags);
 	}
 
 	obd_register_observer(osc_obd, NULL);
@@ -717,7 +725,7 @@ int lov_setup(struct obd_device *obd, struct lustre_cfg *lcfg)
 	init_rwsem(&lov->lov_notify_lock);
 
 	INIT_LIST_HEAD(&lov->lov_pool_list);
-        lov->lov_pool_count = 0;
+	lov->lov_pool_count = 0;
 	rc = lov_pool_hash_init(&lov->lov_pools_hash_body);
 	if (rc < 0) {
 		lu_tgt_descs_fini(ltd);
@@ -745,7 +753,7 @@ out:
 	return rc;
 }
 
-static int lov_cleanup(struct obd_device *obd)
+int lov_cleanup(struct obd_device *obd)
 {
 	struct lu_tgt_descs *ltd = &obd->u.lov.lov_ost_descs;
 	struct lov_obd *lov = &obd->u.lov;
@@ -909,6 +917,49 @@ out_rqset:
 	RETURN(rc);
 }
 
+/**
+ * lov_fid2path() - retrieve corresponding MDT FID from given OST FID
+ * @lov: Pointer to struct lov_obd
+ * @len: length of @karg
+ * @karg: pointer to struct getinfo_fid2path{}, carrying the OST FID
+ *        as the input, and the MDT FID as the output
+ * @uarg: User space pointer [out]
+ *
+ * Note: the OST index is retrieved from upper layer's u.gf_root_fid
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
+ */
+static int lov_fid2path(struct lov_obd *lov, int len, void *karg,
+			void __user *uarg)
+{
+	struct lov_tgt_desc *tgt = NULL;
+	struct getinfo_fid2path *gf;
+	u32 ost_idx;
+	int rc;
+
+	gf = karg;
+	ost_idx = gf->gf_u.gf_root_fid->f_oid;
+	if (!fid_is_sane(&gf->gf_fid))
+		RETURN(-EINVAL);
+
+	tgt = lov_tgt(lov, ost_idx);
+	if (!tgt) {
+		CDEBUG(D_IOCTL, DFID" retrieve tgt failed, idx:%u\n",
+		       PFID(&gf->gf_fid), ost_idx);
+		RETURN(-EIO);
+	}
+
+	rc = obd_iocontrol(OBD_IOC_FID2PATH, tgt->ltd_exp, len, gf, uarg);
+	if (rc)
+		CDEBUG(D_IOCTL, "%s: err consult "DFID" on OST: rc=%d\n",
+		       tgt->ltd_exp->exp_obd->obd_name,
+		       PFID(&gf->gf_fid), rc);
+
+	RETURN(rc);
+}
+
 static int lov_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 			 void *karg, void __user *uarg)
 {
@@ -1043,6 +1094,10 @@ static int lov_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 		OBD_FREE_PTR(oqctl);
 		break;
 	}
+	case OBD_IOC_FID2PATH: {
+		rc = lov_fid2path(lov, len, karg, uarg);
+		break;
+	}
 	default: {
 		int set = 0;
 
@@ -1059,10 +1114,13 @@ static int lov_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 
 			/* ll_umount_begin() sets force on lov, pass to osc */
 			osc_obd = class_exp2obd(tgt->ltd_exp);
-			if (osc_obd)
-				osc_obd->obd_force = obd->obd_force;
-			err = obd_iocontrol(cmd, tgt->ltd_exp,
-					    len, karg, uarg);
+			if (osc_obd) {
+				if (test_bit(OBDF_FORCE, obd->obd_flags))
+					set_bit(OBDF_FORCE, osc_obd->obd_flags);
+				else
+					clear_bit(OBDF_FORCE, osc_obd->obd_flags);
+			}
+			err = obd_iocontrol(cmd, tgt->ltd_exp, len, karg, uarg);
 			if (err) {
 				if (tgt->ltd_active) {
 					OBD_IOC_DEBUG(err == -ENOTTY ?
@@ -1112,10 +1170,12 @@ static int lov_get_info(const struct lu_env *env, struct obd_export *exp,
 		*((u32 *)val) = lov_mds_md_size(def_stripe_count, LOV_MAGIC_V3);
 	} else if (KEY_IS(KEY_TGT_COUNT)) {
 		*((int *)val) = ld->ld_tgt_count;
-	} else if (KEY_IS(KEY_MAX_PAGES_PER_RPC)) {
+	} else if (KEY_IS(KEY_MAX_PAGES_PER_RPC_READ) ||
+		   KEY_IS(KEY_MAX_PAGES_PER_RPC_WRITE)) {
 		struct lov_tgt_desc *tgt;
 		struct client_obd *cli;
 		struct obd_import *imp;
+		u32 max_ppr;
 		u32 result = 0;
 
 		lov_foreach_tgt(&obd->u.lov, tgt) {
@@ -1129,11 +1189,14 @@ static int lov_get_info(const struct lu_env *env, struct obd_export *exp,
 			if (imp == NULL || imp->imp_state != LUSTRE_IMP_FULL)
 				continue;
 
+			max_ppr = KEY_IS(KEY_MAX_PAGES_PER_RPC_READ) ?
+					cli->cl_max_pages_per_rpc_read :
+					cli->cl_max_pages_per_rpc_write;
+
 			if (result == 0)
-				result = cli->cl_max_pages_per_rpc;
+				result = max_ppr;
 			else
-				result = min_t(u32, cli->cl_max_pages_per_rpc,
-					       result);
+				result = min_t(u32, result, max_ppr);
 		}
 
 		*((u32 *)val) = result;
@@ -1314,8 +1377,6 @@ static int lov_quotactl(struct obd_device *obd, struct obd_export *exp,
 
 static const struct obd_ops lov_obd_ops = {
 	.o_owner		= THIS_MODULE,
-	.o_setup		= lov_setup,
-	.o_cleanup		= lov_cleanup,
 	.o_connect		= lov_connect,
 	.o_disconnect		= lov_disconnect,
 	.o_statfs		= lov_statfs,
@@ -1380,5 +1441,5 @@ MODULE_DESCRIPTION("Lustre Logical Object Volume");
 MODULE_VERSION(LUSTRE_VERSION_STRING);
 MODULE_LICENSE("GPL");
 
-module_init(lov_init);
+late_initcall_sync(lov_init);
 module_exit(lov_exit);

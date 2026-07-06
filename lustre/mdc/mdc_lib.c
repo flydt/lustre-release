@@ -21,11 +21,10 @@
 #include <cl_object.h>
 #include "mdc_internal.h"
 
-/*
+/**
  * set_mrc_cr_flags() - Move @flags into high(most significant bits (cr_flags_h)
- *			and low(least significant bits (cr_flags_l)) field under
- *			reint record
- *
+ *                      and low(least significant bits (cr_flags_l)) field under
+ *                      reint record
  * @mrc: instance of mdt_reint_rec
  * @flags: open flags passed from client
  */
@@ -80,16 +79,15 @@ void mdc_pack_body(struct req_capsule *pill, const struct lu_fid *fid,
 }
 
 /**
- * Pack a name (path component) into a request
+ * mdc_pack_name() - Pack a name (path component) into a request
+ * @pill: request pill
+ * @field: request field (usually RMF_NAME)
+ * @name: path component
+ * @name_len: length of path component
  *
- * \param[in]	pill		request pill
- * \param[in]	field		request field (usually RMF_NAME)
- * \param[in]	name		path component
- * \param[in]	name_len	length of path component
+ * @field must be present in @req and of size @name_len + 1.
  *
- * \a field must be present in \a req and of size \a name_len + 1.
- *
- * \a name must be '\0' terminated of length \a name_len and represent
+ * @name must be '\0' terminated of length @name_len and represent
  * a single path component (not contain '/').
  */
 static void mdc_pack_name(struct req_capsule *pill,
@@ -233,6 +231,7 @@ void mdc_create_pack(struct req_capsule *pill, struct md_op_data *op_data,
 	set_mrc_cr_flags(rec, flags);
 	rec->cr_bias     = op_data->op_bias;
 	rec->cr_umask    = current_umask();
+	rec->cr_layout_ver = op_data->op_layout_version;
 
 	mdc_pack_name(pill, &RMF_NAME, op_data->op_name, op_data->op_namelen);
 	if (data) {
@@ -332,6 +331,8 @@ void mdc_open_pack(struct req_capsule *pill, struct md_op_data *op_data,
 
 		/* pack SELinux policy info if any */
 		mdc_file_sepol_pack(pill, sepol);
+
+		rec->cr_layout_ver = op_data->op_layout_version;
 	}
 
 	if (lmm) {
@@ -378,7 +379,7 @@ static inline enum mds_attr_flags mdc_attr_pack(unsigned int ia_valid,
 		sa_valid |=  MDS_ATTR_KILL_SUID;
 	if (ia_valid & ATTR_KILL_SGID)
 		sa_valid |= MDS_ATTR_KILL_SGID;
-	if (ia_xvalid & OP_XVALID_CTIME_SET)
+	if (ia_valid & ATTR_CTIME_SET)
 		sa_valid |= MDS_ATTR_CTIME_SET;
 	if (ia_valid & ATTR_OPEN)
 		sa_valid |= MDS_ATTR_FROM_OPEN;
@@ -644,7 +645,7 @@ void mdc_getattr_pack(struct req_capsule *pill, __u64 valid, __u32 flags,
 	b->mbo_valid = valid;
 	if (op_data->op_bias & MDS_CROSS_REF)
 		b->mbo_valid |= OBD_MD_FLCROSSREF;
-	if (op_data->op_bias & MDS_FID_OP)
+	if (op_data->op_bias & MDS_NAMEHASH)
 		b->mbo_valid |= OBD_MD_NAMEHASH;
 	b->mbo_eadatasize = ea_size;
 	b->mbo_flags = flags;

@@ -27,20 +27,13 @@
 #include "mdc_internal.h"
 
 
-/*
- * -- Changelog delivery through character device --
- */
+/* -- Changelog delivery through character device -- */
 
-/**
- * Mutex to protect chlg_registered_devices below
- */
+/* Mutex to protect chlg_registered_devices below */
 static DEFINE_MUTEX(chlg_registered_dev_lock);
 
-/**
- * Global linked list of all registered devices (one per MDT).
- */
+/* Global linked list of all registered devices (one per MDT). */
 static LIST_HEAD(chlg_registered_devices);
-
 
 struct chlg_registered_dev {
 	/* Device name of the form "changelog-{MDTNAME}" */
@@ -82,6 +75,8 @@ struct chlg_reader_state {
 	unsigned int		    crs_last_catidx;
 	unsigned int		    crs_last_idx;
 	unsigned int		    crs_flags;
+	/* Changelog filter mask (0 = off by default ) */
+	__u64			    crs_user_mask;
 };
 
 struct chlg_rec_entry {
@@ -135,9 +130,7 @@ static void chlg_device_release(struct device *dev)
 	OBD_FREE_PTR(entry);
 }
 
-/**
- * Deregister a changelog character device whose refcount has reached zero.
- */
+/* Deregister a changelog character device whose refcount has reached zero. */
 static void chlg_dev_clear(struct kref *kref)
 {
 	struct chlg_registered_dev *entry;
@@ -152,13 +145,15 @@ static void chlg_dev_clear(struct kref *kref)
 	EXIT;
 }
 
-static inline struct obd_device* chlg_obd_get(struct chlg_registered_dev *dev)
+static inline struct obd_device *chlg_obd_get(struct chlg_registered_dev *dev)
 {
 	struct obd_device *obd;
 
 	mutex_lock(&chlg_registered_dev_lock);
-	if (list_empty(&dev->ced_obds))
+	if (list_empty(&dev->ced_obds)) {
+		mutex_unlock(&chlg_registered_dev_lock);
 		return NULL;
+	}
 
 	obd = list_first_entry(&dev->ced_obds, struct obd_device,
 			       u.cli.cl_chg_dev_linkage);
@@ -174,16 +169,17 @@ static inline void chlg_obd_put(struct chlg_registered_dev *dev,
 }
 
 /**
+ * chlg_read_cat_process_cb() - Changelog catalog processing callback
+ * @env: (unused)
+ * @llh: Client-side handle used to identify the llog
+ * @hdr: Header of the current llog record
+ * @data: chlg_reader_state passed from caller [in,out]
+ *
  * ChangeLog catalog processing callback invoked on each record.
  * If the current record is eligible to userland delivery, push
  * it into the crs_rec_queue where the consumer code will fetch it.
  *
- * @param[in]     env  (unused)
- * @param[in]     llh  Client-side handle used to identify the llog
- * @param[in]     hdr  Header of the current llog record
- * @param[in,out] data chlg_reader_state passed from caller
- *
- * @return 0 or LLOG_PROC_* control code on success, negated error on failure.
+ * Return %0 or LLOG_PROC_* control code on success, %negated error on failure.
  */
 static int chlg_read_cat_process_cb(const struct lu_env *env,
 				    struct llog_handle *llh,
@@ -194,6 +190,7 @@ static int chlg_read_cat_process_cb(const struct lu_env *env,
 	struct chlg_rec_entry *enq;
 	size_t len;
 	int rc;
+
 	ENTRY;
 
 	LASSERT(crs != NULL);
@@ -219,6 +216,11 @@ static int chlg_read_cat_process_cb(const struct lu_env *env,
 
 	/* Skip undesired records */
 	if (rec->cr.cr_index < crs->crs_start_offset)
+		RETURN(0);
+
+	/* Check if this record type matches the user's mask */
+	if (crs->crs_user_mask &&
+	    !(crs->crs_user_mask & BIT(rec->cr.cr_type)))
 		RETURN(0);
 
 	CDEBUG(D_HSM, "%llu %02d%-5s %llu 0x%x t="DFID" p="DFID" %.*s\n",
@@ -254,9 +256,7 @@ static int chlg_read_cat_process_cb(const struct lu_env *env,
 	RETURN(0);
 }
 
-/**
- * Remove record from the list it is attached to and free it.
- */
+/* Remove record from the list it is attached to and free it. */
 static void enq_record_delete(struct chlg_rec_entry *rec)
 {
 	list_del(&rec->enq_linkage);
@@ -264,11 +264,11 @@ static void enq_record_delete(struct chlg_rec_entry *rec)
 }
 
 /**
- * Record prefetch thread entry point. Opens the changelog catalog and starts
- * reading records.
+ * chlg_load() - Record prefetch thread entry point. Opens the changelog catalog
+ *               and starts reading records.
+ * @args: chlg_reader_state passed from caller. [in,out]
  *
- * @param[in,out]  args  chlg_reader_state passed from caller.
- * @return 0 on success, negated error code on failure.
+ * Return %0 on success, %negated error code on failure.
  */
 static int chlg_load(void *args)
 {
@@ -384,16 +384,17 @@ out:
 }
 
 /**
+ * chlg_read() - Read Handler
+ * @file: File pointer to the character device.
+ * @buff: Userland buffer where to copy the records. [out]
+ * @count: Userland buffer size.
+ * @ppos: File position, updated with index number of next record to read. [out]
+ *
  * Read handler, dequeues records from the chlg_reader_state if any.
  * No partial records are copied to userland so this function can return less
  * data than required (short read).
  *
- * @param[in]   file   File pointer to the character device.
- * @param[out]  buff   Userland buffer where to copy the records.
- * @param[in]   count  Userland buffer size.
- * @param[out]  ppos   File position, updated with the index number of the next
- *		       record to read.
- * @return number of copied bytes on success, negated error code on failure.
+ * Return number of copied bytes on success, %negated error code on failure.
  */
 static ssize_t chlg_read(struct file *file, char __user *buff, size_t count,
 			 loff_t *ppos)
@@ -404,6 +405,7 @@ static ssize_t chlg_read(struct file *file, char __user *buff, size_t count,
 	size_t written_total = 0;
 	ssize_t rc;
 	LIST_HEAD(consumed);
+
 	ENTRY;
 
 	if (file->f_flags & O_NONBLOCK && crs->crs_rec_count == 0) {
@@ -458,11 +460,13 @@ static ssize_t chlg_read(struct file *file, char __user *buff, size_t count,
 }
 
 /**
+ * chlg_set_start_offset() - Jump to a given record index.
+ * @crs: Internal reader state. [in,out]
+ * @offset: Desired offset (index record).
+ *
  * Jump to a given record index. Helper for chlg_llseek().
  *
- * @param[in,out]  crs     Internal reader state.
- * @param[in]      offset  Desired offset (index record).
- * @return 0 on success, negated error code on failure.
+ * Return 0 on success, negated error code on failure.
  */
 static int chlg_set_start_offset(struct chlg_reader_state *crs, __u64 offset)
 {
@@ -492,12 +496,13 @@ static int chlg_set_start_offset(struct chlg_reader_state *crs, __u64 offset)
 }
 
 /**
- * Move read pointer to a certain record index, encoded as an offset.
+ * chlg_llseek() - Move read pointer to a certain record index, encoded as an
+ *                 offset.
+ * @file: File pointer to the changelog character device [in, out]
+ * @off: Offset to skip, actually a record index, not byte count
+ * @whence: Relative/Absolute interpretation of the offset
  *
- * @param[in,out] file   File pointer to the changelog character device
- * @param[in]	  off    Offset to skip, actually a record index, not byte count
- * @param[in]	  whence Relative/Absolute interpretation of the offset
- * @return the resulting position on success or negated error code on failure.
+ * Return the resulting position on success or %negated error code on failure.
  */
 static loff_t chlg_llseek(struct file *file, loff_t off, int whence)
 {
@@ -530,12 +535,12 @@ static loff_t chlg_llseek(struct file *file, loff_t off, int whence)
 }
 
 /**
- * Clear record range for a given changelog reader.
+ * chlg_clear() - Clear record range for a given changelog reader.
+ * @crs: Current internal state.
+ * @reader: Changelog reader ID (cl1, cl2...)
+ * @record: Record index up which to clear
  *
- * @param[in]  crs     Current internal state.
- * @param[in]  reader  Changelog reader ID (cl1, cl2...)
- * @param[in]  record  Record index up which to clear
- * @return 0 on success, negated error code on failure.
+ * Return %0 on success, %negated error code on failure.
  */
 static int chlg_clear(struct chlg_reader_state *crs, __u32 reader, __u64 record)
 {
@@ -562,14 +567,16 @@ static int chlg_clear(struct chlg_reader_state *crs, __u32 reader, __u64 record)
 #define CHLG_CONTROL_CMD_MAX	64
 
 /**
+ * chlg_write() - Handle writes into the changelog character device.
+ * @file:  File pointer to the changelog character device
+ * @buff:  User supplied data (written data)
+ * @count: Number of written bytes
+ * @off:   (unused)
+ *
  * Handle writes() into the changelog character device. Write() can be used
  * to request special control operations.
  *
- * @param[in]  file  File pointer to the changelog character device
- * @param[in]  buff  User supplied data (written data)
- * @param[in]  count Number of written bytes
- * @param[in]  off   (unused)
- * @return number of written bytes on success, negated error code on failure.
+ * Return number of written bytes on success, negated error code on failure.
  */
 static ssize_t chlg_write(struct file *file, const char __user *buff,
 			  size_t count, loff_t *off)
@@ -579,6 +586,7 @@ static ssize_t chlg_write(struct file *file, const char __user *buff,
 	__u64 record;
 	__u32 reader;
 	int rc = 0;
+
 	ENTRY;
 
 	if (count > CHLG_CONTROL_CMD_MAX)
@@ -605,16 +613,20 @@ out_kbuf:
 }
 
 /**
+ * chlg_open() - Open handler
+ * @inode: Inode struct for the open character device.
+ * @file: Corresponding file pointer.
+ *
  * Open handler, initialize internal CRS state and spawn prefetch thread if
  * needed.
- * @param[in]  inode  Inode struct for the open character device.
- * @param[in]  file   Corresponding file pointer.
- * @return 0 on success, negated error code on failure.
+ *
+ * Return %0 on success, %negated error code on failure.
  */
 static int chlg_open(struct inode *inode, struct file *file)
 {
 	struct chlg_reader_state *crs;
 	struct chlg_registered_dev *dev;
+
 	ENTRY;
 
 	dev = container_of(inode->i_cdev, struct chlg_registered_dev, ced_cdev);
@@ -633,17 +645,18 @@ static int chlg_open(struct inode *inode, struct file *file)
 	init_waitqueue_head(&crs->crs_waitq_prod);
 	init_waitqueue_head(&crs->crs_waitq_cons);
 	crs->crs_prod_task = NULL;
+	crs->crs_user_mask = 0;
 
 	file->private_data = crs;
 	RETURN(0);
 }
 
 /**
- * Close handler, release resources.
+ * chlg_release() - Close handler, release resources.
+ * @inode: Inode struct for the open character device.
+ * @file: Corresponding file pointer.
  *
- * @param[in]  inode  Inode struct for the open character device.
- * @param[in]  file   Corresponding file pointer.
- * @return 0 on success, negated error code on failure.
+ * Return %0 on success, %negated error code on failure.
  */
 static int chlg_release(struct inode *inode, struct file *file)
 {
@@ -665,12 +678,14 @@ static int chlg_release(struct inode *inode, struct file *file)
 }
 
 /**
+ * chlg_poll() - Poll handler
+ * @file: Device file pointer.
+ * @wait: (opaque)
+ *
  * Poll handler, indicates whether the device is readable (new records) and
  * writable (always).
  *
- * @param[in]  file   Device file pointer.
- * @param[in]  wait   (opaque)
- * @return combination of the poll status flags.
+ * Return combination of the poll status flags.
  */
 static unsigned int chlg_poll(struct file *file, poll_table *wait)
 {
@@ -694,21 +709,123 @@ static unsigned int chlg_poll(struct file *file, poll_table *wait)
 	return mask;
 }
 
-static long chlg_ioctl(struct file *file, unsigned int cmd, unsigned long flags)
+/**
+ * mdc_changelog_get_user_info() - Send MDS_GET_INFO RPC to fetch changelog
+ *                                 user information.
+ * @imp: MDC import
+ * @in: User-specific changelog filter
+ * @out: Returned changelog user information [out]
+ *
+ * Return %0 on success with @out properly filled, %negated error code on
+ * failure.
+ */
+static int mdc_changelog_get_user_info(struct obd_import *imp,
+				       const struct changelog_filter *in,
+				       struct changelog_filter *out)
 {
+	struct ptlrpc_request *req;
+	struct changelog_filter *val_in;
+	struct changelog_filter *val_out;
+	char *key;
 	int rc;
 
+	ENTRY;
+
+	req = ptlrpc_request_alloc(imp, &RQF_MDS_GET_INFO);
+	if (req == NULL)
+		RETURN(-ENOMEM);
+
+	/* Set request fields size and pack request buffers */
+	req_capsule_set_size(&req->rq_pill, &RMF_GETINFO_KEY, RCL_CLIENT,
+			     strlen(KEY_CHANGELOG_USER) + 1);
+	req_capsule_set_size(&req->rq_pill, &RMF_GETINFO_VAL, RCL_CLIENT,
+			     sizeof(struct changelog_filter));
+	rc = ptlrpc_request_pack(req, LUSTRE_MDS_VERSION, MDS_GET_INFO);
+	if (rc) {
+		ptlrpc_request_free(req);
+		RETURN(rc);
+	}
+
+	/* Fill in KEY */
+	key = req_capsule_client_get(&req->rq_pill, &RMF_GETINFO_KEY);
+	memcpy(key, KEY_CHANGELOG_USER, strlen(KEY_CHANGELOG_USER) + 1);
+	/* Fill in VAL*/
+	val_in = req_capsule_client_get(&req->rq_pill, &RMF_GETINFO_VAL);
+	memcpy(val_in, in, sizeof(struct changelog_filter));
+
+	/* Set reply size */
+	req_capsule_set_size(&req->rq_pill, &RMF_GETINFO_VAL, RCL_SERVER,
+			     sizeof(struct changelog_filter));
+
+	ptlrpc_request_set_replen(req);
+	rc = ptlrpc_queue_wait(req);
+	if (rc)
+		GOTO(out, rc);
+
+	/* Get reply */
+	val_out = req_capsule_server_get(&req->rq_pill, &RMF_GETINFO_VAL);
+	if (val_out == NULL)
+		GOTO(out, rc = -EPROTO);
+
+	*out = *val_out;
+out:
+	ptlrpc_req_put(req);
+	RETURN(rc);
+}
+
+static long chlg_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	int rc;
 	struct chlg_reader_state *crs = file->private_data;
+
 	switch (cmd) {
 	case OBD_IOC_CHLG_POLL:
-		crs->crs_flags = flags;
+		crs->crs_flags = arg;
 		rc = 0;
 		break;
+	case OBD_IOC_CHANGELOG_FILTER: {
+		struct changelog_filter in;	/* filter request */
+		struct changelog_filter out;	/* user info reply */
+		struct obd_device *obd;
+
+		/* Unpack ioctl data */
+		if (copy_from_user(&in, (void __user *)arg, sizeof(in)))
+			return -EFAULT;
+
+		/* Get changelog user info */
+		obd = chlg_obd_get(crs->crs_ced);
+		if (obd == NULL)
+			return -ENODEV;
+		rc = mdc_changelog_get_user_info(obd->u.cli.cl_import,
+						 &in, &out);
+		if (rc) {
+			CERROR("%s: Failed to get changelog user info for cl%u(%s): rc = %d\n",
+			       obd->obd_name, in.cf_user_id, in.cf_username,
+			       rc);
+			chlg_obd_put(crs->crs_ced, obd);
+			break;
+		}
+		chlg_obd_put(crs->crs_ced, obd);
+
+		mutex_lock(&crs->crs_lock);
+		if (in.cf_mask == 0)
+			crs->crs_user_mask = out.cf_mask;
+		else
+			crs->crs_user_mask = in.cf_mask & out.cf_mask;
+		mutex_unlock(&crs->crs_lock);
+
+		CDEBUG(D_INFO,
+		       "Set changelog filter: username=cl%u(%s), mask=0x%llx\n",
+		       out.cf_user_id, out.cf_username, crs->crs_user_mask);
+		rc = 0;
+		break;
+	}
 	default:
 		rc = -EINVAL;
 		break;
 	}
-	return rc;
+
+	RETURN(rc);
 }
 
 static const struct file_operations chlg_fops = {
@@ -723,6 +840,11 @@ static const struct file_operations chlg_fops = {
 };
 
 /**
+ * get_target_name() - Get changelog defined name from OBD Name
+ * @name: changelog define name which was retrived from OBD Name [out]
+ * @name_len: size of OBD Name
+ * @obd: OBD to get name
+ *
  * This uses obd_name of the form: "testfs-MDT0000-mdc-ffff88006501600"
  * and returns a name of the form: "changelog-testfs-MDT0000".
  */
@@ -743,9 +865,13 @@ static void get_target_name(char *name, size_t name_len, struct obd_device *obd)
 }
 
 /**
- * Find a changelog character device by name.
+ * chlg_registered_dev_find_by_name() - Find changelog character device by name.
+ * @name: Name of changelog char device to be searched
+ *
  * All devices registered during MDC setup are listed in a global list with
  * their names attached.
+ *
+ * Return struct chlg_registered_dev on Success or %NULL if not found
  */
 static struct chlg_registered_dev *
 chlg_registered_dev_find_by_name(const char *name)
@@ -760,10 +886,15 @@ chlg_registered_dev_find_by_name(const char *name)
 }
 
 /**
+ * chlg_registered_dev_find_by_obd() - Find changelog character device by obd
+ * @obd: Find changelog device for this OBD device.
+ *
  * Find chlg_registered_dev structure for a given OBD device.
  * This is bad O(n^2) but for each filesystem:
  *   - N is # of MDTs times # of mount points
  *   - this only runs at shutdown
+ *
+ * Return struct chlg_registered_dev on Success or %NULL if not found
  */
 static struct chlg_registered_dev *
 chlg_registered_dev_find_by_obd(const struct obd_device *obd)
@@ -781,18 +912,20 @@ chlg_registered_dev_find_by_obd(const struct obd_device *obd)
 }
 
 /**
- * Changelog character device initialization.
+ * mdc_changelog_cdev_init() - Changelog character device initialization.
+ * @obd: This MDC obd_device.
+ *
  * Register a misc character device with a dynamic minor number, under a name
  * of the form: 'changelog-fsname-MDTxxxx'. Reference this OBD device with it.
  *
- * @param[in] obd  This MDC obd_device.
- * @return 0 on success, negated error code on failure.
+ * Return %0 on success, negated error code on failure.
  */
 int mdc_changelog_cdev_init(struct obd_device *obd)
 {
 	struct chlg_registered_dev *exist;
 	struct chlg_registered_dev *entry;
 	int minor, rc;
+
 	ENTRY;
 
 	OBD_ALLOC_PTR(entry);
@@ -857,7 +990,9 @@ out_unlock:
 }
 
 /**
- * Release OBD, decrease reference count of the corresponding changelog device.
+ * mdc_changelog_cdev_finish() - Release OBD, decrease reference count of the
+ *                               corresponding changelog device.
+ * @obd: OBD device of changelog
  */
 void mdc_changelog_cdev_finish(struct obd_device *obd)
 {

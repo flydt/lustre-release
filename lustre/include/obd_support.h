@@ -20,9 +20,10 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/percpu_counter.h>
+#include <linux/libcfs/libcfs_debug.h>
+#include <linux/libcfs/libcfs_private.h>
 
-#include <libcfs/libcfs.h>
-#include <lnet/lib-cpt.h>
+#include <linux/lnet/lib-cpt.h>
 #include <lprocfs_status.h>
 #include <lustre_handles.h>
 #include <uapi/linux/lustre/lustre_idl.h>
@@ -44,6 +45,7 @@ extern unsigned int ping_interval;        /* seconds */
 extern unsigned int obd_timeout_set;
 extern unsigned int ldlm_timeout_set;
 extern unsigned int bulk_timeout;
+extern int allow_register;
 extern unsigned int at_min;
 extern unsigned int at_max;
 extern unsigned int at_history;
@@ -57,9 +59,6 @@ extern bool obd_enable_health_write;
 extern bool obd_enable_fname_encoding;
 
 /* Some hash init argument constants */
-#define HASH_NID_STATS_BKT_BITS 5
-#define HASH_NID_STATS_CUR_BITS 7
-#define HASH_NID_STATS_MAX_BITS 12
 #define HASH_GEN_BKT_BITS 5
 #define HASH_GEN_CUR_BITS 7
 #define HASH_GEN_MAX_BITS 12
@@ -263,6 +262,7 @@ extern bool obd_enable_fname_encoding;
 #define OBD_FAIL_MDS_CHANGELOG_ENOSPC		0x18c
 #define OBD_FAIL_MDS_BATCH_NET			0x18d
 #define OBD_FAIL_MDS_HSM_DATA_VERSION_NET	0x18e
+#define OBD_FAIL_MDS_CHANGELOG_FAIL_WRITE	0x18f
 
 /* OI scrub */
 #define OBD_FAIL_OSD_SCRUB_DELAY		0x190
@@ -282,6 +282,7 @@ extern bool obd_enable_fname_encoding;
 #define OBD_FAIL_OSD_DOTDOT_ENOSPC		0x19e
 #define OBD_FAIL_OSD_SCRUB_STALE		0x19f
 #define OBD_FAIL_OSD_FID_REUSE			0x1a0
+#define OBD_FAIL_OSD_DONT_DROP_PREALLOC		0x1a1
 
 #define OBD_FAIL_OFD_SET_OID				0x1e0
 #define OBD_FAIL_OFD_COMMITRW_DELAY			0x1e1
@@ -355,6 +356,7 @@ extern bool obd_enable_fname_encoding;
 #define OBD_FAIL_OST_OPCODE		 0x253
 #define OBD_FAIL_OST_DELORPHAN_DELAY	 0x254
 #define OBD_FAIL_OST_ENOSPC_VALID	 0x255
+#define OBD_FAIL_OST_GRANT_PREPARE	 0x256
 
 #define OBD_FAIL_LDLM                    0x300
 #define OBD_FAIL_LDLM_NAMESPACE_NEW      0x301
@@ -472,6 +474,7 @@ extern bool obd_enable_fname_encoding;
 #define OBD_FAIL_PTLRPC_ENQ_RESEND	 0x534
 #define OBD_FAIL_PTLRPC_DELAY_SEND_FAIL	 0x535
 #define OBD_FAIL_PTLRPC_REPLAY_PAUSE	 0x536
+#define OBD_FAIL_PTLRPC_FAIL_REPLAY	 0x537
 
 #define OBD_FAIL_OBD_PING_NET            0x600
 /*	OBD_FAIL_OBD_LOG_CANCEL_NET      0x601 obsolete since 1.5 */
@@ -542,6 +545,7 @@ extern bool obd_enable_fname_encoding;
 #define OBD_FAIL_MGS_CONFIG_READ_NET	 0x90c
 #define OBD_FAIL_MGS_LDLM_REPLY_NET	 0x90d
 #define OBD_FAIL_MGS_WRITE_TARGET_DELAY	 0x90e
+#define OBD_FAIL_MGC_REG_BEFORE_CONN	 0x90f
 
 #define OBD_FAIL_QUOTA_DQACQ_NET         0xA01
 #define OBD_FAIL_QUOTA_EDQUOT            0xA02
@@ -552,6 +556,7 @@ extern bool obd_enable_fname_encoding;
 #define OBD_FAIL_QUOTA_RECALC            0xA07
 #define OBD_FAIL_QUOTA_GRANT             0xA08
 #define OBD_FAIL_QUOTA_NOSYNC            0xA09
+#define OBD_FAIL_QUOTA_DROP_VER_UPDATE	 0xA11
 
 #define OBD_FAIL_LPROC_REMOVE            0xB00
 
@@ -638,12 +643,17 @@ extern bool obd_enable_fname_encoding;
 #define OBD_FAIL_LLITE_STATAHEAD_PAUSE		    0x1433
 #define OBD_FAIL_LLITE_STAT_RACE1		    0x1434
 #define OBD_FAIL_LLITE_STAT_RACE2		    0x1435
+#define OBD_FAIL_LLITE_TRUNC_PAUSE		    0x1436
+#define OBD_FAIL_LLITE_DIO_COPY_ERR		    0x1437
+#define OBD_FAIL_LLITE_DIO_BUFFER_ALLOC		    0x1438
+#define OBD_FAIL_LLITE_DIO_DRAIN_RETRY		    0x1439
 
-#define OBD_FAIL_FID_INDIR	0x1501
-#define OBD_FAIL_FID_INLMA	0x1502
-#define OBD_FAIL_FID_IGIF	0x1504
-#define OBD_FAIL_FID_LOOKUP	0x1505
-#define OBD_FAIL_FID_NOLMA	0x1506
+#define OBD_FAIL_FID_INDIR			0x1501
+#define OBD_FAIL_FID_INLMA			0x1502
+#define OBD_FAIL_FID_IGIF			0x1504
+#define OBD_FAIL_FID_LOOKUP			0x1505
+#define OBD_FAIL_FID_NOLMA			0x1506
+#define OBD_FAIL_FID_MULTI			0x1507
 
 /* LFSCK */
 #define OBD_FAIL_LFSCK_DELAY1		0x1600
@@ -660,7 +670,7 @@ extern bool obd_enable_fname_encoding;
 #define OBD_FAIL_LFSCK_SKIP_LASTID	0x160d
 #define OBD_FAIL_LFSCK_DELAY4		0x160e
 #define OBD_FAIL_LFSCK_BAD_LMMOI	0x160f
-#define OBD_FAIL_LFSCK_DANGLING 	0x1610
+#define OBD_FAIL_LFSCK_DANGLING		0x1610
 #define OBD_FAIL_LFSCK_UNMATCHED_PAIR1	0x1611
 #define OBD_FAIL_LFSCK_UNMATCHED_PAIR2	0x1612
 #define OBD_FAIL_LFSCK_BAD_OWNER	0x1613
@@ -772,6 +782,7 @@ extern bool obd_enable_fname_encoding;
 /* continuation of MDS related constants */
 #define OBD_FAIL_MDS_PAUSE_CREATE_AFTER_LOOKUP	0x2401
 #define OBD_FAIL_MDS_CONNECT_ACCESS		0x2402
+#define OBD_FAIL_MDS_PAUSE_GETATTR		0x2403
 
 /* PLEASE, KEEP NUMBERS UP TO 0x3000 RESERVED FOR OBD_FAIL_MDS_* */
 
@@ -789,11 +800,6 @@ extern atomic64_t libcfs_kmem;
  * only exists in kernel 6.0 and later, and just uses a larger batch.
  */
 #define OBD_MEMORY_BATCH (16 * 1024 * 1024)
-
-#ifndef HAVE_PERCPU_COUNTER_ADD_BATCH
-#define percpu_counter_add_batch(fbc, amount, batch) \
-	__percpu_counter_add(fbc, amount, batch)
-#endif
 
 static inline void obd_memory_add(size_t size)
 {
@@ -818,8 +824,10 @@ extern __u64 obd_memory_max(void);
 #if OBD_DEBUG_MEMUSAGE
 /* message format here needs to match regexp in lustre/tests/leak_finder.pl */
 #define OBD_ALLOC_POST(ptr, size, name)					\
+do {									\
 	obd_memory_add(size);						\
-	LIBCFS_MEM_MSG(ptr, size, name)
+	LIBCFS_MEM_MSG(ptr, size, name);				\
+} while (0)
 
 /* message format here needs to match regexp in lustre/tests/leak_finder.pl */
 #define OBD_FREE_PRE(ptr, size, name)					\
@@ -875,7 +883,7 @@ do {									      \
 #define __OBD_VMALLOC_VERBOSE(ptr, cptab, cpt, size)			      \
 do {									      \
 	(ptr) = cptab == NULL ?						      \
-		__ll_vmalloc(size, GFP_NOFS | __GFP_HIGHMEM | __GFP_ZERO) :   \
+		__compat_vmalloc(size, GFP_NOFS | __GFP_ZERO) :		      \
 		cfs_cpt_vzalloc(cptab, cpt, size);			      \
 	if (unlikely((ptr) == NULL)) {                                        \
 		CERROR("vmalloc of '" #ptr "' (%d bytes) failed\n",           \
@@ -914,30 +922,13 @@ do {									      \
 		OBD_CPT_VMALLOC(ptr, cptab, cpt, size);			      \
 } while (0)
 
-#ifdef CONFIG_DEBUG_SLAB
-#define POISON(ptr, c, s) do {} while (0)
-#define POISON_PTR(ptr)  ((void)0)
-#else
-#ifdef __underlying_memset
-#define POISON(ptr, c, s) __underlying_memset(ptr, c, s)
-#else
-#define POISON(ptr, c, s) memset(ptr, c, s)
-#endif
-#define POISON_PTR(ptr)  (ptr) = (void *)0xdeadbeef
-#endif
-
-#ifdef POISON_BULK
-#define POISON_PAGE(page, val) do { memset(kmap(page), val, PAGE_SIZE); \
-                                    kunmap(page); } while (0)
-#else
-#define POISON_PAGE(page, val) do { } while (0)
-#endif
+/* In the future, this belongs in include/linux/poison.h */
+#define POISON_PTR(ptr)  (ptr) = ((void *) 0x387 + POISON_POINTER_DELTA)
 
 #define OBD_FREE(ptr, size)						      \
 do {									      \
 	if (likely(ptr)) {						      \
 		OBD_FREE_PRE(ptr, size, "kfreed");			      \
-		POISON(ptr, 0x5a, size);				      \
 		kfree(ptr);						      \
 		POISON_PTR(ptr);					      \
 	}								      \
@@ -952,26 +943,39 @@ do {									\
 	}								\
 } while (0)
 
-#define OBD_FREE_LARGE(ptr, size)					      \
+#define OBD_FREE_LARGE_ATOMIC(ptr, size)			\
 do {									      \
 	if (is_vmalloc_addr(ptr)) {					      \
 		OBD_FREE_PRE(ptr, size, "vfreed");			      \
-		POISON(ptr, 0x5a, size);				      \
-		libcfs_vfree_atomic(ptr);				      \
+		compat_vfree_atomic(ptr);				      \
 		POISON_PTR(ptr);					      \
 	} else {							      \
 		OBD_FREE(ptr, size);					      \
 	}                                                                     \
 } while (0)
 
+#define OBD_FREE_LARGE(ptr, size)				\
+do {								\
+	if (likely(ptr)) {					\
+		OBD_FREE_PRE(ptr, size, "kvfree");		\
+		kvfree(ptr);					\
+		POISON_PTR(ptr);				\
+	}							\
+} while (0)
+
 #define OBD_FREE_PTR_ARRAY_LARGE(ptr, n)			\
 	OBD_FREE_LARGE(ptr, (n) * sizeof(*(ptr)))
+
+static inline void *__kmem_cache_zalloc(struct kmem_cache *cachep, gfp_t flags)
+{
+	return kmem_cache_zalloc(cachep, flags);
+}
 
 #define __OBD_SLAB_ALLOC_VERBOSE(ptr, slab, cptab, cpt, size, type)	      \
 do {									      \
 	LASSERT(ergo((type) != GFP_ATOMIC, !in_interrupt()));		      \
 	(ptr) = (cptab) == NULL ?					      \
-		kmem_cache_zalloc(slab, (type)) :			      \
+		__kmem_cache_zalloc(slab, (type)) :			      \
 		cfs_mem_cache_cpt_alloc(slab, cptab, cpt, (type) | __GFP_ZERO); \
 	if (likely((ptr)))                                                    \
 		OBD_ALLOC_POST(ptr, size, "slab-alloced");                    \
@@ -989,7 +993,6 @@ do {									      \
 do {									      \
 	if (likely(ptr)) {						      \
 		OBD_FREE_PRE(ptr, size, "slab-freed");			      \
-		POISON(ptr, 0x5a, size);				      \
 		kmem_cache_free(slab, ptr);				      \
 		POISON_PTR(ptr);					      \
 	}								      \
@@ -1034,7 +1037,7 @@ do {						\
 	}					\
 } while (0)
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 /* LUSTRE_LMA_FL_MASKS defines which flags will be stored in LMA */
 
 static inline int lma_to_lustre_flags(__u32 lma_flags)
@@ -1048,7 +1051,7 @@ static inline int lustre_to_lma_flags(__u32 la_flags)
 	return (((la_flags & LUSTRE_ORPHAN_FL) ? LMAI_ORPHAN : 0) |
 		((la_flags & LUSTRE_ENCRYPT_FL) ? LMAI_ENCRYPT : 0));
 }
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 /* Convert wire LUSTRE_*_FL to corresponding client local VFS S_* values
  * for the client inode i_flags.  The LUSTRE_*_FL are the Lustre wire
@@ -1085,6 +1088,32 @@ struct obd_heat_instance {
 	__u64 ohi_heat;
 	__u64 ohi_time_second;
 	__u64 ohi_count;
+};
+
+/** additional filesystem attributes for target device */
+struct obd_statfs_info {
+	__u32		os_reserved_mb_low;	/* reserved mb low */
+	__u32		os_reserved_mb_high;	/* reserved mb high */
+	bool		os_enable_pre;		/* enable pre create logic */
+};
+
+/* Counter event rating based on Sliding Window Counter algorithm */
+/* Two fixed time-based sliding windows: previous and current one. */
+#define OBD_COUNTER_NUM	2
+
+struct obd_counter_instance {
+	/*
+	 * Truncated 32-bit monotonic seconds (ktime_get_seconds()) of the
+	 * last processed event. Zero means unset.
+	 */
+	u32		oci_last_event_time;
+	/*
+	 * Truncated 32-bit monotonic seconds (ktime_get_seconds()) when the
+	 * threshold was last exceeded. Zero means no recent trigger.
+	 */
+	u32		oci_last_trigger_time;
+	/* 32-bit counters for each time window */
+	u32		oci_hist[OBD_COUNTER_NUM];
 };
 
 /* Define a fixed 4096-byte encryption unit size */

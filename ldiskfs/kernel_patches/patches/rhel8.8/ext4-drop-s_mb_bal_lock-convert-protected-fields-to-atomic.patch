@@ -1,8 +1,6 @@
 commit 67d25186046145748d5fe4c5019d832215e01c1e
 Author:     Harshad Shirwadkar <harshadshirwadkar@gmail.com>
 AuthorDate: Thu Apr 1 10:21:23 2021 -0700
-Commit:     Theodore Ts'o <tytso@mit.edu>
-CommitDate: Fri Apr 9 11:34:58 2021 -0400
 
 ext4: drop s_mb_bal_lock and convert protected fields to atomic
 
@@ -64,7 +62,7 @@ Index: linux-stage/fs/ext4/mballoc.c
 +	seq_printf(seq, "\tbuddies_generated: %u\n",
 +		   atomic_read(&sbi->s_mb_buddies_generated));
 +	seq_printf(seq, "\tbuddies_time_used: %llu\n",
-+		   atomic64_read(&sbi->s_mb_generation_time));
++		   (unsigned long long)atomic64_read(&sbi->s_mb_generation_time));
  	seq_printf(seq, "\tpreallocated: %u\n",
  		   atomic_read(&sbi->s_mb_preallocated));
  	seq_printf(seq, "\tdiscarded: %u\n",
@@ -96,7 +94,7 @@ Index: linux-stage/fs/ext4/mballoc.c
 -				sbi->s_mb_generation_time);
 +		       "mballoc: %u generated and it took %Lu",
 +				atomic_read(&sbi->s_mb_buddies_generated),
-+				atomic64_read(&sbi->s_mb_generation_time));
++				(unsigned long long)atomic64_read(&sbi->s_mb_generation_time));
  		ext4_msg(sb, KERN_INFO,
  		       "mballoc: %u preallocated, %u discarded",
  				atomic_read(&sbi->s_mb_preallocated),

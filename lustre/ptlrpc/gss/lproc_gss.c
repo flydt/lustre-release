@@ -31,8 +31,10 @@
 #include "gss_internal.h"
 #include "gss_api.h"
 
-static struct dentry *gss_debugfs_dir_lk;
 static struct dentry *gss_debugfs_dir;
+
+static struct kobject *gss_kobj;
+static struct kobject *gss_kobj_lk;
 
 /*
  * statistic of "out-of-sequence-window"
@@ -95,86 +97,82 @@ static int gss_proc_oos_seq_show(struct seq_file *m, void *v)
 }
 LDEBUGFS_SEQ_FOPS_RO(gss_proc_oos);
 
-static ssize_t
-gss_proc_write_secinit(struct file *file, const char *buffer,
-				  size_t count, loff_t *off)
+static ssize_t init_channel_store(struct kobject *kobj, struct attribute *attr,
+				  const char *buf, size_t count)
 {
-        int rc;
+	int rc;
 
-        rc = gss_do_ctx_init_rpc((char *) buffer, count);
-        if (rc) {
-                LASSERT(rc < 0);
-                return rc;
-        }
+	rc = gss_do_ctx_init_rpc((char *)buf, count);
+	if (rc) {
+		LASSERT(rc < 0);
+		return rc;
+	}
 	return count;
 }
+LUSTRE_WO_ATTR(init_channel);
 
-static const struct file_operations gss_proc_secinit = {
-	.write = gss_proc_write_secinit,
-};
-
-static int
-sptlrpc_krb5_allow_old_client_csum_seq_show(struct seq_file *m,
-					    void *data)
+static ssize_t
+krb5_allow_old_client_csum_show(struct kobject *kobj,
+				struct attribute *attr, char *buf)
 {
-	seq_printf(m, "%u\n", krb5_allow_old_client_csum);
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%u\n", krb5_allow_old_client_csum);
 }
 
 static ssize_t
-sptlrpc_krb5_allow_old_client_csum_seq_write(struct file *file,
-					     const char __user *buffer,
-					     size_t count, loff_t *off)
+krb5_allow_old_client_csum_store(struct kobject *kobj,
+				 struct attribute *attr,
+				 const char *buf, size_t count)
 {
 	bool val;
 	int rc;
 
-	rc = kstrtobool_from_user(buffer, count, &val);
+	rc = kstrtobool(buf, &val);
 	if (rc)
 		return rc;
 
 	krb5_allow_old_client_csum = val;
 	return count;
 }
-LDEBUGFS_SEQ_FOPS(sptlrpc_krb5_allow_old_client_csum);
+LUSTRE_RW_ATTR(krb5_allow_old_client_csum);
 
 #ifdef HAVE_GSS_KEYRING
-static int sptlrpc_gss_check_upcall_ns_seq_show(struct seq_file *m, void *data)
+static ssize_t gss_check_upcall_ns_show(struct kobject *kobj,
+					struct attribute *attr, char *buf)
 {
-	seq_printf(m, "%u\n", gss_check_upcall_ns);
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%u\n", gss_check_upcall_ns);
 }
 
-static ssize_t sptlrpc_gss_check_upcall_ns_seq_write(struct file *file,
-						     const char __user *buffer,
-						     size_t count, loff_t *off)
+static ssize_t gss_check_upcall_ns_store(struct kobject *kobj,
+					 struct attribute *attr,
+					 const char *buf, size_t count)
 {
 	bool val;
 	int rc;
 
-	rc = kstrtobool_from_user(buffer, count, &val);
+	rc = kstrtobool(buf, &val);
 	if (rc)
 		return rc;
 
 	gss_check_upcall_ns = val;
 	return count;
 }
-LDEBUGFS_SEQ_FOPS(sptlrpc_gss_check_upcall_ns);
+LUSTRE_RW_ATTR(gss_check_upcall_ns);
 #endif /* HAVE_GSS_KEYRING */
 
-static int rsi_upcall_seq_show(struct seq_file *m,
-			       void *data)
+static ssize_t rsi_upcall_show(struct kobject *kobj, struct attribute *attr,
+			       char *buf)
 {
+	ssize_t len;
+
 	down_read(&rsicache->uc_upcall_rwsem);
-	seq_printf(m, "%s\n", rsicache->uc_upcall);
+	len = scnprintf(buf, PAGE_SIZE, "%s\n", rsicache->uc_upcall);
 	up_read(&rsicache->uc_upcall_rwsem);
 
-	return 0;
+	return len;
 }
 
-static ssize_t rsi_upcall_seq_write(struct file *file,
-				    const char __user *buffer,
-				    size_t count, loff_t *off)
+static ssize_t rsi_upcall_store(struct kobject *kobj, struct attribute *attr,
+				const char *buf, size_t count)
 {
 	char *kbuf = NULL;
 	int rc;
@@ -183,9 +181,7 @@ static ssize_t rsi_upcall_seq_write(struct file *file,
 	if (kbuf == NULL)
 		return -ENOMEM;
 
-	if (copy_from_user(kbuf, buffer, count))
-		GOTO(out, rc = -EFAULT);
-
+	memcpy(kbuf, buf, count);
 	kbuf[count] = '\0';
 
 	rc = upcall_cache_set_upcall(rsicache, kbuf, count, true);
@@ -203,7 +199,7 @@ out:
 	OBD_FREE(kbuf, count + 1);
 	return rc;
 }
-LDEBUGFS_SEQ_FOPS(rsi_upcall);
+LUSTRE_RW_ATTR(rsi_upcall);
 
 static ssize_t ldebugfs_rsi_info_seq_write(struct file *file,
 					   const char __user *buffer,
@@ -260,21 +256,20 @@ out:
 }
 LDEBUGFS_FOPS_WR_ONLY(gss, rsi_info);
 
-static int rsi_entry_expire_seq_show(struct seq_file *m,
-				     void *data)
+static ssize_t rsi_entry_expire_show(struct kobject *kobj,
+				     struct attribute *attr, char *buf)
 {
-	seq_printf(m, "%lld\n", rsicache->uc_entry_expire);
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%lld\n", rsicache->uc_entry_expire);
 }
 
-static ssize_t rsi_entry_expire_seq_write(struct file *file,
-					  const char __user *buffer,
-					  size_t count, loff_t *off)
+static ssize_t rsi_entry_expire_store(struct kobject *kobj,
+				      struct attribute *attr, const char *buf,
+				      size_t count)
 {
 	time64_t val;
 	int rc;
 
-	rc = kstrtoll_from_user(buffer, count, 10, &val);
+	rc = kstrtoll(buf, 10, &val);
 	if (rc)
 		return rc;
 
@@ -285,23 +280,22 @@ static ssize_t rsi_entry_expire_seq_write(struct file *file,
 
 	return count;
 }
-LDEBUGFS_SEQ_FOPS(rsi_entry_expire);
+LUSTRE_RW_ATTR(rsi_entry_expire);
 
-static int rsi_acquire_expire_seq_show(struct seq_file *m,
-				       void *data)
+static ssize_t rsi_acquire_expire_show(struct kobject *kobj,
+				       struct attribute *attr, char *buf)
 {
-	seq_printf(m, "%lld\n", rsicache->uc_acquire_expire);
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%lld\n", rsicache->uc_acquire_expire);
 }
 
-static ssize_t rsi_acquire_expire_seq_write(struct file *file,
-					    const char __user *buffer,
-					    size_t count, loff_t *off)
+static ssize_t rsi_acquire_expire_store(struct kobject *kobj,
+					struct attribute *attr,
+					const char *buf, size_t count)
 {
 	time64_t val;
 	int rc;
 
-	rc = kstrtoll_from_user(buffer, count, 10, &val);
+	rc = kstrtoll(buf, 10, &val);
 	if (rc)
 		return rc;
 
@@ -312,7 +306,7 @@ static ssize_t rsi_acquire_expire_seq_write(struct file *file,
 
 	return count;
 }
-LDEBUGFS_SEQ_FOPS(rsi_acquire_expire);
+LUSTRE_RW_ATTR(rsi_acquire_expire);
 
 static ssize_t ldebugfs_rsc_info_seq_write(struct file *file,
 					   const char __user *buffer,
@@ -412,23 +406,8 @@ LDEBUGFS_FOPS_WR_ONLY(gss, rsc_info);
 static struct ldebugfs_vars gss_debugfs_vars[] = {
 	{ .name	=	"replays",
 	  .fops	=	&gss_proc_oos_fops	},
-	{ .name	=	"init_channel",
-	  .fops	=	&gss_proc_secinit,
-	  .proc_mode =	0200			},
-	{ .name	=	"krb5_allow_old_client_csum",
-	  .fops	=	&sptlrpc_krb5_allow_old_client_csum_fops },
-#ifdef HAVE_GSS_KEYRING
-	{ .name	=	"gss_check_upcall_ns",
-	  .fops	=	&sptlrpc_gss_check_upcall_ns_fops },
-#endif
-	{ .name	=	"rsi_upcall",
-	  .fops	=	&rsi_upcall_fops },
 	{ .name =	"rsi_info",
 	  .fops =	&gss_rsi_info_fops },
-	{ .name	=	"rsi_entry_expire",
-	  .fops	=	&rsi_entry_expire_fops },
-	{ .name	=	"rsi_acquire_expire",
-	  .fops	=	&rsi_acquire_expire_fops },
 	{ .name =	"rsc_info",
 	  .fops =	&gss_rsc_info_fops },
 	{ NULL }
@@ -441,20 +420,19 @@ static struct ldebugfs_vars gss_debugfs_vars[] = {
  */
 static int gss_lk_debug_level = 1;
 
-static int gss_lk_proc_dl_seq_show(struct seq_file *m, void *v)
+static ssize_t debug_level_show(struct kobject *kobj, struct attribute *attr,
+				char *buf)
 {
-	seq_printf(m, "%u\n", gss_lk_debug_level);
-	return 0;
+	return scnprintf(buf, PAGE_SIZE, "%u\n", gss_lk_debug_level);
 }
 
-static ssize_t
-gss_lk_proc_dl_seq_write(struct file *file, const char __user *buffer,
-				size_t count, loff_t *off)
+static ssize_t debug_level_store(struct kobject *kobj, struct attribute *attr,
+				 const char *buf, size_t count)
 {
 	unsigned int val;
 	int rc;
 
-	rc = kstrtouint_from_user(buffer, count, 0, &val);
+	rc = kstrtouint(buf, 0, &val);
 	if (rc < 0)
 		return rc;
 
@@ -465,18 +443,44 @@ gss_lk_proc_dl_seq_write(struct file *file, const char __user *buffer,
 
 	return count;
 }
-LDEBUGFS_SEQ_FOPS(gss_lk_proc_dl);
+LUSTRE_RW_ATTR(debug_level);
 
-static struct ldebugfs_vars gss_lk_debugfs_vars[] = {
-	{ .name	=	"debug_level",
-	  .fops	=	&gss_lk_proc_dl_fops	},
-	{ NULL }
+static struct attribute *gss_attrs[] = {
+	&lustre_attr_init_channel.attr,
+	&lustre_attr_krb5_allow_old_client_csum.attr,
+	&lustre_attr_rsi_acquire_expire.attr,
+	&lustre_attr_rsi_entry_expire.attr,
+	&lustre_attr_rsi_upcall.attr,
+#ifdef HAVE_GSS_KEYRING
+	&lustre_attr_gss_check_upcall_ns.attr,
+#endif
+	NULL
+};
+
+static struct attribute_group gss_attr_group = {
+	.attrs = gss_attrs,
+};
+
+static struct attribute *gss_lk_attrs[] = {
+	&lustre_attr_debug_level.attr,
+	NULL
+};
+
+static struct attribute_group gss_lk_attr_group = {
+	.attrs = gss_lk_attrs,
 };
 
 void gss_exit_tunables(void)
 {
-	debugfs_remove_recursive(gss_debugfs_dir_lk);
-	gss_debugfs_dir_lk = NULL;
+	if (gss_kobj_lk) {
+		sysfs_remove_group(gss_kobj_lk, &gss_lk_attr_group);
+		kobject_put(gss_kobj_lk);
+	}
+
+	if (gss_kobj) {
+		sysfs_remove_group(gss_kobj, &gss_attr_group);
+		kobject_put(gss_kobj);
+	}
 
 	debugfs_remove_recursive(gss_debugfs_dir);
 	gss_debugfs_dir = NULL;
@@ -484,14 +488,30 @@ void gss_exit_tunables(void)
 
 int gss_init_tunables(void)
 {
+	int rc;
 	spin_lock_init(&gss_stat_oos.oos_lock);
 
 	gss_debugfs_dir = debugfs_create_dir("gss", sptlrpc_debugfs_dir);
 	ldebugfs_add_vars(gss_debugfs_dir, gss_debugfs_vars, NULL);
 
-	gss_debugfs_dir_lk = debugfs_create_dir("lgss_keyring",
-						gss_debugfs_dir);
-	ldebugfs_add_vars(gss_debugfs_dir_lk, gss_lk_debugfs_vars, NULL);
+	gss_kobj = kobject_create_and_add("gss", sptlrpc_kobj);
+	if (!gss_kobj)
+		GOTO(out, rc = -ENOMEM);
+
+	rc = sysfs_create_group(gss_kobj, &gss_attr_group);
+	if (rc)
+		GOTO(out, rc);
+
+	gss_kobj_lk = kobject_create_and_add("lgss_keyring", gss_kobj);
+	if (!gss_kobj_lk)
+		GOTO(out, rc = -ENOMEM);
+
+	rc = sysfs_create_group(gss_kobj_lk, &gss_lk_attr_group);
+	if (rc)
+		GOTO(out, rc);
 
 	return 0;
+out:
+	gss_exit_tunables();
+	return rc;
 }

@@ -33,17 +33,19 @@
 
 #define DEBUG_SUBSYSTEM S_LDLM
 
-#include <linux/list.h>
+#include <linux/interval_tree_generic.h>
 #ifdef HAVE_LINUX_FILELOCK_HEADER
 #include <linux/filelock.h>
 #endif
+#include <linux/list.h>
+
 #include <lustre_dlm.h>
 #include <obd_support.h>
 #include <obd_class.h>
 #include <lustre_lib.h>
+#include <lustre_compat.h>
 
 #include "ldlm_internal.h"
-#include <linux/interval_tree_generic.h>
 
 #define START(node) ((node)->l_policy_data.l_flock.start)
 #define LAST(node) ((node)->l_policy_data.l_flock.end)
@@ -151,7 +153,7 @@ ldlm_flock_destroy(struct ldlm_lock *lock, enum ldlm_mode mode, __u64 flags)
 	EXIT;
 }
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 /**
  * POSIX locks deadlock detection code.
  *
@@ -270,7 +272,7 @@ static void ldlm_flock_cancel_on_deadlock(struct ldlm_lock *lock,
 		ldlm_add_ast_work_item(lock, NULL, work_list);
 	}
 }
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 /* Add newly granted lock into interval tree for the resource */
 void ldlm_flock_add_lock(struct ldlm_resource *res,
@@ -323,7 +325,7 @@ ldlm_process_flock_lock(struct ldlm_lock *req, __u64 *flags,
 	int splitted = 0;
 	__u64 start = START(req), end = LAST(req);
 	const struct ldlm_callback_suite null_cbs = { NULL };
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	struct list_head *grant_work = (intention == LDLM_PROCESS_ENQUEUE ?
 					NULL : work_list);
 #endif
@@ -363,7 +365,7 @@ reprocess:
 		/* This loop determines where this processes locks start
 		 * in the resource lr_granted list.
 		 */
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 		list_for_each_entry(lock, &res->lr_waiting, l_res_link) {
 			LASSERT(lock->l_req_mode != LCK_NL);
 
@@ -375,7 +377,7 @@ reprocess:
 				/* client receives cancelled lock as granted
 				 * with l_granted_mode == 0
 				 */
-				LASSERT(lock->l_granted_mode == LCK_MINMODE);
+				LASSERT(lock->l_granted_mode == LCK_MODE_MIN);
 				lock->l_flags |= LDLM_FL_AST_SENT;
 				ldlm_resource_unlink_lock(lock);
 				ldlm_add_ast_work_item(lock, NULL, &rpc_list);
@@ -389,14 +391,14 @@ reprocess:
 				break;
 			}
 		}
-#else /* !HAVE_SERVER_SUPPORT */
+#else /* !CONFIG_LUSTRE_FS_SERVER */
 		/* The only one possible case for client-side calls flock
 		 * policy function is ldlm_flock_completion_ast inside which
 		 * carries LDLM_FL_WAIT_NOREPROC flag.
 		 */
 		CERROR("Illegal parameter for client-side-only module.\n");
 		LBUG();
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 	}
 	if ((*flags == LDLM_FL_WAIT_NOREPROC) || (mode == LCK_NL)) {
 		/* This loop collects all overlapping locks with the
@@ -412,7 +414,7 @@ reprocess:
 				ownlocks_end = &lock->l_same_owner;
 			}
 	}
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	else {
 		lockmode_verify(mode);
 
@@ -498,7 +500,7 @@ reprocess:
 	 * deadlock detection hash list.
 	 */
 	ldlm_flock_blocking_unlink(req);
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 	/* Scan the locks owned by this process to handle overlaps.
 	 * We may have to merge or split existing locks.
@@ -631,7 +633,7 @@ reprocess:
 	}
 
 	if (*flags != LDLM_FL_WAIT_NOREPROC) {
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 		if (intention == LDLM_PROCESS_ENQUEUE) {
 			/* If this is an unlock, reprocess the waitq and
 			 * send completions ASTs for locks that can now be
@@ -667,14 +669,14 @@ restart:
 			LASSERT(req->l_completion_ast);
 			ldlm_add_ast_work_item(req, NULL, grant_work);
 		}
-#else /* !HAVE_SERVER_SUPPORT */
+#else /* !CONFIG_LUSTRE_FS_SERVER */
 		/* The only one possible case for client-side calls flock
 		 * policy function is ldlm_flock_completion_ast inside which
 		 * carries LDLM_FL_WAIT_NOREPROC flag.
 		 */
 		CERROR("Illegal parameter for client-side-only module.\n");
 		LBUG();
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 	}
 
 	/* In case we're reprocessing the requested lock we can't destroy
@@ -815,7 +817,7 @@ ldlm_flock_completion_ast(struct ldlm_lock *lock, __u64 flags, void *data)
 		goto granted;
 
 	if (!(flags & LDLM_FL_BLOCKED_MASK)) {
-		if (NULL == data)
+		if (data == NULL)
 			/* mds granted the lock in the reply */
 			goto granted;
 		/* CP AST RPC: lock get granted, wake it up */
@@ -882,7 +884,7 @@ granted:
 
 	args = lock->l_ast_data;
 
-	if (lock->l_granted_mode == LCK_MINMODE) {
+	if (lock->l_granted_mode == LCK_MODE_MIN) {
 		ldlm_flock_destroy(lock, args->fa_mode, LDLM_FL_WAIT_NOREPROC);
 		lock->l_ast_data = NULL;
 		unlock_res_and_lock(lock);
@@ -966,13 +968,13 @@ ldlm_flock_completion_ast_async(struct ldlm_lock *lock, __u64 flags, void *data)
 			LDLM_DEBUG(lock,
 				   "client-side lock is already granted in a race");
 			LASSERT(lock->l_granted_mode == lock->l_req_mode);
-			LASSERT(lock->l_granted_mode != LCK_MINMODE);
+			LASSERT(lock->l_granted_mode != LCK_MODE_MIN);
 			GOTO(out, rc = 0);
 		}
 
 		if (args->fa_flags & FA_FL_CANCELED ||
 		    ((flags & LDLM_FL_BLOCKED_MASK) == 0 &&
-		     lock->l_granted_mode == LCK_MINMODE)) {
+		     lock->l_granted_mode == LCK_MODE_MIN)) {
 			LDLM_DEBUG(lock, "client-side granted canceled lock");
 			ldlm_flock_destroy(lock, args->fa_mode,
 					   LDLM_FL_WAIT_NOREPROC);
@@ -1051,7 +1053,7 @@ static unsigned int
 ldlm_export_flock_hash(struct cfs_hash *hs, const void *key,
 		       const unsigned int bits)
 {
-	return cfs_hash_64(*(__u64 *)key, bits);
+	return hash_64(*(__u64 *)key, bits);
 }
 
 static void *

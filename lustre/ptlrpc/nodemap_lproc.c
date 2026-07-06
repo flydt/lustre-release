@@ -15,19 +15,22 @@
 #include <lustre_net.h>
 #include <lustre_export.h>
 #include <obd_class.h>
+#include <linux/libcfs/libcfs_caps.h>
 #include "nodemap_internal.h"
 
 static LIST_HEAD(nodemap_pde_list);
 
 /* nodemap debugfs root directory under lustre */
-struct dentry *nodemap_root;
+static struct dentry *nodemap_root;
 
 /**
- * Reads and prints the idmap for the given nodemap.
+ * nodemap_idmap_show() - Reads and prints the idmap for the given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int nodemap_idmap_show(struct seq_file *m, void *data)
 {
@@ -37,9 +40,7 @@ static int nodemap_idmap_show(struct seq_file *m, void *data)
 	bool cont = false;
 	int rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -95,11 +96,13 @@ static int nodemap_idmap_show(struct seq_file *m, void *data)
 }
 
 /**
- * Attaches nodemap_idmap_show to proc file.
+ * nodemap_idmap_open() - Attaches nodemap_idmap_show to proc file.
+ * @inode: inode of seq file in proc fs
+ * @file: seq file
  *
- * \param	inode		inode of seq file in proc fs
- * \param	file		seq file
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int nodemap_idmap_open(struct inode *inode, struct file *file)
 {
@@ -107,20 +110,21 @@ static int nodemap_idmap_open(struct inode *inode, struct file *file)
 }
 
 /**
- * Reads and prints the UID/GID/PROJID offsets for the given nodemap.
+ * nodemap_offset_seq_show() - Reads and prints the UID/GID/PROJID offsets for
+ * the given nodemap.
+ * @m: seq file in proc fs Return:
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return
+ * * %0 on success
+ * * %negative on failure
  */
 static int nodemap_offset_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 	int rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("%s: nodemap not found: rc = %d\n",
@@ -144,13 +148,71 @@ static int nodemap_offset_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the NID ranges for the given nodemap.
+ * nodemap_capabilities_seq_show() - Reads and prints capabilities definitions.
+ * @m: seq file in proc fs
+ * @unused: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
  */
-static int nodemap_ranges_show(struct seq_file *m, void *data)
+static int nodemap_capabilities_seq_show(struct seq_file *m, void *unused)
+{
+	struct lu_nodemap *nodemap;
+	const char *type;
+	char *caps;
+	u64 val;
+	int i, rc = 0;
+
+	nodemap = nodemap_lookup_unlocked(m->private);
+	if (IS_ERR(nodemap)) {
+		rc = PTR_ERR(nodemap);
+		CERROR("%s: nodemap not found: rc = %d\n",
+		       (char *)m->private, rc);
+		return rc;
+	}
+
+	type = nodemap_captype_names[0].ncn_name;
+	for (i = 0; i < ARRAY_SIZE(nodemap_captype_names); i++) {
+		if (nodemap_captype_names[i].ncn_type ==
+		    nodemap->nmf_caps_type) {
+			type = nodemap_captype_names[i].ncn_name;
+			break;
+		}
+	}
+	/* if not applicable, stop here */
+	if (nodemap->nmf_caps_type == NODEMAP_CAP_OFF) {
+		seq_printf(m, "%s\n", type);
+		goto out;
+	}
+
+	val = libcfs_cap2num(nodemap->nm_capabilities);
+	i = cfs_mask2str(NULL, 0, val, libcfs_cap2str, ',');
+	OBD_ALLOC(caps, i + 2);
+	if (!caps)
+		GOTO(out, rc = -ENOMEM);
+	cfs_mask2str(caps, i + 2, val, libcfs_cap2str, ',');
+
+	seq_printf(m, "type: %s\n", type);
+	seq_printf(m, "caps: %s", caps);
+
+	OBD_FREE(caps, i + 2);
+
+out:
+	nodemap_putref(nodemap);
+	return rc;
+}
+
+/**
+ * nodemap_ranges_show() - Reads and prints the regular NID ranges
+ *			   for the given nodemap
+ * @m: seq file in proc fs
+ * @unused: unused
+ *
+ * Return:
+ * * %0		success
+ * * %-errno	on failure
+ */
+static int nodemap_ranges_show(struct seq_file *m, void *unused)
 {
 	struct lu_nodemap		*nodemap;
 	struct lu_nid_range		*range;
@@ -160,7 +222,7 @@ static int nodemap_ranges_show(struct seq_file *m, void *data)
 	int rc;
 
 	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
+	nodemap = nodemap_lookup_locked(m->private);
 	if (IS_ERR(nodemap)) {
 		mutex_unlock(&active_config_lock);
 		rc = PTR_ERR(nodemap);
@@ -191,11 +253,13 @@ static int nodemap_ranges_show(struct seq_file *m, void *data)
 }
 
 /**
- * Connects nodemap_idmap_show to proc file.
+ * nodemap_ranges_open() - Connects nodemap_ranges_show to proc file
+ * @inode: inode of seq file in proc fs
+ * @file: seq file
  *
- * \param	inode		inode of seq file in proc fs
- * \param	file		seq file
- * \retval	0		success
+ * Return:
+ * * %0		success
+ * * %-errno	on failure
  */
 static int nodemap_ranges_open(struct inode *inode, struct file *file)
 {
@@ -203,44 +267,131 @@ static int nodemap_ranges_open(struct inode *inode, struct file *file)
 }
 
 /**
- * Reads and prints the fileset for the given nodemap.
+ * nodemap_ban_ranges_show() - Reads and prints the banned NID ranges
+ *			       for the given nodemap
+ * @m: seq file in proc fs
+ * @unused: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0		success
+ * * %-errno	on failure
+ */
+static int nodemap_ban_ranges_show(struct seq_file *m, void *unused)
+{
+	char start_nidstr[LNET_NIDSTR_SIZE];
+	char end_nidstr[LNET_NIDSTR_SIZE];
+	struct lu_nodemap *nodemap;
+	struct lu_nid_range *range;
+	bool cont = false;
+	int rc;
+
+	mutex_lock(&active_config_lock);
+	nodemap = nodemap_lookup_locked(m->private);
+	if (IS_ERR(nodemap)) {
+		mutex_unlock(&active_config_lock);
+		rc = PTR_ERR(nodemap);
+		CERROR("cannot find nodemap '%s': rc = %d\n",
+		       (char *)m->private, rc);
+		return rc;
+	}
+
+	seq_puts(m, "[");
+	down_read(&active_config->nmc_ban_range_tree_lock);
+	list_for_each_entry(range, &nodemap->nm_ban_ranges, rn_list) {
+		if (cont)
+			seq_puts(m, ",");
+		cont = true;
+		libcfs_nidstr_r(&range->rn_start, start_nidstr,
+				sizeof(start_nidstr));
+		libcfs_nidstr_r(&range->rn_end, end_nidstr, sizeof(end_nidstr));
+		seq_printf(m, "\n { id: %u, start_nid: %s, end_nid: %s }",
+			   range->rn_id, start_nidstr, end_nidstr);
+	}
+	up_read(&active_config->nmc_ban_range_tree_lock);
+	mutex_unlock(&active_config_lock);
+	if (cont)
+		seq_puts(m, "\n");
+	seq_printf(m, "]\n");
+
+	nodemap_putref(nodemap);
+	return 0;
+}
+
+/**
+ * nodemap_ban_ranges_open() - Connects nodemap_ban_ranges_show to proc file
+ * @inode: inode of seq file in proc fs
+ * @file: seq file
+ *
+ * Return:
+ * * %0		success
+ * * %-errno	on failure
+ */
+static int nodemap_ban_ranges_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, nodemap_ban_ranges_show, inode->i_private);
+}
+
+/**
+ * nodemap_fileset_seq_show() - Reads and prints fileset for the given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
+ *
+ * Return
+ * * %0 on success
+ * * %negative on failure
  */
 static int nodemap_fileset_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
+	struct lu_fileset_alt *fileset_alt;
+	struct rb_node *node;
+	bool cont = false;
 	int rc = 0;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
-			(char *)m->private, rc);
+		       (char *)m->private, rc);
 		return rc;
 	}
-	if (nodemap->nm_prim_fileset && nodemap->nm_prim_fileset[0] != '\0')
-		seq_printf(m, "%s\n", nodemap->nm_prim_fileset);
-	else
-		seq_puts(m, "\n");
+
+	seq_puts(m, "[");
+	if (nodemap->nm_fileset_prim && nodemap->nm_fileset_prim[0] != '\0') {
+		seq_printf(m, "\n { primary:     %s%s }",
+			   nodemap->nm_fileset_prim,
+			   nodemap->nm_fileset_prim_ro ? ", mode: ro" : "");
+		cont = true;
+	}
+
+	down_read(&nodemap->nm_fileset_alt_lock);
+	for (node = rb_first(&nodemap->nm_fileset_alt); node;
+	     node = rb_next(node)) {
+		if (cont)
+			seq_puts(m, ",");
+		cont = true;
+		fileset_alt = rb_entry(node, struct lu_fileset_alt, nfa_rb);
+		seq_printf(m, "\n { alternate:   %s%s }", fileset_alt->nfa_path,
+			   fileset_alt->nfa_ro ? ", mode: ro" : "");
+	}
+	up_read(&nodemap->nm_fileset_alt_lock);
+
+	seq_puts(m, "\n]\n");
 
 	nodemap_putref(nodemap);
 	return rc;
 }
 
 /**
- * Set a fileset on a nodemap.
+ * nodemap_fileset_seq_write() - Set a fileset on a nodemap.
+ * @file: proc file
+ * @buffer: string, "<fileset>"
+ * @count: @buffer length
+ * @off: unused
  *
- * \param[in] file      proc file
- * \param[in] buffer    string, "<fileset>"
- * \param[in] count     \a buffer length
- * \param[in] off       unused
- * \retval              \a count on success
- * \retval              negative number on error
+ * Return
+ * * %0 on success
+ * * %negative on failure
  */
 static ssize_t
 nodemap_fileset_seq_write(struct file *file,
@@ -266,7 +417,7 @@ nodemap_fileset_seq_write(struct file *file,
 	if (copy_from_user(nm_fileset, buffer, count))
 		GOTO(out, rc = -EFAULT);
 
-	rc = nodemap_set_fileset(m->private, nm_fileset, false, false);
+	rc = nodemap_set_fileset_prim_lproc(m->private, nm_fileset, false);
 	if (rc != 0)
 		GOTO(out, rc = -EINVAL);
 
@@ -279,20 +430,20 @@ out:
 LDEBUGFS_SEQ_FOPS(nodemap_fileset);
 
 /**
- * Reads and prints the SELinux policy info for the given nodemap.
+ * nodemap_sepol_seq_show() - Reads/prints SELinux policy info for given nodemap
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return
+ * * %0 on success
+ * * %negative on failure
  */
 static int nodemap_sepol_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 	int rc = 0;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -306,14 +457,15 @@ static int nodemap_sepol_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Set SELinux policy info on a nodemap.
+ * nodemap_sepol_seq_write() - Set SELinux policy info on a nodemap.
+ * @file: proc file
+ * @buffer: string, "<sepol>"
+ * @count: @buffer length
+ * @off: unused
  *
- * \param[in] file      proc file
- * \param[in] buffer    string, "<sepol>"
- * \param[in] count     \a buffer length
- * \param[in] off       unused
- * \retval              \a count on success
- * \retval              negative number on error
+ * Return
+ * * %0 on success
+ * * %negative on failure
  */
 static ssize_t
 nodemap_sepol_seq_write(struct file *file,
@@ -348,27 +500,28 @@ out:
 LDEBUGFS_SEQ_FOPS(nodemap_sepol);
 
 /**
- * Reads and prints the exports attached to the given nodemap.
+ * nodemap_exports_show() - Reads and prints the exports attached
+ * to the given nodemap
+ * @m: seq file in proc fs, stores nodemap
+ * @unused: unused
  *
- * \param	m		seq file in proc fs, stores nodemap
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
-static int nodemap_exports_show(struct seq_file *m, void *data)
+static int nodemap_exports_show(struct seq_file *m, void *unused)
 {
 	struct lu_nodemap *nodemap;
 	struct obd_export *exp;
-	char nidstr[LNET_NIDSTR_SIZE] = "<unknown>";
+	char nidstr[LNET_NIDSTR_SIZE];
 	bool cont = false;
 	int rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
-			(char *)m->private, rc);
+		       (char *)m->private, rc);
 		return rc;
 	}
 
@@ -377,14 +530,18 @@ static int nodemap_exports_show(struct seq_file *m, void *data)
 	mutex_lock(&nodemap->nm_member_list_lock);
 	list_for_each_entry(exp, &nodemap->nm_member_list,
 			    exp_target_data.ted_nodemap_member) {
-		if (exp->exp_connection != NULL)
+		if (exp->exp_connection)
 			libcfs_nidstr_r(&exp->exp_connection->c_peer.nid,
-					  nidstr, sizeof(nidstr));
+					nidstr, sizeof(nidstr));
+		else
+			strscpy(nidstr, "<unknown>", sizeof(nidstr));
+
 		if (cont)
 			seq_puts(m, ",");
 		cont = true;
-		seq_printf(m, "\n { nid: %s, uuid: %s }",
-			   nidstr, exp->exp_client_uuid.uuid);
+		seq_printf(m, "\n { nid: %s, uuid: %s, dev: %s%s }", nidstr,
+			   exp->exp_client_uuid.uuid, exp->exp_obd->obd_name,
+			exp->exp_banned ? ", banned: true" : "");
 	}
 	mutex_unlock(&nodemap->nm_member_list_lock);
 
@@ -397,11 +554,13 @@ static int nodemap_exports_show(struct seq_file *m, void *data)
 }
 
 /**
- * Attaches nodemap_idmap_show to proc file.
+ * nodemap_exports_open() - Attaches nodemap_exports_show to proc file
+ * @inode: inode of seq file in proc fs
+ * @file: seq file
  *
- * \param	inode		inode of seq file in proc fs
- * \param	file		seq file
- * \retval	0		success
+ * Return:
+ * * %0		success
+ * * %-errno	on failure
  */
 static int nodemap_exports_open(struct inode *inode, struct file *file)
 {
@@ -409,11 +568,12 @@ static int nodemap_exports_open(struct inode *inode, struct file *file)
 }
 
 /**
- * Reads and prints the active flag for the given nodemap.
+ * nodemap_active_seq_show() - Reads and prints active flag for given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
  */
 static int nodemap_active_seq_show(struct seq_file *m, void *data)
 {
@@ -422,14 +582,15 @@ static int nodemap_active_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Activate/deactivate nodemap.
+ * nodemap_active_seq_write() - Activate/deactivate nodemap.
+ * @file: proc file
+ * @buffer: string, "1" or "0" to activate/deactivate nodemap
+ * @count: @buffer length
+ * @off: unused
  *
- * \param[in] file      proc file
- * \param[in] buffer    string, "1" or "0" to activate/deactivate nodemap
- * \param[in] count     \a buffer length
- * \param[in] off       unused
- * \retval              \a count on success
- * \retval              negative number on error
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static ssize_t
 nodemap_active_seq_write(struct file *file, const char __user *buffer,
@@ -460,19 +621,19 @@ nodemap_active_seq_write(struct file *file, const char __user *buffer,
 LDEBUGFS_SEQ_FOPS(nodemap_active);
 
 /**
- * Reads and prints the nodemap ID for the given nodemap.
+ * nodemap_id_seq_show() - Reads and prints the nodemap ID for the given nodemap
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_id_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		int rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -487,19 +648,19 @@ static int nodemap_id_seq_show(struct seq_file *m, void *data)
 LDEBUGFS_SEQ_FOPS_RO(nodemap_id);
 
 /**
- * Reads and prints the root squash UID for the given nodemap.
+ * nodemap_squash_uid_seq_show() - Read/print root squash UID for given nodemap
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_squash_uid_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		int rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -513,19 +674,19 @@ static int nodemap_squash_uid_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the root squash GID for the given nodemap.
+ * nodemap_squash_gid_seq_show() - Read/print root squash GID for given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_squash_gid_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		int rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -539,19 +700,19 @@ static int nodemap_squash_gid_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the squash PROJID for the given nodemap.
+ * nodemap_squash_projid_seq_show() - Read/print squash PROJID for given nodemap
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_squash_projid_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		int rc = PTR_ERR(nodemap);
 
@@ -566,19 +727,19 @@ static int nodemap_squash_projid_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the trusted flag for the given nodemap.
+ * nodemap_trusted_seq_show() - Read/print trusted flag for the given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_trusted_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		int rc = PTR_ERR(nodemap);
 
@@ -593,20 +754,20 @@ static int nodemap_trusted_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the admin flag for the given nodemap.
+ * nodemap_admin_seq_show() - Read/print the admin flag for the given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_admin_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 	int rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -620,11 +781,13 @@ static int nodemap_admin_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the mapping mode for the given nodemap.
+ * nodemap_map_mode_seq_show() - Read/print mapping mode for the given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_map_mode_seq_show(struct seq_file *m, void *data)
 {
@@ -632,9 +795,7 @@ static int nodemap_map_mode_seq_show(struct seq_file *m, void *data)
 	bool need_sep = false;
 	int rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -663,11 +824,13 @@ static int nodemap_map_mode_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the rbac for the given nodemap.
+ * nodemap_rbac_seq_show() - Reads and prints the rbac for the given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_rbac_seq_show(struct seq_file *m, void *data)
 {
@@ -675,9 +838,7 @@ static int nodemap_rbac_seq_show(struct seq_file *m, void *data)
 	char *sep = "";
 	int i, rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -686,9 +847,17 @@ static int nodemap_rbac_seq_show(struct seq_file *m, void *data)
 	}
 
 	if (nodemap->nmf_rbac == NODEMAP_RBAC_ALL) {
-		for (i = 0; i < ARRAY_SIZE(nodemap_rbac_names); i++)
+		for (i = 0; i < ARRAY_SIZE(nodemap_rbac_names); i++) {
+			/* local_admin only makes sense on non default nodemap
+			 * where root can be mapped or offset
+			 */
+			if (nodemap_rbac_names[i].nrn_mode ==
+			      NODEMAP_RBAC_LOCAL_ADMIN &&
+			    is_default_nodemap(nodemap))
+				continue;
 			seq_printf(m, "%s%s", i == 0 ? "" : ",",
 				   nodemap_rbac_names[i].nrn_name);
+		}
 		seq_puts(m, "\n");
 	} else if (nodemap->nmf_rbac == NODEMAP_RBAC_NONE) {
 		seq_puts(m, "none\n");
@@ -709,20 +878,21 @@ static int nodemap_rbac_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the deny_unknown flag for the given nodemap.
+ * nodemap_deny_unknown_seq_show() - Read/print deny_unknown flag for given
+ * nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_deny_unknown_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 	int rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -736,20 +906,21 @@ static int nodemap_deny_unknown_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the audit_mode flag for the given nodemap.
+ * nodemap_audit_mode_seq_show() - Reads and prints the audit_mode flag for the
+ * given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_audit_mode_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 	int rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -763,20 +934,21 @@ static int nodemap_audit_mode_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the forbid_encryption flag for the given nodemap.
+ * nodemap_forbid_encryption_seq_show() - Reads and prints the forbid_encryption
+ * flag for the given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_forbid_encryption_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 	int rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -790,11 +962,14 @@ static int nodemap_forbid_encryption_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the raise_privs property for the given nodemap.
+ * nodemap_raise_privs_seq_show() - Reads and prints the raise_privs property
+ * for the given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_raise_privs_seq_show(struct seq_file *m, void *data)
 {
@@ -802,9 +977,7 @@ static int nodemap_raise_privs_seq_show(struct seq_file *m, void *data)
 	char *sep = "";
 	int i, rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -857,20 +1030,21 @@ putref:
 }
 
 /**
- * Reads and prints the readonly_mount flag for the given nodemap.
+ * nodemap_readonly_mount_seq_show() - Reads and prints the readonly_mount flag
+ * for the given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_readonly_mount_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 	int rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -884,20 +1058,21 @@ static int nodemap_readonly_mount_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the deny_mount flag for the given nodemap.
+ * nodemap_deny_mount_seq_show() - Reads and prints the deny_mount flag for the
+ * given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
  *
- * \param	m		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_deny_mount_seq_show(struct seq_file *m, void *data)
 {
 	struct lu_nodemap *nodemap;
 	int rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(m->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(m->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -912,11 +1087,14 @@ static int nodemap_deny_mount_seq_show(struct seq_file *m, void *data)
 }
 
 /**
- * Reads and prints the name of the parent nodemap for the given nodemap.
+ * nodemap_parent_seq_show() - Reads and prints the name of the parent nodemap
+ * for the given nodemap.
+ * @seq: seq file in proc fs
+ * @data: unused
  *
- * \param	seq		seq file in proc fs
- * \param	data		unused
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 static int nodemap_parent_seq_show(struct seq_file *seq, void *data)
 {
@@ -924,9 +1102,7 @@ static int nodemap_parent_seq_show(struct seq_file *seq, void *data)
 	char *pname;
 	int rc;
 
-	mutex_lock(&active_config_lock);
-	nodemap = nodemap_lookup(seq->private);
-	mutex_unlock(&active_config_lock);
+	nodemap = nodemap_lookup_unlocked(seq->private);
 	if (IS_ERR(nodemap)) {
 		rc = PTR_ERR(nodemap);
 		CERROR("cannot find nodemap '%s': rc = %d\n",
@@ -945,6 +1121,35 @@ static int nodemap_parent_seq_show(struct seq_file *seq, void *data)
 
 	seq_printf(seq, "%s\n", pname);
 	nodemap_putref(nodemap);
+	return 0;
+}
+
+/**
+ * nodemap_gssonly_identify_seq_show() - Reads & prints gssonly_identification
+ *                                       flag for the given nodemap.
+ * @m: seq file in proc fs
+ * @data: unused
+ *
+ * Returns:
+ * * %0 success
+ * * %negative failure
+ */
+static int nodemap_gssonly_identify_seq_show(struct seq_file *m, void *data)
+{
+	struct lu_nodemap *nodemap;
+	int rc;
+
+	nodemap = nodemap_lookup_unlocked(m->private);
+	if (IS_ERR(nodemap)) {
+		rc = PTR_ERR(nodemap);
+		CERROR("cannot find nodemap '%s': rc = %d\n",
+		       (char *)m->private, rc);
+		return rc;
+	}
+
+	seq_printf(m, "%d\n", (int)nodemap->nmf_gss_identify);
+	nodemap_putref(nodemap);
+
 	return 0;
 }
 
@@ -967,6 +1172,7 @@ LDEBUGFS_SEQ_FOPS_RO(nodemap_squash_projid);
 LDEBUGFS_SEQ_FOPS_RO(nodemap_deny_unknown);
 LDEBUGFS_SEQ_FOPS_RO(nodemap_map_mode);
 LDEBUGFS_SEQ_FOPS_RO(nodemap_offset);
+LDEBUGFS_SEQ_FOPS_RO(nodemap_capabilities);
 LDEBUGFS_SEQ_FOPS_RO(nodemap_rbac);
 LDEBUGFS_SEQ_FOPS_RO(nodemap_audit_mode);
 LDEBUGFS_SEQ_FOPS_RO(nodemap_forbid_encryption);
@@ -974,9 +1180,17 @@ LDEBUGFS_SEQ_FOPS_RO(nodemap_raise_privs);
 LDEBUGFS_SEQ_FOPS_RO(nodemap_readonly_mount);
 LDEBUGFS_SEQ_FOPS_RO(nodemap_deny_mount);
 LDEBUGFS_SEQ_FOPS_RO(nodemap_parent);
+LDEBUGFS_SEQ_FOPS_RO(nodemap_gssonly_identify);
 
 static const struct file_operations nodemap_ranges_fops = {
 	.open		= nodemap_ranges_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release
+};
+
+static const struct file_operations nodemap_ban_ranges_fops = {
+	.open		= nodemap_ban_ranges_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
 	.release	= single_release
@@ -1011,6 +1225,10 @@ static struct ldebugfs_vars lprocfs_nodemap_vars[] = {
 		.fops		= &nodemap_deny_unknown_fops,
 	},
 	{
+		.name		= "enable_cap_mask",
+		.fops		= &nodemap_capabilities_fops,
+	},
+	{
 		.name		= "exports",
 		.fops		= &nodemap_exports_fops,
 	},
@@ -1021,6 +1239,10 @@ static struct ldebugfs_vars lprocfs_nodemap_vars[] = {
 	{
 		.name		= "forbid_encryption",
 		.fops		= &nodemap_forbid_encryption_fops,
+	},
+	{
+		.name		= "gssonly_identification",
+		.fops		= &nodemap_gssonly_identify_fops,
 	},
 	{
 		.name		= "id",
@@ -1049,6 +1271,10 @@ static struct ldebugfs_vars lprocfs_nodemap_vars[] = {
 	{
 		.name		= "ranges",
 		.fops		= &nodemap_ranges_fops,
+	},
+	{
+		.name		= "banlist",
+		.fops		= &nodemap_ban_ranges_fops,
 	},
 	{
 		.name		= "rbac",
@@ -1102,6 +1328,10 @@ static struct ldebugfs_vars lprocfs_default_nodemap_vars[] = {
 		.fops		= &nodemap_deny_unknown_fops,
 	},
 	{
+		.name		= "enable_cap_mask",
+		.fops		= &nodemap_capabilities_fops,
+	},
+	{
 		.name		= "exports",
 		.fops		= &nodemap_exports_fops,
 	},
@@ -1124,6 +1354,14 @@ static struct ldebugfs_vars lprocfs_default_nodemap_vars[] = {
 	{
 		.name		= "child_raise_privileges",
 		.fops		= &nodemap_raise_privs_fops,
+	},
+	{
+		.name		= "banlist",
+		.fops		= &nodemap_ban_ranges_fops,
+	},
+	{
+		.name		= "rbac",
+		.fops		= &nodemap_rbac_fops,
 	},
 	{
 		.name		= "readonly_mount",
@@ -1155,9 +1393,11 @@ static struct ldebugfs_vars lprocfs_default_nodemap_vars[] = {
 };
 
 /**
- * Initialize the nodemap procfs directory.
+ * nodemap_procfs_init() - Initialize the nodemap procfs directory.
  *
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 int nodemap_procfs_init(void)
 {
@@ -1175,7 +1415,7 @@ int nodemap_procfs_init(void)
 	return rc;
 }
 
-/**
+/*
  * Cleanup nodemap proc entry data structures.
  */
 void nodemap_procfs_exit(void)
@@ -1191,7 +1431,7 @@ void nodemap_procfs_exit(void)
 	}
 }
 
-/**
+/*
  * Remove a nodemap's procfs entry and related data.
  */
 void lprocfs_nodemap_remove(struct nodemap_pde *nm_pde)
@@ -1202,11 +1442,13 @@ void lprocfs_nodemap_remove(struct nodemap_pde *nm_pde)
 }
 
 /**
- * Register the proc directory for a nodemap
+ * lprocfs_nodemap_register() - Register the proc directory for a nodemap
+ * @nodemap: nodemap to make the proc dir for
+ * @is_default: 1 if default nodemap
  *
- * \param	nodemap		nodemap to make the proc dir for
- * \param	is_default:	1 if default nodemap
- * \retval	0		success
+ * Return:
+ * * %0 on success
+ * * %negative error code on failure
  */
 int lprocfs_nodemap_register(struct lu_nodemap *nodemap, bool is_default)
 {

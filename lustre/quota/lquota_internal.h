@@ -312,7 +312,7 @@ static inline void lqe_read_unlock(struct lquota_entry *lqe)
 
 /* minimum qunit size, 1K inode for metadata pool and 1MB for data pool */
 #define LQUOTA_LEAST_QUNIT(type) \
-	(type == LQUOTA_RES_MD ? (1 << 10) : toqb(OFD_MAX_BRW_SIZE))
+	(type == LQUOTA_RES_MD ? (1 << 10) : stoqb(OFD_MAX_BRW_SIZE))
 
 static inline enum osd_quota_local_flags lquota_over_fl(int qtype)
 {
@@ -338,6 +338,7 @@ struct lquota_thread_info {
 	struct dt_object_format	qti_dof;
 	struct lu_fid		qti_fid;
 	char			qti_buf[LQUOTA_NAME_MAX];
+	struct lu_nodemap *nodemap;
 };
 
 #define qti_glb_rec	qti_rec.lqr_glb_rec
@@ -368,11 +369,11 @@ struct lquota_thread_info *lquota_info(const struct lu_env *env)
 	    ((libcfs_debug & (mask)) != 0 &&                            \
 	     (libcfs_subsystem_debug & DEBUG_SUBSYSTEM) != 0))          \
 		lquota_lqe_debug0(lqe, msgdata, fmt, ##a);              \
-} while(0)
+} while (0)
 
 void lquota_lqe_debug0(struct lquota_entry *lqe,
 		       struct libcfs_debug_msg_data *data, const char *fmt, ...)
-	__attribute__ ((format (printf, 3, 4)));
+	__printf(3, 4);
 
 #define LQUOTA_DEBUG_LIMIT(mask, lqe, fmt, a...) do {                          \
 	static struct cfs_debug_limit_state _lquota_cdls;		       \
@@ -434,9 +435,9 @@ int lquota_extract_fid(const struct lu_fid *, enum lquota_res_type *,
 		       enum lquota_type *);
 const struct dt_index_features *glb_idx_feature(struct lu_fid *);
 int lquota_obj_iter(const struct lu_env *env, struct dt_device *dev,
-		    struct dt_object *obj, struct lquota_entry *lqe_def,
-		    struct obd_quotactl *oqctl, char *buffer, int size,
-		    bool is_glb, bool is_md);
+		    struct dt_object *obj, struct lu_nodemap *nm,
+		    struct lquota_entry *lqe_def, struct obd_quotactl *oqctl,
+		    char *buffer, int size, bool is_glb, bool is_md);
 
 /* lquota_entry.c */
 /* site create/destroy */
@@ -449,7 +450,7 @@ void lquota_site_free(const struct lu_env *, struct lquota_site *);
 #define lqe_find(env, site, id) lqe_locate_find(env, site, id, true)
 struct lquota_entry *lqe_locate_find(const struct lu_env *,
 				     struct lquota_site *,
-				     union lquota_id *, bool);
+				     const union lquota_id *, bool);
 
 static inline void lqe_set_deleted(struct lquota_entry *lqe)
 {

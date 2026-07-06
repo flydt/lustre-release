@@ -29,18 +29,21 @@ static void qsd_reint_completion(const struct lu_env *env,
 {
 	struct qsd_instance	*qsd = qqi->qqi_qsd;
 	__u64			*slv_ver = (__u64 *)arg;
+	struct obd_import	*imp = class_exp2cliimp(qsd->qsd_exp);
+
 	ENTRY;
 
 	if (rc) {
-		CDEBUG_LIMIT(rc != -EAGAIN ? D_ERROR : D_QUOTA,
+		CDEBUG_LIMIT((imp->imp_state != LUSTRE_IMP_FULL ||
+			      rc == -EAGAIN) ? D_QUOTA : D_ERROR,
 			     "%s: failed to enqueue global quota lock, glb fid:"
 			     DFID", rc:%d\n", qsd->qsd_svname,
 			     PFID(&req_qbody->qb_fid), rc);
 		RETURN_EXIT;
 	}
 
-	CDEBUG(D_QUOTA, "%s: global quota lock successfully acquired, glb "
-	       "fid:"DFID", glb ver:%llu, slv fid:"DFID", slv ver:%llu\n",
+	CDEBUG(D_QUOTA, "%s: global quota lock successfully acquired, glb fid:"
+	       DFID", glb ver:%llu, slv fid:"DFID", slv ver:%llu\n",
 	       qsd->qsd_svname, PFID(&req_qbody->qb_fid),
 	       lvb->lvb_glb_ver, PFID(&rep_qbody->qb_slv_fid),
 	       rep_qbody->qb_slv_ver);
@@ -57,6 +60,7 @@ static int qsd_reint_qid(const struct lu_env *env, struct qsd_qtype_info *qqi,
 {
 	struct lquota_entry	*lqe;
 	int			 rc;
+
 	ENTRY;
 
 	lqe = lqe_locate(env, qqi->qqi_site, qid);
@@ -74,6 +78,7 @@ out:
 
 	if (global && qid->qid_uid == 0) {
 		struct lquota_glb_rec *glb_rec = (struct lquota_glb_rec *)rec;
+
 		qsd_update_default_quota(qqi, glb_rec->qbr_hardlimit,
 					 glb_rec->qbr_softlimit,
 					 glb_rec->qbr_time);
@@ -86,18 +91,19 @@ out:
 static int qsd_reint_entries(const struct lu_env *env,
 			     struct qsd_qtype_info *qqi,
 			     struct idx_info *ii, bool global,
-			     struct page **pages,
-			     unsigned int npages, bool need_swab)
+			     struct folio **folios,
+			     unsigned int nfolios, bool need_swab)
 {
-	struct qsd_thread_info	*qti = qsd_info(env);
-	struct qsd_instance	*qsd = qqi->qqi_qsd;
-	union lquota_id		*qid = &qti->qti_id;
-	int			 i, j, k, size;
-	int			 rc = 0;
+	struct qsd_thread_info *qti = qsd_info(env);
+	struct qsd_instance *qsd = qqi->qqi_qsd;
+	union lquota_id *qid = &qti->qti_id;
+	int i, j, k, size;
+	int rc = 0;
+
 	ENTRY;
 
 	CDEBUG(D_QUOTA, "%s: processing %d pages for %s index\n",
-	       qsd->qsd_svname, npages, global ? "global" : "slave");
+	       qsd->qsd_svname, nfolios, global ? "global" : "slave");
 
 	/* sanity check on the record size */
 	if ((global && ii->ii_recsize != sizeof(struct lquota_glb_rec)) ||
@@ -110,8 +116,9 @@ static int qsd_reint_entries(const struct lu_env *env,
 
 	size = ii->ii_recsize + ii->ii_keysize;
 
-	for (i = 0; i < npages; i++) {
-		union lu_page	*lip = kmap(pages[i]);
+	for (i = 0; i < nfolios; i++) {
+		void *kaddr = ll_kmap_local_folio(folios[i], 0);
+		union lu_page *lip = kaddr;
 
 		for (j = 0; j < LU_PAGE_COUNT; j++) {
 			if (need_swab)
@@ -119,17 +126,16 @@ static int qsd_reint_entries(const struct lu_env *env,
 				lustre_swab_lip_header(&lip->lp_idx);
 
 			if (lip->lp_idx.lip_magic != LIP_MAGIC) {
-				CERROR("%s: invalid magic (%x != %x) for page "
-				       "%d/%d while transferring %s index\n",
+				CERROR("%s: invalid magic (%x != %x) for page %d/%d while transferring %s index\n",
 				       qsd->qsd_svname, lip->lp_idx.lip_magic,
-				       LIP_MAGIC, i + 1, npages,
+				       LIP_MAGIC, i + 1, nfolios,
 				       global ? "global" : "slave");
 				GOTO(out, rc = -EINVAL);
 			}
 
-			CDEBUG(D_QUOTA, "%s: processing page %d/%d with %d "
-			       "entries for %s index\n", qsd->qsd_svname, i + 1,
-			       npages, lip->lp_idx.lip_nr,
+			CDEBUG(D_QUOTA, "%s: processing page %d/%d with %d entries for %s index\n",
+			       qsd->qsd_svname, i + 1,
+			       nfolios, lip->lp_idx.lip_nr,
 			       global ? "global" : "slave");
 
 			for (k = 0; k < lip->lp_idx.lip_nr; k++) {
@@ -161,7 +167,7 @@ static int qsd_reint_entries(const struct lu_env *env,
 			lip++;
 		}
 out:
-		kunmap(pages[i]);
+		ll_kunmap_local(kaddr);
 		if (rc)
 			break;
 	}
@@ -171,31 +177,34 @@ out:
 static int qsd_reint_index(const struct lu_env *env, struct qsd_qtype_info *qqi,
 			   bool global)
 {
-	struct qsd_thread_info	*qti = qsd_info(env);
-	struct qsd_instance	*qsd = qqi->qqi_qsd;
-	struct idx_info		*ii = &qti->qti_ii;
-	struct lu_fid		*fid;
-	struct page		**pages = NULL;
-	unsigned int		 npages, pg_cnt;
-	__u64			 start_hash = 0, ver = 0;
-	bool			 need_swab = false;
-	int			 i, rc;
+	struct qsd_thread_info *qti = qsd_info(env);
+	struct qsd_instance *qsd = qqi->qqi_qsd;
+	struct idx_info *ii = &qti->qti_ii;
+	struct lu_fid *fid;
+	struct folio **folios = NULL;
+	unsigned int nfolios, lu_pgs;
+	__u64 start_hash = 0, ver = 0;
+	bool need_swab = false;
+	int i, rc;
+
 	ENTRY;
 
 	fid = global ? &qqi->qqi_fid : &qqi->qqi_slv_fid;
 
 	/* let's do a 1MB bulk */
-	npages = min_t(unsigned int, OFD_MAX_BRW_SIZE, 1 << 20);
-	npages /= PAGE_SIZE;
+	nfolios = min_t(unsigned int, OFD_MAX_BRW_SIZE, 1 << 20);
+	nfolios /= PAGE_SIZE;
 
 	/* allocate pages for bulk index read */
-	OBD_ALLOC_PTR_ARRAY(pages, npages);
-	if (pages == NULL)
+	OBD_ALLOC_PTR_ARRAY(folios, nfolios);
+	if (folios == NULL)
 		GOTO(out, rc = -ENOMEM);
-	for (i = 0; i < npages; i++) {
-		pages[i] = alloc_page(GFP_NOFS);
-		if (pages[i] == NULL)
+	for (i = 0; i < nfolios; i++) {
+		struct folio *folio = folio_alloc(GFP_NOFS, 0);
+
+		if (IS_ERR_OR_NULL(folio))
 			GOTO(out, rc = -ENOMEM);
+		folios[i] = folio;
 	}
 
 	qqi->qqi_last_version_update_time = ktime_get_seconds();
@@ -206,11 +215,11 @@ repeat:
 	memcpy(&ii->ii_fid, fid, sizeof(*fid));
 	ii->ii_magic = IDX_INFO_MAGIC;
 	ii->ii_flags = II_FL_NOHASH;
-	ii->ii_count = npages * LU_PAGE_COUNT;
+	ii->ii_count = nfolios * LU_PAGE_COUNT;
 	ii->ii_hash_start = start_hash;
 
 	/* send bulk request to quota master to read global index */
-	rc = qsd_fetch_index(env, qsd->qsd_exp, ii, npages, pages, &need_swab);
+	rc = qsd_fetch_index(env, qsd->qsd_exp, ii, nfolios, folios, &need_swab);
 	if (rc) {
 		CWARN("%s: failed to fetch index for "DFID". %d\n",
 		      qsd->qsd_svname, PFID(fid), rc);
@@ -230,33 +239,33 @@ repeat:
 		CWARN("%s: II_FL_NONUNQ is set on index transfer for fid "DFID
 		      ", it shouldn't be\n", qsd->qsd_svname, PFID(fid));
 	if (ii->ii_keysize != sizeof(__u64)) {
-		CERROR("%s: invalid key size reported on index transfer for "
-		       "fid "DFID", %u != %u\n", qsd->qsd_svname, PFID(fid),
+		CERROR("%s: invalid key size reported on index transfer for fid "
+		       DFID", %u != %u\n", qsd->qsd_svname, PFID(fid),
 		       ii->ii_keysize, (int)sizeof(__u64));
 		GOTO(out, rc = -EPROTO);
 	}
 	if (ii->ii_version == 0 && ii->ii_count != 0)
-		CWARN("%s: index version for fid "DFID" is 0, but index isn't "
-		      "empty (%d)\n", qsd->qsd_svname, PFID(fid), ii->ii_count);
+		CWARN("%s: index version for fid "DFID" is 0, but index isn't empty (%d)\n",
+		      qsd->qsd_svname, PFID(fid), ii->ii_count);
 
-	CDEBUG(D_QUOTA, "%s: reintegration process for fid "DFID" successfully "
-	       "fetched %s index, count = %d\n", qsd->qsd_svname,
+	CDEBUG(D_QUOTA, "%s: reintegration process for fid "DFID" successfully fetched %s index, count = %d\n",
+	       qsd->qsd_svname,
 	       PFID(fid), global ? "global" : "slave", ii->ii_count);
 
 	if (start_hash == 0)
 		/* record version associated with the first bulk transfer */
 		ver = ii->ii_version;
 
-	pg_cnt = (ii->ii_count + (LU_PAGE_COUNT) - 1);
-	pg_cnt >>= PAGE_SHIFT - LU_PAGE_SHIFT;
+	lu_pgs = (ii->ii_count + (LU_PAGE_COUNT) - 1);
+	lu_pgs >>= PAGE_SHIFT - LU_PAGE_SHIFT;
 
-	if (pg_cnt > npages) {
-		CERROR("%s: master returned more pages than expected, %u > %u"
-		       "\n", qsd->qsd_svname, pg_cnt, npages);
-		pg_cnt = npages;
+	if (lu_pgs > nfolios) {
+		CERROR("%s: master returned more pages than expected, %u > %u\n",
+		       qsd->qsd_svname, lu_pgs, nfolios);
+		lu_pgs = nfolios;
 	}
 
-	rc = qsd_reint_entries(env, qqi, ii, global, pages, pg_cnt, need_swab);
+	rc = qsd_reint_entries(env, qqi, ii, global, folios, lu_pgs, need_swab);
 	if (rc)
 		GOTO(out, rc);
 
@@ -265,11 +274,11 @@ repeat:
 		goto repeat;
 	}
 out:
-	if (pages != NULL) {
-		for (i = 0; i < npages; i++)
-			if (pages[i] != NULL)
-				__free_page(pages[i]);
-		OBD_FREE_PTR_ARRAY(pages, npages);
+	if (folios) {
+		for (i = 0; i < nfolios; i++)
+			if (folios[i])
+				folio_put(folios[i]);
+		OBD_FREE_PTR_ARRAY(folios, nfolios);
 	}
 
 	/* Update index version */
@@ -294,6 +303,7 @@ static int qsd_reconciliation(const struct lu_env *env,
 	struct lquota_entry	*lqe;
 	union lquota_id		*qid = &qti->qti_id;
 	int			 rc;
+
 	ENTRY;
 
 	LASSERT(qqi->qqi_glb_obj != NULL);
@@ -414,6 +424,7 @@ static int qsd_reint_main(void *_args)
 	struct qsd_qtype_info	*qqi = args->qra_qqi;
 	struct qsd_instance	*qsd = qqi->qqi_qsd;
 	int			 rc;
+
 	ENTRY;
 
 	CDEBUG(D_QUOTA, "%s: Starting reintegration thread for "DFID"\n",
@@ -435,7 +446,10 @@ static int qsd_reint_main(void *_args)
 		GOTO(out_env_init, rc = 0);
 
 	LASSERT(qsd->qsd_exp != NULL);
-	LASSERT(qqi->qqi_glb_uptodate == 0 || qqi->qqi_slv_uptodate == 0);
+
+	/* Has qsd_process_upd already updated the index? */
+	if (qqi->qqi_glb_uptodate != 0 && qqi->qqi_slv_uptodate != 0)
+		GOTO(out_env_init,  rc = 0);
 
 	memset(&qti->qti_lvb, 0, sizeof(qti->qti_lvb));
 
@@ -461,8 +475,8 @@ static int qsd_reint_main(void *_args)
 		if (rc)
 			GOTO(out_env_init, rc);
 
-		CDEBUG(D_QUOTA, "%s: glb_ver:%llu/%llu,slv_ver:%llu/"
-		       "%llu\n", qsd->qsd_svname,
+		CDEBUG(D_QUOTA, "%s: glb_ver:%llu/%llu,slv_ver:%llu/%llu\n",
+		       qsd->qsd_svname,
 		       qti->qti_lvb.lvb_glb_ver, qqi->qqi_glb_ver,
 		       qti->qti_slv_ver, qqi->qqi_slv_ver);
 	}
@@ -562,8 +576,9 @@ static bool qqi_reint_delayed(struct qsd_qtype_info *qqi)
 	struct qsd_instance	*qsd = qqi->qqi_qsd;
 	struct qsd_upd_rec	*upd;
 	struct lquota_entry	*lqe, *n;
-	int			 dqacq = 0;
+	int			 warn = 1, dqacq = 0;
 	bool			 delay = false;
+
 	ENTRY;
 
 	/* any pending quota adjust? */
@@ -591,7 +606,7 @@ static bool qqi_reint_delayed(struct qsd_qtype_info *qqi)
 	/* check if the reintegration has already started or finished */
 	if ((qqi->qqi_glb_uptodate && qqi->qqi_slv_uptodate) ||
 	     qqi->qqi_reint || qsd->qsd_stopping || qsd->qsd_updating)
-		GOTO(out_lock, delay = true);
+		GOTO(out_nowarn, delay = true);
 
 	/* there could be some unfinished global or index entry updates
 	 * (very unlikely), to avoid them messing up with the reint
@@ -608,12 +623,13 @@ static bool qqi_reint_delayed(struct qsd_qtype_info *qqi)
 	qqi->qqi_reint = 1;
 
 	EXIT;
+out_nowarn:
+	warn = 0;
 out_lock:
 	write_unlock(&qsd->qsd_lock);
 out:
-	if (delay)
-		CERROR("%s: Delaying reintegration for qtype:%d until pending "
-		       "updates are flushed.\n",
+	if (warn)
+		CERROR("%s: Delaying reintegration for qtype:%d until pending updates are flushed.\n",
 		       qsd->qsd_svname, qqi->qqi_qtype);
 	return delay;
 }
@@ -625,6 +641,7 @@ int qsd_start_reint_thread(struct qsd_qtype_info *qqi)
 	struct qsd_reint_args	*args;
 	DECLARE_COMPLETION_ONSTACK(started);
 	int			 rc;
+
 	ENTRY;
 
 	/* do not try to start a new thread as this can lead to a deadlock */

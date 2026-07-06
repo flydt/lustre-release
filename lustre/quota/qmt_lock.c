@@ -12,6 +12,7 @@
 
 #define DEBUG_SUBSYSTEM S_LQUOTA
 
+#include <linux/delay.h>
 #include <linux/kthread.h>
 #include <linux/workqueue.h>
 
@@ -36,6 +37,7 @@ int qmt_intent_policy(const struct lu_env *env, struct lu_device *ld,
 	struct ldlm_resource	*res = (*lockp)->l_resource;
 	struct ldlm_reply	*ldlm_rep;
 	int			 rc, lvb_len;
+
 	ENTRY;
 
 	req_capsule_extend(&req->rq_pill, &RQF_LDLM_INTENT_QUOTA);
@@ -165,6 +167,7 @@ int qmt_lvbo_init(struct lu_device *ld, struct ldlm_resource *res)
 	enum lquota_res_type pool_type;
 	enum lquota_type qtype;
 	int rc;
+
 	ENTRY;
 
 	LASSERT(res != NULL);
@@ -197,6 +200,7 @@ int qmt_lvbo_init(struct lu_device *ld, struct ldlm_resource *res)
 		struct qmt_pool_info	*pool;
 		struct lquota_entry	*lqe;
 		struct lqe_glbl_data	*lgd;
+		int wait = 0;
 
 		pool = qmt_pool_lookup_glb(env, qmt, pool_type);
 		if (IS_ERR(pool))
@@ -210,21 +214,49 @@ int qmt_lvbo_init(struct lu_device *ld, struct ldlm_resource *res)
 			GOTO(out, rc = PTR_ERR(lqe));
 		}
 
+again:
+		mutex_lock(&lqe->lqe_glbl_data_lock);
+		/* Is the old lqe_glbl_data still waiting to be freed in
+		 * qmt_lvbo_free_wq?
+		 */
+		if (lqe->lqe_glbl_data) {
+			mutex_unlock(&lqe->lqe_glbl_data_lock);
+
+			wait++;
+			/* wait one second */
+			if (wait < 1000) {
+				msleep_interruptible(1);
+				goto again;
+			}
+
+			LQUOTA_ERROR(lqe, "the lvb is held by qmt_wq: %p\n",
+				     res->lr_lvb_data);
+			lqe_putref(lqe);
+			GOTO(out_put_qpi, rc = -EBUSY);
+		}
+
 		/* TODO: need something like qmt_extend_lqe_gd that has
-		 * to be calledeach time when qpi_slv_nr is incremented */
+		 * to be called each time when qpi_slv_nr is incremented
+		 */
 		lgd = qmt_alloc_lqe_gd(pool, qtype);
 		if (!lgd) {
+			mutex_unlock(&lqe->lqe_glbl_data_lock);
 			lqe_putref(lqe);
-			qpi_putref(env, pool);
-			GOTO(out, rc = -ENOMEM);
+			GOTO(out_put_qpi, rc = -ENOMEM);
 		}
 
 		qmt_setup_lqe_gd(env, qmt, lqe, lgd, pool_type);
+		lqe->lqe_glbl_data = lgd;
+		mutex_unlock(&lqe->lqe_glbl_data_lock);
+
+		qmt_id_lock_notify(qmt, lqe);
 
 		/* store reference to lqe in lr_lvb_data */
 		res->lr_lvb_data = lqe;
-		qpi_putref(env, pool);
 		LQUOTA_DEBUG(lqe, "initialized res lvb");
+
+out_put_qpi:
+		qpi_putref(env, pool);
 	} else {
 		struct dt_object	*obj;
 
@@ -345,6 +377,7 @@ int qmt_lvbo_update(struct lu_device *ld, struct ldlm_resource *res,
 	bool need_revoke;
 	enum qmt_stype stype;
 	int rc = 0, idx;
+
 	ENTRY;
 
 	LASSERT(res != NULL);
@@ -476,6 +509,7 @@ int qmt_lvbo_fill(struct lu_device *ld, struct ldlm_lock *lock, void *lvb,
 	struct lquota_lvb *qlvb = lvb;
 	struct lu_env *env;
 	int rc;
+
 	ENTRY;
 
 	LASSERT(res != NULL);
@@ -595,6 +629,7 @@ static int qmt_alloc_lock_array(struct ldlm_resource *res,
 	struct list_head *pos;
 	unsigned long count = 0;
 	int fail_cnt = 0;
+
 	ENTRY;
 
 	LASSERT(!array->q_max && !array->q_cnt && !array->q_locks);
@@ -716,6 +751,7 @@ static int qmt_glimpse_lock(const struct lu_env *env, struct qmt_device *qmt,
 	struct qmt_gl_lock_array locks;
 	unsigned long i, locks_count;
 	int rc = 0;
+
 	ENTRY;
 
 	memset(&locks, 0, sizeof(locks));
@@ -820,6 +856,7 @@ void qmt_glb_lock_notify(const struct lu_env *env, struct lquota_entry *lqe,
 	struct qmt_thread_info	*qti = qmt_info(env);
 	struct qmt_pool_info	*pool = lqe2qpi(lqe);
 	struct ldlm_resource	*res = NULL;
+
 	ENTRY;
 
 	lquota_generate_fid(&qti->qti_fid, pool->qpi_rtype, lqe_qtype(lqe));
@@ -862,8 +899,8 @@ void qmt_glb_lock_notify(const struct lu_env *env, struct lquota_entry *lqe,
 	if (IS_ERR(res)) {
 		/* this might happen if no slaves have enqueued global quota
 		 * locks yet */
-		LQUOTA_DEBUG(lqe, "failed to lookup ldlm resource associated "
-			     "with "DFID, PFID(&qti->qti_fid));
+		LQUOTA_DEBUG(lqe, "failed to lookup ldlm resource associated with "
+			     DFID, PFID(&qti->qti_fid));
 		RETURN_EXIT;
 	}
 
@@ -923,6 +960,7 @@ static void qmt_id_lock_glimpse(const struct lu_env *env,
 	struct qmt_thread_info	*qti = qmt_info(env);
 	struct qmt_pool_info	*pool = lqe2qpi(lqe);
 	struct ldlm_resource	*res = NULL;
+
 	ENTRY;
 
 	if (!lqe->lqe_enforced)
@@ -934,8 +972,8 @@ static void qmt_id_lock_glimpse(const struct lu_env *env,
 	if (IS_ERR(res)) {
 		/* this might legitimately happens if slaves haven't had the
 		 * opportunity to enqueue quota lock yet. */
-		LQUOTA_DEBUG(lqe, "failed to lookup ldlm resource for per-ID "
-			     "lock "DFID, PFID(&qti->qti_fid));
+		LQUOTA_DEBUG(lqe, "failed to lookup ldlm resource for per-ID lock "
+			     DFID, PFID(&qti->qti_fid));
 		lqe_write_lock(lqe);
 		if (lqe->lqe_revoke_time == 0 &&
 		    lqe->lqe_qunit == pool->qpi_least_qunit)
@@ -996,6 +1034,7 @@ static void qmt_id_lock_glimpse(const struct lu_env *env,
 void qmt_id_lock_notify(struct qmt_device *qmt, struct lquota_entry *lqe)
 {
 	bool	added = false;
+
 	ENTRY;
 
 	LASSERT(lqe->lqe_is_global);
@@ -1040,6 +1079,7 @@ static int qmt_reba_thread(void *_args)
 	struct qmt_device	*qmt = args->qra_dev;
 	struct lu_env		*env = &args->qra_env;
 	struct lquota_entry	*lqe, *tmp;
+
 	ENTRY;
 
 	complete(args->qra_started);
@@ -1083,6 +1123,7 @@ int qmt_start_reba_thread(struct qmt_device *qmt)
 	struct qmt_reba_args *args;
 	DECLARE_COMPLETION_ONSTACK(started);
 	int rc;
+
 	ENTRY;
 
 	OBD_ALLOC_PTR(args);

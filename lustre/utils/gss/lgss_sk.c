@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2015, Trustees of Indiana University
  *
@@ -57,8 +37,6 @@
 #define SK_DEFAULT_PRIME_BITS 2048
 #define SK_DEFAULT_NODEMAP "default"
 
-static int fips_mode;
-
 static void usage(FILE *fp, char *program)
 {
 	int i;
@@ -68,8 +46,10 @@ static void usage(FILE *fp, char *program)
 		"session keyring\n");
 	fprintf(fp, "-m|--modify     <keyfile>	Modify keyfile's attributes\n");
 	fprintf(fp, "-r|--read       <keyfile>	Show keyfile's attributes\n");
+	fprintf(fp, "-R|--remove     <keyfile>	Remove key from user's session keyring\n");
 	fprintf(fp, "-w|--write      <keyfile>	Generate keyfile\n\n");
 	fprintf(fp, "Modify/Write Options:\n");
+	fprintf(fp, "-a|--ascii      <keyfile>	Output key in ASCII-encoded format\n");
 	fprintf(fp, "-c|--crypt      <num>	Cipher for encryption "
 		"(Default: AES Counter mode)\n");
 	for (i = 1; i < ARRAY_SIZE(sk_crypt_algs); i++)
@@ -99,7 +79,10 @@ static void usage(FILE *fp, char *program)
 	fprintf(fp, "                        Not a seed value. "
 		"This is the actual key value.\n\n");
 	fprintf(fp, "Other Options:\n");
+	fprintf(fp, "-s|--suffix	   When loading a server key, do not replace the key and instead add a timestamp-suffix to the key description. This option can only be used with the '-l' argument.\n");
+	fprintf(fp, "-u|--update     <dir>	Only when loading a key, mount path to update the key for\n");
 	fprintf(fp, "-v|--verbose           Increase verbosity for errors\n");
+	fprintf(fp, "-x|--timeout    <num>  When loading a server key, set a timeout of num seconds on former keys with same descriptor. This option can only be used with the '-s' argument; 2 days by default.\n");
 	exit(EXIT_FAILURE);
 }
 
@@ -144,42 +127,6 @@ static ssize_t get_key_data(char *src, void *buffer, size_t bits)
 	rc = 0;
 
 out:
-	close(fd);
-	return rc;
-}
-
-static int write_config_file(char *output_file,
-			     struct sk_keyfile_config *config, bool overwrite)
-{
-	size_t rc;
-	int fd;
-	int flags = O_WRONLY | O_CREAT;
-
-	if (!overwrite)
-		flags |= O_EXCL;
-
-	sk_config_cpu_to_disk(config);
-
-	fd = open(output_file, flags, 0400);
-	if (fd < 0) {
-		fprintf(stderr, "error: opening '%s': %s\n", output_file,
-			strerror(errno));
-		return -errno;
-	}
-
-	rc = write(fd, config, sizeof(*config));
-	if (rc < 0) {
-		fprintf(stderr, "error: writing to '%s': %s\n", output_file,
-			strerror(errno));
-		rc = -errno;
-	} else if (rc != sizeof(*config)) {
-		fprintf(stderr, "error: short write to '%s'\n", output_file);
-		rc = -ENOSPC;
-
-	} else {
-		rc = 0;
-	}
-
 	close(fd);
 	return rc;
 }
@@ -279,134 +226,51 @@ static int parse_mgsnids(char *mgsnids, struct sk_keyfile_config *config)
 	return rc;
 }
 
-#if !defined(HAVE_OPENSSL_EVP_PKEY) && OPENSSL_VERSION_NUMBER >= 0x10100000L
-static inline int __fetch_ssk_prime(struct sk_keyfile_config *config)
+static bool check_orig_ascii_format(const char *filename)
 {
-	const BIGNUM *p;
-	DH *dh = NULL;
-	int primenid;
-	int rc = -1;
+	struct stat st;
+	char *file_data = NULL;
+	bool is_ascii = false;
+	ssize_t bytes_read;
+	int fd, rc;
 
-	primenid = sk_primebits2primenid(config->skc_prime_bits);
-	dh = DH_new_by_nid(primenid);
-	if (!dh) {
-		fprintf(stderr, "error: dh cannot be init\n");
-		goto prime_end;
+	fd = open(filename, O_RDONLY);
+	if (fd < 0)
+		return false;
+
+	rc = fstat(fd, &st);
+	if (rc || st.st_size == 0)
+		goto cleanup;
+
+	file_data = malloc(st.st_size + 1);
+	if (!file_data)
+		goto cleanup;
+
+	bytes_read = read(fd, file_data, st.st_size);
+	if (bytes_read > 0) {
+		file_data[bytes_read] = '\0';
+		is_ascii = sk_is_ascii_encoded(file_data, bytes_read);
 	}
 
-	p = DH_get0_p(dh);
-	if (!p) {
-		fprintf(stderr, "error: cannot get p from dh\n");
-		goto prime_end;
-	}
-
-	if (BN_num_bytes(p) > SK_MAX_P_BYTES) {
-		fprintf(stderr,
-			"error: requested length %d exceeds maximum %d\n",
-			BN_num_bytes(p), SK_MAX_P_BYTES * 8);
-		goto prime_end;
-	}
-
-	if (BN_bn2bin(p, config->skc_p) != BN_num_bytes(p)) {
-		fprintf(stderr, "error: convert BIGNUM p to binary failed\n");
-		goto prime_end;
-	}
-
-	rc = 0;
-
-prime_end:
-	if (rc)
-		fprintf(stderr,
-			"error: fetching SSK prime failed: %s\n",
-			ERR_error_string(ERR_get_error(), NULL));
-	DH_free(dh);
-	return rc;
-}
-#endif
-
-static inline int __gen_ssk_prime(struct sk_keyfile_config *config)
-{
-	int rc = -1;
-	const char *primename;
-	EVP_PKEY_CTX *ctx = NULL;
-	EVP_PKEY *dh = NULL;
-	BIGNUM *p;
-
-	if (fips_mode) {
-		primename = sk_primebits2name(config->skc_prime_bits);
-		if (!primename) {
-			fprintf(stderr,
-				"error: prime len %d not supported in FIPS mode\n",
-				config->skc_prime_bits);
-			return rc;
-		}
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-		fprintf(stdout,
-			"FIPS mode, using well-known prime %s\n", primename);
-#ifndef HAVE_OPENSSL_EVP_PKEY
-		return __fetch_ssk_prime(config);
-#endif
-#endif /* OPENSSL_VERSION_NUMBER >= 0x10100000L */
-	}
-
-	ctx = EVP_PKEY_CTX_new_from_name(NULL, "DH", NULL);
-	if (!ctx || EVP_PKEY_paramgen_init(ctx) != 1) {
-		fprintf(stderr, "error: ctx cannot be init\n");
-		goto prime_end;
-	}
-
-	if (EVP_PKEY_CTX_set_dh_paramgen_prime_len(ctx,
-						 config->skc_prime_bits) <= 0 ||
-	    EVP_PKEY_CTX_set_dh_paramgen_generator(ctx, SK_GENERATOR) <= 0) {
-		fprintf(stderr, "error: cannot set prime or generator\n");
-		goto prime_end;
-	}
-
-	if (EVP_PKEY_paramgen(ctx, &dh) != 1) {
-		fprintf(stderr, "error: cannot generate DH parameters\n");
-		goto prime_end;
-	}
-
-	if (!EVP_PKEY_get_bn_param(dh, OSSL_PKEY_PARAM_FFC_P, &p)) {
-		fprintf(stderr, "error: cannot get p from dh\n");
-		goto prime_end;
-	}
-
-	if (BN_num_bytes(p) > SK_MAX_P_BYTES) {
-		fprintf(stderr,
-			"error: cannot generate DH parameters: requested length %d exceeds maximum %d\n",
-			config->skc_prime_bits, SK_MAX_P_BYTES * 8);
-		goto prime_end;
-	}
-	if (BN_bn2bin(p, config->skc_p) != BN_num_bytes(p)) {
-		fprintf(stderr,
-			"error: convert BIGNUM p to binary failed\n");
-		goto prime_end;
-	}
-
-	rc = 0;
-
-prime_end:
-	if (rc)
-		fprintf(stderr,
-			"error: generating SSK prime failed: %s\n",
-			ERR_error_string(ERR_get_error(), NULL));
-	EVP_PKEY_free(dh);
-	EVP_PKEY_CTX_free(ctx);
-	return rc;
+cleanup:
+	free(file_data);
+	close(fd);
+	return is_ascii;
 }
 
 int main(int argc, char **argv)
 {
 	struct sk_keyfile_config *config;
 	char *datafile = NULL;
+	char *fsname = NULL;
 	char *input = NULL;
 	char *load = NULL;
 	char *modify = NULL;
-	char *output = NULL;
 	char *mgsnids = NULL;
 	char *nodemap = NULL;
-	char *fsname = NULL;
+	char *output = NULL;
+	char *remove = NULL;
+	char *update_path = NULL;
 	char *tmp;
 	char *tmp2;
 	int crypt = SK_CRYPT_EMPTY;
@@ -415,12 +279,16 @@ int main(int argc, char **argv)
 	int shared_keylen = -1;
 	int prime_bits = -1;
 	int verbose = 0;
+	bool ascii = false;
+	bool suffix = false;
+	int timeout = -1;
 	int i;
 	int opt;
 	enum sk_key_type type = SK_TYPE_INVALID;
 	bool generate_prime = false;
 
 	static struct option long_opts[] = {
+	{ .name = "ascii",	.has_arg = no_argument,	      .val = 'a'},
 	{ .name = "crypt",	.has_arg = required_argument, .val = 'c'},
 	{ .name = "data",	.has_arg = required_argument, .val = 'd'},
 	{ .name = "expire",	.has_arg = required_argument, .val = 'e'},
@@ -436,15 +304,22 @@ int main(int argc, char **argv)
 	{ .name = "nodemap",	.has_arg = required_argument, .val = 'n'},
 	{ .name = "prime-bits",	.has_arg = required_argument, .val = 'p'},
 	{ .name = "read",	.has_arg = required_argument, .val = 'r'},
+	{ .name = "remove",	.has_arg = required_argument, .val = 'R'},
+	{ .name = "suffix",	.has_arg = no_argument,	      .val = 's'},
 	{ .name = "type",	.has_arg = required_argument, .val = 't'},
+	{ .name = "update",	.has_arg = required_argument, .val = 'u'},
 	{ .name = "verbose",	.has_arg = no_argument,	      .val = 'v'},
 	{ .name = "write",	.has_arg = required_argument, .val = 'w'},
+	{ .name = "timeout",	.has_arg = required_argument, .val = 'x'},
 	{ .name = NULL, } };
 
 	while ((opt = getopt_long(argc, argv,
-				  "c:d:e:f:g:hi:l:m:n:p:r:s:k:t:w:v", long_opts,
-				  NULL)) != EOF) {
+				  "ac:d:e:f:g:hi:k:l:m:n:p:r:R:st:u:vw:x:",
+				  long_opts, NULL)) != EOF) {
 		switch (opt) {
+		case 'a':
+			ascii = true;
+			break;
 		case 'c':
 			crypt = sk_name2crypt(optarg);
 			break;
@@ -507,6 +382,12 @@ int main(int argc, char **argv)
 		case 'r':
 			input = optarg;
 			break;
+		case 'R':
+			remove = optarg;
+			break;
+		case 's':
+			suffix = true;
+			break;
 		case 't':
 			tmp2 = strdup(optarg);
 			if (!tmp2) {
@@ -533,11 +414,17 @@ int main(int argc, char **argv)
 			}
 			free(tmp2);
 			break;
+		case 'u':
+			update_path = optarg;
+			break;
 		case 'v':
 			verbose++;
 			break;
 		case 'w':
 			output = optarg;
+			break;
+		case 'x':
+			timeout = atoi(optarg);
 			break;
 		default:
 			fprintf(stderr, "error: unknown option: '%c'\n", opt);
@@ -552,7 +439,25 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
-	if (!input && !output && !load && !modify) {
+	if (!input && !output && !load && !modify && !remove) {
+		usage(stderr, argv[0]);
+		return EXIT_FAILURE;
+	}
+	if (remove && (load || modify || input || output)) {
+		fprintf(stderr,
+			"error: remove option cannot be combined with other operations\n");
+		usage(stderr, argv[0]);
+		return EXIT_FAILURE;
+	}
+	if (update_path && !load) {
+		usage(stderr, argv[0]);
+		return EXIT_FAILURE;
+	}
+	if (suffix && !load) {
+		usage(stderr, argv[0]);
+		return EXIT_FAILURE;
+	}
+	if (timeout != -1 && !suffix) {
 		usage(stderr, argv[0]);
 		return EXIT_FAILURE;
 	}
@@ -566,8 +471,25 @@ int main(int argc, char **argv)
 		return print_config(input);
 
 	if (load) {
-		if (sk_load_keyfile(load))
+		int rc = sk_load_keyfile(load, type & SK_TYPE_CLIENT, false,
+					 update_path, suffix, timeout);
+
+		if (rc < 0) {
+			fprintf(stderr,
+				"error: loading keyfile failed: rc=%d\n", rc);
 			return EXIT_FAILURE;
+		}
+		return EXIT_SUCCESS;
+	}
+
+	if (remove) {
+		int rc = sk_remove_keyfile(remove);
+
+		if (rc < 0) {
+			fprintf(stderr, "error: removing key failed: rc=%d\n",
+				rc);
+			return EXIT_FAILURE;
+		}
 		return EXIT_SUCCESS;
 	}
 
@@ -587,9 +509,16 @@ int main(int argc, char **argv)
 	}
 
 	if (modify) {
+		/* Check if the original file was in ASCII format */
+		bool original_ascii = check_orig_ascii_format(modify);
+
 		config = sk_read_file(modify);
 		if (!config)
 			return EXIT_FAILURE;
+
+		/* Preserve original format unless explicitly overridden */
+		if (original_ascii && !ascii)
+			ascii = true;
 
 		if (type != SK_TYPE_INVALID) {
 			/* generate key when adding client type */
@@ -693,11 +622,11 @@ int main(int argc, char **argv)
 
 	if (generate_prime) {
 		printf("Generating DH parameters, this can take a while...\n");
-		if (__gen_ssk_prime(config))
+		if (gen_ssk_prime(config))
 			goto error;
 	}
 
-	if (write_config_file(modify ?: output, config, modify))
+	if (write_config_file(modify ?: output, config, modify, ascii))
 		goto error;
 
 	return EXIT_SUCCESS;

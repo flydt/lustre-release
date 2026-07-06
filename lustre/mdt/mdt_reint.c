@@ -34,7 +34,10 @@ static inline void mdt_reint_init_ma(struct mdt_thread_info *info,
 }
 
 /**
- * Get version of object by fid.
+ * mdt_obj_version_get() - Get version of object by fid.
+ * @info: struct mdt_thread_info
+ * @o: MDT object
+ * @version: Returned version saved [out]
  *
  * Return real version or ENOENT_VERSION if object doesn't exist
  */
@@ -53,9 +56,14 @@ static void mdt_obj_version_get(struct mdt_thread_info *info,
 }
 
 /**
- * Check version is correct.
+ * mdt_version_check() - Check version is correct.
+ * @req: request struct
+ * @version: version to be saved
+ * @idx: versions index
  *
  * Should be called only during replay.
+ *
+ * Return %0 on success %negative on error.
  */
 static int mdt_version_check(struct ptlrpc_request *req,
 			     __u64 version, int idx)
@@ -88,7 +96,10 @@ static int mdt_version_check(struct ptlrpc_request *req,
 }
 
 /**
- * Save pre-versions in reply.
+ * mdt_version_save() - Save pre-versions in reply.
+ * @req: request struct
+ * @version: version to be saved [out]
+ * @idx: versions index
  */
 static void mdt_version_save(struct ptlrpc_request *req, __u64 version,
 			     int idx)
@@ -106,8 +117,11 @@ static void mdt_version_save(struct ptlrpc_request *req, __u64 version,
 }
 
 /**
- * Save enoent version, it is needed when it is obvious that object doesn't
- * exist, e.g. child during create.
+ * mdt_enoent_version_save() - Save enoent version, it is needed when it is
+ *                             obvious that object doesn't exist, e.g. child
+ *                             during create.
+ * @info: struct mdt_thread_info
+ * @idx: versions index
  */
 static void mdt_enoent_version_save(struct mdt_thread_info *info, int idx)
 {
@@ -119,7 +133,10 @@ static void mdt_enoent_version_save(struct mdt_thread_info *info, int idx)
 }
 
 /**
- * Get version from disk and save in reply buffer.
+ * mdt_version_get_save() - Get version from disk and save in reply buffer.
+ * @info: struct mdt_thread_info
+ * @mto: MDT object
+ * @idx: versions index
  *
  * Versions are saved in reply only during normal operations not replays.
  */
@@ -134,7 +151,12 @@ void mdt_version_get_save(struct mdt_thread_info *info,
 }
 
 /**
- * Get version from disk and check it, no save in reply.
+ * mdt_version_get_check() - Get version from disk & check it, no save in reply.
+ * @info: struct mdt_thread_info
+ * @mto: MTD object
+ * @idx: versions index
+ *
+ * Return %0 on success %negative on error.
  */
 int mdt_version_get_check(struct mdt_thread_info *info,
 			  struct mdt_object *mto, int idx)
@@ -148,7 +170,13 @@ int mdt_version_get_check(struct mdt_thread_info *info,
 }
 
 /**
- * Get version from disk and check if recovery or just save.
+ * mdt_version_get_check_save() - Get version from disk and check if recovery
+ *                                or just save.
+ * @info: struct mdt_thread_info
+ * @mto: MTD object
+ * @idx: versions index
+ *
+ * Return %0 on success %negative on error.
  */
 int mdt_version_get_check_save(struct mdt_thread_info *info,
 			       struct mdt_object *mto, int idx)
@@ -165,10 +193,17 @@ int mdt_version_get_check_save(struct mdt_thread_info *info,
 }
 
 /**
- * Lookup with version checking.
+ * mdt_lookup_version_check() - Lookup with version checking.
+ * @info: struct mdt_thread_info
+ * @p: MDT object
+ * @lname: name of the file/directory to lookup
+ * @fid: pointer to the file identifier (FID) found [out]
+ * @idx: previous object versions index
  *
  * This checks version of 'name'. Many reint functions uses 'name' for child not
  * FID, therefore we need to get object by name and check its version.
+ *
+ * Return %0 on success %negative on error.
  */
 int mdt_lookup_version_check(struct mdt_thread_info *info,
 			     struct mdt_object *p,
@@ -228,9 +263,18 @@ static int mdt_stripes_unlock(struct mdt_thread_info *mti,
 }
 
 /**
+ * mdt_stripes_lock() - Lock slave stripes
+ * @mti: struct mdt_thread_info
+ * @obj: MDT object
+ * @mode: lock mode
+ * @ibits: MDS inode lock bits
+ * @einfo: struct ldlm_enqueue_info
+ *
  * Lock slave stripes if necessary, the lock handles of slave stripes
  * will be stored in einfo->ei_cbdata.
- **/
+ *
+ * Return %0 on success %negative on error.
+ */
 static int mdt_stripes_lock(struct mdt_thread_info *mti, struct mdt_object *obj,
 			    enum ldlm_mode mode, enum mds_ibits_locks ibits,
 			    struct ldlm_enqueue_info *einfo)
@@ -255,20 +299,20 @@ static int mdt_stripes_lock(struct mdt_thread_info *mti, struct mdt_object *obj,
 			      policy);
 }
 
-/** lock object, and stripes if it's a striped directory
+/**
+ * mdt_object_stripes_lock() - lock object, and stripes if it's a striped dir
+ * @info: struct mdt_thread_info
+ * @parent: parent object, if it's NULL, find parent by mdo_lookup()
+ * @child: child object
+ * @lh: lock handle
+ * @einfo: struct ldlm_enqueue_info
+ * @ibits: MDS inode lock bits
+ * @mode: lock mode
  *
  * object should be local, this is called in operations which modify both object
  * and stripes.
  *
- * \param info		struct mdt_thread_info
- * \param parent	parent object, if it's NULL, find parent by mdo_lookup()
- * \param child		child object
- * \param lh		lock handle
- * \param einfo		struct ldlm_enqueue_info
- * \param ibits		MDS inode lock bits
- * \param mode		lock mode
- *
- * \retval		0 on success, -ev on error.
+ * Return %0 on success %negative on error.
  */
 int mdt_object_stripes_lock(struct mdt_thread_info *info,
 			    struct mdt_object *parent,
@@ -460,12 +504,18 @@ unlock_parent:
 }
 
 /*
+ * mdt_create() - File creation operation
+ * @info: struct mdt_thread_info
+ * @lhc: lock handle
+ *
  * VBR: we save three versions in reply:
  * 0 - parent. Check that parent version is the same during replay.
  * 1 - name. Version of 'name' if file exists with the same name or
  * ENOENT_VERSION, it is needed because file may appear due to missed replays.
  * 2 - child. Version of child by FID. Must be ENOENT. It is mostly sanity
  * check.
+ *
+ * Return %0 on success %negative on error.
  */
 static int mdt_create(struct mdt_thread_info *info, struct mdt_lock_handle *lhc)
 {
@@ -485,9 +535,9 @@ static int mdt_create(struct mdt_thread_info *info, struct mdt_lock_handle *lhc)
 
 	ENTRY;
 	DEBUG_REQ(D_INODE, mdt_info_req(info),
-		  "Create ("DNAME"->"DFID") in "DFID,
-		  encode_fn_luname(&rr->rr_name), PFID(rr->rr_fid2),
-		  PFID(rr->rr_fid1));
+		  "%s: create ("DNAME"->"DFID") in parent "DFID,
+		  mdt_obd_name(info->mti_mdt), encode_fn_luname(&rr->rr_name),
+		  PFID(rr->rr_fid2), PFID(rr->rr_fid1));
 
 	if (!fid_is_md_operative(rr->rr_fid1))
 		RETURN(-EPERM);
@@ -500,6 +550,7 @@ static int mdt_create(struct mdt_thread_info *info, struct mdt_lock_handle *lhc)
 	    !(spec->sp_cr_flags & MDS_OPEN_DEFAULT_LMV)) {
 		const struct lmv_user_md *lum = spec->u.sp_ea.eadata;
 		struct obd_export *exp = mdt_info_req(info)->rq_export;
+		bool is_foreign = false;
 
 		/* Only new clients can create remote dir( >= 2.4) and
 		 * striped dir(>= 2.6), old client will return -ENOTSUPP
@@ -507,12 +558,24 @@ static int mdt_create(struct mdt_thread_info *info, struct mdt_lock_handle *lhc)
 		if (!mdt_is_dne_client(exp))
 			RETURN(-ENOTSUPP);
 
-		if (le32_to_cpu(lum->lum_stripe_count) > 1) {
+		if (le32_to_cpu(lum->lum_magic) == LMV_MAGIC_FOREIGN) {
+			is_foreign = true;
+			if (!mdt->mdt_enable_foreign_dir)
+				RETURN(-EPERM);
+		} else if (le32_to_cpu(lum->lum_stripe_count) > 1) {
+			s32 stripe_count = le32_to_cpu(lum->lum_stripe_count);
+
 			if (!mdt_is_striped_client(exp))
 				RETURN(-ENOTSUPP);
 
 			if (!mdt->mdt_enable_striped_dir)
 				RETURN(-EPERM);
+			if (stripe_count > LMV_MAX_STRIPE_COUNT ||
+			    stripe_count < LMV_OVERSTRIPE_COUNT_MAX) {
+				CDEBUG(D_INFO, "bad stripe count %d\n",
+				       stripe_count);
+				RETURN(-EOVERFLOW);
+			}
 		} else if (!mdt->mdt_enable_remote_dir) {
 			RETURN(-EPERM);
 		}
@@ -525,11 +588,16 @@ static int mdt_create(struct mdt_thread_info *info, struct mdt_lock_handle *lhc)
 		/* we want rbac roles to have precedence over any other
 		 * permission or capability checks
 		 */
-		if (!uc->uc_rbac_dne_ops ||
-		    (!cap_raised(uc->uc_cap, CAP_SYS_ADMIN) &&
-		     uc->uc_gid != mdt->mdt_enable_remote_dir_gid &&
-		     mdt->mdt_enable_remote_dir_gid != -1))
+		if (is_foreign) {
+			if (!uc->uc_rbac_foreign_ops ||
+			    mdt_enable_gid_deny(uc, CAP_SYS_ADMIN,
+					     mdt->mdt_enable_foreign_dir_gid))
+				RETURN(-EPERM);
+		} else if (!uc->uc_rbac_dne_ops ||
+			   mdt_enable_gid_deny(uc, CAP_SYS_ADMIN,
+					      mdt->mdt_enable_remote_dir_gid)) {
 			RETURN(-EPERM);
+		}
 
 		/* restripe if later found dir exists, MDS_OPEN_CREAT means
 		 * this is create only, don't try restripe.
@@ -557,6 +625,10 @@ static int mdt_create(struct mdt_thread_info *info, struct mdt_lock_handle *lhc)
 
 	if (!mdt_object_exists(parent))
 		GOTO(put_parent, rc = -ENOENT);
+
+	rc = mdt_check_resource_ids(info, parent);
+	if (unlikely(rc))
+		GOTO(put_parent, rc);
 
 	rc = mdt_check_enc(info, parent);
 	if (rc)
@@ -654,6 +726,9 @@ static int mdt_create(struct mdt_thread_info *info, struct mdt_lock_handle *lhc)
 			&info->mti_tmp_fid1, &info->mti_spec);
 	if (unlikely(rc == 0 && !recreate_obj))
 		GOTO(unlock_parent, rc = -EEXIST);
+
+	if (!mdt_layout_version_check(info, parent, rr->rr_layout_ver))
+		GOTO(unlock_parent, rc = -ESTALE);
 
 	if (info->mti_intent_lock)
 		mdt_set_disposition(info, dlmrep, DISP_OPEN_CREATE);
@@ -813,8 +888,12 @@ static int mdt_attr_set(struct mdt_thread_info *info, struct mdt_object *mo,
 	/* Clear xattr cache on clients, so the virtual project ID xattr
 	 * can get the new project ID
 	 */
-	if (ma->ma_attr.la_valid & LA_PROJID)
+	if (ma->ma_attr.la_valid & LA_PROJID) {
+		/* Check projid_set RBAC role for project ID changes */
+		if (!mdt_ucred(info)->uc_rbac_projid_set)
+			RETURN(-EACCES);
 		lockpart |= MDS_INODELOCK_XATTR;
+	}
 
 	lh = &info->mti_lh[MDT_LH_PARENT];
 	rc = mdt_object_stripes_lock(info, NULL, mo, lh, einfo, lockpart,
@@ -855,10 +934,17 @@ out_unlock:
 }
 
 /**
- * Check HSM flags and add HS_DIRTY flag if relevant.
+ * mdt_add_dirty_flag() - Check HSM flags and add HS_DIRTY flag if relevant.
+ * @info: MDT thread specific info
+ * @mo: MDT object
+ * @ma: Metadata attributes
  *
  * A file could be set dirty only if it has a copy in the backend (HS_EXISTS)
  * and is not RELEASED.
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 int mdt_add_dirty_flag(struct mdt_thread_info *info, struct mdt_object *mo,
 			struct md_attr *ma)
@@ -925,6 +1011,10 @@ static int mdt_reint_setattr(struct mdt_thread_info *info,
 
 	if (!mdt_object_exists(mo))
 		GOTO(out_put, rc = -ENOENT);
+
+	rc = mdt_check_resource_ids(info, mo);
+	if (unlikely(rc))
+		GOTO(out_put, rc);
 
 	if (mdt_object_remote(mo))
 		GOTO(out_put, rc = -EREMOTE);
@@ -1025,9 +1115,8 @@ static int mdt_reint_setattr(struct mdt_thread_info *info,
 			 * permission or capability checks
 			 */
 			if (!uc->uc_rbac_dne_ops ||
-			    (!cap_raised(uc->uc_cap, CAP_SYS_ADMIN) &&
-			     uc->uc_gid != mdt->mdt_enable_remote_dir_gid &&
-			     mdt->mdt_enable_remote_dir_gid != -1))
+			    mdt_enable_gid_deny(uc, CAP_SYS_ADMIN,
+						mdt->mdt_enable_remote_dir_gid))
 				GOTO(out_put, rc = -EPERM);
 		}
 
@@ -1288,6 +1377,10 @@ static int mdt_reint_unlink(struct mdt_thread_info *info,
 			GOTO(put_child, rc = -ENOENT);
 	}
 
+	rc = mdt_check_resource_ids(info, mc);
+	if (unlikely(rc))
+		GOTO(put_child, rc);
+
 	child_lh = &info->mti_lh[MDT_LH_CHILD];
 	if (mdt_object_remote(mc)) {
 		struct mdt_body	 *repbody;
@@ -1464,6 +1557,10 @@ static int mdt_reint_link(struct mdt_thread_info *info,
 		GOTO(put_source, rc = -ENOENT);
 	}
 
+	rc = mdt_check_resource_ids(info, ms);
+	if (unlikely(rc))
+		GOTO(put_source, rc);
+
 	CFS_RACE(OBD_FAIL_MDS_LINK_RENAME_RACE);
 
 	lhp = &info->mti_lh[MDT_LH_PARENT];
@@ -1473,6 +1570,10 @@ static int mdt_reint_link(struct mdt_thread_info *info,
 
 	rc = mdt_version_get_check_save(info, mp, 0);
 	if (rc)
+		GOTO(unlock_parent, rc);
+
+	rc = mdt_check_resource_ids(info, mp);
+	if (unlikely(rc))
 		GOTO(unlock_parent, rc);
 
 	rc = mdt_check_enc(info, mp);
@@ -1532,13 +1633,20 @@ put_parent:
 	return rc;
 }
 
-/**
- * Get BFL lock for rename or migrate process.
- **/
+/*
+ * Get BFL(Big Filesystem Lock) for rename or migrate process.
+ *
+ * \param trylock	If set, return immediately if the
+ *			lock cannot be acquired.
+ *
+ * \retval		0 on success(lock taken),
+ *			-ev negative errno upon error
+ */
 static int mdt_rename_lock(struct mdt_thread_info *info,
-			   struct mdt_lock_handle *lh)
+			   struct mdt_lock_handle *lh, bool trylock)
 {
 	enum mds_ibits_locks ibits = MDS_INODELOCK_UPDATE;
+	enum mds_ibits_locks trybits = MDS_INODELOCK_NONE;
 	struct lu_fid *fid = &info->mti_tmp_fid1;
 	struct mdt_object *obj;
 	int rc;
@@ -1550,10 +1658,20 @@ static int mdt_rename_lock(struct mdt_thread_info *info,
 		RETURN(PTR_ERR(obj));
 
 	mdt_lock_reg_init(lh, LCK_EX);
+	ibits = trylock ? MDS_INODELOCK_NONE : MDS_INODELOCK_UPDATE;
+	trybits = trylock ? MDS_INODELOCK_UPDATE : MDS_INODELOCK_NONE;
 	rc = mdt_object_lock_internal(info, obj, &LUSTRE_BFL_FID, lh,
-				      &ibits, 0, false);
+				      &ibits, trybits, false);
 	mdt_object_put(info->mti_env, obj);
+	if (trylock && (ibits & MDS_INODELOCK_UPDATE))
+		RETURN(0);
 	RETURN(rc);
+}
+
+static inline int mdt_rename_lock_try(struct mdt_thread_info *info,
+				       struct mdt_lock_handle *lh)
+{
+	return mdt_rename_lock(info, lh, true);
 }
 
 static void mdt_rename_unlock(struct mdt_thread_info *info,
@@ -2232,9 +2350,8 @@ int mdt_reint_migrate(struct mdt_thread_info *info,
 	 * permission or capability checks
 	 */
 	if (uc && (!uc->uc_rbac_dne_ops ||
-		   (!cap_raised(uc->uc_cap, CAP_SYS_ADMIN) &&
-		    uc->uc_gid != mdt->mdt_enable_remote_dir_gid &&
-		    mdt->mdt_enable_remote_dir_gid != -1)))
+		   mdt_enable_gid_deny(uc, CAP_SYS_ADMIN,
+				       mdt->mdt_enable_remote_dir_gid)))
 		RETURN(-EPERM);
 
 	/*
@@ -2246,7 +2363,7 @@ int mdt_reint_migrate(struct mdt_thread_info *info,
 	 * req is NULL if this is called by directory auto-split.
 	 */
 	if (req && !req_is_replay(req)) {
-		rc = mdt_rename_lock(info, rename_lh);
+		rc = mdt_rename_lock(info, rename_lh, false);
 		if (rc != 0) {
 			CERROR("%s: can't lock FS for rename: rc = %d\n",
 			       mdt_obd_name(info->mti_mdt), rc);
@@ -2270,6 +2387,10 @@ int mdt_reint_migrate(struct mdt_thread_info *info,
 
 	if (!S_ISDIR(lu_object_attr(&pobj->mot_obj)))
 		GOTO(put_parent, rc = -ENOTDIR);
+
+	rc = mdt_check_resource_ids(info, pobj);
+	if (unlikely(rc))
+		GOTO(put_parent, rc);
 
 	rc = mdt_check_enc(info, pobj);
 	if (rc)
@@ -2528,10 +2649,11 @@ unlock_rename:
 /*
  * determine lock order of sobj and tobj
  *
- * there are two situations we need to lock tobj before sobj:
+ * there are three situations we need to lock tobj before sobj:
  * 1. sobj is child of tobj
  * 2. sobj and tobj are stripes of a directory, and stripe index of sobj is
  *    larger than that of tobj
+ * 3. apart from the first two situations, tobj.fid < sobj.fid
  *
  * \retval	1 lock tobj before sobj
  * \retval	0 lock sobj before tobj
@@ -2542,6 +2664,7 @@ static int mdt_rename_determine_lock_order(struct mdt_thread_info *info,
 					   struct mdt_object *tobj)
 {
 	struct md_attr *ma = &info->mti_attr;
+	struct mdt_reint_record *rr = &info->mti_rr;
 	struct lu_fid *spfid = &info->mti_tmp_fid1;
 	struct lu_fid *tpfid = &info->mti_tmp_fid2;
 	struct lmv_mds_md_v1 *lmv;
@@ -2577,8 +2700,12 @@ static int mdt_rename_determine_lock_order(struct mdt_thread_info *info,
 	if (rc)
 		return rc;
 
+	/*
+	 * should we order by fid if 1) sobj/tobj belong to different
+	 * parents, or 2) they are not stripes of a directory
+	 */
 	if (!lu_fid_eq(spfid, tpfid))
-		return 0;
+		goto order_by_fid;
 
 	/* check whether sobj and tobj are sibling stripes */
 	rc = mdt_stripe_get(info, sobj, ma, XATTR_NAME_LMV);
@@ -2586,11 +2713,11 @@ static int mdt_rename_determine_lock_order(struct mdt_thread_info *info,
 		return rc;
 
 	if (!(ma->ma_valid & MA_LMV))
-		return 0;
+		goto order_by_fid;
 
 	lmv = &ma->ma_lmv->lmv_md_v1;
 	if (!(le32_to_cpu(lmv->lmv_magic) & LMV_MAGIC_STRIPE))
-		return 0;
+		goto order_by_fid;
 	sindex = le32_to_cpu(lmv->lmv_master_mdt_index);
 
 	ma->ma_valid = 0;
@@ -2611,6 +2738,12 @@ static int mdt_rename_determine_lock_order(struct mdt_thread_info *info,
 		return -EINVAL;
 
 	return sindex < tindex ? 0 : 1;
+
+order_by_fid:
+	/* To avoid AB/BA deadlock given two phase locking */
+	if (lu_fid_cmp(rr->rr_fid1, rr->rr_fid2) > 0)
+		return 1;
+	return 0;
 }
 
 /* Helper function for mdt_reint_rename so we don't need to opencode
@@ -2630,7 +2763,6 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 	if (rc)
 		return rc;
 
-	mdt_version_get_save(info, mfirstdir, 0);
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME, 5);
 
 	if (mfirstdir != mseconddir) {
@@ -2645,7 +2777,6 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 			CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_PDO_LOCK2, 10);
 		}
 	}
-	mdt_version_get_save(info, mseconddir, 1);
 
 	if (rc != 0)
 		mdt_object_unlock(info, mfirstdir, lh_firstdirp, rc);
@@ -2682,7 +2813,9 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 	ktime_t kstart = ktime_get();
 	enum mdt_stat_idx msi = 0;
 	bool remote;
-	bool bfl = false;
+	bool need_bfl = false;
+	bool preempt_done = false;
+	bool got_bfl = false;
 	int rc;
 
 	ENTRY;
@@ -2697,10 +2830,22 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 	    !fid_is_md_operative(rr->rr_fid2))
 		RETURN(-EPERM);
 
+lock_bfl:
+	msrcdir = mtgtdir = NULL;
+	mold = mnew = NULL;
+	lh_oldp = lh_lookup = lh_newp = NULL;
+	lh_srcdirp = lh_tgtdirp = NULL;
+	fid_zero(old_fid);
+	fid_zero(new_fid);
+
 	/* find both parents. */
 	msrcdir = mdt_parent_find_check(info, rr->rr_fid1, 0);
 	if (IS_ERR(msrcdir))
 		RETURN(PTR_ERR(msrcdir));
+
+	rc = mdt_check_resource_ids(info, msrcdir);
+	if (unlikely(rc))
+		GOTO(out_put_srcdir, rc);
 
 	rc = mdt_check_enc(info, msrcdir);
 	if (rc)
@@ -2717,6 +2862,11 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 		if (IS_ERR(mtgtdir))
 			GOTO(out_put_srcdir, rc = PTR_ERR(mtgtdir));
 	}
+
+	/* if this succeeds we do not need to check "mnew" later again */
+	rc = mdt_check_resource_ids(info, mtgtdir);
+	if (unlikely(rc))
+		GOTO(out_put_tgtdir, rc);
 
 	rc = mdt_check_enc(info, mtgtdir);
 	if (rc)
@@ -2744,21 +2894,23 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 		if (!mdt->mdt_enable_remote_rename && remote)
 			GOTO(out_put_tgtdir, rc = -EXDEV);
 
-		if (remote ||
-		    (S_ISDIR(ma->ma_attr.la_mode) &&
-		     (msrcdir != mtgtdir ||
-		      !mdt->mdt_enable_parallel_rename_dir)) ||
-		    (!S_ISDIR(ma->ma_attr.la_mode) &&
-		     (!mdt->mdt_enable_parallel_rename_file ||
-		      (msrcdir != mtgtdir &&
-		       !mdt->mdt_enable_parallel_rename_crossdir)))) {
-			rc = mdt_rename_lock(info, rename_lh);
+		need_bfl |= remote ||
+			    (S_ISDIR(ma->ma_attr.la_mode) &&
+			     (msrcdir != mtgtdir ||
+			      !mdt->mdt_enable_parallel_rename_dir)) ||
+			    (!S_ISDIR(ma->ma_attr.la_mode) &&
+			     (!mdt->mdt_enable_parallel_rename_file ||
+			      (msrcdir != mtgtdir &&
+			       !mdt->mdt_enable_parallel_rename_crossdir)));
+		if (need_bfl && preempt_done) {
+			rc = mdt_rename_lock(info, rename_lh, false);
 			if (rc != 0) {
 				CERROR("%s: cannot lock for rename: rc = %d\n",
 				       mdt_obd_name(mdt), rc);
 				GOTO(out_put_tgtdir, rc);
 			}
-			bfl = true;
+			got_bfl = true;
+			msi = 0;
 		} else {
 			if (S_ISDIR(ma->ma_attr.la_mode))
 				msi = LPROC_MDT_RENAME_PAR_DIR;
@@ -2775,7 +2927,6 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 		}
 	}
 
-lock_parents:
 	rc = mdt_rename_determine_lock_order(info, msrcdir, mtgtdir);
 	if (rc < 0)
 		GOTO(out_unlock_rename, rc);
@@ -2811,6 +2962,9 @@ lock_parents:
 	if (rc != 0)
 		GOTO(out_unlock_rename, rc);
 
+	mdt_version_get_save(info, msrcdir, 0);
+	mdt_version_get_save(info, mtgtdir, 1);
+
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME4, 5);
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME2, 5);
 
@@ -2837,28 +2991,17 @@ lock_parents:
 		GOTO(out_put_old, rc = -ENOENT);
 	}
 
+	rc = mdt_check_resource_ids(info, mold);
+	if (unlikely(rc))
+		GOTO(out_put_old, rc);
+
 	if (mdt_object_remote(mold) && !mdt->mdt_enable_remote_rename)
 		GOTO(out_put_old, rc = -EXDEV);
 
 	/* we used msrcdir as a hint to take BFL, but it may be wrong */
-	if (unlikely(!bfl && !req_is_replay(req) &&
-		     !S_ISDIR(ma->ma_attr.la_mode) &&
-		     mdt_object_remote(mold))) {
-		LASSERT(!remote);
-		mdt_object_put(info->mti_env, mold);
-		mdt_object_unlock(info, mtgtdir, lh_tgtdirp, rc);
-		mdt_object_unlock(info, msrcdir, lh_srcdirp, rc);
-
-		rc = mdt_rename_lock(info, rename_lh);
-		if (rc != 0) {
-			CERROR("%s: cannot re-lock for rename: rc = %d\n",
-			       mdt_obd_name(mdt), rc);
-			GOTO(out_put_tgtdir, rc);
-		}
-		bfl = true;
-		msi = 0;
-		goto lock_parents;
-	}
+	need_bfl |= !req_is_replay(req) &&
+		    !S_ISDIR(ma->ma_attr.la_mode) &&
+		    mdt_object_remote(mold);
 
 	/* Check if @mtgtdir is subdir of @mold, before locking child
 	 * to avoid reverse locking.
@@ -2933,9 +3076,10 @@ lock_parents:
 		/* We will lock in child fid order here to avoid a
 		 * deadlock related to hardlinks thats only possible with
 		 * regular files. LU-15491
+		 *
+		 * To avoid deadlock on dirs given two phase locking
 		 */
-		if (!S_ISDIR(lu_object_attr(&mold->mot_obj)) &&
-		    lu_fid_cmp(old_fid, new_fid) > 0) {
+		if (lu_fid_cmp(old_fid, new_fid) > 0) {
 			child_reverse_lock = true;
 			rc = mdt_object_check_lock(info, mtgtdir, mnew, lh_newp,
 						   MDS_INODELOCK_LOOKUP |
@@ -2974,7 +3118,6 @@ lock_parents:
 		 * the rename onto victim will hold the layout
 		 * lock. See LU-4002.
 		 */
-
 		if (!child_reverse_lock) {
 			rc = mdt_object_check_lock(info, mtgtdir, mnew, lh_newp,
 						   MDS_INODELOCK_LOOKUP |
@@ -3000,6 +3143,66 @@ lock_parents:
 
 		mdt_version_get_save(info, mold, 2);
 		mdt_enoent_version_save(info, 3);
+	}
+
+	/*
+	 * To reduce the hold time and contention on the BFL
+	 * resource lock, here we use two phase locking:
+	 * 1. get the 4 child locks first (to cancel the majority
+	 * of lock holders)
+	 * 2. try to get the BFL resource lock if it is uncontended
+	 * 3a. if BFL is contended then drop child locks and wait for it
+	 * 3b. re-get the child locks if they were dropped in 3a
+	 * See LU-17427
+	 */
+	if (need_bfl && !got_bfl && mdt->mdt_enable_rename_trylock) {
+		struct lu_fid old_fid_backup = *old_fid;
+
+		rc = mdt_rename_lock_try(info, rename_lh);
+		*old_fid = old_fid_backup;
+		if (rc == 0) {
+			got_bfl = true;
+			msi = LPROC_MDT_RENAME_TRYLOCK;
+
+			if (mtgtdir != msrcdir) {
+				/* Check if @mtgtdir is subdir of @mold */
+				rc = mdo_is_subdir(info->mti_env,
+						   mdt_object_child(mtgtdir),
+						   old_fid);
+				if (rc)
+					GOTO(out_unlock_new,
+					     rc = (rc == 1) ? -EINVAL : rc);
+				/* Check if @msrcdir is subdir of @mnew */
+				if (mnew) {
+					rc = mdo_is_subdir(info->mti_env,
+						      mdt_object_child(msrcdir),
+						      new_fid);
+					if (rc)
+						GOTO(out_unlock_new,
+						     rc = (rc == 1) ? -EINVAL : rc);
+				}
+			}
+		}
+	}
+	if (need_bfl && !got_bfl) {
+		/* drop child locks if we didn't get BFL with trylock above */
+		if (mnew != NULL)
+			mdt_object_unlock(info, mnew, lh_newp, 1);
+		mdt_object_unlock(info, NULL, lh_lookup, 1);
+		mdt_object_unlock(info, mold, lh_oldp, 1);
+
+		if (mnew != NULL)
+			mdt_object_put(info->mti_env, mnew);
+		mdt_object_put(info->mti_env, mold);
+
+		mdt_object_unlock(info, mtgtdir, lh_tgtdirp, 1);
+		mdt_object_unlock(info, msrcdir, lh_srcdirp, 1);
+
+		mdt_object_put(info->mti_env, mtgtdir);
+		mdt_object_put(info->mti_env, msrcdir);
+
+		preempt_done = true;
+		goto lock_bfl;
 	}
 
 	/* step 5: rename it */
@@ -3047,7 +3250,8 @@ out_unlock_parents:
 	mdt_object_unlock(info, mtgtdir, lh_tgtdirp, rc);
 	mdt_object_unlock(info, msrcdir, lh_srcdirp, rc);
 out_unlock_rename:
-	mdt_rename_unlock(info, rename_lh);
+	if (got_bfl)
+		mdt_rename_unlock(info, rename_lh);
 out_put_tgtdir:
 	mdt_object_put(info->mti_env, mtgtdir);
 out_put_srcdir:

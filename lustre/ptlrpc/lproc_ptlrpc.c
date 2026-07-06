@@ -117,7 +117,7 @@ static struct ll_rpc_opcode {
 	{ SEC_CTX_FINI,     "sec_ctx_fini" },
 	{ FLD_QUERY,        "fld_query" },
 	{ FLD_READ,	    "fld_read" },
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	{ OUT_UPDATE,	    "out_update" },
 	{ LFSCK_NOTIFY,	    "lfsck_notify" },
 	{ LFSCK_QUERY,	    "lfsck_query" },
@@ -147,21 +147,32 @@ static struct ll_eopcode {
 
 const char *ll_opcode2str(__u32 opcode)
 {
+	static char unknown_opcode[32];
 	__u32 offset = opcode_offset(opcode);
 
-	/* When one of the assertions below fail, chances are that:
-	 *     1) A new opcode was added in include/lustre/lustre_idl.h,
-	 *        but is missing from the table above.
-	 * or  2) The opcode space was renumbered or rearranged,
-	 *        and the opcode_offset() function in
-	 *        ptlrpc_internal.h needs to be modified.
-	 */
-	LASSERTF(offset < LUSTRE_MAX_OPCODES,
-		 "offset %u >= LUSTRE_MAX_OPCODES %u\n",
-		 offset, LUSTRE_MAX_OPCODES);
-	LASSERTF(ll_rpc_opcode_table[offset].opcode == opcode,
-		 "ll_rpc_opcode_table[%u].opcode %u != opcode %u\n",
-		 offset, ll_rpc_opcode_table[offset].opcode, opcode);
+	/* Handle invalid opcodes gracefully */
+	if (offset == -1 || offset >= LUSTRE_MAX_OPCODES) {
+		snprintf(unknown_opcode, sizeof(unknown_opcode),
+			 "unknown-opcode-%u", opcode);
+		return unknown_opcode;
+	}
+
+	/* Verify the opcode table is correct */
+	if (ll_rpc_opcode_table[offset].opcode != opcode) {
+		/* This should not happen unless there's a bug in the
+		 * opcode_offset() function or the opcode table.
+		 */
+		snprintf(unknown_opcode, sizeof(unknown_opcode),
+			 "opcode-mismatch-%u", opcode);
+		return unknown_opcode;
+	}
+
+	/* If the opname is NULL, return a string with the opcode number */
+	if (ll_rpc_opcode_table[offset].opname == NULL) {
+		snprintf(unknown_opcode, sizeof(unknown_opcode),
+			 "unnamed-opcode-%u", opcode);
+		return unknown_opcode;
+	}
 
 	return ll_rpc_opcode_table[offset].opname;
 }
@@ -301,7 +312,7 @@ static ssize_t req_buffer_history_max_store(struct kobject *kobj,
 	 * will be upgraded */
 	bufpages = (roundup_pow_of_two(svc->srv_buf_size) + PAGE_SIZE - 1) >>
 							PAGE_SHIFT;
-	limit = cfs_totalram_pages() / (2 * bufpages);
+	limit = compat_totalram_pages() / (2 * bufpages);
 	/* do not allow history to consume more than half max number of rqbds */
 	if ((svc->srv_nrqbds_max == 0 && val > limit) ||
 	    (svc->srv_nrqbds_max != 0 && val > svc->srv_nrqbds_max / 2))
@@ -452,9 +463,10 @@ static ssize_t threads_max_store(struct kobject *kobj, struct attribute *attr,
 LUSTRE_RW_ATTR(threads_max);
 
 /**
- * Translates \e ptlrpc_nrs_pol_state values to human-readable strings.
+ * nrs_state2str() - Translates @state values to human-readable strings.
+ * @state: The policy state
  *
- * \param[in] state The policy state
+ * Returns char *(string) correspoding to @state or NULl
  */
 static const char *nrs_state2str(enum ptlrpc_nrs_pol_state state)
 {
@@ -476,12 +488,11 @@ static const char *nrs_state2str(enum ptlrpc_nrs_pol_state state)
 }
 
 /**
- * Obtains status information for \a policy.
+ * nrs_policy_get_info_locked() - Obtains status information for @policy.
+ * @policy: The policy
+ * @info: Holds returned status information [out]
  *
- * Information is copied in \a info.
- *
- * \param[in] policy The policy
- * \param[out] info  Holds returned status information
+ * Information is copied in @info.
  */
 static void nrs_policy_get_info_locked(struct ptlrpc_nrs_policy *policy,
 				       struct ptlrpc_nrs_pol_info *info)
@@ -504,7 +515,7 @@ static void nrs_policy_get_info_locked(struct ptlrpc_nrs_policy *policy,
 	info->pi_req_started = policy->pol_req_started;
 }
 
-/**
+/*
  * Reads and prints policy status information for all policies of a PTLRPC
  * service.
  */
@@ -689,14 +700,14 @@ out:
 }
 
 #define LPROCFS_NRS_WR_MAX_ARG (1024)
-/**
+/*
  * The longest valid command string is the maxium policy name size, plus the
  * length of the " reg" substring, plus the lenght of argument
  */
 #define LPROCFS_NRS_WR_MAX_CMD (NRS_POL_NAME_MAX + sizeof(" reg") - 1 + \
 				LPROCFS_NRS_WR_MAX_ARG)
 
-/**
+/*
  * Starts and stops a given policy on a PTLRPC service.
  *
  * Commands consist of the policy name, followed by an optional [reg|hp] token;
@@ -859,13 +870,13 @@ ptlrpc_lprocfs_svc_req_history_seek(struct ptlrpc_service_part *svcpt,
 /* make up seq_file pos from cpt */
 #define PTLRPC_REQ_CPT2POS(svc, cpt)			\
 	((svc)->srv_cpt_bits == 0 ? 0 :			\
-	 (cpt) << (64 - (svc)->srv_cpt_bits))
+	 (__u64)(cpt) << (64 - (svc)->srv_cpt_bits))
 
 /* convert sequence to position */
 #define PTLRPC_REQ_SEQ2POS(svc, seq)			\
 	((svc)->srv_cpt_bits == 0 ? (seq) :		\
-	 ((seq) >> (svc)->srv_cpt_bits) |		\
-	 ((seq) << (64 - (svc)->srv_cpt_bits)))
+	 ((__u64)(seq) >> (svc)->srv_cpt_bits) |		\
+	 ((__u64)(seq) << (64 - (svc)->srv_cpt_bits)))
 
 /* convert position to sequence */
 #define PTLRPC_REQ_POS2SEQ(svc, pos)			\
@@ -876,12 +887,12 @@ ptlrpc_lprocfs_svc_req_history_seek(struct ptlrpc_service_part *svcpt,
 static void *
 ptlrpc_lprocfs_svc_req_history_start(struct seq_file *s, loff_t *pos)
 {
-	struct ptlrpc_service		*svc = s->private;
-	struct ptlrpc_service_part	*svcpt;
-	struct ptlrpc_srh_iterator	*srhi;
-	unsigned int			cpt;
-	int				rc;
-	int				i;
+	struct ptlrpc_service *svc = s->private;
+	struct ptlrpc_service_part *svcpt;
+	struct ptlrpc_srh_iterator *srhi;
+	__u64 cpt;
+	int rc;
+	int i;
 
 	if (sizeof(loff_t) != sizeof(__u64)) { /* can't support */
 		CWARN("Failed to read request history because size of loff_t "
@@ -1160,7 +1171,7 @@ static struct attribute *ptlrpc_svc_attrs[] = {
 	NULL,
 };
 
-KOBJ_ATTRIBUTE_GROUPS(ptlrpc_svc); /* creates ptlrpc_svc_groups */
+ATTRIBUTE_GROUPS(ptlrpc_svc); /* creates ptlrpc_svc_groups */
 
 static void ptlrpc_sysfs_svc_release(struct kobject *kobj)
 {
@@ -1171,7 +1182,7 @@ static void ptlrpc_sysfs_svc_release(struct kobject *kobj)
 }
 
 static struct kobj_type ptlrpc_svc_ktype = {
-	.default_groups = KOBJ_ATTR_GROUPS(ptlrpc_svc),
+	.default_groups = ptlrpc_svc_groups,
 	.sysfs_ops	= &lustre_sysfs_ops,
 	.release	= ptlrpc_sysfs_svc_release,
 };
@@ -1211,7 +1222,7 @@ void ptlrpc_ldebugfs_register_service(struct dentry *entry, char *param,
 		.open		= ptlrpc_lprocfs_svc_req_history_open,
 		.read		= seq_read,
 		.llseek		= seq_lseek,
-		.release	= lprocfs_seq_release,
+		.release	= seq_release,
 	};
 
 	ptlrpc_ldebugfs_register(entry, svc->srv_name, param,
@@ -1428,7 +1439,7 @@ ssize_t pinger_recov_show(struct kobject *kobj, struct attribute *attr,
 
 	with_imp_locked(obd, imp, rc)
 		rc = scnprintf(buf, PAGE_SIZE, "%d\n",
-			       !imp->imp_no_pinger_recover);
+			       !test_bit(IMPF_NO_PINGER_RECOVER, imp->imp_flags));
 
 	return rc;
 }
@@ -1448,9 +1459,11 @@ ssize_t pinger_recov_store(struct kobject *kobj, struct attribute *attr,
 		return rc;
 
 	with_imp_locked(obd, imp, rc) {
-		spin_lock(&imp->imp_lock);
-		imp->imp_no_pinger_recover = !val;
-		spin_unlock(&imp->imp_lock);
+		if (val)
+			clear_bit(IMPF_NO_PINGER_RECOVER, imp->imp_flags);
+		else
+			set_bit(IMPF_NO_PINGER_RECOVER, imp->imp_flags);
+		smp_mb__after_atomic();
 	}
 
 	return rc ?: count;

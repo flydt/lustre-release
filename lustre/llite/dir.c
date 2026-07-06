@@ -13,7 +13,7 @@
  * Directory code for lustre client.
  */
 
-#include <linux/fs.h>
+#include <lustre_compat/linux/fs.h>
 #include <linux/pagemap.h>
 #include <linux/mm.h>
 #include <linux/version.h>
@@ -40,7 +40,12 @@
 #include "llite_internal.h"
 
 /**
- * ll_get_dir_page() - Get directory page for a given directory inode
+ * ll_get_dir_folio() - Get directory page for a given directory inode
+ * @dir: pointer to the directory(inode) for which page is being fetched
+ * @op_data: pointer to the md operation structure
+ * @offset: Offset within page
+ * @hash64: True if lustre client is 64bit else False for 32bit client
+ * @partial_readdir_rc: Used only on partial reads
  *
  * (new) readdir implementation overview.
  *
@@ -107,7 +112,6 @@
  * starting hash and will issue RPC to fetch that page. If there is a hash
  * collision the concerned page is removed.
  *
- *
  * Server.
  *
  * identification of and access to overflow pages
@@ -122,80 +126,67 @@
  * lu_dirpage for this integrated page will be adjusted. See
  * mdc_adjust_dirpages().
  *
- *
- * @dir: pointer to the directory(inode) for which page is being fetched
- * @op_data: pointer to the md operation structure
- * @offset: Offset witchin page
- * @partial_readdir_rc: Used only on partial reads
- *
  * Return:
  * * %Success - pointer to the page structure
  * * %Failure - Error pointer (pointed by rc)
  */
-struct page *ll_get_dir_page(struct inode *dir, struct md_op_data *op_data,
-			     __u64 offset, bool hash64, int *partial_readdir_rc)
+struct folio *ll_get_dir_folio(struct inode *dir, struct md_op_data *op_data,
+			       __u64 offset, bool hash64,
+			       int *partial_readdir_rc)
 {
 	struct md_readdir_info mrinfo = {
 					.mr_blocking_ast = ll_md_blocking_ast };
-	struct page *page;
+	struct folio *folio;
 	unsigned long idx = hash_x_index(offset, hash64);
 	int rc;
 
 	/* check page first */
-	page = find_get_page(dir->i_mapping, idx);
-	if (page) {
-		wait_on_page_locked(page);
-		if (PageUptodate(page))
-			RETURN(page);
-		put_page(page);
+	folio = get_folio_read(dir->i_mapping, idx, 0, 0);
+	if (!IS_ERR_OR_NULL(folio)) {
+		folio_wait_locked(folio);
+		if (folio_test_uptodate(folio))
+			RETURN(folio);
+		folio_put(folio);
 	}
 
-	rc = md_read_page(ll_i2mdexp(dir), op_data, &mrinfo, offset, &page);
+	rc = md_read_page(ll_i2mdexp(dir), op_data, &mrinfo, offset, &folio);
 	if (rc != 0)
 		return ERR_PTR(rc);
 
 	if (partial_readdir_rc && mrinfo.mr_partial_readdir_rc)
 		*partial_readdir_rc = mrinfo.mr_partial_readdir_rc;
 
-	return page;
+	return folio;
 }
 
-void ll_release_page(struct inode *inode, struct page *page,
-		     bool remove)
+void ll_release_dir_folio(struct inode *inode, struct folio *folio,
+			  bool remove)
 {
-	kunmap(page);
-
 	/* Always remove the page for striped dir, because the page is
 	 * built from temporarily in LMV layer
 	 */
 	if (inode && ll_dir_striped(inode)) {
-		__free_page(page);
+		folio_put(folio);
 		return;
 	}
 
 	if (remove) {
-		lock_page(page);
-		if (likely(page->mapping != NULL))
-			cfs_delete_from_page_cache(page);
-		unlock_page(page);
+		folio_lock(folio);
+		if (likely(folio->mapping != NULL))
+			cfs_folio_delete_from_cache(folio);
+		folio_unlock(folio);
 	}
-	put_page(page);
+	folio_put(folio);
 }
 
-#ifdef HAVE_DIR_CONTEXT
 int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
 		struct dir_context *ctx, int *partial_readdir_rc)
 {
-#else
-int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
-		void *cookie, filldir_t filldir, int *partial_readdir_rc)
-{
-#endif
 	struct ll_sb_info *sbi = ll_i2sbi(inode);
 	__u64 pos = *ppos;
 	bool is_api32 = ll_need_32bit_api(sbi);
 	bool is_hash64 = test_bit(LL_SBI_64BIT_HASH, sbi->ll_flags);
-	struct page *page;
+	struct folio *folio;
 	bool done = false;
 	struct llcrypt_str lltr = LLTR_INIT(NULL, 0);
 	int rc = 0;
@@ -208,22 +199,24 @@ int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
 			RETURN(rc);
 	}
 
-	page = ll_get_dir_page(inode, op_data, pos, is_hash64,
-				partial_readdir_rc);
+	folio = ll_get_dir_folio(inode, op_data, pos, is_hash64,
+				 partial_readdir_rc);
 
 	while (rc == 0 && !done) {
+		void *kaddr = NULL;
 		struct lu_dirpage *dp;
 		struct lu_dirent  *ent;
 		__u64 hash;
 		__u64 next;
 
-		if (IS_ERR(page)) {
-			rc = PTR_ERR(page);
+		if (IS_ERR(folio)) {
+			rc = PTR_ERR(folio);
 			break;
 		}
 
 		hash = MDS_DIR_END_OFF;
-		dp = page_address(page);
+		kaddr = kmap(fpgptr(folio));
+		dp = kaddr;
 		for (ent = lu_dirent_start(dp); ent != NULL && !done;
 		     ent = lu_dirent_next(ent)) {
 			__u16          type;
@@ -251,7 +244,6 @@ int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
 			 * 'ent' through 'lde_name', so the parameter 'name'
 			 * for 'filldir()' must be part of the 'ent'.
 			 */
-#ifdef HAVE_DIR_CONTEXT
 			ctx->pos = lhash;
 			if (!IS_ENCRYPTED(inode)) {
 				done = !dir_emit(ctx, ent->lde_name, namelen,
@@ -273,19 +265,15 @@ int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
 				done = !dir_emit(ctx, de_name.name, de_name.len,
 						 ino, type);
 			}
-#else
-			/* HAVE_DIR_CONTEXT is defined from kernel 3.11, whereas
-			 * IS_ENCRYPTED is brought by kernel 4.14.
-			 * So there is no need to handle encryption case here.
-			 */
-			done = filldir(cookie, ent->lde_name, namelen, lhash,
-				       ino, type);
-#endif
 		}
 
 		if (done) {
 			pos = hash;
-			ll_release_page(inode, page, false);
+			if (kaddr) {
+				kunmap(kmap_to_page(kaddr));
+				kaddr = NULL;
+			}
+			ll_release_dir_folio(inode, folio, false);
 			break;
 		}
 
@@ -294,31 +282,31 @@ int ll_dir_read(struct inode *inode, __u64 *ppos, struct md_op_data *op_data,
 		if (pos == MDS_DIR_END_OFF) {
 			/* End of directory reached. */
 			done = 1;
-			ll_release_page(inode, page, false);
+			if (kaddr) {
+				kunmap(kmap_to_page(kaddr));
+				kaddr = NULL;
+			}
+			ll_release_dir_folio(inode, folio, false);
 		} else {
+			u32 flags = le32_to_cpu(dp->ldp_flags);
+
 			/* Normal case: continue to the next page.*/
-			ll_release_page(inode, page,
-					le32_to_cpu(dp->ldp_flags) &
-					LDF_COLLIDE);
+			if (kaddr) {
+				kunmap(kmap_to_page(kaddr));
+				kaddr = NULL;
+			}
+			ll_release_dir_folio(inode, folio, flags & LDF_COLLIDE);
 			next = pos;
-			page = ll_get_dir_page(inode, op_data, pos,
-					       is_hash64, partial_readdir_rc);
+			folio = ll_get_dir_folio(inode, op_data, pos,
+						 is_hash64, partial_readdir_rc);
 		}
 	}
-#ifdef HAVE_DIR_CONTEXT
 	ctx->pos = pos;
-#else
-	*ppos = pos;
-#endif
 	llcrypt_fname_free_buffer(&lltr);
 	RETURN(rc);
 }
 
-#ifdef HAVE_DIR_CONTEXT
 static int ll_iterate(struct file *filp, struct dir_context *ctx)
-#else
-static int ll_readdir(struct file *filp, void *cookie, filldir_t filldir)
-#endif
 {
 	struct inode *inode = file_inode(filp);
 	struct ll_file_data *lfd = filp->private_data;
@@ -388,14 +376,9 @@ static int ll_readdir(struct file *filp, void *cookie, filldir_t filldir)
 
 	op_data->op_fid3 = pfid;
 
-#ifdef HAVE_DIR_CONTEXT
 	ctx->pos = pos;
 	rc = ll_dir_read(inode, &pos, op_data, ctx, &partial_readdir_rc);
 	pos = ctx->pos;
-#else
-	rc = ll_dir_read(inode, &pos, op_data, cookie, filldir,
-			 &partial_readdir_rc);
-#endif
 	lfd->lfd_pos = pos;
 	if (!lfd->fd_partial_readdir_rc)
 		lfd->fd_partial_readdir_rc = partial_readdir_rc;
@@ -409,13 +392,8 @@ static int ll_readdir(struct file *filp, void *cookie, filldir_t filldir)
 		if (api32 && hash64)
 			pos = pos >> 32;
 	}
-#ifdef HAVE_DIR_CONTEXT
 	ctx->pos = pos;
-#else
-	filp->f_pos = pos;
-#endif
 	ll_finish_md_op_data(op_data);
-
 out:
 	if (!rc)
 		ll_stats_ops_tally(sbi, LPROC_LL_READDIR,
@@ -452,8 +430,8 @@ static int ll_dir_setdirstripe(struct dentry *dparent, struct lmv_user_md *lump,
 		.d_name = {
 			.name = dirname,
 			.len = strlen(dirname),
-			.hash = ll_full_name_hash(dparent, dirname,
-						  strlen(dirname)),
+			.hash = full_name_hash(dparent, dirname,
+					       strlen(dirname)),
 		},
 		.d_sb = dparent->d_sb,
 	};
@@ -483,7 +461,11 @@ static int ll_dir_setdirstripe(struct dentry *dparent, struct lmv_user_md *lump,
 
 	if (lump->lum_stripe_count > 1 &&
 	    !(exp_connect_flags(sbi->ll_md_exp) & OBD_CONNECT_DIR_STRIPE))
-		RETURN(-EINVAL);
+		RETURN(-EOPNOTSUPP);
+
+	if (lump->lum_stripe_count > LMV_MAX_STRIPE_COUNT ||
+	    lump->lum_stripe_count < LMV_OVERSTRIPE_COUNT_MAX)
+		RETURN(-EOVERFLOW);
 
 	if (IS_DEADDIR(parent) &&
 	    !CFS_FAIL_CHECK(OBD_FAIL_LLITE_NO_CHECK_DEAD))
@@ -1150,9 +1132,12 @@ progress:
 }
 
 
-static int copy_and_ct_start(int cmd, struct obd_export *exp,
+static int copy_and_ct_start(int cmd, struct file *file,
 			     const struct lustre_kernelcomm __user *data)
 {
+	struct ll_file_data *lfd = file->private_data;
+	struct inode *inode = file_inode(file);
+	struct obd_export *exp = ll_i2mdexp(inode);
 	struct lustre_kernelcomm *lk;
 	struct lustre_kernelcomm *tmp;
 	size_t size = sizeof(*lk);
@@ -1167,6 +1152,9 @@ static int copy_and_ct_start(int cmd, struct obd_export *exp,
 
 	if (copy_from_user(lk, data, size))
 		GOTO(out_lk, rc = -EFAULT);
+
+	if (!(lk->lk_flags & LK_FLG_STOP) && lfd->lfd_hsm_agent_registered)
+		GOTO(out_lk, rc = -EEXIST);
 
 	if (lk->lk_flags & LK_FLG_STOP)
 		goto do_ioctl;
@@ -1251,6 +1239,8 @@ static int copy_and_ct_start(int cmd, struct obd_export *exp,
 	}
 do_ioctl:
 	rc = obd_iocontrol(cmd, exp, size, lk, NULL);
+	if (!rc)
+		lfd->lfd_hsm_agent_registered = !(lk->lk_flags & LK_FLG_STOP);
 out_lk:
 	OBD_FREE(lk, size);
 	return rc;
@@ -1620,20 +1610,21 @@ static int quotactl_getallquota(struct ll_sb_info *sbi,
 	struct if_quotactl_iter *iter = NULL;
 	void __user *buffer = (void __user *)qctl->qc_allquota_buffer;
 	__u64 cur = 0, count = qctl->qc_allquota_buflen;
+	bool found = false;
 	int rc = 0;
 
 	ENTRY;
 
 	mutex_lock(&quotactl_iter_lock);
 
-	while ((ll_iter = list_first_entry_or_null(&sbi->ll_all_quota_list,
-						struct ll_quotactl_iter_list,
-						lqil_sbi_list)) != NULL) {
-		if (qctl->qc_allquota_mark == ll_iter->lqil_mark)
+	list_for_each_entry(ll_iter, &sbi->ll_all_quota_list, lqil_sbi_list) {
+		if (qctl->qc_allquota_mark == ll_iter->lqil_mark) {
+			found = true;
 			break;
+		}
 	}
 
-	if (!ll_iter) {
+	if (!found) {
 		mutex_unlock(&quotactl_iter_lock);
 		RETURN(-EBUSY);
 	}
@@ -1666,6 +1657,9 @@ static int quotactl_getallquota(struct ll_sb_info *sbi,
 		OBD_SLAB_FREE_PTR(iter, quota_iter_slab);
 	}
 
+	list_del_init(&ll_iter->lqil_sbi_list);
+	OBD_FREE_PTR(ll_iter);
+
 	mutex_unlock(&quotactl_iter_lock);
 
 	RETURN(rc);
@@ -1688,6 +1682,8 @@ int quotactl_ioctl(struct super_block *sb, struct if_quotactl *qctl)
 	case LUSTRE_Q_SETDEFAULT:
 	case LUSTRE_Q_SETQUOTAPOOL:
 	case LUSTRE_Q_SETINFOPOOL:
+	case LUSTRE_Q_SETQUOTALQA:
+	case LUSTRE_Q_SETINFOLQA:
 	case LUSTRE_Q_SETDEFAULT_POOL:
 	case LUSTRE_Q_DELETEQID:
 	case LUSTRE_Q_RESETQID:
@@ -1700,6 +1696,7 @@ int quotactl_ioctl(struct super_block *sb, struct if_quotactl *qctl)
 	case Q_GETQUOTA:
 	case LUSTRE_Q_GETDEFAULT:
 	case LUSTRE_Q_GETQUOTAPOOL:
+	case LUSTRE_Q_GETQUOTALQA:
 	case LUSTRE_Q_GETDEFAULT_POOL:
 	case LUSTRE_Q_ITERQUOTA:
 	case LUSTRE_Q_GETALLQUOTA:
@@ -1709,6 +1706,7 @@ int quotactl_ioctl(struct super_block *sb, struct if_quotactl *qctl)
 		break;
 	case Q_GETINFO:
 	case LUSTRE_Q_GETINFOPOOL:
+	case LUSTRE_Q_GETINFOLQA:
 		break;
 	default:
 		CERROR("%s: unsupported quotactl op: %#x: rc = %d\n",
@@ -1758,8 +1756,10 @@ int quotactl_ioctl(struct super_block *sb, struct if_quotactl *qctl)
 		struct obd_quotactl *oqctl;
 		int oqctl_len = sizeof(*oqctl);
 
-		if (LUSTRE_Q_CMD_IS_POOL(cmd))
+		if (LUSTRE_Q_CMD_IS_POOL(cmd) || LUSTRE_Q_CMD_IS_LQA(cmd)) {
+			BUILD_BUG_ON(LQA_NAME_MAX != LOV_MAXPOOLNAME);
 			oqctl_len += LOV_MAXPOOLNAME + 1;
+		}
 
 		OBD_ALLOC(oqctl, oqctl_len);
 		if (oqctl == NULL)
@@ -2013,13 +2013,19 @@ static long ll_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		char *filename;
 
 		rc = obd_ioctl_getdata(&data, &len, uarg);
-		if (rc != 0)
+		if (rc)
 			RETURN(rc);
+		if (!data->ioc_inlbuf1 || data->ioc_inllen1 < 1)
+			GOTO(out_free, rc = -EINVAL);
+		/* NAME_MAX is the *actual* usable name length, +1 for NUL */
+		if (data->ioc_inllen1 > NAME_MAX + 1)
+			GOTO(out_free, rc = -ENAMETOOLONG);
 
 		filename = data->ioc_inlbuf1;
-		namelen = strlen(filename);
-		if (namelen < 1) {
-			CDEBUG(D_INFO, "IOC_MDC_LOOKUP missing filename\n");
+		namelen = strnlen(filename, data->ioc_inllen1);
+		if (namelen != data->ioc_inllen1 - 1) {
+			CDEBUG(D_INFO, "IOC_MDC_LOOKUP bad namelen %u != %u\n",
+			       namelen, data->ioc_inllen1 - 1);
 			GOTO(out_free, rc = -EINVAL);
 		}
 
@@ -2047,16 +2053,21 @@ out_free:
 		rc = obd_ioctl_getdata(&data, &len, uarg);
 		if (rc)
 			RETURN(rc);
-
-		if (data->ioc_inlbuf1 == NULL || data->ioc_inlbuf2 == NULL ||
-		    data->ioc_inllen1 == 0 || data->ioc_inllen2 == 0)
+		if (!data->ioc_inlbuf1 || !data->ioc_inlbuf2 ||
+		    data->ioc_inllen1 < 1 || data->ioc_inllen2 == 0)
 			GOTO(lmv_out_free, rc = -EINVAL);
+		/* NAME_MAX is the *actual* usable name length, +1 for NUL */
+		if (data->ioc_inllen1 > NAME_MAX + 1)
+			GOTO(lmv_out_free, rc = -ENAMETOOLONG);
+		if (data->ioc_inllen2 > XATTR_SIZE_MAX)
+			GOTO(lmv_out_free, rc = -EOVERFLOW);
 
 		filename = data->ioc_inlbuf1;
-		namelen = data->ioc_inllen1;
-
-		if (namelen < 1) {
-			CDEBUG(D_INFO, "IOC_MDC_LOOKUP missing filename\n");
+		namelen = strnlen(filename, data->ioc_inllen1) + 1;
+		if (namelen != data->ioc_inllen1) {
+			CDEBUG(D_INFO,
+			       "LL_IOC_MDC_SETSTRIPE bad namelen %u != %u\n",
+			       namelen, data->ioc_inllen1);
 			GOTO(lmv_out_free, rc = -EINVAL);
 		}
 		lum = (struct lmv_user_md *)data->ioc_inlbuf2;
@@ -2290,7 +2301,7 @@ finish_req:
 	}
 	case LL_IOC_REMOVE_ENTRY: {
 		char *filename = NULL;
-		int namelen = 0;
+		int namelen;
 		int rc;
 
 		/* Here is a little hack to avoid sending REINT_RMENTRY to
@@ -2524,7 +2535,8 @@ out_req:
 	}
 	case OBD_IOC_QUOTACTL: {
 		struct if_quotactl *qctl;
-		int qctl_len = sizeof(*qctl) + LOV_MAXPOOLNAME + 1;
+		int qctl_len = sizeof(*qctl) + max(LOV_MAXPOOLNAME + 1,
+						   LQA_NAME_MAX + 1);
 
 		OBD_ALLOC(qctl, qctl_len);
 		if (!qctl)
@@ -2533,11 +2545,15 @@ out_req:
 		if (copy_from_user(qctl, uarg, sizeof(*qctl)))
 			GOTO(out_quotactl, rc = -EFAULT);
 
-		if (LUSTRE_Q_CMD_IS_POOL(qctl->qc_cmd)) {
-			char __user *from = uarg +
-					offsetof(typeof(*qctl), qc_poolname);
-			if (copy_from_user(qctl->qc_poolname, from,
-					   LOV_MAXPOOLNAME + 1))
+		if (LUSTRE_Q_CMD_IS_POOL(qctl->qc_cmd) ||
+		    LUSTRE_Q_CMD_IS_LQA(qctl->qc_cmd)) {
+			char __user *from;
+			unsigned long len;
+
+			BUILD_BUG_ON(LQA_NAME_MAX != LOV_MAXPOOLNAME);
+			from = uarg + offsetof(typeof(*qctl), qc_poolname);
+			len = LOV_MAXPOOLNAME + 1;
+			if (copy_from_user(qctl->qc_poolname, from, len))
 				GOTO(out_quotactl, rc = -EFAULT);
 		}
 
@@ -2591,22 +2607,15 @@ out_quotactl:
 		RETURN(index);
 	}
 	case LL_IOC_HSM_REQUEST: {
-		struct hsm_user_request *hur;
+		struct hsm_user_request hdr, *hur;
 		ssize_t totalsize;
 
-		OBD_ALLOC_PTR(hur);
-		if (hur == NULL)
-			RETURN(-ENOMEM);
-
 		/* We don't know the true size yet; copy the fixed-size part */
-		if (copy_from_user(hur, uarg, sizeof(*hur))) {
-			OBD_FREE_PTR(hur);
+		if (copy_from_user(&hdr, uarg, sizeof(hdr)))
 			RETURN(-EFAULT);
-		}
 
 		/* Compute the whole struct size */
-		totalsize = hur_len(hur);
-		OBD_FREE_PTR(hur);
+		totalsize = hur_len(&hdr);
 		if (totalsize < 0)
 			RETURN(-E2BIG);
 
@@ -2615,12 +2624,15 @@ out_quotactl:
 			RETURN(-E2BIG);
 
 		OBD_ALLOC_LARGE(hur, totalsize);
-		if (hur == NULL)
+		if (!hur)
 			RETURN(-ENOMEM);
 
-		/* Copy the whole struct */
-		if (copy_from_user(hur, uarg, totalsize))
+		/* Copy the rest of the struct if needed */
+		if (totalsize > sizeof(*hur) &&
+		    copy_from_user(hur->hur_user_item, uarg + sizeof(*hur),
+				   totalsize - sizeof(*hur)))
 			GOTO(out_hur, rc = -EFAULT);
+		memcpy(hur, &hdr, sizeof(*hur));
 
 		if (hur->hur_request.hr_action == HUA_RELEASE) {
 			const struct lu_fid *fid;
@@ -2674,7 +2686,7 @@ out_hur:
 		if (!capable(CAP_SYS_ADMIN))
 			RETURN(-EPERM);
 
-		rc = copy_and_ct_start(cmd, sbi->ll_md_exp, uarg);
+		rc = copy_and_ct_start(cmd, file, uarg);
 		RETURN(rc);
 
 	case LL_IOC_HSM_COPY_START: {
@@ -2719,24 +2731,29 @@ out_hur:
 		struct lmv_user_md *lum;
 		int len;
 		char *filename;
-		int namelen = 0;
+		int namelen;
 		__u32 flags;
 		int rc;
 
 		rc = obd_ioctl_getdata(&data, &len, uarg);
 		if (rc)
 			RETURN(rc);
-
 		if (data->ioc_inlbuf1 == NULL || data->ioc_inlbuf2 == NULL ||
-		    data->ioc_inllen1 == 0 || data->ioc_inllen2 == 0)
+		    data->ioc_inllen1 < 1 || data->ioc_inllen2 < sizeof(*lum))
 			GOTO(migrate_free, rc = -EINVAL);
+		/* NAME_MAX is the *actual* usable name length, +1 for NUL */
+		if (data->ioc_inllen1 > NAME_MAX + 1)
+			GOTO(migrate_free, rc = -ENAMETOOLONG);
+		if (data->ioc_inllen2 > XATTR_SIZE_MAX)
+			GOTO(migrate_free, rc = -EOVERFLOW);
 
 		filename = data->ioc_inlbuf1;
-		namelen = data->ioc_inllen1;
+		namelen = strnlen(filename, data->ioc_inllen1) + 1;
 		flags = data->ioc_type;
-
-		if (namelen < 1 || namelen != strlen(filename) + 1) {
-			CDEBUG(D_INFO, "IOC_MDC_LOOKUP missing filename\n");
+		if (namelen != data->ioc_inllen1) {
+			CDEBUG(D_INFO,
+			       "IOC_MDC_MIGRATE bad filename len %u != %u\n",
+			       namelen, data->ioc_inllen1);
 			GOTO(migrate_free, rc = -EINVAL);
 		}
 
@@ -2834,7 +2851,7 @@ out_ladvise:
 		}
 
 		/* Get Child from dcache first. */
-		qstr.hash = ll_full_name_hash(parent, name, namelen);
+		qstr.hash = full_name_hash(parent, name, namelen);
 		qstr.name = name;
 		qstr.len = namelen;
 		dchild = d_lookup(parent, &qstr);
@@ -2940,7 +2957,8 @@ static loff_t ll_dir_seek(struct file *file, loff_t offset, int origin)
 	loff_t ret = -EINVAL;
 
 	ENTRY;
-	ll_inode_lock(inode);
+
+	inode_lock(inode);
 	switch (origin) {
 	case SEEK_SET:
 		break;
@@ -2983,7 +3001,7 @@ static loff_t ll_dir_seek(struct file *file, loff_t offset, int origin)
 	GOTO(out, ret);
 
 out:
-	ll_inode_unlock(inode);
+	inode_unlock(inode);
 	return ret;
 }
 
@@ -3015,11 +3033,7 @@ const struct file_operations ll_dir_operations = {
 	.open		= ll_dir_open,
 	.release	= ll_dir_release,
 	.read		= generic_read_dir,
-#ifdef HAVE_DIR_CONTEXT
 	.iterate_shared	= ll_iterate,
-#else
-	.readdir	= ll_readdir,
-#endif
 	.unlocked_ioctl	= ll_dir_ioctl,
 	.fsync		= ll_fsync,
 	.flush		= ll_dir_flush,

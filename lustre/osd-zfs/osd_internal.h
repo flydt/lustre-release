@@ -20,6 +20,7 @@
 #ifndef _OSD_INTERNAL_H
 #define _OSD_INTERNAL_H
 
+#include <lustre_compat/linux/fs.h>
 #include <linux/refcount.h>
 #include <dt_object.h>
 #include <md_object.h>
@@ -31,9 +32,7 @@
 #endif
 #include <sys/arc.h>
 #include <sys/nvpair.h>
-#ifdef HAVE_ZFS_REFCOUNT_HEADER
 #include <sys/zfs_refcount.h>
-#endif
 #include <sys/zfs_znode.h>
 #include <sys/zap.h>
 #include <sys/dbuf.h>
@@ -83,11 +82,8 @@
 
 #define OSD_MAX_CACHE_SIZE OBD_OBJECT_EOF
 
-#ifndef HAVE_ZFS_REFCOUNT_HEADER
-#ifndef HAVE_ZFS_REFCOUNT_ADD
-#define zfs_refcount_add	refcount_add
-#endif
-#endif
+/* Default FatZAP leaf block shift: 2^13 = 8K */
+#define OSD_FZAP_BLOCKSHIFT_DEFAULT	13
 
 extern const struct dt_body_operations osd_body_scrub_ops;
 extern const struct dt_body_operations osd_body_ops;
@@ -270,6 +266,10 @@ struct osd_thread_info {
 	char			*oti_seq_name;
 	char			*oti_dir_name;
 	uint64_t		oti_lastid_oid;
+
+	/* just for fake RW now */
+	struct page		**oti_dio_pages;
+	int			oti_dio_pages_used;
 };
 
 extern struct lu_context_key osd_key;
@@ -287,6 +287,7 @@ struct osd_thandle {
 	struct list_head	 ot_sa_list;
 	dmu_tx_t		*ot_tx;
 	struct lquota_trans	 ot_quota_trans;
+	__u64			 ot_txg;
 	__u32			 ot_assigned:1;
 };
 
@@ -316,6 +317,8 @@ struct osd_seq_list {
 };
 
 #define OSD_OST_MAP_SIZE	32
+#define OSD_TXG_MAP_SIZE	8
+#define OSD_TXG_MAP_MASK	(OSD_TXG_MAP_SIZE-1)
 
 /*
  * osd device.
@@ -336,6 +339,7 @@ struct osd_device {
 	uint64_t		 od_remote_parent_dir;
 	uint64_t		 od_index_backup_id;
 	uint64_t		 od_max_blksz;
+	uint64_t		 od_min_blksz;
 	uint64_t		 od_root;
 	uint64_t		 od_O_id;
 	struct osd_oi		**od_oi_table;
@@ -351,6 +355,10 @@ struct osd_device {
 				 od_nonrotational:1,
 				 od_sync_on_lseek:1;
 	unsigned int		 od_dnsize;
+	/* blockshift controls ZFS FatZAP leaf block size.
+	 * Actual block size = 2^N bytes.
+	 */
+	int			 od_fzap_blockshift;
 	int			 od_index_backup_stop;
 
 	enum lustre_index_backup_policy od_index_backup_policy;
@@ -396,6 +404,12 @@ struct osd_device {
 	struct list_head	 od_index_restore_list;
 	spinlock_t		 od_lock;
 	unsigned long long	 od_readcache_max_filesize;
+
+	/* slots to track per-txg commit callbacks */
+	atomic_t		 od_commit_cb_in_txg[OSD_TXG_MAP_SIZE];
+	wait_queue_head_t	 od_commit_cb_waitq;
+	/* last seen txg, used to count commit callbacks in a specific slot */
+	atomic64_t		 od_last_txg;
 };
 
 static inline struct qsd_instance *osd_def_qsd(struct osd_device *osd)
@@ -450,7 +464,8 @@ struct osd_object {
 				 oo_with_projid:1,
 #endif
 				 oo_late_attr_set:1,
-				 oo_pfid_in_lma:1;
+				 oo_pfid_in_lma:1,
+				 oo_lmv_updated:1;
 
 	/* the i_flags in LMA */
 	__u32			 oo_lma_flags;
@@ -607,7 +622,7 @@ extern struct kmem_cache *osd_zapit_cachep;
 extern struct lprocfs_vars lprocfs_osd_obd_vars[];
 
 int osd_procfs_init(struct osd_device *osd, const char *name);
-int osd_procfs_fini(struct osd_device *osd);
+void osd_procfs_fini(struct osd_device *osd);
 
 /* osd_object.c */
 extern char *osd_obj_tag;
@@ -702,6 +717,8 @@ int osd_oii_insert(const struct lu_env *env, struct osd_device *dev,
 		   const struct lu_fid *fid, uint64_t oid, bool insert);
 int osd_oii_lookup(struct osd_device *dev, const struct lu_fid *fid,
 		   uint64_t *oid);
+int osd_last_seq_get(const struct lu_env *env, struct dt_device *dt,
+		     __u64 *seq);
 
 /**
  * Basic transaction credit op
@@ -740,6 +757,7 @@ int osd_xattr_get_lma(const struct lu_env *env, struct osd_object *obj,
 int osd_xattr_get(const struct lu_env *env, struct dt_object *dt,
 		  struct lu_buf *buf, const char *name);
 int osd_declare_xattr_set(const struct lu_env *env, struct dt_object *dt,
+			  const struct lu_attr *attr,
 			  const struct lu_buf *buf, const char *name,
 			  int fl, struct thandle *handle);
 int osd_xattr_set(const struct lu_env *env, struct dt_object *dt,
@@ -829,6 +847,11 @@ static inline uint32_t attrs_zfs2fs(const uint64_t flags)
 
 #endif
 
+#define ZFS_OSD_USER_USER_MODIFIABLE	(LUSTRE_APPEND_FL | \
+					 LUSTRE_NODUMP_FL | \
+					 LUSTRE_PROJINHERIT_FL | \
+					 LUSTRE_IMMUTABLE_FL)
+
 static inline uint64_t
 osd_dmu_object_alloc(objset_t *os, dmu_object_type_t objtype, int blocksize,
 		     int dnodesize, dmu_tx_t *tx)
@@ -912,11 +935,7 @@ static inline uint64_t osd_db_dirty_txg(dmu_buf_impl_t *db)
 	uint64_t txg = 0;
 
 	mutex_enter(&db->db_mtx);
-#ifdef HAVE_DB_DIRTY_RECORDS_LIST
 	dr = list_head(&db->db_dirty_records);
-#else
-	dr = db->db_last_dirty;
-#endif
 	if (dr != NULL)
 		txg = dr->dr_txg;
 	mutex_exit(&db->db_mtx);
@@ -992,7 +1011,7 @@ static inline void osd_dmu_write(struct osd_device *osd, dnode_t *dn,
 				 const char *buf, dmu_tx_t *tx)
 {
 	LASSERT(dn);
-	dmu_write_by_dnode(dn, offset, size, buf, tx);
+	ll_dmu_write_by_dnode(dn, offset, size, buf, tx, 0);
 }
 
 static inline int osd_dmu_read(struct osd_device *osd, dnode_t *dn,
@@ -1002,22 +1021,6 @@ static inline int osd_dmu_read(struct osd_device *osd, dnode_t *dn,
 	LASSERT(dn);
 	return -dmu_read_by_dnode(dn, offset, size, buf, flags);
 }
-
-#ifdef HAVE_DMU_OBJSET_OWN_6ARG
-#define osd_dmu_objset_own(name, type, ronly, decrypt, tag, os)	\
-	dmu_objset_own((name), (type), (ronly), (decrypt), (tag), (os))
-#else
-#define osd_dmu_objset_own(name, type, ronly, decrypt, tag, os)	\
-	dmu_objset_own((name), (type), (ronly), (tag), (os))
-#endif
-
-#ifdef HAVE_DMU_OBJSET_DISOWN_3ARG
-#define osd_dmu_objset_disown(os, decrypt, tag)	\
-	dmu_objset_disown((os), (decrypt), (tag))
-#else
-#define osd_dmu_objset_disown(os, decrypt, tag)	\
-	dmu_objset_disown((os), (tag))
-#endif
 
 static inline int
 osd_index_register(struct osd_device *osd, const struct lu_fid *fid,
@@ -1045,14 +1048,6 @@ osd_index_backup(const struct lu_env *env, struct osd_device *osd, bool backup)
 			    &osd->od_index_backup_list, &osd->od_lock,
 			    &osd->od_index_backup_stop, backup);
 }
-
-#ifndef HAVE_DMU_TX_MARK_NETFREE
-#define dmu_tx_mark_netfree(tx)
-#endif
-
-#ifndef HAVE_ZFS_INODE_TIMESPEC
-#define inode_timespec_t timestruc_t
-#endif
 
 #ifdef HAVE_DMU_OFFSET_NEXT
 #define osd_dmu_offset_next(os, obj, hole, res) \

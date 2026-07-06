@@ -30,9 +30,8 @@
 #include <linux/rhashtable.h>
 #include <linux/uio.h>
 #include <linux/pm_qos.h>
-#include <libcfs/libcfs.h>
-#include <lnet/api.h>
-#include <lnet/lib-types.h>
+#include <linux/lnet/api.h>
+#include <linux/lnet/lib-types.h>
 #include <uapi/linux/lnet/nidstr.h>
 #include <uapi/linux/lustre/lustre_idl.h>
 #include <lustre_ha.h>
@@ -74,14 +73,7 @@
  * RPC count.
  */
 #define PTLRPC_BULK_OPS_MASK	(~((__u64)PTLRPC_BULK_OPS_COUNT - 1))
-/*
- * Unaligned DIO adjust MD size for alignment to the interop page size
- * Enable page alignmen interop range:
- *  MD_MAX_INTEROP_PAGE_SIZE(64k) <-> MD_MIN_INTEROP_PAGE_SIZE(4k)
- */
-#define MD_MIN_INTEROP_PAGE_SHIFT	12
-#define MD_MIN_INTEROP_PAGE_SIZE	(1u << MD_MIN_INTEROP_PAGE_SHIFT)
-#define MD_MAX_INTEROP_PAGE_SIZE	(1u << 16)
+#define PTLRPC_BULK_INTEROP_PAGE_SIZE	4096
 /**
  * Define maxima for bulk I/O.
  *
@@ -567,12 +559,8 @@ extern bool ptlrpc_pmqos_use_stats_for_duration;
 struct ptlrpc_connection {
 	/** linkage for connections hash table */
 	struct rhash_head	c_hash;
-	/** Our own lnet nid for this connection */
-	struct lnet_nid		c_self;
 	/** Remote side nid for this connection */
 	struct lnet_processid	c_peer;
-	/** UUID of the other side */
-	struct obd_uuid		c_remote_uuid;
 	/** reference counter for this connection */
 	atomic_t		c_refcount;
 };
@@ -816,13 +804,13 @@ struct ptlrpc_cli_req {
 	/** optional time limit for send attempts. This is a timeout
 	 *  not a timestamp so timeout_t (s32) is used instead of time64_t
 	 */
-	timeout_t			 cr_delay_limit;
+	ktime_t				 cr_delay_limit_ns;
 	/** time request was first queued */
-	time64_t			 cr_queued_time;
+	ktime_t				 cr_queued_time_ns;
 	/** request sent in nanoseconds */
 	ktime_t				 cr_sent_ns;
 	/** time for request really sent out */
-	time64_t			 cr_sent_out;
+	ktime_t				 cr_sent_out_ns;
 	/** when req reply unlink must finish. */
 	time64_t			 cr_reply_deadline;
 	/** when req bulk unlink must finish. */
@@ -882,10 +870,10 @@ struct ptlrpc_cli_req {
  * be removed step by step to avoid potential abuse
  */
 #define rq_bulk			rq_cli.cr_bulk
-#define rq_delay_limit		rq_cli.cr_delay_limit
-#define rq_queued_time		rq_cli.cr_queued_time
+#define rq_delay_limit_ns	rq_cli.cr_delay_limit_ns
+#define rq_queued_time_ns	rq_cli.cr_queued_time_ns
 #define rq_sent_ns		rq_cli.cr_sent_ns
-#define rq_real_sent		rq_cli.cr_sent_out
+#define rq_real_sent_ns		rq_cli.cr_sent_out_ns
 #define rq_reply_deadline	rq_cli.cr_reply_deadline
 #define rq_bulk_deadline	rq_cli.cr_bulk_deadline
 #define rq_req_deadline		rq_cli.cr_req_deadline
@@ -1037,7 +1025,8 @@ struct ptlrpc_request {
 		/* bulk request, sent to server, but uncommitted */
 		rq_unstable:1,
 		rq_early_free_repbuf:1, /* free reply buffer in advance */
-		rq_allow_intr:1;
+		rq_allow_intr:1,
+		rq_pause_after_reply:1;
 	/** @} */
 
 	/** server-side flags are serialized by rq_lock @{ */
@@ -1426,12 +1415,12 @@ extern const struct ptlrpc_bulk_frag_ops ptlrpc_bulk_kiov_nopin_ops;
 struct ptlrpc_bulk_desc {
 	unsigned int	bd_refs; /* number MD's assigned including zero-sends */
 	/** completed with failure */
-	unsigned long bd_failure:1;
+	unsigned long bd_failure:1,
 	/** client side */
-	unsigned short bd_md_offset; /* offset in 4k pages ranged [0, 15] */
-	unsigned int bd_registered:1,
-	/* bulk request is RDMA transfer, use page->host as real address */
-		     bd_is_rdma:1;
+		    bd_registered:1,
+	/* bulk request is GPU RDMA transfer, use page->host as real address */
+		     bd_is_rdma:1,
+		     bd_is_srv:1; /* export or import should be used */
 	/** For serialization with callback */
 	spinlock_t bd_lock;
 	/** {put,get}{source,sink}{kvec,kiov} */
@@ -1952,7 +1941,7 @@ extern void reply_in_callback(struct lnet_event *ev);
 extern void client_bulk_callback(struct lnet_event *ev);
 extern void request_in_callback(struct lnet_event *ev);
 extern void reply_out_callback(struct lnet_event *ev);
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 extern void server_bulk_callback(struct lnet_event *ev);
 #endif
 /** @} */
@@ -1997,36 +1986,12 @@ int ptlrpc_connection_init(void);
 void ptlrpc_connection_fini(void);
 extern lnet_pid_t ptl_get_pid(void);
 
-/*
- * Check if the peer connection is on the local node.  We need to use GFP_NOFS
- * for requests from a local client to avoid recursing into the filesystem
- * as we might end up waiting on a page sent in the request we're serving.
- *
- * Use __GFP_HIGHMEM so that the pages can use all of the available memory
- * on 32-bit machines.  Use more aggressive GFP_HIGHUSER flags from non-local
- * clients to be able to generate more memory pressure on the OSS and allow
- * inactive pages to be reclaimed, since it doesn't have any other processes
- * or allocations that generate memory reclaim pressure.
- *
- * See b=17576 (bdf50dc9) and b=19529 (3dcf18d3) for details.
- */
-static inline bool ptlrpc_connection_is_local(struct ptlrpc_connection *conn)
-{
-	if (!conn)
-		return false;
-
-	if (nid_same(&conn->c_peer.nid, &conn->c_self))
-		return true;
-
-	RETURN(LNetIsPeerLocal(&conn->c_peer.nid));
-}
-
 /* ptlrpc/niobuf.c */
 /**
  * Actual interfacing with LNet to put/get/register/unregister stuff
  * @{
  */
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 struct ptlrpc_bulk_desc *ptlrpc_prep_bulk_exp(struct ptlrpc_request *req,
 					      unsigned int nfrags,
 					      unsigned int max_brw,
@@ -2139,7 +2104,7 @@ ptlrpc_request_alloc_pack(struct obd_import *imp,
 int ptlrpc_request_bufs_pack(struct ptlrpc_request *request,
 			     __u32 version, int opcode, char **bufs,
 			     struct ptlrpc_cli_ctx *ctx);
-#define ptlrpc_req_finished(rq) ptlrpc_req_put(rq)
+void obd_mod_free(struct kref *kref);
 void ptlrpc_req_put(struct ptlrpc_request *request);
 void ptlrpc_req_put_with_imp_lock(struct ptlrpc_request *request);
 struct ptlrpc_request *ptlrpc_request_addref(struct ptlrpc_request *req);
@@ -2166,12 +2131,6 @@ __u64 ptlrpc_sample_next_xid(void);
 __u64 ptlrpc_req_xid(struct ptlrpc_request *request);
 void ptlrpc_get_mod_rpc_slot(struct ptlrpc_request *req);
 void ptlrpc_put_mod_rpc_slot(struct ptlrpc_request *req);
-
-/* Set of routines to run a function in ptlrpcd context */
-void *ptlrpcd_alloc_work(struct obd_import *imp,
-			 int (*cb)(const struct lu_env *, void *), void *data);
-void ptlrpcd_destroy_work(void *handler);
-int ptlrpcd_queue_work(void *handler);
 
 /** @} */
 struct ptlrpc_service_buf_conf {
@@ -2259,6 +2218,7 @@ struct ptlrpc_service *ptlrpc_register_service(
 int ptlrpc_unregister_service(struct ptlrpc_service *service);
 int ptlrpc_service_health_check(struct ptlrpc_service *service);
 void ptlrpc_server_drop_request(struct ptlrpc_request *req);
+void ptlrpc_del_exp_list(struct ptlrpc_request *req);
 void ptlrpc_request_change_export(struct ptlrpc_request *req,
 				  struct obd_export *export);
 void ptlrpc_update_export_timer(struct ptlrpc_request *req);
@@ -2558,8 +2518,8 @@ static inline __u32 lustre_request_magic(struct ptlrpc_request *req)
 
 static inline int ptlrpc_send_limit_expired(struct ptlrpc_request *req)
 {
-	if (req->rq_delay_limit != 0 &&
-	    req->rq_queued_time + req->rq_delay_limit < ktime_get_seconds())
+	if (req->rq_delay_limit_ns != 0 &&
+	    req->rq_queued_time_ns + req->rq_delay_limit_ns < ktime_get_real())
 		return 1;
 	return 0;
 }
@@ -2601,14 +2561,13 @@ int client_import_dyn_add_conn(struct obd_import *imp, struct obd_uuid *uuid,
 			       struct lnet_nid *prim_nid, int priority);
 int client_import_add_nids_to_conn(struct obd_import *imp,
 				   struct lnet_nid *nidlist,
-				   int nid_count, int nid_size,
-				   struct obd_uuid *uuid);
+				   int nid_count, struct obd_uuid *uuid);
 int client_import_del_conn(struct obd_import *imp, struct obd_uuid *uuid);
 int import_set_conn_priority(struct obd_import *imp, struct obd_uuid *uuid);
 void client_destroy_import(struct obd_import *imp);
 /** @} */
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 int server_disconnect_export(struct obd_export *exp);
 #endif
 

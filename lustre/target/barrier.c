@@ -112,7 +112,10 @@ static void barrier_set(struct barrier_instance *barrier, __u32 status)
 }
 
 /**
- * Create the barrier for the given instance.
+ * barrier_freeze() - Create the barrier for the given instance.
+ * @env: pointer to the thread context
+ * @barrier: pointer to the barrier instance
+ * @phase1: indicate whether it is phase1 barrier or not
  *
  * We use two-phases barrier to guarantee that after the barrier setup:
  * 1) All the MDT side pending async modification have been flushed.
@@ -143,13 +146,10 @@ static void barrier_set(struct barrier_instance *barrier, __u32 status)
  * Every barrier instance will call dt_sync() to make all async transactions
  * to be committed locally.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] barrier	pointer to the barrier instance
- * \param[in] phase1	indicate whether it is phase1 barrier or not
- *
- * \retval		positive number for timeout
- * \retval		0 for success
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for timeout
+ * * %0 for success
+ * * %negative error number on failure
  */
 static int barrier_freeze(const struct lu_env *env,
 			  struct barrier_instance *barrier, bool phase1)
@@ -157,6 +157,7 @@ static int barrier_freeze(const struct lu_env *env,
 	time64_t left;
 	int rc = 0;
 	__s64 inflight = 0;
+
 	ENTRY;
 
 	write_lock(&barrier->bi_rwlock);
@@ -234,6 +235,7 @@ bool barrier_entry(struct dt_device *key)
 {
 	struct barrier_instance *barrier;
 	bool entered = false;
+
 	ENTRY;
 
 	barrier = barrier_instance_find(key);
@@ -282,6 +284,7 @@ int barrier_handler(struct dt_device *key, struct ptlrpc_request *req)
 	struct barrier_lvb *lvb;
 	struct lu_env env;
 	int rc = 0;
+
 	ENTRY;
 
 	/* glimpse on barrier locks always packs a glimpse descriptor */
@@ -350,8 +353,8 @@ out_barrier:
 	lvb->lvb_status = barrier->bi_status;
 	lvb->lvb_index = barrier_dev_idx(barrier);
 
-	CDEBUG(D_SNAPSHOT, "%s: handled barrier request: status %u, "
-	       "deadline %lld: rc = %d\n", barrier_barrier2name(barrier),
+	CDEBUG(D_SNAPSHOT, "%s: handled barrier request: status %u, deadline %lld: rc = %d\n",
+	       barrier_barrier2name(barrier),
 	       lvb->lvb_status, barrier->bi_deadline, rc);
 
 	barrier_instance_put(barrier);
@@ -367,6 +370,7 @@ int barrier_register(struct dt_device *key, struct dt_device *next)
 {
 	struct barrier_instance	*barrier;
 	int rc;
+
 	ENTRY;
 
 	OBD_ALLOC_PTR(barrier);
@@ -379,11 +383,7 @@ int barrier_register(struct dt_device *key, struct dt_device *next)
 	init_waitqueue_head(&barrier->bi_waitq);
 	rwlock_init(&barrier->bi_rwlock);
 	kref_init(&barrier->bi_ref);
-#ifdef HAVE_PERCPU_COUNTER_INIT_GFP_FLAG
 	rc = percpu_counter_init(&barrier->bi_writers, 0, GFP_KERNEL);
-#else
-	rc = percpu_counter_init(&barrier->bi_writers, 0);
-#endif
 	if (rc)
 		barrier_instance_put(barrier);
 	else

@@ -1334,9 +1334,10 @@ int iam_index_next(struct iam_container *c, struct iam_path *path)
 
 				result = iam_index_advance(path);
 				if (result == 0) {
-					CERROR("cannot find cursor : %u\n",
-						cursor);
 					result = -EIO;
+					CERROR("%s: cannot find cursor %u: rc = %d\n",
+					       iam_path_obj(path)->i_sb->s_id,
+					       cursor, result);
 				}
 				if (result < 0)
 					break;
@@ -1624,6 +1625,9 @@ newblock:
 	if (IS_ERR(bh)) {
 		*e = PTR_ERR(bh);
 		bh = NULL;
+	} else {
+		LASSERT(buffer_uptodate(bh));
+		memset(bh->b_data, 0, inode->i_sb->s_blocksize);
 	}
 
 	return bh;

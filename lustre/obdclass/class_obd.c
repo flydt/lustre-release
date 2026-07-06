@@ -26,10 +26,10 @@
 #include <lustre_kernelcomm.h>
 #include <lprocfs_status.h>
 #include <cl_object.h>
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 # include <dt_object.h>
 # include <md_object.h>
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 #include <uapi/linux/lustre/lustre_ioctl.h>
 #include "llog_internal.h"
 #include <lustre_ioctl_old.h>
@@ -65,7 +65,9 @@ EXPORT_SYMBOL(ldlm_timeout_set);
 /* bulk transfer timeout, give up after 100s by default */
 unsigned int bulk_timeout = 100; /* seconds */
 EXPORT_SYMBOL(bulk_timeout);
-
+/* allow new filesystem registration, enabled by default */
+int allow_register = 1;
+EXPORT_SYMBOL(allow_register);
 /* Adaptive timeout defs here instead of ptlrpc module for /proc/sys/ access */
 unsigned int at_min = 5;
 EXPORT_SYMBOL(at_min);
@@ -150,80 +152,97 @@ out:
 	RETURN(rc);
 }
 
-#define OBD_MAX_IOCTL_BUFFER	8192
+#define OBD_MAX_IOCTL_BUFFER	(XATTR_SIZE_MAX + 8192)
 
 static int obd_ioctl_is_invalid(struct obd_ioctl_data *data)
 {
-	const int maxlen = 1 << 30;
+	const int maxlen = OBD_MAX_IOCTL_BUFFER;
+	int rc = -EINVAL;
+
 	if (data->ioc_len > maxlen) {
-		CERROR("OBD ioctl: ioc_len larger than 1<<30\n");
-		return 1;
+		CERROR("%s: ioc_len larger than maximum %u: rc = %d\n",
+		       current->comm, maxlen, rc);
+		return rc;
 	}
 
-	if (data->ioc_inllen1 > maxlen) {
-		CERROR("OBD ioctl: ioc_inllen1 larger than 1<<30\n");
-		return 1;
+	if (data->ioc_inllen1 >= maxlen) {
+		CERROR("%s: ioc_inllen1 larger than maximum %u: rc = %d\n",
+		       current->comm, maxlen, rc);
+		return rc;
 	}
 
-	if (data->ioc_inllen2 > maxlen) {
-		CERROR("OBD ioctl: ioc_inllen2 larger than 1<<30\n");
-		return 1;
+	if (data->ioc_inllen2 >= maxlen) {
+		CERROR("%s: ioc_inllen2 larger than maximum %u: rc = %d\n",
+		       current->comm, maxlen, rc);
+		return rc;
 	}
 
-	if (data->ioc_inllen3 > maxlen) {
-		CERROR("OBD ioctl: ioc_inllen3 larger than 1<<30\n");
-		return 1;
+	if (data->ioc_inllen3 >= maxlen) {
+		CERROR("%s: ioc_inllen3 larger than maximum %u: rc = %d\n",
+		       current->comm, maxlen, rc);
+		return rc;
 	}
 
-	if (data->ioc_inllen4 > maxlen) {
-		CERROR("OBD ioctl: ioc_inllen4 larger than 1<<30\n");
-		return 1;
+	if (data->ioc_inllen4 >= maxlen) {
+		CERROR("%s: ioc_inllen4 larger than maximum %u: rc = %d\n",
+		       current->comm, maxlen, rc);
+		return rc;
 	}
 
 	if (data->ioc_inlbuf1 && data->ioc_inllen1 == 0) {
-		CERROR("OBD ioctl: inlbuf1 pointer but 0 length\n");
-		return 1;
+		CERROR("%s: ioc_inlbuf1 pointer but 0 length: rc = %d\n",
+		       current->comm, rc);
+		return rc;
 	}
 
 	if (data->ioc_inlbuf2 && data->ioc_inllen2 == 0) {
-		CERROR("OBD ioctl: inlbuf2 pointer but 0 length\n");
-		return 1;
+		CERROR("%s: ioc_inlbuf2 pointer but 0 length: rc = %d\n",
+		       current->comm, rc);
+		return rc;
 	}
 
 	if (data->ioc_inlbuf3 && data->ioc_inllen3 == 0) {
-		CERROR("OBD ioctl: inlbuf3 pointer but 0 length\n");
-		return 1;
+		CERROR("%s: ioc_inlbuf3 pointer but 0 length: rc = %d\n",
+		       current->comm, rc);
+		return rc;
 	}
 
 	if (data->ioc_inlbuf4 && data->ioc_inllen4 == 0) {
-		CERROR("OBD ioctl: inlbuf4 pointer but 0 length\n");
-		return 1;
+		CERROR("%s: ioc_inlbuf4 pointer but 0 length: rc = %d\n",
+		       current->comm, rc);
+		return rc;
 	}
 
 	if (data->ioc_pbuf1 && data->ioc_plen1 == 0) {
-		CERROR("OBD ioctl: pbuf1 pointer but 0 length\n");
-		return 1;
+		CERROR("%s: ioc_pbuf1 pointer but 0 length: rc = %d\n",
+		       current->comm, rc);
+		return rc;
 	}
 
 	if (data->ioc_pbuf2 && data->ioc_plen2 == 0) {
-		CERROR("OBD ioctl: pbuf2 pointer but 0 length\n");
-		return 1;
+		CERROR("%s: ioc_pbuf2 pointer but 0 length: rc = %d\n",
+		       current->comm, rc);
+		return rc;
 	}
 
 	if (!data->ioc_pbuf1 && data->ioc_plen1 != 0) {
-		CERROR("OBD ioctl: plen1 set but NULL pointer\n");
-		return 1;
+		CERROR("%s: ioc_plen1 set but NULL pointer: rc = %d\n",
+		       current->comm, rc);
+		return rc;
 	}
 
 	if (!data->ioc_pbuf2 && data->ioc_plen2 != 0) {
-		CERROR("OBD ioctl: plen2 set but NULL pointer\n");
-		return 1;
+		CERROR("%s: ioc_plen2 set but NULL pointer: rc = %d\n",
+		       current->comm, rc);
+		return rc;
 	}
 
 	if (obd_ioctl_packlen(data) > data->ioc_len) {
-		CERROR("OBD ioctl: packlen exceeds ioc_len (%d > %d)\n",
-		       obd_ioctl_packlen(data), data->ioc_len);
-		return 1;
+		rc = -EOVERFLOW;
+		CERROR("%s: packlen %d exceeds ioc_len %d: rc = %d\n",
+		       current->comm, obd_ioctl_packlen(data), data->ioc_len,
+		       rc);
+		return rc;
 	}
 
 	return 0;
@@ -317,7 +336,7 @@ int class_handle_ioctl(unsigned int cmd, void __user *uarg)
 	CDEBUG(D_IOCTL, "obdclass: cmd=%x len=%u uarg=%pK\n", cmd, len, uarg);
 	if (unlikely(_IOC_TYPE(cmd) != 'f' && !OBD_IOC_BARRIER_ALLOW(cmd) &&
 		     !IOC_OSC_SET_ACTIVE_ALLOW(cmd)))
-		RETURN(OBD_IOC_ERROR(obd->obd_name, cmd, "unknown", -ENOTTY));
+		RETURN(OBD_IOC_ERROR("obdclass", cmd, "unknown", -ENOTTY));
 
 	rc = obd_ioctl_getdata(&data, &len, uarg);
 	if (rc) {
@@ -439,7 +458,7 @@ out_lcfg:
 		if (!obd)
 			GOTO(out, rc = -ENOENT);
 
-		if (obd->obd_stopping)
+		if (test_bit(OBDF_STOPPING, obd->obd_flags))
 			status = "ST";
 		else if (obd->obd_inactive)
 			status = "IN";
@@ -480,7 +499,8 @@ out_lcfg:
 	}
 	LASSERT(obd->obd_magic == OBD_DEVICE_MAGIC);
 
-	if (!test_bit(OBDF_SET_UP, obd->obd_flags) || obd->obd_stopping) {
+	if (!test_bit(OBDF_SET_UP, obd->obd_flags) ||
+	    test_bit(OBDF_STOPPING, obd->obd_flags)) {
 		rc = -EINVAL;
 		CERROR("obdclass: device %d not set up: rc = %d\n",
 		       data->ioc_dev, rc);
@@ -821,10 +841,10 @@ static int __init obdclass_init(void)
 	/* Default the dirty page cache cap to 1/2 of system memory.
 	 * For clients with less memory, a larger fraction is needed
 	 * for other purposes (mostly for BGL). */
-	if (cfs_totalram_pages() <= 512 << (20 - PAGE_SHIFT))
-		obd_max_dirty_pages = cfs_totalram_pages() / 4;
+	if (compat_totalram_pages() <= 512 << (20 - PAGE_SHIFT))
+		obd_max_dirty_pages = compat_totalram_pages() / 4;
 	else
-		obd_max_dirty_pages = cfs_totalram_pages() / 2;
+		obd_max_dirty_pages = compat_totalram_pages() / 2;
 
 	err = obd_init_caches();
 	if (err)
@@ -853,7 +873,7 @@ static int __init obdclass_init(void)
 	err = cfs_hash_init();
 	if (err)
 		goto cleanup_obd_pool;
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	err = dt_global_init();
 	if (err != 0)
 		goto cleanup_cfs_hash;
@@ -861,7 +881,7 @@ static int __init obdclass_init(void)
 	err = lu_ucred_global_init();
 	if (err != 0)
 		goto cleanup_dt_global;
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 	/* simulate a late OOM situation now to require all
 	 * alloc'ed/initialized resources to be freed
@@ -874,14 +894,14 @@ static int __init obdclass_init(void)
 	return 0;
 
 cleanup_all:
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	lu_ucred_global_fini();
 
 cleanup_dt_global:
 	dt_global_fini();
 
 cleanup_cfs_hash:
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 	cfs_hash_fini();
 cleanup_obd_pool:
 	obd_pool_fini();
@@ -953,10 +973,10 @@ static void __exit obdclass_exit(void)
 	ENTRY;
 
 	misc_deregister(&obd_psdev);
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	lu_ucred_global_fini();
 	dt_global_fini();
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 	cfs_hash_fini();
 	obd_pool_fini();
 	llog_info_fini();
@@ -1070,10 +1090,115 @@ void obd_heat_add(struct obd_heat_instance *instance,
 }
 EXPORT_SYMBOL(obd_heat_add);
 
+/*
+ * obd_counter_add() - Add event count to sliding window counter
+ * @instance: counter instance to update
+ * @time: current timestamp in seconds
+ * @count: number of events to add
+ * @winsz: time window size in seconds
+ */
+void obd_counter_add(struct obd_counter_instance *instance,
+		     time64_t time, u32 count, u32 winsz)
+{
+	u32 time_u32 = (u32)time;
+
+	LASSERT(winsz > 0);
+	if (unlikely(instance->oci_last_event_time == 0)) {
+		instance->oci_hist[0] = count;
+	} else {
+		u32 start;
+
+		/* Start of the window containing oci_last_event_time. */
+		start = rounddown(instance->oci_last_event_time, winsz);
+		if (time_before32(time_u32, start + winsz)) {
+			/* In current time window. */
+			instance->oci_hist[0] += count;
+		} else {
+			int i, shift;
+
+			/* Move the sliding windows. */
+			shift = (time_u32 - start) / winsz;
+			LASSERT(shift > 0);
+			for (i = OBD_COUNTER_NUM - 1; i > 0; i--) {
+				if (i >= shift)
+					instance->oci_hist[i] =
+						instance->oci_hist[i - shift];
+				else
+					instance->oci_hist[i] = 0;
+			}
+
+			instance->oci_hist[0] = count;
+		}
+	}
+
+	instance->oci_last_event_time = time_u32;
+}
+EXPORT_SYMBOL(obd_counter_add);
+
+/*
+ * obd_counter_add_test() - Add event and test against threshold
+ * @instance: counter instance to update
+ * @time: current timestamp in seconds
+ * @count: number of events to add
+ * @winsz: time window size in seconds
+ * @max: threshold for event detection
+ * @hold_time_sec: hold detection state for this many seconds
+ *
+ * Return: true if event count exceeds @max or if within hold time,
+ *         false otherwise
+ */
+bool obd_counter_add_test(struct obd_counter_instance *instance,
+			  time64_t time, u32 count, u32 winsz, u32 max,
+			  u32 hold_time_sec)
+{
+	u64 val;
+	u64 overlap;
+	bool threshold_exceeded = false;
+	u32 time_u32 = (u32)time;
+
+	LASSERT(winsz > 0);
+
+	obd_counter_add(instance, time, count, winsz);
+	/*
+	 * The counter number in rolling window is calculated using the
+	 * following formula:
+	 * Counter in current window + (counter in the previous window *
+	 * overlap percentage of the rolling window and previous window)
+	 * This algorithm assumes a constant event rate in the (any)
+	 * previous window. Hence the result is only a approximated value.
+	 */
+	if (is_power_of_2(winsz)) {
+		u32 winshift = ilog2(winsz);
+
+		overlap = winsz - (time & (winsz - 1));
+		val = instance->oci_hist[0] +
+		      (instance->oci_hist[1] * overlap >> winshift);
+	} else {
+		overlap = winsz - (time % winsz);
+		val = instance->oci_hist[0] +
+		      instance->oci_hist[1] * overlap / winsz;
+	}
+
+	threshold_exceeded = val > max;
+	/*
+	 * Once threshold is exceeded, maintain that state for hold_time_sec
+	 * seconds to prevent rapid state changes.
+	 */
+	if (threshold_exceeded) {
+		instance->oci_last_trigger_time = time_u32;
+	} else if (instance->oci_last_trigger_time != 0 &&
+		   time_before32(time_u32,
+				 instance->oci_last_trigger_time + hold_time_sec)) {
+		threshold_exceeded = true;
+	}
+	return threshold_exceeded;
+}
+EXPORT_SYMBOL(obd_counter_add_test);
+
 MODULE_AUTHOR("OpenSFS, Inc. <http://www.lustre.org/>");
 MODULE_DESCRIPTION("Lustre Class Driver");
 MODULE_VERSION(LUSTRE_VERSION_STRING);
 MODULE_LICENSE("GPL");
 
-module_init(obdclass_init);
+late_initcall_sync(obdclass_init);
 module_exit(obdclass_exit);

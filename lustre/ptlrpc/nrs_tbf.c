@@ -12,19 +12,17 @@
 
 #define DEBUG_SUBSYSTEM S_RPC
 #include <linux/delay.h>
-#include <cfs_hash.h>
+
 #include <obd_support.h>
 #include <obd_class.h>
-#include <libcfs/libcfs.h>
 #include <lustre_req_layout.h>
+#include <lustre_nodemap.h>
 #include "ptlrpc_internal.h"
 
-/**
- * \name tbf
+/*
+ * name tbf
  *
  * Token Bucket Filter over client NIDs
- *
- * @{
  */
 
 #define NRS_POL_NAME_TBF	"tbf"
@@ -41,6 +39,220 @@ static int tbf_depth = 3;
 module_param(tbf_depth, int, 0644);
 MODULE_PARM_DESC(tbf_depth, "How many tokens that a client can save up");
 
+static int nrs_tbf_jobid_str(const struct nrs_tbf_key *key, char *str, int len)
+{
+	return snprintf(str, len, "%.*s", LUSTRE_JOBID_SIZE - 1, key->tk_jobid);
+}
+
+static int nrs_tbf_nid_str(const struct nrs_tbf_key *key, char *str, int len)
+{
+	char nidstr[LNET_NIDSTR_SIZE];
+
+	libcfs_nidstr_r(&key->tk_nid, nidstr, sizeof(nidstr));
+	return snprintf(str, len, "%s", nidstr);
+}
+
+static int nrs_tbf_opc_str(const struct nrs_tbf_key *key, char *str, int len)
+{
+	return snprintf(str, len, "%s", ll_opcode2str(key->tk_opcode));
+}
+
+static int nrs_tbf_id_str(u32 id, char *str, int len)
+{
+	if (id == U32_MAX)
+		return snprintf(str, len, "-1");
+
+	return snprintf(str, len, "%u", id);
+}
+
+static int nrs_tbf_uid_str(const struct nrs_tbf_key *key, char *str, int len)
+{
+	return nrs_tbf_id_str(key->tk_id.ti_uid, str, len);
+}
+
+static int nrs_tbf_gid_str(const struct nrs_tbf_key *key, char *str, int len)
+{
+	return nrs_tbf_id_str(key->tk_id.ti_gid, str, len);
+}
+
+static int nrs_tbf_projid_str(const struct nrs_tbf_key *key, char *str, int len)
+{
+	return nrs_tbf_id_str(key->tk_id.ti_projid, str, len);
+}
+
+static int nrs_tbf_nodemap_str(const struct nrs_tbf_key *key, char *str,
+			       int len)
+{
+	return nrs_tbf_id_str(key->tk_nmid, str, len);
+}
+
+static const struct nrs_tbf_type nrs_tbf_types[] = {
+	[NRS_TBF_FIELD_JOBID] = {
+		.ntt_name = NRS_TBF_TYPE_JOBID,
+		.ntt_flag = NRS_TBF_FLAG_JOBID,
+		.ntt_str = nrs_tbf_jobid_str,
+	},
+	[NRS_TBF_FIELD_NID] = {
+		.ntt_name = NRS_TBF_TYPE_NID,
+		.ntt_flag = NRS_TBF_FLAG_NID,
+		.ntt_str = nrs_tbf_nid_str,
+		},
+	[NRS_TBF_FIELD_OPCODE] = {
+		.ntt_name = NRS_TBF_TYPE_OPCODE,
+		.ntt_flag = NRS_TBF_FLAG_OPCODE,
+		.ntt_str = nrs_tbf_opc_str,
+	},
+	[NRS_TBF_FIELD_UID] = {
+		.ntt_name = NRS_TBF_TYPE_UID,
+		.ntt_flag = NRS_TBF_FLAG_UID,
+		.ntt_str = nrs_tbf_uid_str,
+	},
+	[NRS_TBF_FIELD_GID] = {
+		.ntt_name = NRS_TBF_TYPE_GID,
+		.ntt_flag = NRS_TBF_FLAG_GID,
+		.ntt_str = nrs_tbf_gid_str,
+	},
+	[NRS_TBF_FIELD_PROJID] = {
+		.ntt_name = NRS_TBF_TYPE_PROJID,
+		.ntt_flag = NRS_TBF_FLAG_PROJID,
+		.ntt_str = nrs_tbf_projid_str,
+	},
+	[NRS_TBF_FIELD_NODEMAP] = {
+		.ntt_name = NRS_TBF_TYPE_NODEMAP,
+		.ntt_flag = NRS_TBF_FLAG_NODEMAP,
+		.ntt_str = nrs_tbf_nodemap_str,
+	},
+};
+
+/* This converts the class key to a string using the TBF rule format.
+ * e.g: "jobid={kworker.0}&uid={0}&gid={0}"
+ */
+static int nrs_tbf_cli2str_r(struct nrs_tbf_client *cli, char *str, int len)
+{
+	const struct nrs_tbf_type *type = nrs_tbf_types;
+	struct nrs_tbf_key *key = &cli->tc_key;
+	int outl = 0;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(nrs_tbf_types); i++, type++) {
+		if (!(key->tk_flags & type->ntt_flag))
+			continue;
+
+		if (!type->ntt_str)
+			continue;
+
+		outl += snprintf(str + outl, len - outl,
+				 "%s%s={", outl ? "&" : "", type->ntt_name);
+		if (outl >= len - 1)
+			break;
+
+		outl += type->ntt_str(key, str + outl, len - outl);
+		if (outl >= len - 2)
+			break;
+
+		str[outl++] = '}';
+		str[outl] = '\0';
+	}
+
+	outl = min(outl, len - 1);
+	str[outl] = '\0';
+
+	return outl;
+}
+
+/* racy print (used for debug logs) */
+#define TBF_PRINT_KEY_BUF_SIZE 256
+static DEFINE_PER_CPU(char [TBF_PRINT_KEY_BUF_SIZE], nrs_tbf_print_bufs);
+static char *nrs_tbf_cli2str(struct nrs_tbf_client *cli)
+{
+	char *buf = raw_cpu_ptr(nrs_tbf_print_bufs);
+
+	nrs_tbf_cli2str_r(cli, buf, TBF_PRINT_KEY_BUF_SIZE);
+
+	return buf;
+}
+
+__printf(3, 4) /* function attribute */
+static void __nrs_tbf_cli_debug(struct nrs_tbf_client *cli,
+				struct libcfs_debug_msg_data *data,
+				const char *fmt, ...)
+{
+	struct ptlrpc_nrs_policy *pol;
+	struct va_format vaf;
+	char *srv_name;
+	va_list args;
+	int cpt;
+
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+	if (unlikely(!cli)) {
+		libcfs_debug_msg(data, "%pV: class@%p\n", &vaf, cli);
+		goto out;
+	}
+
+	pol = cli->tc_res.res_policy;
+	cpt = pol ? nrs_pol2cptid(pol) : 0;
+	srv_name = pol ? nrs_pol2svc(pol)->srv_name : "unknown";
+	libcfs_debug_msg(data, "%s.%d NRS: %pV: class@%p key %s rule@0x%p gen %llu rate %llu depth %llu token %llu deadline %llu time %llu state 0x%lx ref %u\n",
+			 srv_name, cpt, &vaf, cli, nrs_tbf_cli2str(cli),
+			 cli->tc_rule, cli->tc_rule_generation,
+			 cli->tc_rpc_rate, cli->tc_depth, cli->tc_ntoken,
+			 cli->tc_deadline, cli->tc_check_time,
+			 cli->tc_state, refcount_read(&cli->tc_ref));
+
+out:
+	va_end(args);
+}
+
+#define TBF_CLI_DEBUG(cli, fmt, a...)	\
+do {									\
+	if (cfs_cdebug_show(D_RPCTRACE, DEBUG_SUBSYSTEM)) {		\
+		LIBCFS_DEBUG_MSG_DATA_DECL(msgdata, D_RPCTRACE, NULL);	\
+		__nrs_tbf_cli_debug(cli, &msgdata, fmt, ##a);		\
+	}								\
+} while (0)
+
+static int nrs_tbf_id_cli_set(struct ptlrpc_request *req, struct tbf_id *id,
+			      enum nrs_tbf_flag need);
+
+#define NRS_TBF_JOBID_NULL ""
+
+static void nrs_tbf_cli_gen_key(struct ptlrpc_request *req,
+				struct nrs_tbf_key *key,
+				enum nrs_tbf_flag valid)
+{
+	if (valid & NRS_TBF_FLAG_IDS)
+		nrs_tbf_id_cli_set(req, &key->tk_id, valid & NRS_TBF_FLAG_IDS);
+
+	if (valid & NRS_TBF_FLAG_NID)
+		key->tk_nid = req->rq_peer.nid;
+	if (valid & NRS_TBF_FLAG_OPCODE)
+		key->tk_opcode = lustre_msg_get_opc(req->rq_reqmsg);
+	if (valid & NRS_TBF_FLAG_JOBID) {
+		const char *jobid;
+
+		jobid = lustre_msg_get_jobid(req->rq_reqmsg);
+		if (jobid == NULL)
+			jobid = NRS_TBF_JOBID_NULL;
+		strscpy(key->tk_jobid, jobid, sizeof(key->tk_jobid));
+	}
+
+	if (valid & NRS_TBF_FLAG_NODEMAP) {
+		struct lu_nodemap *lnm;
+
+		lnm = nodemap_get_from_exp(req->rq_export);
+		if (IS_ERR_OR_NULL(lnm)) {
+			key->tk_nmid = LUSTRE_NODEMAP_MAX_ID;
+		} else {
+			key->tk_nmid = lnm->nm_id;
+			nodemap_putref(lnm);
+		}
+	}
+
+	key->tk_flags = valid;
+}
+
 static enum hrtimer_restart nrs_tbf_timer_cb(struct hrtimer *timer)
 {
 	struct nrs_tbf_head *head = container_of(timer, struct nrs_tbf_head,
@@ -53,6 +265,8 @@ static enum hrtimer_restart nrs_tbf_timer_cb(struct hrtimer *timer)
 
 	return HRTIMER_NORESTART;
 }
+
+static void nrs_tbf_conds_free(struct list_head *cond_list);
 
 #define NRS_TBF_DEFAULT_RULE "default"
 
@@ -68,7 +282,10 @@ static void nrs_tbf_rule_fini(struct kref *kref)
 	LASSERT(list_empty(&rule->tr_cli_list));
 	LASSERT(list_empty(&rule->tr_linkage));
 
-	rule->tr_head->th_ops->o_rule_fini(rule);
+	if (!list_empty(&rule->tr_conds))
+		nrs_tbf_conds_free(&rule->tr_conds);
+	LASSERT(rule->tr_conds_str != NULL);
+	OBD_FREE_STR(rule->tr_conds_str);
 	OBD_FREE_PTR(rule);
 }
 
@@ -100,7 +317,7 @@ nrs_tbf_cli_reset_value(struct nrs_tbf_head *head,
 	cli->tc_rule_sequence = atomic_read(&head->th_rule_sequence);
 	cli->tc_rule_generation = rule->tr_generation;
 
-	if (cli->tc_in_heap)
+	if (test_bit(NRS_TBF_CLI_HEAP_BIT, &cli->tc_state))
 		binheap_relocate(head->th_binheap,
 				 &cli->tc_node);
 }
@@ -129,7 +346,10 @@ nrs_tbf_cli_reset(struct nrs_tbf_head *head,
 static int
 nrs_tbf_rule_dump(struct nrs_tbf_rule *rule, struct seq_file *m)
 {
-	return rule->tr_head->th_ops->o_rule_dump(rule, m);
+	seq_printf(m, "%s %s %llu, ref %d\n", rule->tr_name,
+		   rule->tr_conds_str, rule->tr_rpc_rate,
+		   kref_read(&rule->tr_ref) - 1);
+	return 0;
 }
 
 static int
@@ -184,6 +404,9 @@ nrs_tbf_rule_find(struct nrs_tbf_head *head,
 	return rule;
 }
 
+static int nrs_tbf_cond_match(struct nrs_tbf_rule *rule,
+			      struct nrs_tbf_client *cli);
+
 static struct nrs_tbf_rule *
 nrs_tbf_rule_match(struct nrs_tbf_head *head,
 		   struct nrs_tbf_client *cli)
@@ -195,7 +418,7 @@ nrs_tbf_rule_match(struct nrs_tbf_head *head,
 	/* Match the newest rule in the list */
 	list_for_each_entry(tmp_rule, &head->th_list, tr_linkage) {
 		LASSERT((tmp_rule->tr_flags & NTRS_STOPPING) == 0);
-		if (head->th_ops->o_rule_match(tmp_rule, cli)) {
+		if (nrs_tbf_cond_match(tmp_rule, cli)) {
 			rule = tmp_rule;
 			break;
 		}
@@ -209,28 +432,39 @@ nrs_tbf_rule_match(struct nrs_tbf_head *head,
 	return rule;
 }
 
-static void
-nrs_tbf_cli_init(struct nrs_tbf_head *head,
-		 struct nrs_tbf_client *cli,
-		 struct ptlrpc_request *req)
+static
+struct nrs_tbf_client *nrs_tbf_cli_alloc(struct nrs_tbf_head *head,
+					 struct ptlrpc_request *req,
+					 gfp_t gfp)
 {
+	struct ptlrpc_nrs_policy *pol = head->th_res.res_policy;
+	enum nrs_tbf_flag valid = head->th_type_flag;
+	struct nrs_tbf_client *cli;
 	struct nrs_tbf_rule *rule;
 
-	memset(cli, 0, sizeof(*cli));
-	cli->tc_in_heap = false;
-	head->th_ops->o_cli_init(cli, req);
+	OBD_CPT_ALLOC_GFP(cli, nrs_pol2cptab(pol), nrs_pol2cptid(pol),
+			  sizeof(*cli), gfp);
+	if (!cli)
+		return NULL;
+
+	nrs_tbf_cli_gen_key(req, &cli->tc_key, valid);
+
+	INIT_LIST_HEAD(&cli->tc_lru);
 	INIT_LIST_HEAD(&cli->tc_list);
 	INIT_LIST_HEAD(&cli->tc_linkage);
 	spin_lock_init(&cli->tc_rule_lock);
 	refcount_set(&cli->tc_ref, 1);
 	rule = nrs_tbf_rule_match(head, cli);
 	nrs_tbf_cli_reset(head, rule, cli);
+
+	return cli;
 }
 
 static void nrs_tbf_cli_free(struct rcu_head *head)
 {
 	struct nrs_tbf_client *cli = container_of(head, struct nrs_tbf_client,
 						  tc_rcu_head);
+
 	OBD_FREE_PTR(cli);
 }
 
@@ -238,27 +472,31 @@ static void
 nrs_tbf_cli_fini(struct nrs_tbf_client *cli)
 {
 	LASSERT(list_empty(&cli->tc_list));
-	LASSERT(!cli->tc_in_heap);
+	LASSERT(!test_bit(NRS_TBF_CLI_HEAP_BIT, &cli->tc_state));
+	LASSERT(!test_and_set_bit(NRS_TBF_CLI_DEL_BIT, &cli->tc_state));
+
+	TBF_CLI_DEBUG(cli, "TBF class fini");
 	spin_lock(&cli->tc_rule_lock);
 	nrs_tbf_cli_rule_put(cli);
 	spin_unlock(&cli->tc_rule_lock);
 
-	if (cli->tc_id.ti_type & NRS_TBF_FLAG_NID)
-		call_rcu(&cli->tc_rcu_head, nrs_tbf_cli_free);
-	else
-		OBD_FREE_PTR(cli);
+	call_rcu(&cli->tc_rcu_head, nrs_tbf_cli_free);
 }
+
+static
+struct nrs_tbf_rule *nrs_tbf_rule_alloc(struct ptlrpc_nrs_policy *policy,
+					struct nrs_tbf_head *head,
+					struct nrs_tbf_cmd *start);
 
 static int
 nrs_tbf_rule_start(struct ptlrpc_nrs_policy *policy,
 		   struct nrs_tbf_head *head,
 		   struct nrs_tbf_cmd *start)
 {
-	struct nrs_tbf_rule	*rule;
-	struct nrs_tbf_rule	*tmp_rule;
-	struct nrs_tbf_rule	*next_rule;
-	char			*next_name = start->u.tc_start.ts_next_name;
-	int			 rc;
+	struct nrs_tbf_rule *rule;
+	struct nrs_tbf_rule *tmp_rule;
+	struct nrs_tbf_rule *next_rule;
+	char *next_name = start->u.tc_start.ts_next_name;
 
 	rule = nrs_tbf_rule_find(head, start->tc_name);
 	if (rule) {
@@ -266,27 +504,9 @@ nrs_tbf_rule_start(struct ptlrpc_nrs_policy *policy,
 		return -EEXIST;
 	}
 
-	OBD_CPT_ALLOC_PTR(rule, nrs_pol2cptab(policy), nrs_pol2cptid(policy));
-	if (rule == NULL)
-		return -ENOMEM;
-
-	strscpy(rule->tr_name, start->tc_name, sizeof(rule->tr_name));
-	rule->tr_rpc_rate = start->u.tc_start.ts_rpc_rate;
-	rule->tr_flags = start->u.tc_start.ts_rule_flags;
-	rule->tr_nsecs_per_rpc = NSEC_PER_SEC / rule->tr_rpc_rate;
-	rule->tr_depth = tbf_depth;
-	kref_init(&rule->tr_ref);
-	INIT_LIST_HEAD(&rule->tr_cli_list);
-	INIT_LIST_HEAD(&rule->tr_nids);
-	INIT_LIST_HEAD(&rule->tr_linkage);
-	spin_lock_init(&rule->tr_rule_lock);
-	rule->tr_head = head;
-
-	rc = head->th_ops->o_rule_init(policy, rule, start);
-	if (rc) {
-		OBD_FREE_PTR(rule);
-		return rc;
-	}
+	rule = nrs_tbf_rule_alloc(policy, head, start);
+	if (IS_ERR(rule))
+		return PTR_ERR(rule);
 
 	/* Add as the newest rule */
 	spin_lock(&head->th_rule_lock);
@@ -327,17 +547,18 @@ nrs_tbf_rule_start(struct ptlrpc_nrs_policy *policy,
 }
 
 /**
- * Change the rank of a rule in the rule list
+ * nrs_tbf_rule_change_rank() - Change the rank of a rule in the rule list
+ * @policy: the policy instance
+ * @head: the TBF policy instance
+ * @name: the rule name to be moved
+ * @next_name: the rule name before which the matched rule will be moved
  *
  * The matched rule will be moved to the position right before another
  * given rule.
  *
- * \param[in] policy	the policy instance
- * \param[in] head	the TBF policy instance
- * \param[in] name	the rule name to be moved
- * \param[in] next_name	the rule name before which the matched rule will be
- *			moved
- *
+ * Return
+ * * %0 on success
+ * * %negative on error
  */
 static int
 nrs_tbf_rule_change_rank(struct ptlrpc_nrs_policy *policy,
@@ -476,13 +697,13 @@ nrs_tbf_command(struct ptlrpc_nrs_policy *policy,
 }
 
 /**
- * Binary heap predicate.
+ * tbf_cli_compare() - Binary heap predicate.
+ * @e1: the first binheap node to compare
+ * @e2: the second binheap node to compare
  *
- * \param[in] e1 the first binheap node to compare
- * \param[in] e2 the second binheap node to compare
- *
- * \retval 0 e1 > e2
- * \retval 1 e1 < e2
+ * Return
+ * * %0 if e1 > e2
+ * * %1 if e1 < e2
  */
 static int
 tbf_cli_compare(struct binheap_node *e1, struct binheap_node *e2)
@@ -507,7 +728,7 @@ tbf_cli_compare(struct binheap_node *e1, struct binheap_node *e2)
 	return 1;
 }
 
-/**
+/*
  * TBF binary heap operations
  */
 static struct binheap_ops nrs_tbf_heap_ops = {
@@ -516,255 +737,8 @@ static struct binheap_ops nrs_tbf_heap_ops = {
 	.hop_compare	= tbf_cli_compare,
 };
 
-static unsigned int
-nrs_tbf_jobid_hop_hash(struct cfs_hash *hs, const void *key,
-		       const unsigned int bits)
-{
-	return cfs_hash_djb2_hash(key, strlen(key), bits);
-}
-
-static int nrs_tbf_jobid_hop_keycmp(const void *key, struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						     struct nrs_tbf_client,
-						     tc_hnode);
-
-	return (strcmp(cli->tc_jobid, key) == 0);
-}
-
-static void *nrs_tbf_jobid_hop_key(struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						     struct nrs_tbf_client,
-						     tc_hnode);
-
-	return cli->tc_jobid;
-}
-
-static void *nrs_tbf_hop_object(struct hlist_node *hnode)
-{
-	return hlist_entry(hnode, struct nrs_tbf_client, tc_hnode);
-}
-
-static void nrs_tbf_jobid_hop_get(struct cfs_hash *hs, struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						     struct nrs_tbf_client,
-						     tc_hnode);
-
-	refcount_inc(&cli->tc_ref);
-}
-
-static void nrs_tbf_jobid_hop_put(struct cfs_hash *hs, struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						     struct nrs_tbf_client,
-						     tc_hnode);
-
-	refcount_dec(&cli->tc_ref);
-}
-
-static void
-nrs_tbf_jobid_hop_exit(struct cfs_hash *hs, struct hlist_node *hnode)
-
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	nrs_tbf_cli_fini(cli);
-}
-
-static struct cfs_hash_ops nrs_tbf_jobid_hash_ops = {
-	.hs_hash	= nrs_tbf_jobid_hop_hash,
-	.hs_keycmp	= nrs_tbf_jobid_hop_keycmp,
-	.hs_key		= nrs_tbf_jobid_hop_key,
-	.hs_object	= nrs_tbf_hop_object,
-	.hs_get		= nrs_tbf_jobid_hop_get,
-	.hs_put		= nrs_tbf_jobid_hop_put,
-	.hs_put_locked	= nrs_tbf_jobid_hop_put,
-	.hs_exit	= nrs_tbf_jobid_hop_exit,
-};
-
-#define NRS_TBF_JOBID_HASH_FLAGS (CFS_HASH_SPIN_BKTLOCK | \
-				  CFS_HASH_NO_ITEMREF | \
-				  CFS_HASH_DEPTH)
-
-static struct nrs_tbf_client *
-nrs_tbf_jobid_hash_lookup(struct cfs_hash *hs,
-			  struct cfs_hash_bd *bd,
-			  const char *jobid)
-{
-	struct hlist_node *hnode;
-	struct nrs_tbf_client *cli;
-
-	hnode = cfs_hash_bd_lookup_locked(hs, bd, (void *)jobid);
-	if (hnode == NULL)
-		return NULL;
-
-	cli = container_of(hnode, struct nrs_tbf_client, tc_hnode);
-	if (!list_empty(&cli->tc_lru))
-		list_del_init(&cli->tc_lru);
-	return cli;
-}
-
-#define NRS_TBF_JOBID_NULL ""
-
-static struct nrs_tbf_client *
-nrs_tbf_jobid_cli_find(struct nrs_tbf_head *head,
-		       struct ptlrpc_request *req)
-{
-	const char		*jobid;
-	struct nrs_tbf_client	*cli;
-	struct cfs_hash		*hs = head->th_cli_hash;
-	struct cfs_hash_bd		 bd;
-
-	jobid = lustre_msg_get_jobid(req->rq_reqmsg);
-	if (jobid == NULL)
-		jobid = NRS_TBF_JOBID_NULL;
-	cfs_hash_bd_get_and_lock(hs, (void *)jobid, &bd, 1);
-	cli = nrs_tbf_jobid_hash_lookup(hs, &bd, jobid);
-	cfs_hash_bd_unlock(hs, &bd, 1);
-
-	return cli;
-}
-
-static struct nrs_tbf_client *
-nrs_tbf_jobid_cli_findadd(struct nrs_tbf_head *head,
-			  struct nrs_tbf_client *cli)
-{
-	const char		*jobid;
-	struct nrs_tbf_client	*ret;
-	struct cfs_hash		*hs = head->th_cli_hash;
-	struct cfs_hash_bd		 bd;
-
-	jobid = cli->tc_jobid;
-	cfs_hash_bd_get_and_lock(hs, (void *)jobid, &bd, 1);
-	ret = nrs_tbf_jobid_hash_lookup(hs, &bd, jobid);
-	if (ret == NULL) {
-		cfs_hash_bd_add_locked(hs, &bd, &cli->tc_hnode);
-		ret = cli;
-	}
-	cfs_hash_bd_unlock(hs, &bd, 1);
-
-	return ret;
-}
-
-static void
-nrs_tbf_jobid_cli_put(struct nrs_tbf_head *head,
-		      struct nrs_tbf_client *cli)
-{
-	struct cfs_hash_bd		 bd;
-	struct cfs_hash		*hs = head->th_cli_hash;
-	struct nrs_tbf_bucket	*bkt;
-	int			 hw;
-	LIST_HEAD(zombies);
-
-	cfs_hash_bd_get(hs, &cli->tc_jobid, &bd);
-	bkt = cfs_hash_bd_extra_get(hs, &bd);
-	if (!cfs_hash_bd_dec_and_lock(hs, &bd, &cli->tc_ref))
-		return;
-	LASSERT(list_empty(&cli->tc_lru));
-	list_add_tail(&cli->tc_lru, &bkt->ntb_lru);
-
-	/*
-	 * Check and purge the LRU, there is at least one client in the LRU.
-	 */
-	hw = tbf_jobid_cache_size >>
-	     (hs->hs_cur_bits - hs->hs_bkt_bits);
-	while (cfs_hash_bd_count_get(&bd) > hw) {
-		if (unlikely(list_empty(&bkt->ntb_lru)))
-			break;
-		cli = list_first_entry(&bkt->ntb_lru,
-				       struct nrs_tbf_client,
-				       tc_lru);
-		cfs_hash_bd_del_locked(hs, &bd, &cli->tc_hnode);
-		list_move(&cli->tc_lru, &zombies);
-	}
-	cfs_hash_bd_unlock(head->th_cli_hash, &bd, 1);
-
-	while (!list_empty(&zombies)) {
-		cli = container_of(zombies.next,
-				   struct nrs_tbf_client, tc_lru);
-		list_del_init(&cli->tc_lru);
-		nrs_tbf_cli_fini(cli);
-	}
-}
-
-static void
-nrs_tbf_jobid_cli_init(struct nrs_tbf_client *cli,
-		       struct ptlrpc_request *req)
-{
-	char *jobid = lustre_msg_get_jobid(req->rq_reqmsg);
-
-	if (jobid == NULL)
-		jobid = NRS_TBF_JOBID_NULL;
-	LASSERT(strlen(jobid) < LUSTRE_JOBID_SIZE);
-	INIT_LIST_HEAD(&cli->tc_lru);
-	memcpy(cli->tc_jobid, jobid, strlen(jobid));
-}
-
-static int nrs_tbf_jobid_hash_order(void)
-{
-	int bits;
-
-	for (bits = 1; (1 << bits) < tbf_jobid_cache_size; ++bits)
-		;
-
-	return bits;
-}
-
-#define NRS_TBF_JOBID_BKT_BITS 10
-
-static int
-nrs_tbf_jobid_startup(struct ptlrpc_nrs_policy *policy,
-		      struct nrs_tbf_head *head)
-{
-	struct nrs_tbf_cmd	 start;
-	struct nrs_tbf_bucket	*bkt;
-	int			 bits;
-	int			 i;
-	int			 rc;
-	struct cfs_hash_bd	 bd;
-
-	bits = nrs_tbf_jobid_hash_order();
-	if (bits < NRS_TBF_JOBID_BKT_BITS)
-		bits = NRS_TBF_JOBID_BKT_BITS;
-	head->th_cli_hash = cfs_hash_create("nrs_tbf_hash",
-					    bits,
-					    bits,
-					    NRS_TBF_JOBID_BKT_BITS,
-					    sizeof(*bkt),
-					    0,
-					    0,
-					    &nrs_tbf_jobid_hash_ops,
-					    NRS_TBF_JOBID_HASH_FLAGS);
-	if (head->th_cli_hash == NULL)
-		return -ENOMEM;
-
-	cfs_hash_for_each_bucket(head->th_cli_hash, &bd, i) {
-		bkt = cfs_hash_bd_extra_get(head->th_cli_hash, &bd);
-		INIT_LIST_HEAD(&bkt->ntb_lru);
-	}
-
-	memset(&start, 0, sizeof(start));
-	start.u.tc_start.ts_jobids_str = "*";
-
-	start.u.tc_start.ts_rpc_rate = tbf_rate;
-	start.u.tc_start.ts_rule_flags = NTRS_DEFAULT;
-	start.tc_name = NRS_TBF_DEFAULT_RULE;
-	INIT_LIST_HEAD(&start.u.tc_start.ts_jobids);
-	rc = nrs_tbf_rule_start(policy, head, &start);
-	if (rc) {
-		cfs_hash_putref(head->th_cli_hash);
-		head->th_cli_hash = NULL;
-	}
-
-	return rc;
-}
-
-/**
- * Frees jobid of \a list.
+/*
+ * Frees jobid of @jobid_list.
  *
  */
 static void
@@ -865,7 +839,7 @@ nrs_tbf_jobid_list_parse(char *orig, struct list_head *jobid_list)
 
 	copy = kstrdup(orig, GFP_KERNEL);
 	if (!copy)
-		return -ENOMEM;
+		RETURN(-ENOMEM);
 	str = copy;
 	INIT_LIST_HEAD(jobid_list);
 	while (str && rc == 0) {
@@ -882,460 +856,41 @@ nrs_tbf_jobid_list_parse(char *orig, struct list_head *jobid_list)
 	RETURN(rc);
 }
 
-static void nrs_tbf_jobid_cmd_fini(struct nrs_tbf_cmd *cmd)
+static inline bool nrs_tbf_flags_valid(u32 flags)
 {
-	if (!list_empty(&cmd->u.tc_start.ts_jobids))
-		nrs_tbf_jobid_list_free(&cmd->u.tc_start.ts_jobids);
-	OBD_FREE_STR(cmd->u.tc_start.ts_jobids_str);
+	return (flags & NRS_TBF_FLAG_ALL) &&
+	       (flags & ~NRS_TBF_FLAG_ALL) == 0;
 }
 
-static int nrs_tbf_check_id_value(char **strp, char *key)
-{
-	char *str = *strp;
-	char *tok;
-	int len;
-
-	tok = strim(strsep(&str, "="));
-	if (!*tok || !str)
-		/* No LHS or no '=' */
-		return -EINVAL;
-	str = strim(str);
-	len = strlen(str);
-	if (strcmp(tok, key) != 0 ||
-	    str[0] != '{' || str[len-1] != '}')
-		/* Wrong key, or RHS missing {} */
-		return -EINVAL;
-
-	/* Skip '{' and '}' */
-	str[len-1] = '\0';
-	str += 1;
-	*strp = str;
-	return 0;
-}
-
-static int nrs_tbf_jobid_parse(struct nrs_tbf_cmd *cmd, char *id)
-{
-	int rc;
-
-	rc = nrs_tbf_check_id_value(&id, "jobid");
-	if (rc)
-		return rc;
-
-	OBD_STRNDUP(cmd->u.tc_start.ts_jobids_str, id, strlen(id));
-	if (cmd->u.tc_start.ts_jobids_str == NULL)
-		return -ENOMEM;
-
-	/* parse jobid list */
-	rc = nrs_tbf_jobid_list_parse(cmd->u.tc_start.ts_jobids_str,
-				      &cmd->u.tc_start.ts_jobids);
-	if (rc)
-		nrs_tbf_jobid_cmd_fini(cmd);
-
-	return rc;
-}
-
-static int nrs_tbf_jobid_rule_init(struct ptlrpc_nrs_policy *policy,
-				   struct nrs_tbf_rule *rule,
-				   struct nrs_tbf_cmd *start)
-{
-	int rc = 0;
-
-	LASSERT(start->u.tc_start.ts_jobids_str);
-	OBD_STRNDUP(rule->tr_jobids_str,
-		    start->u.tc_start.ts_jobids_str,
-		    strlen(start->u.tc_start.ts_jobids_str));
-	if (rule->tr_jobids_str == NULL)
-		return -ENOMEM;
-
-	INIT_LIST_HEAD(&rule->tr_jobids);
-	if (!list_empty(&start->u.tc_start.ts_jobids)) {
-		rc = nrs_tbf_jobid_list_parse(rule->tr_jobids_str,
-					      &rule->tr_jobids);
-		if (rc)
-			CERROR("jobids {%s} illegal\n", rule->tr_jobids_str);
-	}
-	if (rc)
-		OBD_FREE_STR(rule->tr_jobids_str);
-	return rc;
-}
-
-static int
-nrs_tbf_jobid_rule_dump(struct nrs_tbf_rule *rule, struct seq_file *m)
-{
-	seq_printf(m, "%s {%s} %llu, ref %d\n", rule->tr_name,
-		   rule->tr_jobids_str, rule->tr_rpc_rate,
-		   kref_read(&rule->tr_ref) - 1);
-	return 0;
-}
-
-static int
-nrs_tbf_jobid_rule_match(struct nrs_tbf_rule *rule,
-			 struct nrs_tbf_client *cli)
-{
-	return nrs_tbf_jobid_list_match(&rule->tr_jobids, cli->tc_jobid);
-}
-
-static void nrs_tbf_jobid_rule_fini(struct nrs_tbf_rule *rule)
-{
-	if (!list_empty(&rule->tr_jobids))
-		nrs_tbf_jobid_list_free(&rule->tr_jobids);
-	LASSERT(rule->tr_jobids_str != NULL);
-	OBD_FREE_STR(rule->tr_jobids_str);
-}
-
-static struct nrs_tbf_ops nrs_tbf_jobid_ops = {
-	.o_name = NRS_TBF_TYPE_JOBID,
-	.o_startup = nrs_tbf_jobid_startup,
-	.o_cli_find = nrs_tbf_jobid_cli_find,
-	.o_cli_findadd = nrs_tbf_jobid_cli_findadd,
-	.o_cli_put = nrs_tbf_jobid_cli_put,
-	.o_cli_init = nrs_tbf_jobid_cli_init,
-	.o_rule_init = nrs_tbf_jobid_rule_init,
-	.o_rule_dump = nrs_tbf_jobid_rule_dump,
-	.o_rule_match = nrs_tbf_jobid_rule_match,
-	.o_rule_fini = nrs_tbf_jobid_rule_fini,
-};
-
-/**
- * libcfs_hash operations for nrs_tbf_net::cn_cli_hash
- *
- * This uses ptlrpc_request::rq_peer.nid (as nid4) as its key, in order to hash
- * nrs_tbf_client objects.
- */
-#define NRS_TBF_NID_BKT_BITS	8
-#define NRS_TBF_NID_BITS	16
-
-static u32 nrs_tbf_nid_hashfn(const void *data, u32 len, u32 seed)
-{
-	const struct lnet_nid *nid = data;
-
-	return cfs_hash_32(nidhash(nid) ^ seed, 32);
-}
-
-static int nrs_tbf_nid_cmpfn(struct rhashtable_compare_arg *arg, const void *obj)
-{
-	const struct nrs_tbf_client *cli = obj;
-	const struct lnet_nid *nid = arg->key;
-
-	if (!refcount_read(&cli->tc_ref))
-		return -ENXIO;
-
-	return nid_same(nid, &cli->tc_nid) ? 0 : -ESRCH;
-}
-
-static const struct rhashtable_params tbf_nid_hash_params = {
-	.key_len	= sizeof(struct lnet_nid),
-	.key_offset	= offsetof(struct nrs_tbf_client, tc_nid),
-	.head_offset	= offsetof(struct nrs_tbf_client, tc_rhash),
-	.hashfn		= nrs_tbf_nid_hashfn,
-	.obj_cmpfn	= nrs_tbf_nid_cmpfn,
-	.automatic_shrinking = true,
-};
-
-static void nrs_tbf_nid_exit(void *vcli, void *data)
+static void nrs_tbf_cli_exit(void *vcli, void *data)
 {
 	struct nrs_tbf_client *cli = vcli;
 
-	CDEBUG(D_RPCTRACE,
-	       "Busy TBF object from client with NID %s, with %d refs\n",
-	       libcfs_nidstr(&cli->tc_nid), refcount_read(&cli->tc_ref));
+	if (test_bit(NRS_TBF_CLI_LRU_BIT, &cli->tc_state))
+		list_del(&cli->tc_lru);
+	else
+		TBF_CLI_DEBUG(cli, "Busy TBF class");
 
 	nrs_tbf_cli_fini(cli);
 }
-
-static struct nrs_tbf_client *
-nrs_tbf_nid_cli_find(struct nrs_tbf_head *head,
-		     struct ptlrpc_request *req)
-{
-	struct nrs_tbf_client *cli;
-
-	rcu_read_lock();
-	cli = rhashtable_lookup(&head->th_cli_rhash, &req->rq_peer.nid,
-				tbf_nid_hash_params);
-	if (cli && !refcount_inc_not_zero(&cli->tc_ref))
-		cli = NULL;
-	rcu_read_unlock();
-
-	return cli;
-}
-
-static struct nrs_tbf_client *
-nrs_tbf_nid_cli_findadd(struct nrs_tbf_head *head,
-			struct nrs_tbf_client *cli)
-{
-	struct nrs_tbf_client *cli2 = NULL;
-
-	rcu_read_lock();
-try_again:
-	cli2 = rhashtable_lookup_get_insert_fast(&head->th_cli_rhash,
-						 &cli->tc_rhash,
-						 tbf_nid_hash_params);
-	if (cli2) {
-		/* Insertion failed. */
-		if (IS_ERR(cli2)) {
-			/* hash table could be resizing. */
-			if (PTR_ERR(cli2) == -ENOMEM ||
-			    PTR_ERR(cli2) == -EBUSY) {
-				rcu_read_unlock();
-				msleep(20);
-				rcu_read_lock();
-				goto try_again;
-			}
-			/* return ERR_PTR */
-		} else {
-			/* lost race. Use new cli2 */
-			if (!refcount_inc_not_zero(&cli2->tc_ref))
-				goto try_again;
-		}
-	} else {
-		/* New cli has been inserted */
-		cli2 = cli;
-	}
-	if (!IS_ERR(cli2))
-		cli2->tc_id.ti_type = head->th_type_flag;
-	rcu_read_unlock();
-
-	return cli2;
-}
-
-static void
-nrs_tbf_nid_cli_put(struct nrs_tbf_head *head,
-		      struct nrs_tbf_client *cli)
-{
-	if (!refcount_dec_and_test(&cli->tc_ref))
-		return;
-
-	rhashtable_remove_fast(&head->th_cli_rhash,
-			       &cli->tc_rhash,
-			       tbf_nid_hash_params);
-	nrs_tbf_cli_fini(cli);
-}
-
-static int
-nrs_tbf_nid_startup(struct ptlrpc_nrs_policy *policy,
-		    struct nrs_tbf_head *head)
-{
-	struct nrs_tbf_cmd start;
-	int rc;
-
-	rc = rhashtable_init(&head->th_cli_rhash, &tbf_nid_hash_params);
-	if (rc < 0)
-		return rc;
-
-	memset(&start, 0, sizeof(start));
-	start.u.tc_start.ts_nids_str = "*";
-
-	start.u.tc_start.ts_rpc_rate = tbf_rate;
-	start.u.tc_start.ts_rule_flags = NTRS_DEFAULT;
-	start.tc_name = NRS_TBF_DEFAULT_RULE;
-	INIT_LIST_HEAD(&start.u.tc_start.ts_nids);
-	rc = nrs_tbf_rule_start(policy, head, &start);
-	if (rc < 0)
-		rhashtable_free_and_destroy(&head->th_cli_rhash,
-					    nrs_tbf_nid_exit, NULL);
-
-	return rc;
-}
-
-static void
-nrs_tbf_nid_cli_init(struct nrs_tbf_client *cli,
-			     struct ptlrpc_request *req)
-{
-	cli->tc_nid = req->rq_peer.nid;
-}
-
-static int nrs_tbf_nid_rule_init(struct ptlrpc_nrs_policy *policy,
-				 struct nrs_tbf_rule *rule,
-				 struct nrs_tbf_cmd *start)
-{
-	size_t len = strlen(start->u.tc_start.ts_nids_str);
-
-	LASSERT(start->u.tc_start.ts_nids_str);
-
-	OBD_STRNDUP(rule->tr_nids_str, start->u.tc_start.ts_nids_str, len);
-	if (!rule->tr_nids_str)
-		return -ENOMEM;
-
-	INIT_LIST_HEAD(&rule->tr_nids);
-	if (!list_empty(&start->u.tc_start.ts_nids)) {
-		if (cfs_parse_nidlist(rule->tr_nids_str, len, &rule->tr_nids)) {
-			CERROR("nids {%s} illegal\n",
-			       rule->tr_nids_str);
-			OBD_FREE_STR(rule->tr_nids_str);
-			return -EINVAL;
-		}
-	}
-	return 0;
-}
-
-static int
-nrs_tbf_nid_rule_dump(struct nrs_tbf_rule *rule, struct seq_file *m)
-{
-	seq_printf(m, "%s {%s} %llu, ref %d\n", rule->tr_name,
-		   rule->tr_nids_str, rule->tr_rpc_rate,
-		   kref_read(&rule->tr_ref) - 1);
-	return 0;
-}
-
-static int
-nrs_tbf_nid_rule_match(struct nrs_tbf_rule *rule,
-		       struct nrs_tbf_client *cli)
-{
-	return cfs_match_nid(&cli->tc_nid, &rule->tr_nids);
-}
-
-static void nrs_tbf_nid_rule_fini(struct nrs_tbf_rule *rule)
-{
-	if (!list_empty(&rule->tr_nids))
-		cfs_free_nidlist(&rule->tr_nids);
-	LASSERT(rule->tr_nids_str != NULL);
-	OBD_FREE_STR(rule->tr_nids_str);
-}
-
-static void nrs_tbf_nid_cmd_fini(struct nrs_tbf_cmd *cmd)
-{
-	if (!list_empty(&cmd->u.tc_start.ts_nids))
-		cfs_free_nidlist(&cmd->u.tc_start.ts_nids);
-	OBD_FREE_STR(cmd->u.tc_start.ts_nids_str);
-}
-
-static int nrs_tbf_nid_parse(struct nrs_tbf_cmd *cmd, char *id)
-{
-	int rc;
-	size_t len;
-
-	rc = nrs_tbf_check_id_value(&id, "nid");
-	if (rc)
-		return rc;
-
-	len = strlen(id);
-
-	OBD_STRNDUP(cmd->u.tc_start.ts_nids_str, id, len);
-	if (!cmd->u.tc_start.ts_nids_str)
-		return -ENOMEM;
-
-	/* parse NID list */
-	if (cfs_parse_nidlist(cmd->u.tc_start.ts_nids_str, len,
-			      &cmd->u.tc_start.ts_nids)) {
-		nrs_tbf_nid_cmd_fini(cmd);
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
-static struct nrs_tbf_ops nrs_tbf_nid_ops = {
-	.o_name		= NRS_TBF_TYPE_NID,
-	.o_startup	= nrs_tbf_nid_startup,
-	.o_cli_find	= nrs_tbf_nid_cli_find,
-	.o_cli_findadd	= nrs_tbf_nid_cli_findadd,
-	.o_cli_put	= nrs_tbf_nid_cli_put,
-	.o_cli_init	= nrs_tbf_nid_cli_init,
-	.o_rule_init	= nrs_tbf_nid_rule_init,
-	.o_rule_dump	= nrs_tbf_nid_rule_dump,
-	.o_rule_match	= nrs_tbf_nid_rule_match,
-	.o_rule_fini	= nrs_tbf_nid_rule_fini,
-};
-
-static unsigned int
-nrs_tbf_hop_hash(struct cfs_hash *hs, const void *key,
-		 const unsigned int bits)
-{
-	return cfs_hash_djb2_hash(key, sizeof(struct nrs_tbf_key), bits);
-}
-
-static int nrs_tbf_hop_keycmp(const void *data, struct hlist_node *hnode)
-{
-	struct nrs_tbf_key *key = (struct nrs_tbf_key *)data;
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	return nid_same(&cli->tc_nid, &key->tk_nid) &&
-	       cli->tc_opcode == key->tk_opcode &&
-	       cli->tc_id.ti_uid == key->tk_id.ti_uid &&
-	       cli->tc_id.ti_gid == key->tk_id.ti_gid &&
-	       strcmp(cli->tc_jobid, key->tk_jobid) == 0;
-}
-
-static void *nrs_tbf_hop_key(struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-	return &cli->tc_key;
-}
-
-static void nrs_tbf_hop_get(struct cfs_hash *hs, struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	refcount_inc(&cli->tc_ref);
-}
-
-static void nrs_tbf_hop_put(struct cfs_hash *hs, struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	refcount_dec(&cli->tc_ref);
-}
-
-static void nrs_tbf_hop_exit(struct cfs_hash *hs, struct hlist_node *hnode)
-
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	nrs_tbf_cli_fini(cli);
-}
-
-static struct cfs_hash_ops nrs_tbf_hash_ops = {
-	.hs_hash	= nrs_tbf_hop_hash,
-	.hs_keycmp      = nrs_tbf_hop_keycmp,
-	.hs_key		= nrs_tbf_hop_key,
-	.hs_object	= nrs_tbf_hop_object,
-	.hs_get		= nrs_tbf_hop_get,
-	.hs_put		= nrs_tbf_hop_put,
-	.hs_put_locked	= nrs_tbf_hop_put,
-	.hs_exit	= nrs_tbf_hop_exit,
-};
-
-#define NRS_TBF_GENERIC_BKT_BITS	10
-#define NRS_TBF_GENERIC_HASH_FLAGS	(CFS_HASH_SPIN_BKTLOCK | \
-					CFS_HASH_NO_ITEMREF | \
-					CFS_HASH_DEPTH)
 
 static int
 nrs_tbf_startup(struct ptlrpc_nrs_policy *policy, struct nrs_tbf_head *head)
 {
-	struct nrs_tbf_cmd	 start;
-	struct nrs_tbf_bucket	*bkt;
-	int			 bits;
-	int			 i;
-	int			 rc;
-	struct cfs_hash_bd	 bd;
+	struct rhashtable_params *params = &head->th_rhash_params;
+	struct nrs_tbf_cmd start;
+	int rc;
 
-	bits = nrs_tbf_jobid_hash_order();
-	if (bits < NRS_TBF_GENERIC_BKT_BITS)
-		bits = NRS_TBF_GENERIC_BKT_BITS;
-	head->th_cli_hash = cfs_hash_create("nrs_tbf_hash",
-					    bits, bits,
-					    NRS_TBF_GENERIC_BKT_BITS,
-					    sizeof(*bkt), 0, 0,
-					    &nrs_tbf_hash_ops,
-					    NRS_TBF_GENERIC_HASH_FLAGS);
-	if (head->th_cli_hash == NULL)
-		return -ENOMEM;
+	memset(params, 0, sizeof(*params));
+	params->key_len = sizeof(struct nrs_tbf_key);
+	params->key_offset = offsetof(struct nrs_tbf_client, tc_key);
+	params->head_offset = offsetof(struct nrs_tbf_client, tc_rhash);
+	params->min_size = 256;
+	params->automatic_shrinking = true;
 
-	cfs_hash_for_each_bucket(head->th_cli_hash, &bd, i) {
-		bkt = cfs_hash_bd_extra_get(head->th_cli_hash, &bd);
-		INIT_LIST_HEAD(&bkt->ntb_lru);
-	}
+	rc = rhashtable_init(&head->th_cli_rhash, params);
+	if (rc)
+		return rc;
 
 	memset(&start, 0, sizeof(start));
 	start.u.tc_start.ts_conds_str = "*";
@@ -1346,29 +901,13 @@ nrs_tbf_startup(struct ptlrpc_nrs_policy *policy, struct nrs_tbf_head *head)
 	INIT_LIST_HEAD(&start.u.tc_start.ts_conds);
 	rc = nrs_tbf_rule_start(policy, head, &start);
 	if (rc)
-		cfs_hash_putref(head->th_cli_hash);
+		rhashtable_free_and_destroy(&head->th_cli_rhash,
+					    nrs_tbf_cli_exit, NULL);
 
 	return rc;
 }
 
-static struct nrs_tbf_client *
-nrs_tbf_cli_hash_lookup(struct cfs_hash *hs, struct cfs_hash_bd *bd,
-			struct nrs_tbf_key *key)
-{
-	struct hlist_node *hnode;
-	struct nrs_tbf_client *cli;
-
-	hnode = cfs_hash_bd_lookup_locked(hs, bd, key);
-	if (hnode == NULL)
-		return NULL;
-
-	cli = container_of(hnode, struct nrs_tbf_client, tc_hnode);
-	if (!list_empty(&cli->tc_lru))
-		list_del_init(&cli->tc_lru);
-	return cli;
-}
-
-/**
+/*
  * ONLY opcode presented in this function will be checked in
  * nrs_tbf_id_cli_set(). That means, we can add or remove an
  * opcode to enable or disable requests handled in nrs_tbf
@@ -1466,24 +1005,29 @@ static int ost_tbf_id_cli_set(struct ptlrpc_request *req,
 	if (body != NULL) {
 		id->ti_uid = body->oa.o_uid;
 		id->ti_gid = body->oa.o_gid;
+		id->ti_projid = body->oa.o_projid;
 		return 0;
 	}
 
 	return -EINVAL;
 }
 
-static void unpack_ugid_from_mdt_body(struct ptlrpc_request *req,
-				      struct tbf_id *id)
+static void unpack_ugpid_from_mdt_body(struct ptlrpc_request *req,
+				       struct tbf_id *id)
 {
 	struct mdt_body *b = req_capsule_client_get(&req->rq_pill,
 						    &RMF_MDT_BODY);
 	LASSERT(b != NULL);
 
-	/* TODO: nodemaping feature converts {ug}id from individual
+	/*
+	 * TODO: nodemaping feature converts {ug}id from individual
 	 * clients to the actual ones of the file system. Some work
-	 * may be needed to fix this. */
+	 * may be needed to fix this.
+	 * TODO: Set ProjID in @mdt_body->mbo_projid.
+	 */
 	id->ti_uid = b->mbo_uid;
 	id->ti_gid = b->mbo_gid;
+	id->ti_projid = b->mbo_projid;
 }
 
 static void unpack_ugid_from_mdt_rec_reint(struct ptlrpc_request *req,
@@ -1497,6 +1041,7 @@ static void unpack_ugid_from_mdt_rec_reint(struct ptlrpc_request *req,
 	/* use the fs{ug}id as {ug}id of the process */
 	id->ti_uid = rec->rr_fsuid;
 	id->ti_gid = rec->rr_fsgid;
+	/* TODO: extend @mdt_rec_reint to store ProjID. */
 }
 
 static int mdt_tbf_id_cli_set(struct ptlrpc_request *req,
@@ -1513,7 +1058,7 @@ static int mdt_tbf_id_cli_set(struct ptlrpc_request *req,
 	case MDS_SYNC:
 	case MDS_GETXATTR:
 	case MDS_HSM_STATE_GET ... MDS_SWAP_LAYOUTS:
-		unpack_ugid_from_mdt_body(req, id);
+		unpack_ugpid_from_mdt_body(req, id);
 		break;
 	case MDS_CLOSE:
 	case MDS_REINT:
@@ -1547,7 +1092,7 @@ static int ldlm_tbf_id_cli_set(struct ptlrpc_request *req,
 	req_capsule_extend(&req->rq_pill, fmt);
 
 	if (lit->opc & (IT_GETXATTR | IT_GETATTR | IT_LOOKUP))
-		unpack_ugid_from_mdt_body(req, id);
+		unpack_ugpid_from_mdt_body(req, id);
 	else if (lit->opc & (IT_OPEN | IT_OPEN | IT_GLIMPSE | IT_BRW))
 		unpack_ugid_from_mdt_rec_reint(req, id);
 	else
@@ -1556,22 +1101,40 @@ static int ldlm_tbf_id_cli_set(struct ptlrpc_request *req,
 }
 
 static int nrs_tbf_id_cli_set(struct ptlrpc_request *req, struct tbf_id *id,
-			      enum nrs_tbf_flag ti_type)
+			      enum nrs_tbf_flag need)
 {
-	u32 opc;
 	struct req_format *fmt;
 	const struct req_format *old_fmt;
-	int rc;
+	int rc = 0;
+	u32 opc;
 
-	memset(id, 0, sizeof(struct tbf_id));
-	id->ti_type = ti_type;
+	id->ti_uid = (__u32) -1;
+	id->ti_gid = (__u32) -1;
+	id->ti_projid = (__u32) -1;
 
-	rc = lustre_msg_get_uid_gid(req->rq_reqmsg, &id->ti_uid, &id->ti_gid);
-	if (!rc && id->ti_uid != (u32) -1 && id->ti_gid != (u32) -1)
-		return 0;
+	if (need & (NRS_TBF_FLAG_UID | NRS_TBF_FLAG_GID)) {
+		rc = lustre_msg_get_uid_gid(req->rq_reqmsg, &id->ti_uid,
+					    &id->ti_gid);
+		if (!rc) {
+			if (id->ti_uid != (u32) -1)
+				need &= ~NRS_TBF_FLAG_UID;
+			if (id->ti_gid != (u32) -1)
+				need &= ~NRS_TBF_FLAG_GID;
+		}
+	}
 
-	/* client req doesn't have uid/gid pack in ptlrpc_body
-	 * --> fallback to the old method
+	if (need & NRS_TBF_FLAG_PROJID) {
+		rc = lustre_msg_get_projid(req->rq_reqmsg, &id->ti_projid);
+		if (!rc && id->ti_projid != (u32) -1)
+			need &= ~NRS_TBF_FLAG_PROJID;
+	}
+
+	/* Obtain all ID(s) in need. */
+	if (need == 0)
+		return rc;
+
+	/* The client req doesn't have uid/gid/projid pack in ptlrpc_body
+	 * --> fallback to the old method.
 	 */
 	opc = lustre_msg_get_opc(req->rq_reqmsg);
 	fmt = req_fmt(opc);
@@ -1598,34 +1161,116 @@ static int nrs_tbf_id_cli_set(struct ptlrpc_request *req, struct tbf_id *id,
 	return rc;
 }
 
-static inline void nrs_tbf_cli_gen_key(struct ptlrpc_request *req,
-				       struct nrs_tbf_key *key)
+/* The following nrs_tbf_lru_* function manipulate class object with a 0
+ * refcount. These need to be accessed with a rcu lock to prevent deletions.
+ * A TBF class with a 0 refcount means the following things:
+ *  - class is in LRU list (NRS_TBF_CLI_LRU_BIT is set)
+ *  - class is being added in LRU (refs 1->0 then NRS_TBF_CLI_LRU_BIT 0->1)
+ *  - class is being deleted (NRS_TBF_CLI_LRU_BIT 1->0)
+ *  - class is being removed from LRU (NRS_TBF_CLI_LRU_BIT 1->0 then refs 0->1)
+ */
+
+static void nrs_tbf_lru_add(struct nrs_tbf_head *head,
+			    struct nrs_tbf_client *cli)
 {
-	const char *jobid;
+	LASSERTF(!test_bit(NRS_TBF_CLI_LRU_BIT, &cli->tc_state),
+		 "class@%p already in LRU", cli);
+	LASSERTF(!refcount_read(&cli->tc_ref), "class@%p ref != 0: %d",
+		 cli, refcount_read(&cli->tc_ref));
 
-	key->tk_nid = req->rq_peer.nid;
-	key->tk_opcode = lustre_msg_get_opc(req->rq_reqmsg);
-	nrs_tbf_id_cli_set(req, &key->tk_id, NRS_TBF_FLAG_UID | NRS_TBF_FLAG_GID);
+	spin_lock(&head->th_lru_lock);
+	list_add_tail_rcu(&cli->tc_lru, &head->th_lru_list);
+	atomic_inc(&head->th_lru_cnt);
+	spin_unlock(&head->th_lru_lock);
 
-	jobid = lustre_msg_get_jobid(req->rq_reqmsg);
-	if (jobid == NULL)
-		jobid = NRS_TBF_JOBID_NULL;
-	strscpy(key->tk_jobid, jobid, sizeof(key->tk_jobid));
+	set_bit(NRS_TBF_CLI_LRU_BIT, &cli->tc_state);
+	TBF_CLI_DEBUG(cli, "TBF LRU add");
+
+}
+
+static
+struct nrs_tbf_client *nrs_tbf_lru_tryhit(struct nrs_tbf_head *head,
+					  struct nrs_tbf_client *cli)
+{
+	if (!test_and_clear_bit(NRS_TBF_CLI_LRU_BIT, &cli->tc_state))
+		return NULL;
+
+	LASSERTF(!refcount_read(&cli->tc_ref), "class@%p ref != 0: %d",
+		 cli, refcount_read(&cli->tc_ref));
+
+	spin_lock(&head->th_lru_lock);
+	atomic_dec(&head->th_lru_cnt);
+	list_del_rcu(&cli->tc_lru);
+	spin_unlock(&head->th_lru_lock);
+
+	refcount_set(&cli->tc_ref, 1);
+	TBF_CLI_DEBUG(cli, "TBF LRU hit");
+
+	return cli;
+}
+
+static int nrs_tbf_lru_shrink(struct nrs_tbf_head *head)
+{
+	struct nrs_tbf_client *cli;
+	int high = tbf_jobid_cache_size;
+	int low = 3 * high / 4;
+	int freed = 0;
+
+	if (atomic_read(&head->th_lru_cnt) <= high)
+		return 0;
+
+	/* already running ? */
+	if (test_and_set_bit(NRS_TBF_SHRINKING_BIT, &head->th_state))
+		return 0;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(cli, &head->th_lru_list, tc_lru) {
+		if (atomic_read(&head->th_lru_cnt) <= low)
+			break;
+
+		/* race with nrs_tbf_lru_tryhit()/nrs_tbf_lru_add ? */
+		if (!test_and_clear_bit(NRS_TBF_CLI_LRU_BIT, &cli->tc_state))
+			continue;
+
+		LASSERTF(!refcount_read(&cli->tc_ref), "class@%p ref != 0: %d",
+			 cli, refcount_read(&cli->tc_ref));
+
+		rhashtable_remove_fast(&head->th_cli_rhash, &cli->tc_rhash,
+				       head->th_rhash_params);
+
+		spin_lock(&head->th_lru_lock);
+		atomic_dec(&head->th_lru_cnt);
+		list_del_rcu(&cli->tc_lru);
+		spin_unlock(&head->th_lru_lock);
+
+		nrs_tbf_cli_fini(cli);
+		freed++;
+	}
+	rcu_read_unlock();
+
+	clear_bit(NRS_TBF_SHRINKING_BIT, &head->th_state);
+	CDEBUG(D_RPCTRACE,
+	       "%d objects freed from LRU (cur: %u, high: %d, low: %d)\n",
+	       freed, atomic_read(&head->th_lru_cnt), high, low);
+
+	return freed;
 }
 
 static struct nrs_tbf_client *
 nrs_tbf_cli_find(struct nrs_tbf_head *head, struct ptlrpc_request *req)
 {
 	struct nrs_tbf_client *cli;
-	struct cfs_hash *hs = head->th_cli_hash;
-	struct cfs_hash_bd bd;
 	struct nrs_tbf_key key;
 
 	memset(&key, 0, sizeof(key));
-	nrs_tbf_cli_gen_key(req, &key);
-	cfs_hash_bd_get_and_lock(hs, &key, &bd, 1);
-	cli = nrs_tbf_cli_hash_lookup(hs, &bd, &key);
-	cfs_hash_bd_unlock(hs, &bd, 1);
+	nrs_tbf_cli_gen_key(req, &key, head->th_type_flag);
+
+	rcu_read_lock();
+	cli = rhashtable_lookup(&head->th_cli_rhash, &key,
+				head->th_rhash_params);
+	if (cli && !refcount_inc_not_zero(&cli->tc_ref))
+		cli = nrs_tbf_lru_tryhit(head, cli);
+	rcu_read_unlock();
 
 	return cli;
 }
@@ -1634,86 +1279,71 @@ static struct nrs_tbf_client *
 nrs_tbf_cli_findadd(struct nrs_tbf_head *head,
 		    struct nrs_tbf_client *cli)
 {
-	struct nrs_tbf_key	*key;
-	struct nrs_tbf_client	*ret;
-	struct cfs_hash		*hs = head->th_cli_hash;
-	struct cfs_hash_bd	 bd;
+	struct nrs_tbf_client *cli2 = NULL;
 
-	key = &cli->tc_key;
-	cfs_hash_bd_get_and_lock(hs, key, &bd, 1);
-	ret = nrs_tbf_cli_hash_lookup(hs, &bd, key);
-	if (ret == NULL) {
-		cfs_hash_bd_add_locked(hs, &bd, &cli->tc_hnode);
-		ret = cli;
+try_again:
+	rcu_read_lock();
+	cli2 = rhashtable_lookup_get_insert_fast(&head->th_cli_rhash,
+						 &cli->tc_rhash,
+						 head->th_rhash_params);
+	if (IS_ERR(cli2))
+		goto out;
+
+	if (cli2 && !refcount_inc_not_zero(&cli2->tc_ref)) {
+		cli2 = nrs_tbf_lru_tryhit(head, cli);
+		if (!cli2) {
+			/* lost race -> retry */
+			rcu_read_unlock();
+			schedule();
+			goto try_again;
+		}
 	}
-	cfs_hash_bd_unlock(hs, &bd, 1);
 
-	return ret;
+out:
+	rcu_read_unlock();
+	if (!cli2)
+		TBF_CLI_DEBUG(cli, "TBF class insert");
+
+	return cli2 ?: cli;
 }
 
 static void
 nrs_tbf_cli_put(struct nrs_tbf_head *head, struct nrs_tbf_client *cli)
 {
-	struct cfs_hash_bd	 bd;
-	struct cfs_hash		*hs = head->th_cli_hash;
-	struct nrs_tbf_bucket	*bkt;
-	int			 hw;
-	LIST_HEAD(zombies);
 
-	cfs_hash_bd_get(hs, &cli->tc_key, &bd);
-	bkt = cfs_hash_bd_extra_get(hs, &bd);
-	if (!cfs_hash_bd_dec_and_lock(hs, &bd, &cli->tc_ref))
+	if (!refcount_dec_and_test(&cli->tc_ref))
 		return;
-	LASSERT(list_empty(&cli->tc_lru));
-	list_add_tail(&cli->tc_lru, &bkt->ntb_lru);
 
-	/**
-	 * Check and purge the LRU, there is at least one client in the LRU.
-	 */
-	hw = tbf_jobid_cache_size >> (hs->hs_cur_bits - hs->hs_bkt_bits);
-	while (cfs_hash_bd_count_get(&bd) > hw) {
-		if (unlikely(list_empty(&bkt->ntb_lru)))
-			break;
-		cli = list_first_entry(&bkt->ntb_lru,
-				       struct nrs_tbf_client,
-				       tc_lru);
-		cfs_hash_bd_del_locked(hs, &bd, &cli->tc_hnode);
-		list_move(&cli->tc_lru, &zombies);
-	}
-	cfs_hash_bd_unlock(head->th_cli_hash, &bd, 1);
-
-	while (!list_empty(&zombies)) {
-		cli = container_of(zombies.next,
-				   struct nrs_tbf_client, tc_lru);
-		list_del_init(&cli->tc_lru);
-		nrs_tbf_cli_fini(cli);
-	}
+	nrs_tbf_lru_add(head, cli);
+	nrs_tbf_lru_shrink(head);
 }
 
 static void
-nrs_tbf_generic_cli_init(struct nrs_tbf_client *cli,
-			 struct ptlrpc_request *req)
-{
-	nrs_tbf_cli_gen_key(req, &cli->tc_key);
-	INIT_LIST_HEAD(&cli->tc_lru);
-}
-
-static void
-nrs_tbf_id_list_free(struct list_head *uid_list)
+nrs_tbf_id_list_free(struct list_head *id_list)
 {
 	struct nrs_tbf_id *nti_id, *n;
 
-	list_for_each_entry_safe(nti_id, n, uid_list, nti_linkage) {
+	list_for_each_entry_safe(nti_id, n, id_list, nti_linkage) {
 		list_del_init(&nti_id->nti_linkage);
 		OBD_FREE_PTR(nti_id);
 	}
 }
 
 static void
+nrs_tbf_nodemap_list_free(struct list_head *nm_list)
+{
+	struct nrs_tbf_nodemap *nodemap, *n;
+
+	list_for_each_entry_safe(nodemap, n, nm_list, ntn_linkage) {
+		list_del_init(&nodemap->ntn_linkage);
+		OBD_FREE_PTR(nodemap);
+	}
+}
+
+static void
 nrs_tbf_expression_free(struct nrs_tbf_expression *expr)
 {
-	LASSERT(expr->te_field >= NRS_TBF_FIELD_NID &&
-		expr->te_field < NRS_TBF_FIELD_MAX);
+	LASSERT(expr->te_field >= 0 && expr->te_field < NRS_TBF_FIELD_MAX);
 	switch (expr->te_field) {
 	case NRS_TBF_FIELD_NID:
 		cfs_free_nidlist(&expr->te_cond);
@@ -1726,7 +1356,11 @@ nrs_tbf_expression_free(struct nrs_tbf_expression *expr)
 		break;
 	case NRS_TBF_FIELD_UID:
 	case NRS_TBF_FIELD_GID:
+	case NRS_TBF_FIELD_PROJID:
 		nrs_tbf_id_list_free(&expr->te_cond);
+		break;
+	case NRS_TBF_FIELD_NODEMAP:
+		nrs_tbf_nodemap_list_free(&expr->te_cond);
 		break;
 	default:
 		LBUG();
@@ -1762,14 +1396,6 @@ nrs_tbf_conds_free(struct list_head *cond_list)
 	}
 }
 
-static void
-nrs_tbf_generic_cmd_fini(struct nrs_tbf_cmd *cmd)
-{
-	if (!list_empty(&cmd->u.tc_start.ts_conds))
-		nrs_tbf_conds_free(&cmd->u.tc_start.ts_conds);
-	OBD_FREE_STR(cmd->u.tc_start.ts_conds_str);
-}
-
 #define NRS_TBF_DISJUNCTION_DELIM	(",")
 #define NRS_TBF_CONJUNCTION_DELIM	("&")
 #define NRS_TBF_EXPRESSION_DELIM	("=")
@@ -1781,7 +1407,66 @@ nrs_tbf_id_list_parse(char *str, struct list_head *id_list,
 		      enum nrs_tbf_flag tif);
 
 static int
-nrs_tbf_expression_parse(char *str, struct list_head *cond_list)
+nrs_tbf_nodemap_list_add(char *name, struct list_head *nm_list)
+{
+	struct nrs_tbf_nodemap *nodemap;
+	struct lu_nodemap *lnm;
+
+	ENTRY;
+
+	OBD_ALLOC_PTR(nodemap);
+	if (nodemap == NULL)
+		RETURN(-ENOMEM);
+
+	/*
+	 * If the setting for nodemap and TBF are using Lustre config log,
+	 * it must ensure that nodemap is configured before the TBF.
+	 * Otherwise, the nodemap lookup will return an error and adding
+	 * TBF rule for the nodemap will fail.
+	 */
+	lnm = nodemap_lookup_unlocked(name);
+	if (IS_ERR(lnm)) {
+		OBD_FREE_PTR(nodemap);
+		RETURN(PTR_ERR(lnm));
+	}
+
+	nodemap->ntn_nmid = lnm->nm_id;
+	nodemap_putref(lnm);
+	list_add_tail(&nodemap->ntn_linkage, nm_list);
+	RETURN(0);
+}
+
+static int
+nrs_tbf_nodemap_list_parse(char *orig, struct list_head *nm_list)
+{
+	char *str, *copy;
+	int rc = 0;
+
+	ENTRY;
+
+	copy = kstrdup(orig, GFP_KERNEL);
+	if (!copy)
+		RETURN(-ENOMEM);
+
+	str = copy;
+	INIT_LIST_HEAD(nm_list);
+	while (str && rc == 0) {
+		char *tok = strsep(&str, " ");
+
+		if (*tok)
+			rc = nrs_tbf_nodemap_list_add(tok, nm_list);
+	}
+	if (list_empty(nm_list))
+		rc = -EINVAL;
+	if (rc)
+		nrs_tbf_nodemap_list_free(nm_list);
+	kfree(copy);
+	RETURN(rc);
+}
+
+static int
+nrs_tbf_expression_parse(enum nrs_tbf_flag ntf, char *str,
+			 struct list_head *cond_list)
 {
 	struct nrs_tbf_expression *expr;
 	char *field;
@@ -1807,28 +1492,51 @@ nrs_tbf_expression_parse(char *str, struct list_head *cond_list)
 	str += 1;
 	len -= 2;
 
-	if (strcmp(field, "nid") == 0) {
+	if (strcmp(field, NRS_TBF_TYPE_NID) == 0) {
+		if (!(ntf & NRS_TBF_FLAG_NID))
+			GOTO(out, rc = -EINVAL);
 		if (cfs_parse_nidlist(str, len, &expr->te_cond) < 0)
 			GOTO(out, rc = -EINVAL);
 		expr->te_field = NRS_TBF_FIELD_NID;
-	} else if (strcmp(field, "jobid") == 0) {
+	} else if (strcmp(field, NRS_TBF_TYPE_JOBID) == 0) {
+		if (!(ntf & NRS_TBF_FLAG_JOBID))
+			GOTO(out, rc = -EINVAL);
 		if (nrs_tbf_jobid_list_parse(str, &expr->te_cond) < 0)
 			GOTO(out, rc = -EINVAL);
 		expr->te_field = NRS_TBF_FIELD_JOBID;
-	} else if (strcmp(field, "opcode") == 0) {
+	} else if (strcmp(field, NRS_TBF_TYPE_OPCODE) == 0) {
+		if (!(ntf & NRS_TBF_FLAG_OPCODE))
+			GOTO(out, rc = -EINVAL);
 		if (nrs_tbf_opcode_list_parse(str, &expr->te_opcodes) < 0)
 			GOTO(out, rc = -EINVAL);
 		expr->te_field = NRS_TBF_FIELD_OPCODE;
-	} else if (strcmp(field, "uid") == 0) {
+	} else if (strcmp(field, NRS_TBF_TYPE_UID) == 0) {
+		if (!(ntf & NRS_TBF_FLAG_UID))
+			GOTO(out, rc = -EINVAL);
 		if (nrs_tbf_id_list_parse(str, &expr->te_cond,
 					  NRS_TBF_FLAG_UID) < 0)
 			GOTO(out, rc = -EINVAL);
 		expr->te_field = NRS_TBF_FIELD_UID;
-	} else if (strcmp(field, "gid") == 0) {
+	} else if (strcmp(field, NRS_TBF_TYPE_GID) == 0) {
+		if (!(ntf & NRS_TBF_FLAG_GID))
+			GOTO(out, rc = -EINVAL);
 		if (nrs_tbf_id_list_parse(str, &expr->te_cond,
 					  NRS_TBF_FLAG_GID) < 0)
 			GOTO(out, rc = -EINVAL);
 		expr->te_field = NRS_TBF_FIELD_GID;
+	} else if (strcmp(field, NRS_TBF_TYPE_PROJID) == 0) {
+		if (!(ntf & NRS_TBF_FLAG_PROJID))
+			GOTO(out, rc = -EINVAL);
+		if (nrs_tbf_id_list_parse(str, &expr->te_cond,
+					  NRS_TBF_FLAG_PROJID) < 0)
+			GOTO(out, rc = -EINVAL);
+		expr->te_field = NRS_TBF_FIELD_PROJID;
+	} else if (strcmp(field, NRS_TBF_TYPE_NODEMAP) == 0) {
+		if (!(ntf & NRS_TBF_FLAG_NODEMAP))
+			GOTO(out, rc = -EINVAL);
+		if (nrs_tbf_nodemap_list_parse(str, &expr->te_cond) < 0)
+			GOTO(out, rc = -EINVAL);
+		expr->te_field = NRS_TBF_FIELD_NODEMAP;
 	} else {
 		GOTO(out, rc = -EINVAL);
 	}
@@ -1841,7 +1549,8 @@ out:
 }
 
 static int
-nrs_tbf_conjunction_parse(char *str, struct list_head *cond_list)
+nrs_tbf_conjunction_parse(enum nrs_tbf_flag ntf, char *str,
+			  struct list_head *cond_list)
 {
 	struct nrs_tbf_conjunction *conjunction;
 	int rc = 0;
@@ -1856,14 +1565,15 @@ nrs_tbf_conjunction_parse(char *str, struct list_head *cond_list)
 	while (str && !rc) {
 		char *expr = strsep(&str, NRS_TBF_CONJUNCTION_DELIM);
 
-		rc = nrs_tbf_expression_parse(expr,
+		rc = nrs_tbf_expression_parse(ntf, expr,
 					      &conjunction->tc_expressions);
 	}
 	return rc;
 }
 
 static int
-nrs_tbf_conds_parse(char *orig, struct list_head *cond_list)
+nrs_tbf_conds_parse(enum nrs_tbf_flag ntf, char *orig,
+		    struct list_head *cond_list)
 {
 	char *str;
 	int rc = 0;
@@ -1877,33 +1587,31 @@ nrs_tbf_conds_parse(char *orig, struct list_head *cond_list)
 	while (str && !rc) {
 		char *term = strsep(&str, NRS_TBF_DISJUNCTION_DELIM);
 
-		rc = nrs_tbf_conjunction_parse(term, cond_list);
+		rc = nrs_tbf_conjunction_parse(ntf, term, cond_list);
 	}
 	kfree(orig);
 
-	return rc;
-}
-
-static int
-nrs_tbf_generic_parse(struct nrs_tbf_cmd *cmd, const char *id)
-{
-	int rc;
-
-	OBD_STRNDUP(cmd->u.tc_start.ts_conds_str, id, strlen(id));
-	if (cmd->u.tc_start.ts_conds_str == NULL)
-		return -ENOMEM;
-
-	/* Parse hybird NID and JOBID conditions */
-	rc = nrs_tbf_conds_parse(cmd->u.tc_start.ts_conds_str,
-				 &cmd->u.tc_start.ts_conds);
 	if (rc)
-		nrs_tbf_generic_cmd_fini(cmd);
+		nrs_tbf_conds_free(cond_list);
 
 	return rc;
 }
 
 static int
-nrs_tbf_id_list_match(struct list_head *id_list, struct tbf_id id);
+nrs_tbf_id_list_match(struct list_head *id_list, u32 id,
+		      enum nrs_tbf_flag flag);
+
+static int
+nrs_tbf_nodemap_list_match(struct list_head *nm_list, unsigned int nmid)
+{
+	struct nrs_tbf_nodemap *nodemap;
+
+	list_for_each_entry(nodemap, nm_list, ntn_linkage) {
+		if (nodemap->ntn_nmid == nmid)
+			return 1;
+	}
+	return 0;
+}
 
 static int
 nrs_tbf_expression_match(struct nrs_tbf_expression *expr,
@@ -1918,8 +1626,18 @@ nrs_tbf_expression_match(struct nrs_tbf_expression *expr,
 	case NRS_TBF_FIELD_OPCODE:
 		return test_bit(cli->tc_opcode, expr->te_opcodes);
 	case NRS_TBF_FIELD_UID:
+		return nrs_tbf_id_list_match(&expr->te_cond, cli->tc_id.ti_uid,
+					     NRS_TBF_FLAG_UID);
 	case NRS_TBF_FIELD_GID:
-		return nrs_tbf_id_list_match(&expr->te_cond, cli->tc_id);
+		return nrs_tbf_id_list_match(&expr->te_cond, cli->tc_id.ti_gid,
+					     NRS_TBF_FLAG_GID);
+	case NRS_TBF_FIELD_PROJID:
+		return nrs_tbf_id_list_match(&expr->te_cond,
+					     cli->tc_id.ti_projid,
+					     NRS_TBF_FLAG_PROJID);
+	case NRS_TBF_FIELD_NODEMAP:
+		return nrs_tbf_nodemap_list_match(&expr->te_cond,
+						  cli->tc_nmid);
 	default:
 		return 0;
 	}
@@ -1957,206 +1675,52 @@ nrs_tbf_cond_match(struct nrs_tbf_rule *rule, struct nrs_tbf_client *cli)
 	return 0;
 }
 
-static void
-nrs_tbf_generic_rule_fini(struct nrs_tbf_rule *rule)
+static
+struct nrs_tbf_rule *nrs_tbf_rule_alloc(struct ptlrpc_nrs_policy *policy,
+					struct nrs_tbf_head *head,
+					struct nrs_tbf_cmd *start)
 {
-	if (!list_empty(&rule->tr_conds))
-		nrs_tbf_conds_free(&rule->tr_conds);
-	LASSERT(rule->tr_conds_str != NULL);
-	OBD_FREE_STR(rule->tr_conds_str);
-}
-
-static int
-nrs_tbf_rule_init(struct ptlrpc_nrs_policy *policy,
-		  struct nrs_tbf_rule *rule, struct nrs_tbf_cmd *start)
-{
+	struct nrs_tbf_rule *rule;
 	int rc = 0;
+
+	OBD_CPT_ALLOC_PTR(rule, nrs_pol2cptab(policy), nrs_pol2cptid(policy));
+	if (!rule)
+		return ERR_PTR(-ENOMEM);
+
+	strscpy(rule->tr_name, start->tc_name, sizeof(rule->tr_name));
+	rule->tr_rpc_rate = start->u.tc_start.ts_rpc_rate;
+	rule->tr_flags = start->u.tc_start.ts_rule_flags;
+	rule->tr_nsecs_per_rpc = NSEC_PER_SEC / rule->tr_rpc_rate;
+	rule->tr_depth = tbf_depth;
+	kref_init(&rule->tr_ref);
+	INIT_LIST_HEAD(&rule->tr_cli_list);
+	INIT_LIST_HEAD(&rule->tr_nids);
+	INIT_LIST_HEAD(&rule->tr_linkage);
+	spin_lock_init(&rule->tr_rule_lock);
+	rule->tr_head = head;
 
 	LASSERT(start->u.tc_start.ts_conds_str);
 	OBD_STRNDUP(rule->tr_conds_str,
 		    start->u.tc_start.ts_conds_str,
 		    strlen(start->u.tc_start.ts_conds_str));
-	if (rule->tr_conds_str == NULL)
-		return -ENOMEM;
+	if (!rule->tr_conds_str)
+		GOTO(err, rc = -ENOMEM);
 
 	INIT_LIST_HEAD(&rule->tr_conds);
 	if (!list_empty(&start->u.tc_start.ts_conds)) {
-		rc = nrs_tbf_conds_parse(rule->tr_conds_str,
+		rc = nrs_tbf_conds_parse(start->u.tc_start.ts_valid_type,
+					 rule->tr_conds_str,
 					 &rule->tr_conds);
 	}
 	if (rc)
-		nrs_tbf_generic_rule_fini(rule);
+		GOTO(err, rc);
 
-	return rc;
-}
+	return rule;
 
-static int
-nrs_tbf_generic_rule_dump(struct nrs_tbf_rule *rule, struct seq_file *m)
-{
-	seq_printf(m, "%s %s %llu, ref %d\n", rule->tr_name,
-		   rule->tr_conds_str, rule->tr_rpc_rate,
-		   kref_read(&rule->tr_ref) - 1);
-	return 0;
-}
+err:
+	kref_put(&rule->tr_ref, nrs_tbf_rule_fini);
 
-static int
-nrs_tbf_generic_rule_match(struct nrs_tbf_rule *rule,
-			   struct nrs_tbf_client *cli)
-{
-	return nrs_tbf_cond_match(rule, cli);
-}
-
-static struct nrs_tbf_ops nrs_tbf_generic_ops = {
-	.o_name = NRS_TBF_TYPE_GENERIC,
-	.o_startup = nrs_tbf_startup,
-	.o_cli_find = nrs_tbf_cli_find,
-	.o_cli_findadd = nrs_tbf_cli_findadd,
-	.o_cli_put = nrs_tbf_cli_put,
-	.o_cli_init = nrs_tbf_generic_cli_init,
-	.o_rule_init = nrs_tbf_rule_init,
-	.o_rule_dump = nrs_tbf_generic_rule_dump,
-	.o_rule_match = nrs_tbf_generic_rule_match,
-	.o_rule_fini = nrs_tbf_generic_rule_fini,
-};
-
-static void nrs_tbf_opcode_rule_fini(struct nrs_tbf_rule *rule)
-{
-	if (rule->tr_opcodes)
-		bitmap_free(rule->tr_opcodes);
-
-	LASSERT(rule->tr_opcodes_str != NULL);
-	OBD_FREE_STR(rule->tr_opcodes_str);
-}
-
-static unsigned int
-nrs_tbf_opcode_hop_hash(struct cfs_hash *hs, const void *key,
-			const unsigned int bits)
-{
-	/* XXX did hash needs ? */
-	return cfs_hash_djb2_hash(key, sizeof(__u32), bits);
-}
-
-static int nrs_tbf_opcode_hop_keycmp(const void *key, struct hlist_node *hnode)
-{
-	const __u32	*opc = key;
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	return *opc == cli->tc_opcode;
-}
-
-static void *nrs_tbf_opcode_hop_key(struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	return &cli->tc_opcode;
-}
-
-static void nrs_tbf_opcode_hop_get(struct cfs_hash *hs,
-				   struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	refcount_inc(&cli->tc_ref);
-}
-
-static void nrs_tbf_opcode_hop_put(struct cfs_hash *hs,
-				   struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	refcount_dec(&cli->tc_ref);
-}
-
-static void nrs_tbf_opcode_hop_exit(struct cfs_hash *hs,
-				    struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	CDEBUG(D_RPCTRACE,
-	       "Busy TBF object from client with opcode %s, with %d refs\n",
-	       ll_opcode2str(cli->tc_opcode), refcount_read(&cli->tc_ref));
-
-	nrs_tbf_cli_fini(cli);
-}
-static struct cfs_hash_ops nrs_tbf_opcode_hash_ops = {
-	.hs_hash	= nrs_tbf_opcode_hop_hash,
-	.hs_keycmp	= nrs_tbf_opcode_hop_keycmp,
-	.hs_key		= nrs_tbf_opcode_hop_key,
-	.hs_object	= nrs_tbf_hop_object,
-	.hs_get		= nrs_tbf_opcode_hop_get,
-	.hs_put		= nrs_tbf_opcode_hop_put,
-	.hs_put_locked	= nrs_tbf_opcode_hop_put,
-	.hs_exit	= nrs_tbf_opcode_hop_exit,
-};
-
-static int
-nrs_tbf_opcode_startup(struct ptlrpc_nrs_policy *policy,
-		    struct nrs_tbf_head *head)
-{
-	struct nrs_tbf_cmd	start = { 0 };
-	int rc;
-
-	head->th_cli_hash = cfs_hash_create("nrs_tbf_hash",
-					    NRS_TBF_NID_BITS,
-					    NRS_TBF_NID_BITS,
-					    NRS_TBF_NID_BKT_BITS, 0,
-					    CFS_HASH_MIN_THETA,
-					    CFS_HASH_MAX_THETA,
-					    &nrs_tbf_opcode_hash_ops,
-					    CFS_HASH_RW_BKTLOCK);
-	if (head->th_cli_hash == NULL)
-		return -ENOMEM;
-
-	start.u.tc_start.ts_opcodes_str = "*";
-
-	start.u.tc_start.ts_rpc_rate = tbf_rate;
-	start.u.tc_start.ts_rule_flags = NTRS_DEFAULT;
-	start.tc_name = NRS_TBF_DEFAULT_RULE;
-	rc = nrs_tbf_rule_start(policy, head, &start);
-
-	return rc;
-}
-
-static struct nrs_tbf_client *
-nrs_tbf_opcode_cli_find(struct nrs_tbf_head *head,
-			struct ptlrpc_request *req)
-{
-	__u32 opc;
-
-	opc = lustre_msg_get_opc(req->rq_reqmsg);
-	return cfs_hash_lookup(head->th_cli_hash, &opc);
-}
-
-static struct nrs_tbf_client *
-nrs_tbf_opcode_cli_findadd(struct nrs_tbf_head *head,
-			   struct nrs_tbf_client *cli)
-{
-	return cfs_hash_findadd_unique(head->th_cli_hash, &cli->tc_opcode,
-				       &cli->tc_hnode);
-}
-
-static void
-nrs_tbf_cfs_hash_cli_put(struct nrs_tbf_head *head,
-			struct nrs_tbf_client *cli)
-{
-	cfs_hash_put(head->th_cli_hash, &cli->tc_hnode);
-}
-
-static void
-nrs_tbf_opcode_cli_init(struct nrs_tbf_client *cli,
-			struct ptlrpc_request *req)
-{
-	cli->tc_opcode = lustre_msg_get_opc(req->rq_reqmsg);
+	return ERR_PTR(rc);
 }
 
 #define MAX_OPCODE_LEN	32
@@ -2211,245 +1775,30 @@ nrs_tbf_opcode_list_parse(char *orig, unsigned long **bitmaptr)
 	RETURN(rc);
 }
 
-static void nrs_tbf_opcode_cmd_fini(struct nrs_tbf_cmd *cmd)
-{
-	OBD_FREE_STR(cmd->u.tc_start.ts_opcodes_str);
-}
-
-static int nrs_tbf_opcode_parse(struct nrs_tbf_cmd *cmd, char *id)
-{
-	int rc;
-
-	rc = nrs_tbf_check_id_value(&id, "opcode");
-	if (rc)
-		return rc;
-
-	OBD_STRNDUP(cmd->u.tc_start.ts_opcodes_str, id, strlen(id));
-	if (cmd->u.tc_start.ts_opcodes_str == NULL)
-		return -ENOMEM;
-
-	/* parse opcode list */
-	rc = nrs_tbf_opcode_list_parse(cmd->u.tc_start.ts_opcodes_str, NULL);
-	if (rc)
-		nrs_tbf_opcode_cmd_fini(cmd);
-
-	return rc;
-}
-
 static int
-nrs_tbf_opcode_rule_match(struct nrs_tbf_rule *rule,
-			  struct nrs_tbf_client *cli)
-{
-	if (rule->tr_opcodes == NULL)
-		return 0;
-
-	return test_bit(cli->tc_opcode, rule->tr_opcodes);
-}
-
-static int nrs_tbf_opcode_rule_init(struct ptlrpc_nrs_policy *policy,
-				    struct nrs_tbf_rule *rule,
-				    struct nrs_tbf_cmd *start)
-{
-	int rc = 0;
-
-	LASSERT(start->u.tc_start.ts_opcodes_str != NULL);
-	OBD_STRNDUP(rule->tr_opcodes_str,
-		  start->u.tc_start.ts_opcodes_str,
-		  strlen(start->u.tc_start.ts_opcodes_str));
-	if (rule->tr_opcodes_str == NULL)
-		return -ENOMEM;
-
-	/* Default rule '*' */
-	if (strcmp(start->u.tc_start.ts_opcodes_str, "*") == 0)
-		return 0;
-
-	rc = nrs_tbf_opcode_list_parse(rule->tr_opcodes_str,
-				       &rule->tr_opcodes);
-	if (rc)
-		OBD_FREE_STR(rule->tr_opcodes_str);
-
-	return rc;
-}
-
-static int
-nrs_tbf_opcode_rule_dump(struct nrs_tbf_rule *rule, struct seq_file *m)
-{
-	seq_printf(m, "%s {%s} %llu, ref %d\n", rule->tr_name,
-		   rule->tr_opcodes_str, rule->tr_rpc_rate,
-		   kref_read(&rule->tr_ref) - 1);
-	return 0;
-}
-
-
-struct nrs_tbf_ops nrs_tbf_opcode_ops = {
-	.o_name = NRS_TBF_TYPE_OPCODE,
-	.o_startup = nrs_tbf_opcode_startup,
-	.o_cli_find = nrs_tbf_opcode_cli_find,
-	.o_cli_findadd = nrs_tbf_opcode_cli_findadd,
-	.o_cli_put = nrs_tbf_cfs_hash_cli_put,
-	.o_cli_init = nrs_tbf_opcode_cli_init,
-	.o_rule_init = nrs_tbf_opcode_rule_init,
-	.o_rule_dump = nrs_tbf_opcode_rule_dump,
-	.o_rule_match = nrs_tbf_opcode_rule_match,
-	.o_rule_fini = nrs_tbf_opcode_rule_fini,
-};
-
-static unsigned int
-nrs_tbf_id_hop_hash(struct cfs_hash *hs, const void *key,
-		    const unsigned int bits)
-{
-	return cfs_hash_djb2_hash(key, sizeof(struct tbf_id), bits);
-}
-
-static int nrs_tbf_id_hop_keycmp(const void *key, struct hlist_node *hnode)
-{
-	const struct tbf_id *opc = key;
-	enum nrs_tbf_flag ntf;
-	struct nrs_tbf_client *cli = hlist_entry(hnode, struct nrs_tbf_client,
-						 tc_hnode);
-	ntf = opc->ti_type & cli->tc_id.ti_type;
-	if ((ntf & NRS_TBF_FLAG_UID) && opc->ti_uid != cli->tc_id.ti_uid)
-		return 0;
-
-	if ((ntf & NRS_TBF_FLAG_GID) && opc->ti_gid != cli->tc_id.ti_gid)
-		return 0;
-
-	return 1;
-}
-
-static void *nrs_tbf_id_hop_key(struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-	return &cli->tc_id;
-}
-
-static void nrs_tbf_id_hop_get(struct cfs_hash *hs, struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	refcount_inc(&cli->tc_ref);
-}
-
-static void nrs_tbf_id_hop_put(struct cfs_hash *hs, struct hlist_node *hnode)
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	refcount_dec(&cli->tc_ref);
-}
-
-static void
-nrs_tbf_id_hop_exit(struct cfs_hash *hs, struct hlist_node *hnode)
-
-{
-	struct nrs_tbf_client *cli = hlist_entry(hnode,
-						 struct nrs_tbf_client,
-						 tc_hnode);
-
-	nrs_tbf_cli_fini(cli);
-}
-
-static struct cfs_hash_ops nrs_tbf_id_hash_ops = {
-	.hs_hash	= nrs_tbf_id_hop_hash,
-	.hs_keycmp	= nrs_tbf_id_hop_keycmp,
-	.hs_key		= nrs_tbf_id_hop_key,
-	.hs_object	= nrs_tbf_hop_object,
-	.hs_get		= nrs_tbf_id_hop_get,
-	.hs_put		= nrs_tbf_id_hop_put,
-	.hs_put_locked	= nrs_tbf_id_hop_put,
-	.hs_exit	= nrs_tbf_id_hop_exit,
-};
-
-static int
-nrs_tbf_id_startup(struct ptlrpc_nrs_policy *policy,
-		   struct nrs_tbf_head *head)
-{
-	struct nrs_tbf_cmd start;
-	int rc;
-
-	head->th_cli_hash = cfs_hash_create("nrs_tbf_id_hash",
-					    NRS_TBF_NID_BITS,
-					    NRS_TBF_NID_BITS,
-					    NRS_TBF_NID_BKT_BITS, 0,
-					    CFS_HASH_MIN_THETA,
-					    CFS_HASH_MAX_THETA,
-					    &nrs_tbf_id_hash_ops,
-					    CFS_HASH_RW_BKTLOCK);
-	if (head->th_cli_hash == NULL)
-		return -ENOMEM;
-
-	memset(&start, 0, sizeof(start));
-	start.u.tc_start.ts_ids_str = "*";
-	start.u.tc_start.ts_rpc_rate = tbf_rate;
-	start.u.tc_start.ts_rule_flags = NTRS_DEFAULT;
-	start.tc_name = NRS_TBF_DEFAULT_RULE;
-	INIT_LIST_HEAD(&start.u.tc_start.ts_ids);
-	rc = nrs_tbf_rule_start(policy, head, &start);
-	if (rc) {
-		cfs_hash_putref(head->th_cli_hash);
-		head->th_cli_hash = NULL;
-	}
-
-	return rc;
-}
-
-static struct nrs_tbf_client *
-nrs_tbf_id_cli_find(struct nrs_tbf_head *head,
-		    struct ptlrpc_request *req)
-{
-	struct tbf_id id;
-
-	LASSERT(head->th_type_flag == NRS_TBF_FLAG_UID ||
-		head->th_type_flag == NRS_TBF_FLAG_GID);
-
-	nrs_tbf_id_cli_set(req, &id, head->th_type_flag);
-	return cfs_hash_lookup(head->th_cli_hash, &id);
-}
-
-static struct nrs_tbf_client *
-nrs_tbf_id_cli_findadd(struct nrs_tbf_head *head,
-		       struct nrs_tbf_client *cli)
-{
-	return cfs_hash_findadd_unique(head->th_cli_hash, &cli->tc_id,
-				       &cli->tc_hnode);
-}
-
-static void
-nrs_tbf_uid_cli_init(struct nrs_tbf_client *cli,
-		     struct ptlrpc_request *req)
-{
-	nrs_tbf_id_cli_set(req, &cli->tc_id, NRS_TBF_FLAG_UID);
-}
-
-static void
-nrs_tbf_gid_cli_init(struct nrs_tbf_client *cli,
-		     struct ptlrpc_request *req)
-{
-	nrs_tbf_id_cli_set(req, &cli->tc_id, NRS_TBF_FLAG_GID);
-}
-
-static int
-nrs_tbf_id_list_match(struct list_head *id_list, struct tbf_id id)
+nrs_tbf_id_list_match(struct list_head *id_list, u32 id,
+		      enum nrs_tbf_flag idtype)
 {
 	struct nrs_tbf_id *nti_id;
-	enum nrs_tbf_flag flag;
 
 	list_for_each_entry(nti_id, id_list, nti_linkage) {
-		flag = id.ti_type & nti_id->nti_id.ti_type;
-		if (!flag)
-			continue;
+		u32 curid;
 
-		if ((flag & NRS_TBF_FLAG_UID) &&
-		    (id.ti_uid != nti_id->nti_id.ti_uid))
-			continue;
+		switch (idtype) {
+		case NRS_TBF_FLAG_UID:
+			curid = nti_id->nti_id.ti_uid;
+			break;
+		case NRS_TBF_FLAG_GID:
+			curid = nti_id->nti_id.ti_gid;
+			break;
+		case NRS_TBF_FLAG_PROJID:
+			curid = nti_id->nti_id.ti_projid;
+			break;
+		default:
+			return 0;
+		}
 
-		if ((flag & NRS_TBF_FLAG_GID) &&
-		    (id.ti_gid != nti_id->nti_id.ti_gid))
+		if (id != curid)
 			continue;
 
 		return 1;
@@ -2458,30 +1807,18 @@ nrs_tbf_id_list_match(struct list_head *id_list, struct tbf_id id)
 }
 
 static int
-nrs_tbf_id_rule_match(struct nrs_tbf_rule *rule,
-		      struct nrs_tbf_client *cli)
-{
-	return nrs_tbf_id_list_match(&rule->tr_ids, cli->tc_id);
-}
-
-static void nrs_tbf_id_cmd_fini(struct nrs_tbf_cmd *cmd)
-{
-	nrs_tbf_id_list_free(&cmd->u.tc_start.ts_ids);
-
-	OBD_FREE_STR(cmd->u.tc_start.ts_ids_str);
-}
-
-static int
 nrs_tbf_id_list_parse(char *orig, struct list_head *id_list,
-		      enum nrs_tbf_flag tif)
+		      enum nrs_tbf_flag ntf)
 {
 	int rc = 0;
 	unsigned long val;
 	char *str;
 	struct tbf_id id = { 0 };
+
 	ENTRY;
 
-	if (tif != NRS_TBF_FLAG_UID && tif != NRS_TBF_FLAG_GID)
+	if (ntf != NRS_TBF_FLAG_UID && ntf != NRS_TBF_FLAG_GID &&
+	    ntf != NRS_TBF_FLAG_PROJID)
 		RETURN(-EINVAL);
 
 	orig = kstrdup(orig, GFP_KERNEL);
@@ -2500,14 +1837,15 @@ nrs_tbf_id_list_parse(char *orig, struct list_head *id_list,
 			 */
 			continue;
 
-		id.ti_type = tif;
 		rc = kstrtoul(tok, 0, &val);
 		if (rc < 0)
 			GOTO(out, rc = -EINVAL);
-		if (tif == NRS_TBF_FLAG_UID)
+		if (ntf == NRS_TBF_FLAG_UID)
 			id.ti_uid = val;
-		else
+		else if (ntf == NRS_TBF_FLAG_GID)
 			id.ti_gid = val;
+		else
+			id.ti_projid = val;
 
 		OBD_ALLOC_PTR(nti_id);
 		if (nti_id == NULL)
@@ -2526,174 +1864,95 @@ out:
 	RETURN(rc);
 }
 
-static int nrs_tbf_ug_id_parse(struct nrs_tbf_cmd *cmd, char *id)
+
+#define NRS_TBF_TYPE_COMBINATOR	"+"
+
+static int nrs_tbf_type_parse(const char *orig, enum nrs_tbf_flag *fl)
 {
-	int rc;
-	enum nrs_tbf_flag tif;
-
-	tif = cmd->u.tc_start.ts_valid_type;
-
-	rc = nrs_tbf_check_id_value(&id,
-				    tif == NRS_TBF_FLAG_UID ? "uid" : "gid");
-	if (rc)
-		return rc;
-
-	OBD_STRNDUP(cmd->u.tc_start.ts_ids_str, id, strlen(id));
-	if (cmd->u.tc_start.ts_ids_str == NULL)
-		return -ENOMEM;
-
-	rc = nrs_tbf_id_list_parse(cmd->u.tc_start.ts_ids_str,
-				   &cmd->u.tc_start.ts_ids, tif);
-	if (rc)
-		nrs_tbf_id_cmd_fini(cmd);
-
-	return rc;
-}
-
-static int
-nrs_tbf_id_rule_init(struct ptlrpc_nrs_policy *policy,
-		     struct nrs_tbf_rule *rule,
-		     struct nrs_tbf_cmd *start)
-{
-	struct nrs_tbf_head *head = rule->tr_head;
+	enum nrs_tbf_flag flags = NRS_TBF_FLAG_INVALID;
+	char *copy, *str;
 	int rc = 0;
-	enum nrs_tbf_flag tif = head->th_type_flag;
-	int ids_len = strlen(start->u.tc_start.ts_ids_str);
 
-	LASSERT(start->u.tc_start.ts_ids_str);
-	INIT_LIST_HEAD(&rule->tr_ids);
+	ENTRY;
 
-	OBD_STRNDUP(rule->tr_ids_str, start->u.tc_start.ts_ids_str, ids_len);
-	if (rule->tr_ids_str == NULL)
-		return -ENOMEM;
+	copy = kstrdup(orig, GFP_KERNEL);
+	if (!copy)
+		RETURN(-ENOMEM);
 
-	if (!list_empty(&start->u.tc_start.ts_ids)) {
-		rc = nrs_tbf_id_list_parse(rule->tr_ids_str,
-					   &rule->tr_ids, tif);
-		if (rc)
-			CERROR("%ss {%s} illegal\n",
-			       tif == NRS_TBF_FLAG_UID ? "uid" : "gid",
-			       rule->tr_ids_str);
+	str = copy;
+	while (str && rc == 0) {
+		char *name;
+		bool found = false;
+		int i;
+
+		name = strsep(&str, NRS_TBF_TYPE_COMBINATOR);
+		if (!*name)
+			GOTO(out, rc);
+
+		for (i = 0; i < ARRAY_SIZE(nrs_tbf_types); i++) {
+			if (strcmp(name, nrs_tbf_types[i].ntt_name) == 0) {
+				flags |= nrs_tbf_types[i].ntt_flag;
+				found = true;
+				break;
+			}
+		}
+
+		if (found == false)
+			GOTO(out, rc = -EINVAL);
 	}
-	if (rc)
-		OBD_FREE_STR(rule->tr_ids_str);
-	return rc;
+out:
+	kfree(copy);
+	if (rc == 0) {
+		if (flags == NRS_TBF_FLAG_INVALID)
+			RETURN(-EINVAL);
+
+		*fl = flags;
+	}
+
+	RETURN(rc);
 }
-
-static int
-nrs_tbf_id_rule_dump(struct nrs_tbf_rule *rule, struct seq_file *m)
-{
-	seq_printf(m, "%s {%s} %llu, ref %d\n", rule->tr_name,
-		   rule->tr_ids_str, rule->tr_rpc_rate,
-		   kref_read(&rule->tr_ref) - 1);
-	return 0;
-}
-
-static void nrs_tbf_id_rule_fini(struct nrs_tbf_rule *rule)
-{
-	nrs_tbf_id_list_free(&rule->tr_ids);
-	OBD_FREE_STR(rule->tr_ids_str);
-}
-
-struct nrs_tbf_ops nrs_tbf_uid_ops = {
-	.o_name = NRS_TBF_TYPE_UID,
-	.o_startup = nrs_tbf_id_startup,
-	.o_cli_find = nrs_tbf_id_cli_find,
-	.o_cli_findadd = nrs_tbf_id_cli_findadd,
-	.o_cli_put = nrs_tbf_cfs_hash_cli_put,
-	.o_cli_init = nrs_tbf_uid_cli_init,
-	.o_rule_init = nrs_tbf_id_rule_init,
-	.o_rule_dump = nrs_tbf_id_rule_dump,
-	.o_rule_match = nrs_tbf_id_rule_match,
-	.o_rule_fini = nrs_tbf_id_rule_fini,
-};
-
-struct nrs_tbf_ops nrs_tbf_gid_ops = {
-	.o_name = NRS_TBF_TYPE_GID,
-	.o_startup = nrs_tbf_id_startup,
-	.o_cli_find = nrs_tbf_id_cli_find,
-	.o_cli_findadd = nrs_tbf_id_cli_findadd,
-	.o_cli_put = nrs_tbf_cfs_hash_cli_put,
-	.o_cli_init = nrs_tbf_gid_cli_init,
-	.o_rule_init = nrs_tbf_id_rule_init,
-	.o_rule_dump = nrs_tbf_id_rule_dump,
-	.o_rule_match = nrs_tbf_id_rule_match,
-	.o_rule_fini = nrs_tbf_id_rule_fini,
-};
-
-static struct nrs_tbf_type nrs_tbf_types[] = {
-	{
-		.ntt_name = NRS_TBF_TYPE_JOBID,
-		.ntt_flag = NRS_TBF_FLAG_JOBID,
-		.ntt_ops = &nrs_tbf_jobid_ops,
-	},
-	{
-		.ntt_name = NRS_TBF_TYPE_NID,
-		.ntt_flag = NRS_TBF_FLAG_NID,
-		.ntt_ops = &nrs_tbf_nid_ops,
-	},
-	{
-		.ntt_name = NRS_TBF_TYPE_OPCODE,
-		.ntt_flag = NRS_TBF_FLAG_OPCODE,
-		.ntt_ops = &nrs_tbf_opcode_ops,
-	},
-	{
-		.ntt_name = NRS_TBF_TYPE_GENERIC,
-		.ntt_flag = NRS_TBF_FLAG_GENERIC,
-		.ntt_ops = &nrs_tbf_generic_ops,
-	},
-	{
-		.ntt_name = NRS_TBF_TYPE_UID,
-		.ntt_flag = NRS_TBF_FLAG_UID,
-		.ntt_ops = &nrs_tbf_uid_ops,
-	},
-	{
-		.ntt_name = NRS_TBF_TYPE_GID,
-		.ntt_flag = NRS_TBF_FLAG_GID,
-		.ntt_ops = &nrs_tbf_gid_ops,
-	},
-};
 
 /**
+ * nrs_tbf_start() - policy to start
+ * @policy: The policy to start
+ * @arg: tbf flags
+ *
  * Is called before the policy transitions into
  * ptlrpc_nrs_pol_state::NRS_POL_STATE_STARTED; allocates and initializes a
  * policy-specific private data structure.
  *
- * \param[in] policy The policy to start
+ * see nrs_policy_register()
+ * see nrs_policy_ctl()
  *
- * \retval -ENOMEM OOM error
- * \retval  0	   success
+ * Return
+ * * %0 on success
+ * * %errno on error (-ENOMEM (OOM) error)
  *
- * \see nrs_policy_register()
- * \see nrs_policy_ctl()
  */
 static int nrs_tbf_start(struct ptlrpc_nrs_policy *policy, char *arg)
 {
-	struct nrs_tbf_head	*head;
-	struct nrs_tbf_ops	*ops;
-	__u32			 type;
-	char			*name;
-	int found = 0;
-	int i;
+	struct nrs_tbf_head *head;
+	enum nrs_tbf_flag flags;
+	char *name;
 	int rc = 0;
 
-	if (arg == NULL)
+	if (arg == NULL) {
+		flags = NRS_TBF_FLAG_ALL;
 		name = NRS_TBF_TYPE_GENERIC;
-	else if (strlen(arg) < NRS_TBF_TYPE_MAX_LEN)
+	} else if (strlen(arg) < NRS_TBF_TYPE_MAX_LEN) {
 		name = arg;
-	else
+		rc = nrs_tbf_type_parse(arg, &flags);
+		if (rc)
+			GOTO(out, rc);
+	} else {
 		GOTO(out, rc = -EINVAL);
-
-	for (i = 0; i < ARRAY_SIZE(nrs_tbf_types); i++) {
-		if (strcmp(name, nrs_tbf_types[i].ntt_name) == 0) {
-			ops = nrs_tbf_types[i].ntt_ops;
-			type = nrs_tbf_types[i].ntt_flag;
-			found = 1;
-			break;
-		}
 	}
-	if (found == 0)
-		GOTO(out, rc = -ENOTSUPP);
+
+	LASSERT((flags & NRS_TBF_FLAG_ALL) != 0);
+	LASSERT((flags & ~NRS_TBF_FLAG_ALL) == 0);
+
+	if (!nrs_tbf_flags_valid(flags))
+		GOTO(out, rc = -EINVAL);
 
 	OBD_CPT_ALLOC_PTR(head, nrs_pol2cptab(policy), nrs_pol2cptid(policy));
 	if (head == NULL)
@@ -2701,8 +1960,7 @@ static int nrs_tbf_start(struct ptlrpc_nrs_policy *policy, char *arg)
 
 	memcpy(head->th_type, name, strlen(name));
 	head->th_type[strlen(name)] = '\0';
-	head->th_ops = ops;
-	head->th_type_flag = type;
+	head->th_type_flag = flags;
 
 	head->th_binheap = binheap_create(&nrs_tbf_heap_ops,
 					  CBH_FLAG_ATOMIC_GROW, 4096, NULL,
@@ -2712,11 +1970,14 @@ static int nrs_tbf_start(struct ptlrpc_nrs_policy *policy, char *arg)
 		GOTO(out_free_head, rc = -ENOMEM);
 
 	atomic_set(&head->th_rule_sequence, 0);
+	atomic_set(&head->th_lru_cnt, 0);
 	spin_lock_init(&head->th_rule_lock);
+	spin_lock_init(&head->th_lru_lock);
 	INIT_LIST_HEAD(&head->th_list);
-	hrtimer_init(&head->th_timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
-	head->th_timer.function = nrs_tbf_timer_cb;
-	rc = head->th_ops->o_startup(policy, head);
+	INIT_LIST_HEAD(&head->th_lru_list);
+	hrtimer_setup(&head->th_timer, nrs_tbf_timer_cb, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_ABS);
+	rc = nrs_tbf_startup(policy, head);
 	if (rc)
 		GOTO(out_free_heap, rc);
 
@@ -2731,13 +1992,14 @@ out:
 }
 
 /**
+ * nrs_tbf_stop() - Stop policy transction
+ * @policy: The policy to stop
+ *
  * Is called before the policy transitions into
  * ptlrpc_nrs_pol_state::NRS_POL_STATE_STOPPED; deallocates the policy-specific
  * private data structure.
  *
- * \param[in] policy The policy to stop
- *
- * \see nrs_policy_stop0()
+ * see __nrs_policy_stop()
  */
 static void nrs_tbf_stop(struct ptlrpc_nrs_policy *policy)
 {
@@ -2748,17 +2010,18 @@ static void nrs_tbf_stop(struct ptlrpc_nrs_policy *policy)
 	LASSERT(head != NULL);
 	hrtimer_cancel(&head->th_timer);
 	/* Should cleanup hash first before free rules */
-	if (head->th_type_flag == NRS_TBF_FLAG_NID) {
-		rhashtable_free_and_destroy(&head->th_cli_rhash,
-					    nrs_tbf_nid_exit, NULL);
-	} else {
-		LASSERT(head->th_cli_hash);
-		cfs_hash_putref(head->th_cli_hash);
-	}
+	atomic_set(&head->th_lru_cnt, 0);
+	rhashtable_free_and_destroy(&head->th_cli_rhash,
+				    nrs_tbf_cli_exit, NULL);
 	list_for_each_entry_safe(rule, n, &head->th_list, tr_linkage) {
 		list_del_init(&rule->tr_linkage);
 		kref_put(&rule->tr_ref, nrs_tbf_rule_fini);
 	}
+
+	/* wait for all the class object to be freed */
+	rcu_barrier();
+
+	LASSERT(list_empty(&head->th_lru_list));
 	LASSERT(list_empty(&head->th_list));
 	LASSERT(head->th_binheap != NULL);
 	LASSERT(binheap_is_empty(head->th_binheap));
@@ -2769,18 +2032,18 @@ static void nrs_tbf_stop(struct ptlrpc_nrs_policy *policy)
 }
 
 /**
- * Performs a policy-specific ctl function on TBF policy instances; similar
- * to ioctl.
+ * nrs_tbf_ctl() - Performs a policy-specific ctl function on TBF policy
+ * instances; similar to ioctl.
+ * @policy: the policy instance
+ * @opc: the opcode
+ * @arg: used for passing parameters and information[in,out]
  *
- * \param[in]	  policy the policy instance
- * \param[in]	  opc	 the opcode
- * \param[in,out] arg	 used for passing parameters and information
+ * pre: assert_spin_locked(&policy->pol_nrs->->nrs_lock)
+ * post: assert_spin_locked(&policy->pol_nrs->->nrs_lock)
  *
- * \pre assert_spin_locked(&policy->pol_nrs->->nrs_lock)
- * \post assert_spin_locked(&policy->pol_nrs->->nrs_lock)
- *
- * \retval 0   operation carried out successfully
- * \retval -ve error
+ * Return
+ * * %0 on success (operation carried out successfully)
+ * * %negative on error
  */
 static int nrs_tbf_ctl(struct ptlrpc_nrs_policy *policy,
 		       enum ptlrpc_nrs_ctl opc,
@@ -2838,17 +2101,18 @@ static int nrs_tbf_ctl(struct ptlrpc_nrs_policy *policy,
 }
 
 /**
- * Is called for obtaining a TBF policy resource.
+ * nrs_tbf_res_get() - Is called for obtaining a TBF policy resource.
+ * @policy: The policy on which the request is being asked for
+ * @nrq: The request for which resources are being taken
+ * @parent: Parent resource, unused in this policy
+ * @resp: Resources references are placed in this array[out]
+ * @moving_req: Signifies limited caller context; unused in this policy
  *
- * \param[in]  policy	  The policy on which the request is being asked for
- * \param[in]  nrq	  The request for which resources are being taken
- * \param[in]  parent	  Parent resource, unused in this policy
- * \param[out] resp	  Resources references are placed in this array
- * \param[in]  moving_req Signifies limited caller context; unused in this
- *			  policy
+ * see nrs_resource_get_safe()
  *
- *
- * \see nrs_resource_get_safe()
+ * Return
+ * * %0 on success
+ * * %negative on error
  */
 static int nrs_tbf_res_get(struct ptlrpc_nrs_policy *policy,
 			   struct ptlrpc_nrs_request *nrq,
@@ -2868,7 +2132,7 @@ static int nrs_tbf_res_get(struct ptlrpc_nrs_policy *policy,
 
 	head = container_of(parent, struct nrs_tbf_head, th_res);
 	req = container_of(nrq, struct ptlrpc_request, rq_nrq);
-	cli = head->th_ops->o_cli_find(head, req);
+	cli = nrs_tbf_cli_find(head, req);
 	if (cli != NULL) {
 		spin_lock(&policy->pol_nrs->nrs_svcpt->scp_req_lock);
 		LASSERT(cli->tc_rule);
@@ -2877,13 +2141,9 @@ static int nrs_tbf_res_get(struct ptlrpc_nrs_policy *policy,
 		    cli->tc_rule->tr_flags & NTRS_STOPPING) {
 			struct nrs_tbf_rule *rule;
 
-			CDEBUG(D_RPCTRACE,
-			       "TBF class@%p rate %llu sequence %d, "
-			       "rule flags %d, head sequence %d\n",
-			       cli, cli->tc_rpc_rate,
-			       cli->tc_rule_sequence,
-			       cli->tc_rule->tr_flags,
-			       atomic_read(&head->th_rule_sequence));
+			TBF_CLI_DEBUG(cli, "TBF rule update, rule flags 0x%x, head sequence %d",
+				      cli->tc_rule->tr_flags,
+				      atomic_read(&head->th_rule_sequence));
 			rule = nrs_tbf_rule_match(head, cli);
 			if (rule != cli->tc_rule) {
 				nrs_tbf_cli_reset(head, rule, cli);
@@ -2900,15 +2160,14 @@ static int nrs_tbf_res_get(struct ptlrpc_nrs_policy *policy,
 		goto out;
 	}
 
-	OBD_CPT_ALLOC_GFP(cli, nrs_pol2cptab(policy), nrs_pol2cptid(policy),
-			  sizeof(*cli), moving_req ? GFP_ATOMIC : __GFP_IO);
+
+	cli = nrs_tbf_cli_alloc(head, req, moving_req ? GFP_ATOMIC : __GFP_IO);
 	if (cli == NULL)
 		return -ENOMEM;
 
-	nrs_tbf_cli_init(head, cli, req);
-	tmp = head->th_ops->o_cli_findadd(head, cli);
+	tmp = nrs_tbf_cli_findadd(head, cli);
 	if (tmp != cli) {
-		refcount_dec(&cli->tc_ref);
+		WARN_ON(!refcount_dec_if_one(&cli->tc_ref));
 		nrs_tbf_cli_fini(cli);
 		cli = tmp;
 		if (IS_ERR(cli))
@@ -2921,11 +2180,11 @@ out:
 }
 
 /**
- * Called when releasing references to the resource hierachy obtained for a
+ * nrs_tbf_res_put() - Called when releasing references to the resource hierachy
+ * obtained for a
  * request for scheduling using the TBF policy.
- *
- * \param[in] policy   the policy the resource belongs to
- * \param[in] res      the resource to be released
+ * @policy: the policy the resource belongs to
+ * @res: the resource to be released
  */
 static void nrs_tbf_res_put(struct ptlrpc_nrs_policy *policy,
 			    const struct ptlrpc_nrs_resource *res)
@@ -2942,24 +2201,24 @@ static void nrs_tbf_res_put(struct ptlrpc_nrs_policy *policy,
 	cli = container_of(res, struct nrs_tbf_client, tc_res);
 	head = container_of(res->res_parent, struct nrs_tbf_head, th_res);
 
-	head->th_ops->o_cli_put(head, cli);
+	nrs_tbf_cli_put(head, cli);
 }
 
 /**
- * Called when getting a request from the TBF policy for handling, or just
- * peeking; removes the request from the policy when it is to be handled.
+ * nrs_tbf_req_get() - Called when getting a request from the TBF policy for
+ * handling, or just peeking; removes the request from the policy when it is
+ * to be handled.
+ * @policy: The policy
+ * @peek: When set, signifies that we just want to examine the request,
+ * and not handle it, so the request is not removed from the policy.
+ * @force: Force the policy to return a request
  *
- * \param[in] policy The policy
- * \param[in] peek   When set, signifies that we just want to examine the
- *		     request, and not handle it, so the request is not removed
- *		     from the policy.
- * \param[in] force  Force the policy to return a request
+ * See: ptlrpc_nrs_req_get_nolock()
+ * See: nrs_request_get()
  *
- * \retval The request to be handled; this is the next request in the TBF
- *	   rule
+ * Return The request to be handled; this is the next request in the TBF
+ *	rule
  *
- * \see ptlrpc_nrs_req_get_nolock()
- * \see nrs_request_get()
  */
 static
 struct ptlrpc_nrs_request *nrs_tbf_req_get(struct ptlrpc_nrs_policy *policy,
@@ -2980,7 +2239,7 @@ struct ptlrpc_nrs_request *nrs_tbf_req_get(struct ptlrpc_nrs_policy *policy,
 		return NULL;
 
 	cli = container_of(node, struct nrs_tbf_client, tc_node);
-	LASSERT(cli->tc_in_heap);
+	LASSERT(test_bit(NRS_TBF_CLI_HEAP_BIT, &cli->tc_state));
 	if (unlikely(peek)) {
 		nrq = list_first_entry(&cli->tc_list,
 				       struct ptlrpc_nrs_request,
@@ -3027,19 +2286,14 @@ struct ptlrpc_nrs_request *nrs_tbf_req_get(struct ptlrpc_nrs_policy *policy,
 			if (list_empty(&cli->tc_list)) {
 				binheap_remove(head->th_binheap,
 					       &cli->tc_node);
-				cli->tc_in_heap = false;
+				clear_bit(NRS_TBF_CLI_HEAP_BIT, &cli->tc_state);
 			} else {
 				if (!(rule->tr_flags & NTRS_REALTIME))
 					cli->tc_deadline = now + cli->tc_nsecs;
 				binheap_relocate(head->th_binheap,
 						 &cli->tc_node);
 			}
-			CDEBUG(D_RPCTRACE,
-			       "TBF dequeues: class@%p rate %llu gen %llu token %llu, rule@%p rate %llu gen %llu\n",
-			       cli, cli->tc_rpc_rate,
-			       cli->tc_rule_generation, cli->tc_ntoken,
-			       cli->tc_rule, cli->tc_rule->tr_rpc_rate,
-			       cli->tc_rule->tr_generation);
+			TBF_CLI_DEBUG(cli, "TBF dequeues");
 		} else {
 			ktime_t time;
 
@@ -3064,13 +2318,12 @@ struct ptlrpc_nrs_request *nrs_tbf_req_get(struct ptlrpc_nrs_policy *policy,
 }
 
 /**
- * Adds request \a nrq to \a policy's list of queued requests
+ * nrs_tbf_req_add() - Adds request @nrq to @policy's list of queued requests
+ * @policy: The policy
+ * @nrq: The request to add
  *
- * \param[in] policy The policy
- * \param[in] nrq    The request to add
- *
- * \retval 0 success; nrs_request_enqueue() assumes this function will always
- *		      succeed
+ * Return 0 on success; nrs_request_enqueue() assumes this function will always
+ * succeed
  */
 static int nrs_tbf_req_add(struct ptlrpc_nrs_policy *policy,
 			   struct ptlrpc_nrs_request *nrq)
@@ -3086,11 +2339,11 @@ static int nrs_tbf_req_add(struct ptlrpc_nrs_policy *policy,
 	head = container_of(nrs_request_resource(nrq)->res_parent,
 			    struct nrs_tbf_head, th_res);
 	if (list_empty(&cli->tc_list)) {
-		LASSERT(!cli->tc_in_heap);
+		LASSERT(!test_bit(NRS_TBF_CLI_HEAP_BIT, &cli->tc_state));
 		cli->tc_deadline = cli->tc_check_time + cli->tc_nsecs;
 		rc = binheap_insert(head->th_binheap, &cli->tc_node);
 		if (rc == 0) {
-			cli->tc_in_heap = true;
+			set_bit(NRS_TBF_CLI_HEAP_BIT, &cli->tc_state);
 			nrq->nr_u.tbf.tr_sequence = head->th_sequence++;
 			list_add_tail(&nrq->nr_u.tbf.tr_list,
 					  &cli->tc_list);
@@ -3109,28 +2362,23 @@ static int nrs_tbf_req_add(struct ptlrpc_nrs_policy *policy,
 			}
 		}
 	} else {
-		LASSERT(cli->tc_in_heap);
+		LASSERT(test_bit(NRS_TBF_CLI_HEAP_BIT, &cli->tc_state));
 		nrq->nr_u.tbf.tr_sequence = head->th_sequence++;
 		list_add_tail(&nrq->nr_u.tbf.tr_list,
 				  &cli->tc_list);
 	}
 
 	if (rc == 0)
-		CDEBUG(D_RPCTRACE,
-		       "TBF enqueues: class@%p rate %llu gen %llu token %llu, rule@%p rate %llu gen %llu\n",
-		       cli, cli->tc_rpc_rate,
-		       cli->tc_rule_generation, cli->tc_ntoken,
-		       cli->tc_rule, cli->tc_rule->tr_rpc_rate,
-		       cli->tc_rule->tr_generation);
+		TBF_CLI_DEBUG(cli, "TBF enqueues");
 
 	return rc;
 }
 
 /**
- * Removes request \a nrq from \a policy's list of queued requests.
- *
- * \param[in] policy The policy
- * \param[in] nrq    The request to remove
+ * nrs_tbf_req_del() - Removes request @nrq from @policy's list of queued
+ * requests.
+ * @policy: The policy
+ * @nrq: The request to remove
  */
 static void nrs_tbf_req_del(struct ptlrpc_nrs_policy *policy,
 			     struct ptlrpc_nrs_request *nrq)
@@ -3150,7 +2398,7 @@ static void nrs_tbf_req_del(struct ptlrpc_nrs_policy *policy,
 	if (list_empty(&cli->tc_list)) {
 		binheap_remove(head->th_binheap,
 			       &cli->tc_node);
-		cli->tc_in_heap = false;
+		clear_bit(NRS_TBF_CLI_HEAP_BIT, &cli->tc_state);
 	} else {
 		binheap_relocate(head->th_binheap,
 				 &cli->tc_node);
@@ -3158,14 +2406,13 @@ static void nrs_tbf_req_del(struct ptlrpc_nrs_policy *policy,
 }
 
 /**
- * Prints a debug statement right before the request \a nrq stops being
- * handled.
+ * nrs_tbf_req_stop() - Prints a debug statement right before the request
+ * @nrq stops being handled.
+ * @policy: The policy handling the request
+ * @nrq: The request being handled
  *
- * \param[in] policy The policy handling the request
- * \param[in] nrq    The request being handled
- *
- * \see ptlrpc_server_finish_request()
- * \see ptlrpc_nrs_req_stop_nolock()
+ * ptlrpc_server_finish_request()
+ * ptlrpc_nrs_req_stop_nolock()
  */
 static void nrs_tbf_req_stop(struct ptlrpc_nrs_policy *policy,
 			      struct ptlrpc_nrs_request *nrq)
@@ -3180,11 +2427,11 @@ static void nrs_tbf_req_stop(struct ptlrpc_nrs_policy *policy,
 	       nrq->nr_u.tbf.tr_sequence);
 }
 
-/**
+/*
  * debugfs interface
  */
 
-/**
+/*
  * The maximum RPC rate.
  */
 #define LPROCFS_NRS_RATE_MAX		1000000ULL	/* 1rpc/us */
@@ -3250,55 +2497,38 @@ static int nrs_tbf_id_parse(struct nrs_tbf_cmd *cmd, char *token)
 	int rc;
 	ENTRY;
 
-	switch (cmd->u.tc_start.ts_valid_type) {
-	case NRS_TBF_FLAG_JOBID:
-		rc = nrs_tbf_jobid_parse(cmd, token);
-		break;
-	case NRS_TBF_FLAG_NID:
-		rc = nrs_tbf_nid_parse(cmd, token);
-		break;
-	case NRS_TBF_FLAG_OPCODE:
-		rc = nrs_tbf_opcode_parse(cmd, token);
-		break;
-	case NRS_TBF_FLAG_GENERIC:
-		rc = nrs_tbf_generic_parse(cmd, token);
-		break;
-	case NRS_TBF_FLAG_UID:
-	case NRS_TBF_FLAG_GID:
-		rc = nrs_tbf_ug_id_parse(cmd, token);
-		break;
-	default:
+	if (!nrs_tbf_flags_valid(cmd->u.tc_start.ts_valid_type))
 		RETURN(-EINVAL);
-	}
+
+	OBD_STRNDUP(cmd->u.tc_start.ts_conds_str, token, strlen(token));
+	if (cmd->u.tc_start.ts_conds_str == NULL)
+		return -ENOMEM;
+
+	/* Parse hybird NID and JOBID conditions */
+	rc = nrs_tbf_conds_parse(cmd->u.tc_start.ts_valid_type,
+				 cmd->u.tc_start.ts_conds_str,
+				 &cmd->u.tc_start.ts_conds);
+
+	if (rc)
+		OBD_FREE_STR(cmd->u.tc_start.ts_conds_str);
 
 	RETURN(rc);
 }
 
 static void nrs_tbf_cmd_fini(struct nrs_tbf_cmd *cmd)
 {
-	if (cmd->tc_cmd == NRS_CTL_TBF_START_RULE) {
-		switch (cmd->u.tc_start.ts_valid_type) {
-		case NRS_TBF_FLAG_JOBID:
-			nrs_tbf_jobid_cmd_fini(cmd);
-			break;
-		case NRS_TBF_FLAG_NID:
-			nrs_tbf_nid_cmd_fini(cmd);
-			break;
-		case NRS_TBF_FLAG_OPCODE:
-			nrs_tbf_opcode_cmd_fini(cmd);
-			break;
-		case NRS_TBF_FLAG_GENERIC:
-			nrs_tbf_generic_cmd_fini(cmd);
-			break;
-		case NRS_TBF_FLAG_UID:
-		case NRS_TBF_FLAG_GID:
-			nrs_tbf_id_cmd_fini(cmd);
-			break;
-		default:
-			CWARN("unknown NRS_TBF_FLAGS:0x%x\n",
-			      cmd->u.tc_start.ts_valid_type);
-		}
+	if (cmd->tc_cmd != NRS_CTL_TBF_START_RULE)
+		return;
+
+	if (!nrs_tbf_flags_valid(cmd->u.tc_start.ts_valid_type)) {
+		CWARN("unknown NRS_TBF_FLAGS:0x%x\n",
+		      cmd->u.tc_start.ts_valid_type);
+		return;
 	}
+
+	if (!list_empty(&cmd->u.tc_start.ts_conds))
+		nrs_tbf_conds_free(&cmd->u.tc_start.ts_conds);
+	OBD_FREE_STR(cmd->u.tc_start.ts_conds_str);
 }
 
 static int check_rule_name(const char *name)
@@ -3484,13 +2714,12 @@ out:
 }
 
 /**
- * Get the TBF policy type (nid, jobid, etc) preset by
+ * nrs_tbf_type_flag() - Get the TBF policy type (nid, jobid, etc) preset by
  * proc entry 'nrs_policies' for command buffer parsing.
+ * @svc: the PTLRPC service
+ * @queue: the NRS queue type
  *
- * \param[in] svc the PTLRPC service
- * \param[in] queue the NRS queue type
- *
- * \retval the preset TBF policy type flag
+ * Return the preset TBF policy type flag
  */
 static __u32
 nrs_tbf_type_flag(struct ptlrpc_service *svc, enum ptlrpc_nrs_queue_type queue)
@@ -3583,12 +2812,13 @@ out:
 LDEBUGFS_SEQ_FOPS(ptlrpc_lprocfs_nrs_tbf_rule);
 
 /**
- * Initializes a TBF policy's lprocfs interface for service \a svc
+ * nrs_tbf_lprocfs_init() - Initializes a TBF policy's lprocfs interface for
+ * service @svc
+ * @svc: the service (Portal RPC)
  *
- * \param[in] svc the service
- *
- * \retval 0	success
- * \retval != 0	error
+ * Return
+ * * %0 on success
+ * * %!=0 on error
  */
 static int nrs_tbf_lprocfs_init(struct ptlrpc_service *svc)
 {
@@ -3607,7 +2837,7 @@ static int nrs_tbf_lprocfs_init(struct ptlrpc_service *svc)
 	return 0;
 }
 
-/**
+/*
  * TBF policy operations
  */
 static const struct ptlrpc_nrs_pol_ops nrs_tbf_ops = {
@@ -3623,7 +2853,7 @@ static const struct ptlrpc_nrs_pol_ops nrs_tbf_ops = {
 	.op_lprocfs_init	= nrs_tbf_lprocfs_init,
 };
 
-/**
+/*
  * TBF policy configuration
  */
 struct ptlrpc_nrs_pol_conf nrs_conf_tbf = {
@@ -3631,7 +2861,3 @@ struct ptlrpc_nrs_pol_conf nrs_conf_tbf = {
 	.nc_ops			= &nrs_tbf_ops,
 	.nc_compat		= nrs_policy_compat_all,
 };
-
-/** @} tbf */
-
-/** @} nrs */

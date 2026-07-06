@@ -1,25 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2006, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
@@ -45,7 +24,7 @@
 #include <libcfs/util/list.h>
 #include <linux/lnet/lnet-types.h>
 #include <linux/lnet/nidstr.h>
-#include <uapi/linux/lustre/lgss.h>
+#include <linux/lustre/lgss.h>
 
 #include <krb5.h>
 
@@ -132,6 +111,29 @@ static inline int gss_buffer_write_file(FILE *f, void *value, size_t length)
 
 out:
 	return rc;
+}
+
+static inline int hex_to_bin(const char *hex, size_t hex_len,
+			     char *out, size_t out_size)
+{
+	size_t byte_len = hex_len / 2;
+	char tmp[3] = { 0 };
+	int i;
+
+	if (!hex || !out)
+		return -EINVAL;
+	if (hex_len % 2 != 0)
+		return -EINVAL;
+	if (byte_len > out_size)
+		return -EINVAL;
+
+	for (i = 0; i < byte_len; i++) {
+		tmp[0] = hex[2 * i];
+		tmp[1] = hex[2 * i + 1];
+		out[i] = strtoul(tmp, NULL, 16);
+	}
+
+	return (int)byte_len;
 }
 
 #endif /* __LSUPPORT_H__ */

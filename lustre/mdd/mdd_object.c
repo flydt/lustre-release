@@ -75,13 +75,11 @@ static u32 mdd_open_flags_to_mode(enum mds_open_flags open_flags)
 
 /**
  * mdd_obj_user_alloc() - Allocate/init a user and its sub-structures.
- *
- * @flags: open flags passed from client
+ * @o_flags: open flags passed from client
  * @uid: client uid
  * @gid: client gid
  *
- * Return:
- * * populate mdd_object_user with valid struct on success
+ * Return populated mdd_object_user with valid struct on success
  */
 static struct mdd_object_user *mdd_obj_user_alloc(enum mds_open_flags o_flags,
 						  uid_t uid, gid_t gid)
@@ -104,9 +102,8 @@ static struct mdd_object_user *mdd_obj_user_alloc(enum mds_open_flags o_flags,
 }
 
 /**
- * Free a user and its sub-structures.
- *
- * \param mou [IN]  user to be freed.
+ * mdd_obj_user_free() - Free a user and its sub-structures.
+ * @mou: user to be freed.
  */
 static void mdd_obj_user_free(struct mdd_object_user *mou)
 {
@@ -115,7 +112,6 @@ static void mdd_obj_user_free(struct mdd_object_user *mou)
 
 /**
  * mdd_obj_user_find() - Find if UID/GID already has this file open
- *
  * @mdd_obj: Metadata server side object
  * @uid: Client UID
  * @gid: Client GID
@@ -146,13 +142,16 @@ struct mdd_object_user *mdd_obj_user_find(struct mdd_object *mdd_obj,
 }
 
 /**
- * Add a user to the list of openers for this file
+ * mdd_obj_user_add() - Add a user to the list of openers for this file
+ * @mdd_obj: mdd_obj
+ * @mou: user
+ * @denied: Flag to indicate 'access denied' if true
  *
- * Caller should have write-locked \param mdd_obj.
- * \param mdd_obj [IN] mdd_obj
- * \param mou [IN] user
- * \retval 0 success
- * \retval -ve failure
+ * Caller should have write-locked @mdd_obj.
+ *
+ * Return:
+ * * %0 success
+ * * %negative failure
  */
 static int mdd_obj_user_add(struct mdd_object *mdd_obj,
 			    struct mdd_object_user *mou,
@@ -184,12 +183,13 @@ static int mdd_obj_user_add(struct mdd_object *mdd_obj,
 }
 
 /**
- * Remove UID from the list
+ * mdd_obj_user_remove() - Remove UID from the list
+ * @mdd_obj: mdd_obj
+ * @mou: user
  *
- * Caller should have write-locked \param mdd_obj.
- * \param mdd_obj [IN] mdd_obj
- * \param uid [IN] user
- * \retval -ve failure
+ * Caller should have write-locked @mdd_obj.
+ *
+ * Returns %0 on success or %negative failure
  */
 static int mdd_obj_user_remove(struct mdd_object *mdd_obj,
 			       struct mdd_object_user *mou)
@@ -646,10 +646,16 @@ static bool is_project_state_change(const struct lu_attr *oattr,
 }
 
 /**
- * This gives the same functionality as the code between
- * sys_chmod and inode_setattr
- * chown_common and inode_setattr
- * utimes and inode_setattr
+ * mdd_fix_attr() - adjust file attributes
+ * @env: execution environment
+ * @obj: metadata object which attributes are adjusted/fixed
+ * @oattr: Original, current object attributes.
+ * @la: New attributes to be evaluated and potentially modified depending on
+ * @oattr content and other rules. [in, out]
+ * @ma: sturct md_attr to be evaluated for that object.
+ *
+ * This gives the same functionality as the code between sys_chmod and
+ * inode_setattr chown_common and inode_setattr utimes and inode_setattr
  * This API is ported from mds_fix_attr but remove some unnecesssary stuff.
  *
  * @param[in]     oattr  Original, current object attributes.
@@ -691,7 +697,7 @@ static int mdd_fix_attr(const struct lu_env *env, struct mdd_object *obj,
 		if (!uc->uc_rbac_file_perms ||
 		    (!cap_raised(uc->uc_cap, CAP_SYS_RESOURCE) &&
 		     !lustre_in_group_p(uc, ma->ma_enable_chprojid_gid) &&
-		     !(ma->ma_enable_chprojid_gid == -1 &&
+		     !(ma->ma_enable_chprojid_gid == MDT_INVALID_GID &&
 		       mdd_permission_internal(env, obj, oattr, MAY_WRITE))))
 			RETURN(-EPERM);
 	}
@@ -724,10 +730,6 @@ static int mdd_fix_attr(const struct lu_env *env, struct mdd_object *obj,
 		if (la->la_valid & LA_MTIME && la->la_mtime <= oattr->la_mtime)
 			la->la_valid &= ~LA_MTIME;
 		RETURN(0);
-	} else if ((la->la_valid & LA_ATIME) && (la->la_valid & LA_CTIME)) {
-		/* save the time when atime was changed, in case this is
-		 * set-in-past, to not lose it later on close. */
-		obj->mod_atime_set = la->la_ctime;
 	}
 
 	/* Check if flags change. */
@@ -908,9 +910,24 @@ static int mdd_fix_attr(const struct lu_env *env, struct mdd_object *obj,
 		/**
 		 * The pure setattr, it has the priority over what is
 		 * already set, do not drop it if ctime is equal.
+		 *
+		 * Inter-client clock skew can cause the client's
+		 * ctime to be less than the existing ctime (set by
+		 * another client whose clock is ahead). Rather than
+		 * dropping all time updates, clamp the ctime to at
+		 * least the existing value so that explicit
+		 * time-setting operations (e.g. utimensat) are not
+		 * silently rejected.
 		 */
 		if (la->la_ctime < oattr->la_ctime)
-			la->la_valid &= ~(LA_ATIME | LA_MTIME | LA_CTIME);
+			la->la_ctime = oattr->la_ctime;
+	}
+
+	if ((la->la_valid & LA_ATIME) && (la->la_valid & LA_CTIME)) {
+		/* save the time when atime was changed, in case this is
+		 * set-in-past, to not lose it later on close.
+		 */
+		obj->mod_atime_set = la->la_ctime;
 	}
 
 	RETURN(0);
@@ -1107,17 +1124,30 @@ stop:
 	RETURN(rc);
 }
 
-/**
+/*
  * Save LMA extended attributes with data from \a ma.
  *
  * HSM and Size-On-MDS data will be extracted from \ma if they are valid, if
  * not, LMA EA will be first read from disk, modified and write back.
  *
  */
-/* Precedence for choosing record type when multiple
- * attributes change: setattr > mtime > ctime > atime
- * (ctime changes when mtime does, plus chmod/chown.
- * atime and ctime are independent.)
+
+/**
+ * mdd_attr_set_changelog() - add attribute changes in the Lustre changelog.
+ * @env: execution environment
+ * @obj: metadata object which is getting modified
+ * @handle: transaction handle
+ * @pfid: Parent FID
+ * @valid: valid attributes
+ *
+ * Precedence for choosing record type when multiple attributes
+ * change: setattr > mtime > ctime > atime
+ * (ctime changes when mtime does, plus chmod/chown. atime and ctime are
+ * independent)
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int mdd_attr_set_changelog(const struct lu_env *env,
 				  struct md_object *obj, struct thandle *handle,
@@ -1151,6 +1181,7 @@ static int mdd_declare_attr_set(const struct lu_env *env,
 				const struct lu_attr *attr,
 				struct thandle *handle)
 {
+	unsigned long mask = 0;
 	int rc;
 
 	rc = mdo_declare_attr_set(env, obj, attr, handle);
@@ -1180,8 +1211,18 @@ static int mdd_declare_attr_set(const struct lu_env *env,
 	}
 #endif
 
-	rc = mdd_declare_changelog_store(env, mdd, CL_SETXATTR, NULL, NULL,
-					 handle);
+	/*
+	 * any enabled operation can cause a new record to the changelog,
+	 * see mdd_attr_set_changelog() for the details above.
+	 */
+	if (mdd_changelog_enabled(env, mdd, mask = CL_TRUNC) ||
+	    mdd_changelog_enabled(env, mdd, mask = CL_SETATTR) ||
+	    mdd_changelog_enabled(env, mdd, mask = CL_MTIME) ||
+	    mdd_changelog_enabled(env, mdd, mask = CL_CTIME) ||
+	    mdd_changelog_enabled(env, mdd, mask = CL_ATIME))
+		rc = mdd_declare_changelog_store(env, mdd, mask, NULL,
+						 NULL, handle);
+
 	return rc;
 }
 
@@ -1315,7 +1356,7 @@ int mdd_attr_set(const struct lu_env *env, struct md_object *obj,
 		if (qi.lqi_space > 0) {
 			qi.lqi_id.qid_gid = la->la_gid;
 			qi.lqi_type = GRPQUOTA;
-			qi.lqi_space = toqb(qi.lqi_space);
+			qi.lqi_space = stoqb(qi.lqi_space);
 			qi.lqi_is_blk = true;
 			rc = dt_reserve_or_free_quota(env, mdd->mdd_bottom,
 						      &qi);
@@ -1459,12 +1500,12 @@ static int mdd_xattr_sanity_check(const struct lu_env *env,
 	RETURN(0);
 }
 
-/**
- * Check if a string begins with a given prefix.
+/*
+ * has_prefix() - Check if a string begins with a given prefix.
+ * @str: String to check
+ * @prefix:  Substring to check at the beginning of @str
  *
- * \param str	  String to check
- * \param prefix  Substring to check at the beginning of \a str
- * \return true/false whether the condition is verified.
+ * Return %true/%false whether the condition is verified.
  */
 static inline bool has_prefix(const char *str, const char *prefix)
 {
@@ -1472,11 +1513,13 @@ static inline bool has_prefix(const char *str, const char *prefix)
 }
 
 /**
- * Indicate the kind of changelog to store (if any) for a xattr set/del.
+ * mdd_xattr_changelog_type() - Indicate the kind of changelog to store (if any)
+ * for a xattr set/del.
+ * @env: execution environment
+ * @mdd: pointer to metadata object
+ * @xattr_name: Full extended attribute name.
  *
- * \param[in]  xattr_name  Full extended attribute name.
- *
- * \return type of changelog to use, or CL_NONE if no changelog is to be emitted
+ * Return type of changelog to use, or CL_NONE if no changelog is to be emitted
  */
 static enum changelog_rec_type
 mdd_xattr_changelog_type(const struct lu_env *env, struct mdd_device *mdd,
@@ -1529,12 +1572,13 @@ static int mdd_declare_xattr_set(const struct lu_env *env,
 
 /*
  * Compare current and future data of HSM EA and add a changelog if needed.
+ * @buf: Future HSM EA content.
  *
- * Caller should have write-locked \param obj.
+ * Caller should have write-locked @obj.
  *
- * \param buf - Future HSM EA content.
- * \retval 0 if no changelog is needed or changelog was added properly.
- * \retval -ve errno if there was a problem
+ * Return:
+ * * %0 if no changelog is needed or changelog was added properly.
+ * * %negatibe errno if there was a problem
  */
 static int mdd_hsm_update_locked(const struct lu_env *env,
 				 struct md_object *obj,
@@ -1765,17 +1809,16 @@ stop:
 }
 
 /**
- * Extract the mirror with specified mirror id, and store the splitted
- * mirror layout to @buf.
+ * mdd_split_ea() - Extract the mirror with specified mirror id, and store the
+ * splitted mirror layout to @buf.
+ * @comp_v1: mirrored layout
+ * @mirror_id: the mirror with mirror_id to be extracted
+ * @buf: store the layout excluding the extracted mirror, caller free the buffer
+ * we allocated in this function [out]
+ * @buf_vic: store the extracted layout, caller free the buffer we allocated in
+ * this function [out]
  *
- * \param[in] comp_v1	mirrored layout
- * \param[in] mirror_id	the mirror with mirror_id to be extracted
- * \param[out] buf	store the layout excluding the extracted mirror,
- *			caller free the buffer we allocated in this function
- * \param[out] buf_vic	store the extracted layout, caller free the buffer
- *			we allocated in this function
- *
- * \retval	0 on success; < 0 if error happens
+ * Return 0 on success or %negative on error
  */
 static int mdd_split_ea(struct lov_comp_md_v1 *comp_v1, __u16 mirror_id,
 			struct lu_buf *buf, struct lu_buf *buf_vic)
@@ -2082,7 +2125,7 @@ static int mdd_layout_merge_allowed(const struct lu_env *env,
 	RETURN(rc);
 }
 
-/**
+/*
  * The caller should guarantee to update the object ctime
  * after xattr_set if needed.
  */
@@ -2217,7 +2260,7 @@ static int mdd_declare_xattr_del(const struct lu_env *env,
 	return mdd_declare_changelog_store(env, mdd, type, NULL, NULL, handle);
 }
 
-/**
+/*
  * The caller should guarantee to update the object ctime
  * after xattr_set if needed.
  */
@@ -2393,7 +2436,7 @@ static int mdd_layout_swap_allowed(const struct lu_env *env,
 /* XXX To set the proper lmm_oi & lmm_layout_gen when swap layouts, we have to
  *     look into the layout in MDD layer.
  */
-static int mdd_lmm_oi(struct lov_mds_md *lmm, struct ost_id *oi, bool get)
+int mdd_lmm_oi(struct lov_mds_md *lmm, struct ost_id *oi, bool set)
 {
 	struct lov_comp_md_v1	*comp_v1;
 	struct lov_mds_md	*v1;
@@ -2407,7 +2450,17 @@ static int mdd_lmm_oi(struct lov_mds_md *lmm, struct ost_id *oi, bool get)
 		if (ent_count == 0)
 			return -EINVAL;
 
-		if (get) {
+		if (set) {
+			for (i = 0; i < le32_to_cpu(ent_count); i++) {
+				off = le32_to_cpu(comp_v1->lcm_entries[i].
+						lcme_offset);
+				v1 = (struct lov_mds_md *)((char *)comp_v1 +
+						off);
+				if (le32_to_cpu(v1->lmm_magic) !=
+							LOV_MAGIC_FOREIGN)
+					v1->lmm_oi = *oi;
+			}
+		} else {
 			int i = 0;
 
 			off = le32_to_cpu(comp_v1->lcm_entries[i].lcme_offset);
@@ -2429,37 +2482,17 @@ static int mdd_lmm_oi(struct lov_mds_md *lmm, struct ost_id *oi, bool get)
 
 				*oi = v1->lmm_oi;
 			}
-		} else {
-			for (i = 0; i < le32_to_cpu(ent_count); i++) {
-				off = le32_to_cpu(comp_v1->lcm_entries[i].
-						lcme_offset);
-				v1 = (struct lov_mds_md *)((char *)comp_v1 +
-						off);
-				if (le32_to_cpu(v1->lmm_magic) !=
-							LOV_MAGIC_FOREIGN)
-					v1->lmm_oi = *oi;
-			}
 		}
 	} else if (le32_to_cpu(lmm->lmm_magic) == LOV_MAGIC_V1 ||
 		   le32_to_cpu(lmm->lmm_magic) == LOV_MAGIC_V3) {
-		if (get)
-			*oi = lmm->lmm_oi;
-		else
+		if (set)
 			lmm->lmm_oi = *oi;
+		else
+			*oi = lmm->lmm_oi;
 	} else {
 		return -EINVAL;
 	}
 	return 0;
-}
-
-static inline int mdd_get_lmm_oi(struct lov_mds_md *lmm, struct ost_id *oi)
-{
-	return mdd_lmm_oi(lmm, oi, true);
-}
-
-static inline int mdd_set_lmm_oi(struct lov_mds_md *lmm, struct ost_id *oi)
-{
-	return mdd_lmm_oi(lmm, oi, false);
 }
 
 static int mdd_lmm_gen(struct lov_mds_md *lmm, __u32 *gen, bool get)
@@ -2608,9 +2641,15 @@ static bool swap_hsm_set_dirty(struct lu_buf *out_buf, struct lu_buf *src_buf)
  *        0 do not update HSM xattr
  *   -EPERM data version mismatch, no swap
  */
-static int swap_hsm_update_version(struct lu_buf *out_buf, __u64 out_dv,
-				   struct lu_buf *src_buf, __u64 src_dv)
+static int swap_hsm_update_version(struct sl_hsm_object_info *out,
+				   struct sl_hsm_object_info *src,
+				   __u64 flags)
 {
+
+	struct lu_buf *out_buf = out->hsm_buf;
+	struct lu_buf *src_buf = src->hsm_buf;
+	__u64 out_dv = out->dv;
+	__u64 src_dv = src->dv;
 	struct md_hsm src_hsm;
 
 	/* Put lb_len as a second argument since we know that src_buf is a valid
@@ -2623,7 +2662,7 @@ static int swap_hsm_update_version(struct lu_buf *out_buf, __u64 out_dv,
 		return 0;
 
 	/* migration with old client -> set the dirty flag */
-	if (!src_dv || !out_dv) {
+	if (!(flags & SWAP_LAYOUTS_WITH_DV12)) {
 		src_hsm.mh_flags |= HS_DIRTY;
 		goto hsm2buf;
 	}
@@ -2665,7 +2704,8 @@ static int swap_layouts_prepare_hsm_attr(const struct lu_env *env,
 					 struct mdd_device *mdd,
 					 struct thandle *handle,
 					 struct sl_hsm_object_info *fst,
-					 struct sl_hsm_object_info *snd)
+					 struct sl_hsm_object_info *snd,
+					 __u64 flags)
 {
 	unsigned long o_fst_fl;
 	unsigned long o_snd_fl;
@@ -2698,8 +2738,7 @@ static int swap_layouts_prepare_hsm_attr(const struct lu_env *env,
 
 	if ((o_snd_fl & VOLATILE_OBJ) && rc2) {
 		/* migration of fst */
-		rc = swap_hsm_update_version(snd->hsm_buf, snd->dv,
-					     fst->hsm_buf, fst->dv);
+		rc = swap_hsm_update_version(snd, fst, flags);
 		if (rc == 0)
 			return 0;
 		if (rc < 0)
@@ -2945,8 +2984,8 @@ retry:
 	snd_info.o = snd_o;
 	snd_info.hsm_buf = snd_hsm_buf;
 	snd_info.dv = dv2;
-	rc = swap_layouts_prepare_hsm_attr(env, mdd, handle, &fst_info,
-					   &snd_info);
+	rc = swap_layouts_prepare_hsm_attr(env, mdd, handle,
+					   &fst_info, &snd_info, flags);
 	if (rc)
 		GOTO(stop, rc);
 
@@ -3154,7 +3193,7 @@ mdd_layout_instantiate_component(const struct lu_env *env,
 	RETURN(rc);
 }
 
-/**
+/*
  * Change the FLR layout from RDONLY to WRITE_PENDING.
  *
  * It picks the primary mirror, and bumps the layout version, and set
@@ -3248,7 +3287,7 @@ out:
 	RETURN(rc);
 }
 
-/**
+/*
  * Handle mirrored file state transition when it's in WRITE_PENDING.
  *
  * Only MD_LAYOUT_RESYNC, which represents start of resync, is allowed when
@@ -3335,7 +3374,7 @@ out:
 	RETURN(rc);
 }
 
-/**
+/*
  * Handle the requests when a FLR file's state is in SYNC_PENDING.
  *
  * Only concurrent write and sync complete requests are possible when the
@@ -3437,7 +3476,7 @@ mdd_layout_check(const struct lu_env *env, struct md_object *o,
 	return mdo_layout_check(env, md2mdd_obj(o), mlc);
 }
 
-/**
+/*
  *  Update the layout for PCC-RO.
  */
 static int
@@ -3484,10 +3523,17 @@ out:
 }
 
 /**
- * Layout change callback for object.
+ * mdd_layout_change() - Layout change callback for object.
+ * @env: execution environment
+ * @o: pointer to metadata object
+ * @mlc: pointer to md_layout_change struct (kind of layout change)
  *
  * This is used by FLR and PCC-RO as well as dir migration
  * and restriping.
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int
 mdd_layout_change(const struct lu_env *env, struct md_object *o,
@@ -4160,21 +4206,21 @@ int mdd_readpage(const struct lu_env *env, struct md_object *obj,
 
 		if (rdpg->rp_count <= 0)
 			GOTO(out_unlock, rc = -EFAULT);
-		LASSERT(rdpg->rp_pages != NULL);
+		LASSERT(rdpg->rp_folios != NULL);
 
 		dp = (struct lu_dirpage *)rdpg_page_get(rdpg, 0);
 		memset(dp, 0, sizeof(struct lu_dirpage));
 		dp->ldp_hash_start = cpu_to_le64(rdpg->rp_hash);
 		dp->ldp_hash_end   = cpu_to_le64(MDS_DIR_END_OFF);
 		dp->ldp_flags = cpu_to_le32(LDF_EMPTY);
-		rdpg_page_put(rdpg, 0);
+		rdpg_page_put(rdpg, 0, dp);
 		GOTO(out_unlock, rc = LU_PAGE_SIZE);
 	}
 
 	rc = dt_index_walk(env, mdd_object_child(mdd_obj), rdpg,
 			   mdd_dir_page_build, NULL);
 	if (rc >= 0) {
-		struct lu_dirpage	*dp;
+		struct lu_dirpage *dp;
 
 		dp = (struct lu_dirpage *)rdpg_page_get(rdpg, 0);
 		dp->ldp_hash_start = cpu_to_le64(rdpg->rp_hash);
@@ -4187,7 +4233,7 @@ int mdd_readpage(const struct lu_env *env, struct md_object *obj,
 			dp->ldp_flags = cpu_to_le32(LDF_EMPTY);
 			rc = min_t(unsigned int, LU_PAGE_SIZE, rdpg->rp_count);
 		}
-		rdpg_page_put(rdpg, 0);
+		rdpg_page_put(rdpg, 0, dp);
 	}
 
 	GOTO(out_unlock, rc);

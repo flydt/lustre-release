@@ -144,10 +144,8 @@ kiblnd_post_rx(struct kib_rx *rx, int credit)
 {
 	struct kib_conn *conn = rx->rx_conn;
 	struct kib_net *net = conn->ibc_peer->ibp_ni->ni_data;
-	struct ib_recv_wr *bad_wrq = NULL;
-#ifdef HAVE_OFED_IB_GET_DMA_MR
-	struct ib_mr *mr = conn->ibc_hdev->ibh_mrs;
-#endif
+	struct ib_recv_wr wrq = {0};
+	struct ib_sge rx_sge = {0};
 	int rc;
 
 	LASSERT(net != NULL);
@@ -155,20 +153,14 @@ kiblnd_post_rx(struct kib_rx *rx, int credit)
 	LASSERT(credit == IBLND_POSTRX_NO_CREDIT ||
 		 credit == IBLND_POSTRX_PEER_CREDIT ||
 		 credit == IBLND_POSTRX_RSRVD_CREDIT);
-#ifdef HAVE_OFED_IB_GET_DMA_MR
-	LASSERT(mr != NULL);
+	rx_sge.lkey   = conn->ibc_hdev->ibh_pd->local_dma_lkey;
+	rx_sge.addr   = rx->rx_msgaddr;
+	rx_sge.length = IBLND_MSG_SIZE;
 
-	rx->rx_sge.lkey   = mr->lkey;
-#else
-	rx->rx_sge.lkey   = conn->ibc_hdev->ibh_pd->local_dma_lkey;
-#endif
-	rx->rx_sge.addr   = rx->rx_msgaddr;
-	rx->rx_sge.length = IBLND_MSG_SIZE;
-
-	rx->rx_wrq.next = NULL;
-	rx->rx_wrq.sg_list = &rx->rx_sge;
-	rx->rx_wrq.num_sge = 1;
-	rx->rx_wrq.wr_id = kiblnd_ptr2wreqid(rx, IBLND_WID_RX);
+	wrq.next = NULL;
+	wrq.sg_list = &rx_sge;
+	wrq.num_sge = 1;
+	wrq.wr_id = kiblnd_ptr2wreqid(rx, IBLND_WID_RX);
 
 	LASSERT(conn->ibc_state >= IBLND_CONN_INIT);
 	LASSERT(rx->rx_nob >= 0);              /* not posted */
@@ -184,15 +176,10 @@ kiblnd_post_rx(struct kib_rx *rx, int credit)
 	 * own this rx (and rx::rx_conn) anymore, LU-5678.
 	 */
 	kiblnd_conn_addref(conn);
-#ifdef HAVE_OFED_IB_POST_SEND_RECV_CONST
-	rc = ib_post_recv(conn->ibc_cmid->qp, &rx->rx_wrq,
-			  (const struct ib_recv_wr **)&bad_wrq);
-#else
-	rc = ib_post_recv(conn->ibc_cmid->qp, &rx->rx_wrq, &bad_wrq);
-#endif
+	rc = ib_post_recv(conn->ibc_cmid->qp, &wrq, NULL);
 	if (unlikely(rc != 0)) {
-		CERROR("Can't post rx for %s: bad_wrq: %p: rc = %d\n",
-		       libcfs_nidstr(&conn->ibc_peer->ibp_nid), bad_wrq, rc);
+		CERROR("Can't post rx for %s: rc = %d\n",
+		       libcfs_nidstr(&conn->ibc_peer->ibp_nid), rc);
 		rx->rx_nob = 0;
 	}
 
@@ -365,7 +352,7 @@ kiblnd_handle_rx(struct kib_rx *rx)
 	switch (msg->ibm_type) {
 	default:
 		rc = -EPROTO;
-                CERROR("Bad IBLND message type %x from %s: rc = %d\n",
+		CERROR("Bad IBLND message type %x from %s: rc = %d\n",
 		       msg->ibm_type, libcfs_nidstr(&conn->ibc_peer->ibp_nid),
 		       rc);
 		post_credit = IBLND_POSTRX_NO_CREDIT;
@@ -661,9 +648,9 @@ kiblnd_unmap_tx(struct kib_tx *tx)
 {
 	if (
 #ifdef HAVE_OFED_FMR_POOL_API
-		tx->tx_fmr.fmr_pfmr ||
+	    tx->tx_fmr.fmr_pfmr ||
 #endif
-		tx->tx_fmr.fmr_frd)
+	    tx->tx_fmr.fmr_frd)
 		kiblnd_fmr_pool_unmap(&tx->tx_fmr, tx->tx_status);
 
 	if (tx->tx_nfrags != 0) {
@@ -672,47 +659,12 @@ kiblnd_unmap_tx(struct kib_tx *tx)
 	}
 }
 
-#ifdef HAVE_OFED_IB_GET_DMA_MR
-static struct ib_mr *
-kiblnd_find_rd_dma_mr(struct lnet_ni *ni, struct kib_rdma_desc *rd)
-{
-	struct kib_net *net = ni->ni_data;
-	struct kib_hca_dev *hdev = net->ibn_dev->ibd_hdev;
-	struct lnet_ioctl_config_o2iblnd_tunables *tunables;
-
-	tunables = &ni->ni_lnd_tunables.lnd_tun_u.lnd_o2ib;
-
-	/*
-	 * if map-on-demand is turned on and the device supports
-	 * either FMR or FastReg then use that. Otherwise use global
-	 * memory regions. If that's not available either, then you're
-	 * dead in the water and fail the operation.
-	 */
-	if (tunables->lnd_map_on_demand && (IS_FAST_REG_DEV(net->ibn_dev)
-#ifdef HAVE_OFED_FMR_POOL_API
-	     || net->ibn_dev->ibd_dev_caps & IBLND_DEV_CAPS_FMR_ENABLED
-#endif
-	))
-		return NULL;
-
-	/*
-	 * hdev->ibh_mrs can be NULL. This case is dealt with gracefully
-	 * in the call chain. The mapping will fail with appropriate error
-	 * message.
-	 */
-	return hdev->ibh_mrs;
-}
-#endif
-
 static int kiblnd_map_tx(struct lnet_ni *ni, struct kib_tx *tx,
 			 struct kib_rdma_desc *rd, int nfrags)
 {
 	struct kib_net *net = ni->ni_data;
 	struct kib_hca_dev *hdev = net->ibn_dev->ibd_hdev;
-#ifdef HAVE_OFED_IB_GET_DMA_MR
-	struct ib_mr *mr = NULL;
-#endif
-	__u32 nob;
+	u32 nob;
 	int i;
 
 	/* If rd is not tx_rd, it's going to get sent to a peer_ni and I'm the
@@ -730,15 +682,6 @@ static int kiblnd_map_tx(struct lnet_ni *ni, struct kib_tx *tx,
 		nob += rd->rd_frags[i].rf_nob;
 	}
 
-#ifdef HAVE_OFED_IB_GET_DMA_MR
-	mr = kiblnd_find_rd_dma_mr(ni, rd);
-	if (mr != NULL) {
-		/* found pre-mapping MR */
-		rd->rd_key = (rd != tx->tx_rd) ? mr->rkey : mr->lkey;
-		return 0;
-	}
-#endif
-
 	if (net->ibn_fmr_ps != NULL)
 		return kiblnd_fmr_map_tx(net, tx, rd, nob);
 
@@ -747,7 +690,7 @@ static int kiblnd_map_tx(struct lnet_ni *ni, struct kib_tx *tx,
 
 static int kiblnd_setup_rd_kiov(struct lnet_ni *ni, struct kib_tx *tx,
 				struct kib_rdma_desc *rd, int nkiov,
-				struct bio_vec *kiov, int offset, int nob)
+				const struct bio_vec *kiov, int offset, int nob)
 {
 	struct kib_net *net = ni->ni_data;
 	struct scatterlist *sg;
@@ -921,7 +864,7 @@ __must_hold(&conn->ibc_lock)
 		/* close_conn will launch failover */
 		rc = -ENETDOWN;
 	} else {
-		struct ib_send_wr *bad = &tx->tx_wrq[tx->tx_nwrq - 1].wr;
+		const struct ib_send_wr *bad = &tx->tx_wrq[tx->tx_nwrq - 1].wr;
 		struct ib_send_wr *wr  = &tx->tx_wrq[0].wr;
 
 		if (frd != NULL && !frd->frd_posted) {
@@ -934,17 +877,12 @@ __must_hold(&conn->ibc_lock)
 			 "bad wr_id %#llx, opc %d, flags %d, peer_ni: %s\n",
 			 bad->wr_id, bad->opcode, bad->send_flags,
 			 libcfs_nidstr(&conn->ibc_peer->ibp_nid));
-
 		bad = NULL;
 		if (lnet_send_error_simulation(tx->tx_lntmsg[0], &tx->tx_hstatus))
 			rc = -EINVAL;
 		else
-#ifdef HAVE_OFED_IB_POST_SEND_RECV_CONST
-			rc = ib_post_send(conn->ibc_cmid->qp, wr,
-					  (const struct ib_send_wr **)&bad);
-#else
 			rc = ib_post_send(conn->ibc_cmid->qp, wr, &bad);
-#endif
+
 		if (frd && !frd->frd_posted) {
 			/* The local invalidate becomes invalid (has been
 			 * successfully used) if the post succeeds or the
@@ -1126,16 +1064,9 @@ kiblnd_init_tx_sge(struct kib_tx *tx, u64 addr, unsigned int len)
 {
 	struct ib_sge *sge = &tx->tx_sge[tx->tx_nsge];
 	struct kib_hca_dev *hdev = tx->tx_pool->tpo_hdev;
-#ifdef HAVE_OFED_IB_GET_DMA_MR
-	struct ib_mr *mr = hdev->ibh_mrs;
-#endif
 
 	*sge = (struct ib_sge) {
-#ifdef HAVE_OFED_IB_GET_DMA_MR
-		.lkey   = mr->lkey,
-#else
 		.lkey   = hdev->ibh_pd->local_dma_lkey,
-#endif
 		.addr   = addr,
 		.length = len,
 	};
@@ -1225,30 +1156,21 @@ kiblnd_init_rdma(struct kib_conn *conn, struct kib_tx *tx, int type,
 			       resid);
 
 		sge = &tx->tx_sge[tx->tx_nsge];
-		sge->addr   = kiblnd_rd_frag_addr(srcrd, srcidx);
-		sge->lkey   = kiblnd_rd_frag_key(srcrd, srcidx);
+		sge->addr = kiblnd_rd_frag_addr(srcrd, srcidx);
+		sge->lkey = kiblnd_rd_frag_key(srcrd, srcidx);
 		sge->length = sge_nob;
 
 		if (wrq_sge == 0) {
 			wrq = &tx->tx_wrq[tx->tx_nwrq];
 
-			wrq->wr.next	= &(wrq + 1)->wr;
-			wrq->wr.wr_id	= kiblnd_ptr2wreqid(tx, IBLND_WID_RDMA);
+			wrq->wr.next = &(wrq + 1)->wr;
+			wrq->wr.wr_id = kiblnd_ptr2wreqid(tx, IBLND_WID_RDMA);
 			wrq->wr.sg_list	= sge;
-			wrq->wr.opcode	= IB_WR_RDMA_WRITE;
+			wrq->wr.opcode = IB_WR_RDMA_WRITE;
 			wrq->wr.send_flags = 0;
 
-#ifdef HAVE_OFED_IB_RDMA_WR
-			wrq->remote_addr	= kiblnd_rd_frag_addr(dstrd,
-								      dstidx);
-			wrq->rkey		= kiblnd_rd_frag_key(dstrd,
-								     dstidx);
-#else
-			wrq->wr.wr.rdma.remote_addr = kiblnd_rd_frag_addr(dstrd,
-									dstidx);
-			wrq->wr.wr.rdma.rkey	= kiblnd_rd_frag_key(dstrd,
-								     dstidx);
-#endif
+			wrq->remote_addr = kiblnd_rd_frag_addr(dstrd, dstidx);
+			wrq->rkey = kiblnd_rd_frag_key(dstrd, dstidx);
 		}
 
 		srcidx = kiblnd_rd_consume_frag(srcrd, srcidx, sge_nob);
@@ -1453,10 +1375,9 @@ kiblnd_connect_peer(struct kib_peer_ni *peer_ni)
 	LASSERT(net != NULL);
 	LASSERT(peer_ni->ibp_connecting > 0);
 
-	cmid = kiblnd_rdma_create_id(peer_ni->ibp_ni->ni_net_ns,
-				     kiblnd_cm_callback, peer_ni,
-				     RDMA_PS_TCP, IB_QPT_RC);
-
+	cmid = rdma_create_id(peer_ni->ibp_ni->ni_net_ns,
+			      kiblnd_cm_callback, peer_ni,
+			      RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(cmid)) {
 		rc = PTR_ERR(cmid);
 		CERROR("Can't create CMID for %s: rc = %d\n",
@@ -1726,15 +1647,15 @@ kiblnd_send(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg)
 	unsigned int payload_offset = lntmsg->msg_offset;
 	unsigned int payload_nob = lntmsg->msg_len;
 	struct lnet_libmd *msg_md = lntmsg->msg_md;
-	bool gpu;
+	struct iov_iter from;
 	struct kib_msg *ibmsg;
 	struct kib_rdma_desc *rd;
 	struct kib_tx *tx;
+	bool gpu;
 	int nob;
 	int rc;
 
 	/* NB 'private' is different depending on what we're sending.... */
-
 	CDEBUG(D_NET, "sending %d bytes in %d frags to %s\n",
 	       payload_nob, payload_niov, libcfs_idstr(target));
 
@@ -1742,6 +1663,12 @@ kiblnd_send(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg)
 
 	/* Thread context */
 	LASSERT(!in_interrupt());
+
+	iov_iter_bvec(&from, WRITE,
+		      payload_kiov, payload_niov,
+		      payload_nob + payload_offset);
+
+	iov_iter_advance(&from, payload_offset);
 
 	tx = kiblnd_get_idle_tx(ni, &target->nid);
 	if (tx == NULL) {
@@ -1756,7 +1683,7 @@ kiblnd_send(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg)
 	switch (type) {
 	default:
 		LBUG();
-		return (-EIO);
+		return -EIO;
 
 	case LNET_MSG_ACK:
 		LASSERT(payload_nob == 0);
@@ -1775,8 +1702,7 @@ kiblnd_send(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg)
 		rd = &ibmsg->ibm_u.get.ibgm_rd;
 		tx->tx_gpu = gpu;
 		rc = kiblnd_setup_rd_kiov(ni, tx, rd,
-					  msg_md->md_niov,
-					  msg_md->md_kiov,
+					  msg_md->md_niov, msg_md->md_kiov,
 					  0, msg_md->md_length);
 		if (rc != 0) {
 			CERROR("Can't setup GET sink %s: rc = %d\n",
@@ -1872,11 +1798,12 @@ kiblnd_send(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg)
 			wrq->wr.num_sge++;
 		}
 	} else {
-		lnet_copy_kiov2flat(IBLND_MSG_SIZE, ibmsg,
-				    offsetof(struct kib_msg,
-					     ibm_u.immediate.ibim_payload),
-				    payload_niov, payload_kiov,
-				    payload_offset, payload_nob);
+		rc = copy_from_iter(&ibmsg->ibm_u.immediate.ibim_payload,
+				    payload_nob, &from);
+		if (rc != payload_nob) {
+			kiblnd_tx_done(tx);
+			return -EFAULT;
+		}
 
 		nob = offsetof(struct kib_immediate_msg,
 			       ibim_payload[payload_nob]);
@@ -1968,19 +1895,19 @@ kiblnd_get_dev_prio(struct lnet_ni *ni, unsigned int dev_idx)
 
 int
 kiblnd_recv(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg,
-	    int delayed, unsigned int niov, struct bio_vec *kiov,
-	    unsigned int offset, unsigned int mlen, unsigned int rlen)
+	    int delayed, struct iov_iter *to, unsigned int rlen)
 {
 	struct kib_rx *rx = private;
 	struct kib_msg *rxmsg = rx->rx_msg;
 	struct kib_conn *conn = rx->rx_conn;
 	struct kib_tx *tx;
-	__u64 ibprm_cookie;
+	u64 ibprm_cookie;
 	int nob;
 	int post_credit = IBLND_POSTRX_PEER_CREDIT;
+	int wanted = iov_iter_count(to);
 	int rc = 0;
 
-	LASSERT(mlen <= rlen);
+	LASSERT(wanted <= rlen);
 	LASSERT(!in_interrupt());
 
 	switch (rxmsg->ibm_type) {
@@ -2001,16 +1928,19 @@ kiblnd_recv(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg,
 			break;
 		}
 
-		lnet_copy_flat2kiov(niov, kiov, offset,
-				    IBLND_MSG_SIZE, rxmsg,
-				    offsetof(struct kib_msg,
-					     ibm_u.immediate.ibim_payload),
-				    mlen);
+		rc = copy_to_iter(&rxmsg->ibm_u.immediate.ibim_payload, wanted,
+				  to);
+		if (rc != wanted) {
+			rc = -EFAULT;
+			break;
+		}
+
+		rc = 0;
 		lnet_finalize(lntmsg, 0);
 		break;
 
 	case IBLND_MSG_PUT_REQ: {
-		struct kib_msg	*txmsg;
+		struct kib_msg *txmsg;
 		struct kib_rdma_desc *rd;
 		struct lnet_libmd *msg_md = NULL;
 
@@ -2018,7 +1948,8 @@ kiblnd_recv(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg,
 			msg_md = lntmsg->msg_md;
 
 		ibprm_cookie = rxmsg->ibm_u.putreq.ibprm_cookie;
-		if (mlen == 0) {
+
+		if (!wanted) {
 			lnet_finalize(lntmsg, 0);
 			kiblnd_send_completion(rx->rx_conn, IBLND_MSG_PUT_NAK,
 					       0, ibprm_cookie);
@@ -2039,7 +1970,9 @@ kiblnd_recv(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg,
 		txmsg = tx->tx_msg;
 		rd = &txmsg->ibm_u.putack.ibpam_rd;
 		rc = kiblnd_setup_rd_kiov(ni, tx, rd,
-					  niov, kiov, offset, mlen);
+					  to->nr_segs, to->bvec,
+					  to->iov_offset,
+					  wanted);
 		if (rc != 0) {
 			CERROR("Can't setup PUT sink for %s: rc = %d\n",
 			       libcfs_nidstr(&conn->ibc_peer->ibp_nid), rc);
@@ -3430,6 +3363,12 @@ kiblnd_cm_callback(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 
 	case RDMA_CM_EVENT_UNREACHABLE:
 		conn = cmid->context;
+
+		/* In case we have a flapping network, we can get this event
+		 * before conn is created */
+		if (conn == NULL)
+			return -ENETDOWN;
+
 		CNETERR("%s: UNREACHABLE %d cm_id %p conn %p ibc_state: %d\n",
 			libcfs_nidstr(&conn->ibc_peer->ibp_nid),
 			event->status, cmid, conn, conn->ibc_state);
@@ -3553,6 +3492,13 @@ kiblnd_cm_callback(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 
 	case RDMA_CM_EVENT_ADDR_CHANGE:
 		LCONSOLE_INFO("Physical link changed (eg hca/port)\n");
+		return 0;
+
+	case RDMA_CM_EVENT_CONNECT_RESPONSE:
+		conn = cmid->context;
+		LCONSOLE_INFO("RDMA_CM_EVENT_CONNECT_RESPONSE from %s, with status %d, ibc_state %d\n",
+			      libcfs_nidstr(&conn->ibc_peer->ibp_nid),
+			      event->status, conn->ibc_state);
 		return 0;
 	}
 }

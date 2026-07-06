@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2008, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
@@ -65,9 +45,6 @@
 #endif
 
 #include "mount_utils.h"
-
-#define vprint(fmt, arg...) if (verbose > 0) printf(fmt, ##arg)
-#define verrprint(fmt, arg...) if (verbose >= 0) fprintf(stderr, fmt, ##arg)
 
 #ifdef HAVE_SERVER_SUPPORT
 static struct module_backfs_ops *backfs_ops[LDD_MT_LAST];
@@ -191,6 +168,31 @@ char *strscpy(char *dst, char *src, int buflen)
 	return strscat(dst, src, buflen);
 }
 
+/*
+ * Check if filesystem is already mounted by comparing filesystem names.
+ * For Lustre client mounts, extract and compare the filesystem name part
+ * (after ":/" in the mount source) to handle cases where hostnames differ
+ * but refer to the same filesystem.
+ *
+ * Return true if sources match, false otherwise.
+ */
+static bool compare_lustre_sources(const char *src1, const char *src2)
+{
+	const char *fs1, *fs2;
+
+	/* Find filesystem part after ":/" */
+	fs1 = strstr(src1, ":/");
+	fs2 = strstr(src2, ":/");
+
+	/* If both have ":/" pattern, compare filesystem names */
+	if (fs1 && fs2) {
+		src1 = fs1 + 2; /* skip ":/" */
+		src2 = fs2 + 2; /* skip ":/" */
+	}
+
+	return strcmp(src1, src2) == 0;
+}
+
 int check_mtab_entry(char *spec1, char *spec2, char *mtpt, char *type)
 {
 	FILE *fp;
@@ -201,10 +203,12 @@ int check_mtab_entry(char *spec1, char *spec2, char *mtpt, char *type)
 		return 0;
 
 	while ((mnt = getmntent(fp)) != NULL) {
-		if ((strcmp(mnt->mnt_fsname, spec1) == 0 ||
-		     strcmp(mnt->mnt_fsname, spec2) == 0) &&
-		    (!mtpt || strcmp(mnt->mnt_dir, mtpt) == 0) &&
-		    (!type || strcmp(mnt->mnt_type, type) == 0)) {
+		if (type && strcmp(mnt->mnt_type, type) != 0)
+			continue;
+		if (mtpt && strcmp(mnt->mnt_dir, mtpt) != 0)
+			continue;
+		if (compare_lustre_sources(mnt->mnt_fsname, spec1) ||
+		    (spec2 && compare_lustre_sources(mnt->mnt_fsname, spec2))) {
 			endmntent(fp);
 			return EEXIST;
 		}
@@ -571,6 +575,7 @@ struct module_backfs_ops *load_backfs_module(enum ldd_mount_type mount_type)
 	DLSYM(name, ops, prepare_lustre);
 	DLSYM(name, ops, tune_lustre);
 	DLSYM(name, ops, label_lustre);
+	DLSYM(name, ops, label_read);
 	DLSYM(name, ops, rename_fsname);
 	DLSYM(name, ops, enable_quota);
 
@@ -597,6 +602,9 @@ struct module_backfs_ops *load_backfs_module(enum ldd_mount_type mount_type)
 		ops = &zfs_ops;
 		break;
 #endif /* HAVE_ZFS_OSD */
+	case LDD_MT_WBCFS:
+		ops = &wbcfs_ops;
+		break;
 	default:
 		ops = NULL;
 		break;
@@ -605,7 +613,7 @@ struct module_backfs_ops *load_backfs_module(enum ldd_mount_type mount_type)
 	return ops;
 }
 
-/**
+/*
  * Unload plugin and free backfs_ops structure. Must be called the same number
  * of times as load_backfs_module is.
  */
@@ -782,6 +790,18 @@ int osd_label_lustre(struct mount_opts *mop)
 	return ret;
 }
 
+int osd_label_read(char *dev, struct lustre_disk_data *ldd)
+{
+	int ret;
+
+	if (backfs_mount_type_okay(ldd->ldd_mount_type))
+		ret = backfs_ops[ldd->ldd_mount_type]->label_read(dev, ldd);
+	else
+		ret = EINVAL;
+
+	return ret;
+}
+
 /* Rename filesystem fsname */
 int osd_rename_fsname(struct mkfs_opts *mop, const char *oldname)
 {
@@ -793,6 +813,59 @@ int osd_rename_fsname(struct mkfs_opts *mop, const char *oldname)
 								     oldname);
 	else
 		ret = EINVAL;
+
+	return ret;
+}
+
+/* Reset mountdata */
+int osd_mountdata_reset(struct mkfs_opts *mop, char *mountdata_arg)
+{
+	struct lustre_disk_data ldd;
+	struct stat file_stat;
+	int rc, ret = 0;
+	FILE *fp;
+
+	stat(mountdata_arg, &file_stat);
+	if (S_ISBLK(file_stat.st_mode)) {
+		osd_fini();
+		osd_init();
+		ldd.ldd_mount_type = mop->mo_ldd.ldd_mount_type;
+		rc = osd_read_ldd(mountdata_arg, &ldd);
+		osd_fini();
+		osd_init();
+		if (rc != 0) {
+			fprintf(stderr, "%s: Failed to read device (%s): %s\n",
+				progname, mountdata_arg, strerror(rc));
+			ret = rc;
+			return ret;
+		}
+	} else if (S_ISREG(file_stat.st_mode)) {
+		fp = fopen(mountdata_arg, "r");
+		rc = fread(&ldd, 1, sizeof(ldd), fp);
+		fclose(fp);
+		if (rc < 0) {
+			fprintf(stderr, "%s: Failed to read file (%s): %s\n",
+				progname, mountdata_arg, strerror(rc));
+			ret = rc;
+			return ret;
+		}
+	} else {
+		fprintf(stderr,
+			"%s: Given path is not a file or a block device (%s)\n",
+			progname, mountdata_arg);
+		return 1;
+	}
+
+	memcpy(&(mop->mo_ldd), &ldd, sizeof(ldd));
+
+	ret = osd_label_read(mop->mo_device, &mop->mo_ldd);
+	if (ret != 0) {
+		fprintf(stderr, "%s: Failed to read label data: %s\n",
+			progname, strerror(ret));
+		return ret;
+	}
+	mop->mo_ldd.ldd_svindex = strtol(&(mop->mo_ldd.ldd_svname[12]),
+					 NULL, 16);
 
 	return ret;
 }
@@ -1230,7 +1303,17 @@ out:
 
 #ifdef HAVE_GSS
 #ifdef HAVE_OPENSSL_SSK
-int load_shared_keys(struct mount_opts *mop)
+/**
+ * load_shared_keys() - Loads all keys under @mop->mo_skpath.
+ * @mop: mount options containing skpath
+ * @client: True if Client is mounting with a server key
+ *
+ * Return:
+ * * %positive when last client file system key id if successfully loaded
+ * * %0 other key type successfully loaded
+ * * %-errno on failure
+ */
+int load_shared_keys(struct mount_opts *mop, bool client)
 {
 	DIR *dir;
 	struct dirent *dentry;
@@ -1251,7 +1334,7 @@ int load_shared_keys(struct mount_opts *mop)
 
 	/* Load individual keys or a directory of them */
 	if (S_ISREG(sbuf.st_mode)) {
-		return sk_load_keyfile(path);
+		return sk_load_keyfile(path, client, true, NULL, false, -1);
 	} else if (!S_ISDIR(sbuf.st_mode)) {
 		fprintf(stderr, "Invalid shared key path: %s\n", path);
 		return -ENOKEY;
@@ -1296,13 +1379,27 @@ int load_shared_keys(struct mount_opts *mop)
 		if (!S_ISREG(sbuf.st_mode))
 			continue;
 
-		rc = sk_load_keyfile(fullpath);
-		if (rc)
+		rc = sk_load_keyfile(fullpath, client, false, NULL, false, -1);
+		if (rc < 0)
 			fprintf(stderr, "Failed to load key %s\n", fullpath);
+		else
+			rc = 0;
 	}
 	closedir(dir);
 
 	return rc;
+}
+
+/**
+ * Unloads leftover key \a key
+ *
+ * \param[in]	key	id of key to remove
+ *
+ */
+void unload_shared_key(unsigned int key)
+{
+	if (key > 0)
+		(void)keyctl_unlink(key, KEY_SPEC_USER_KEYRING);
 }
 #endif /* HAVE_OPENSSL_SSK */
 #endif /* HAVE_GSS */

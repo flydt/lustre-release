@@ -19,7 +19,7 @@
 #ifndef __LUSTRE_KERNELCOMM_H__
 #define __LUSTRE_KERNELCOMM_H__
 
-#include <lustre_compat/linux/generic-radix-tree.h>
+#include <linux/generic-radix-tree.h>
 #include <net/genetlink.h>
 #include <net/sock.h>
 /* For declarations shared with userspace */
@@ -92,7 +92,7 @@ enum lustre_param_list_attrs {
  * @LUSTRE_STATS_ATTR_TIMESTAMP:       time of collection in nanoseconds
  *				       (NLA_S64)
  * @LUSTRE_STATS_ATTR_START_TIME:      start time of collection (NLA_S64)
- * @LUSTRE_STATS_ATTR_ELPASE_TIME:     elpase time of collection (NLA_S64)
+ * @LUSTRE_STATS_ATTR_ELAPSE_TIME:     elapsed time of collection (NLA_S64)
  * @LUSTRE_STATS_ATTR_DATASET:	       bookmarks for that stats data
  *				       (NLA_NESTED)
  */
@@ -158,6 +158,53 @@ struct lustre_stats_list {
 unsigned int lustre_stats_scan(struct lustre_stats_list *slist, const char *filter);
 int lustre_stats_dump(struct sk_buff *msg, struct netlink_callback *cb);
 int lustre_stats_done(struct netlink_callback *cb);
+
+/**
+ * enum lustre_target_attrs	      - Lustre general top-level netlink
+ *					attributes that describe lustre
+ *					'target_obd'. These values are used
+ *					to piece together messages for
+ *					sending and receiving.
+ *
+ * @LUSTRE_TARGET_ATTR_UNSPEC:		unspecified attribute to catch errors
+ *
+ * @LUSTRE_TARGET_ATTR_HDR:		Netlink group this data is for
+ *					(NLA_NUL_STRING)
+ * @LUSTRE_TARGET_ATTR_SOURCE:		obd device targets belong too
+ *					(NLA_STRING)
+ * @LUSTRE_TARGET_ATTR_PROP_LIST:	list of target properties (NLA_NESTED)
+ */
+enum lustre_target_attrs {
+	LUSTRE_TARGET_ATTR_UNSPEC = 0,
+
+	LUSTRE_TARGET_ATTR_HDR,
+	LUSTRE_TARGET_ATTR_SOURCE,
+	LUSTRE_TARGET_ATTR_PROP_LIST,
+
+	__LUSTRE_TARGET_ATTR_MAX_PLUS_ONE,
+};
+
+#define LUSTRE_TARGET_ATTR_MAX	(__LUSTRE_TARGET_ATTR_MAX_PLUS_ONE - 1)
+
+/**
+ * enum lustre_target_props_attrs
+ *
+ * @LUSTRE_TARGET_PROP_ATTR_UNSPEC:	unspecified attribute to catch errors
+ * @LUSTRE_TARGET_PROP_ATTR_INDEX:	target number used as an index (NLA_U16)
+ * @LUSTRE_DEVICE_PROP_ATTR_UUID:	UUID of the target (NLA_STRING)
+ * @LUSTRE_DEVICE_PROP_ATTR_STATUS:	status of the target (NLA_STRING)
+ */
+enum lustre_target_prop_attrs {
+	LUSTRE_TARGET_PROP_ATTR_UNSPEC = 0,
+
+	LUSTRE_TARGET_PROP_ATTR_INDEX,
+	LUSTRE_TARGET_PROP_ATTR_UUID,
+	LUSTRE_TARGET_PROP_ATTR_STATUS,
+
+	__LUSTRE_TARGET_PROP_ATTR_MAX_PLUS_ONE,
+};
+
+#define LUSTRE_TARGET_PROP_ATTR_MAX	(__LUSTRE_TARGET_PROP_ATTR_MAX_PLUS_ONE - 1)
 
 /* prototype for callback function on kuc groups */
 typedef int (*libcfs_kkuc_cb_t)(void *data, void *cb_arg);

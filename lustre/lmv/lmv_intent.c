@@ -35,7 +35,7 @@ static int lmv_intent_remote(struct obd_export *exp, struct lookup_intent *it,
 			     const struct lu_fid *parent_fid,
 			     struct ptlrpc_request **reqp,
 			     ldlm_blocking_callback cb_blocking,
-			     __u64 extra_lock_flags,
+			     __u64 extra_lock_flags, __u32 *suppgids,
 			     const char *secctx_name, __u32 secctx_name_size)
 {
 	struct obd_device	*obd = exp->exp_obd;
@@ -47,6 +47,7 @@ static int lmv_intent_remote(struct obd_export *exp, struct lookup_intent *it,
 	struct mdt_body		*body;
 	int			pmode;
 	int			rc = 0;
+
 	ENTRY;
 
 	body = req_capsule_server_get(&(*reqp)->rq_pill, &RMF_MDT_BODY);
@@ -99,11 +100,19 @@ static int lmv_intent_remote(struct obd_export *exp, struct lookup_intent *it,
 		       DFID"\n",
 		       secctx_name_size, secctx_name, PFID(&body->mbo_fid1));
 	}
+	/* add suppgids from client */
+	if (it->it_op & (IT_LOOKUP | IT_GETATTR | IT_OPEN) && suppgids) {
+		op_data->op_suppgids[0] = suppgids[0];
+		op_data->op_suppgids[1] = suppgids[1];
+	} else {
+		op_data->op_suppgids[0] = -1;
+		op_data->op_suppgids[1] = -1;
+	}
 
 	rc = md_intent_lock(tgt->ltd_exp, op_data, it, &req, cb_blocking,
 			    extra_lock_flags);
-        if (rc)
-                GOTO(out_free_op_data, rc);
+	if (rc)
+		GOTO(out_free_op_data, rc);
 
 	/*
 	 * LLite needs LOOKUP lock to track dentry revocation in order to
@@ -136,7 +145,7 @@ out:
 int lmv_revalidate_slaves(struct obd_export *exp,
 			  const struct lmv_stripe_md *lsm,
 			  ldlm_blocking_callback cb_blocking,
-			  int extra_lock_flags)
+			  int extra_lock_flags, __u32 *suppgids)
 {
 	struct obd_device *obd = exp->exp_obd;
 	struct lmv_obd *lmv = &obd->u.lmv;
@@ -189,6 +198,13 @@ int lmv_revalidate_slaves(struct obd_export *exp,
 		 */
 		op_data->op_bias = MDS_CROSS_REF;
 		op_data->op_cli_flags = CLI_NO_SLOT;
+		if (suppgids) {
+			op_data->op_suppgids[0] = suppgids[0];
+			op_data->op_suppgids[1] = suppgids[1];
+		} else {
+			op_data->op_suppgids[0] = -1;
+			op_data->op_suppgids[1] = -1;
+		}
 
 		tgt = lmv_tgt_retry(lmv, lsm->lsm_md_oinfo[i].lmo_mds);
 		if (!tgt)
@@ -352,10 +368,18 @@ retry:
 			RETURN(rc);
 	}
 
-	CDEBUG(D_INODE, "OPEN_INTENT with fid1="DFID", fid2="DFID","
-	       " name='"DNAME"' -> mds #%u\n", PFID(&op_data->op_fid1),
-	       PFID(&op_data->op_fid2), encode_fn_opdata(op_data),
-	       tgt->ltd_index);
+	if (lmv_dir_striped(op_data->op_lso1))
+		op_data->op_layout_version =
+			op_data->op_lso1->lso_lsm.lsm_md_layout_version;
+	else
+		op_data->op_layout_version = 1;
+
+
+	CDEBUG(D_INODE, "OPEN_INTENT with fid1="DFID", fid2="DFID", name='"
+	       DNAME"' -> mds #%u layout version %u\n",
+	       PFID(&op_data->op_fid1), PFID(&op_data->op_fid2),
+	       encode_fn_opdata(op_data), tgt->ltd_index,
+	       op_data->op_layout_version);
 
 	rc = md_intent_lock(tgt->ltd_exp, op_data, it, reqp, cb_blocking,
 			    extra_lock_flags);
@@ -365,14 +389,14 @@ retry:
 	 * Nothing is found, do not access body->fid1 as it is zero and thus
 	 * pointless.
 	 */
-	if ((it->it_disposition & DISP_LOOKUP_NEG) &&
-	    !(it->it_disposition & DISP_OPEN_CREATE) &&
-	    !(it->it_disposition & DISP_OPEN_OPEN)) {
+	if (it_disposition(it, DISP_LOOKUP_NEG) &&
+	    !it_disposition(it, DISP_OPEN_CREATE) &&
+	    !it_disposition(it, DISP_OPEN_OPEN)) {
 		if (!(it->it_open_flags & MDS_OPEN_BY_FID) &&
 		    lmv_dir_retry_check_update(op_data)) {
 			ptlrpc_req_put(*reqp);
 			it->it_request = NULL;
-			it->it_disposition = 0;
+			it_clear_disposition(it, DISP_ALL);
 			*reqp = NULL;
 
 			it->it_open_flags = flags;
@@ -391,6 +415,7 @@ retry:
 	if (unlikely((body->mbo_valid & OBD_MD_MDS))) {
 		rc = lmv_intent_remote(exp, it, &op_data->op_fid1, reqp,
 				       cb_blocking, extra_lock_flags,
+				       op_data->op_suppgids,
 				       op_data->op_file_secctx_name,
 				       op_data->op_file_secctx_name_size);
 		if (rc != 0)
@@ -418,6 +443,7 @@ lmv_intent_lookup(struct obd_export *exp, struct md_op_data *op_data,
 	struct lmv_tgt_desc *tgt = NULL;
 	struct mdt_body *body;
 	int rc;
+
 	ENTRY;
 
 	/* foreign dir is not striped */
@@ -487,7 +513,8 @@ retry:
 			rc = lmv_revalidate_slaves(exp,
 						   &op_data->op_lso2->lso_lsm,
 						   cb_blocking,
-						   extra_lock_flags);
+						   extra_lock_flags,
+						   op_data->op_suppgids);
 			if (rc != 0)
 				RETURN(rc);
 		}
@@ -496,7 +523,7 @@ retry:
 		   lmv_dir_retry_check_update(op_data)) {
 		ptlrpc_req_put(*reqp);
 		it->it_request = NULL;
-		it->it_disposition = 0;
+		it_clear_disposition(it, DISP_ALL);
 		*reqp = NULL;
 
 		goto retry;
@@ -516,7 +543,7 @@ retry:
 	/* Not cross-ref case, just get out of here. */
 	if (unlikely((body->mbo_valid & OBD_MD_MDS))) {
 		rc = lmv_intent_remote(exp, it, NULL, reqp, cb_blocking,
-				       extra_lock_flags,
+				       extra_lock_flags, op_data->op_suppgids,
 				       op_data->op_file_secctx_name,
 				       op_data->op_file_secctx_name_size);
 		if (rc != 0)
@@ -534,7 +561,8 @@ int lmv_intent_lock(struct obd_export *exp, struct md_op_data *op_data,
 		    ldlm_blocking_callback cb_blocking,
 		    __u64 extra_lock_flags)
 {
-	int rc;
+	int rc = 0;
+
 	ENTRY;
 
 	LASSERT(it != NULL);

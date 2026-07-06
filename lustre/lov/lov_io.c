@@ -25,13 +25,11 @@
  */
 
 /**
- * Allocate a new sub IO
+ * lov_sub_alloc() - Allocate a new sub IO
+ * @lio: top level lov IO structure
+ * @index: index into lov (stripe)
  *
- * \param[in] lio	top level lov IO structure
- * \param[in] index	index into lov (stripe)
- *
- * \retval		Pointer to allocated lov_io_sub
- * 			structure
+ * Return Pointer to allocated lov_io_sub structure
  */
 static inline struct lov_io_sub *lov_sub_alloc(struct lov_io *lio, int index)
 {
@@ -56,11 +54,9 @@ static inline struct lov_io_sub *lov_sub_alloc(struct lov_io *lio, int index)
 }
 
 /**
- * Release a sub IO
- *
- * \param[in] lio	top level lov IO structure
- * \param[in] sub	sub io to individual stripe
- *
+ * lov_sub_free() - Release a sub IO
+ * @lio: top level lov IO structure
+ * @sub: sub io to individual stripe
  */
 static inline void lov_sub_free(struct lov_io *lio, struct lov_io_sub *sub)
 {
@@ -141,6 +137,8 @@ static int lov_io_sub_init(const struct lu_env *env, struct lov_io *lio,
 	sub_io->ci_ndelay = io->ci_ndelay;
 	sub_io->ci_layout_version = io->ci_layout_version;
 	sub_io->ci_tried_all_mirrors = io->ci_tried_all_mirrors;
+	sub_io->ci_parity_io = io->ci_parity_io;
+	sub_io->ci_parity_eof = io->ci_parity_eof;
 
 	result = cl_io_sub_init(sub->sub_env, sub_io, io->ci_type, sub_obj);
 
@@ -187,8 +185,19 @@ out:
 	RETURN(sub);
 }
 
-/**
+/*
  * Lov io operations.
+ */
+
+/**
+ * lov_io_subio_init() -  Initilize LOV I/O operation
+ * @env: lustre environment
+ * @lio: Pointer to struct lov_io
+ * @io: highlevel I/O request
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int lov_io_subio_init(const struct lu_env *env, struct lov_io *lio,
 			     struct cl_io *io)
@@ -204,7 +213,7 @@ static int lov_io_subio_init(const struct lu_env *env, struct lov_io *lio,
 	RETURN(0);
 }
 
-/**
+/*
  * Decide if it will need write intent RPC
  */
 static int lov_io_mirror_write_intent(struct lov_io *lio,
@@ -305,10 +314,160 @@ static int lov_io_mirror_write_intent(struct lov_io *lio,
 	RETURN(0);
 }
 
-static int lov_io_mirror_init(struct lov_io *lio, struct lov_object *obj,
-			      struct cl_io *io)
+/**
+ * lov_io_parity_size_comp() - Parity byte span for one data/parity pair
+ * @data_lsme: data component stripe metadata
+ * @parity_lsme: parity component stripe metadata
+ * @data_end: exclusive end of data in file offset space
+ *
+ * Returns how many bytes of parity are written for data in
+ * [data_lsme->lsme_extent.e_start, data_end).
+ * May overestimate (holes) but must not be short.
+ */
+static loff_t lov_io_parity_size_comp(struct lov_stripe_md_entry *data_lsme,
+				      struct lov_stripe_md_entry *parity_lsme,
+				      loff_t data_end)
+{
+	struct ec_split_comp sc;
+	loff_t comp_start = data_lsme->lsme_extent.e_start;
+	loff_t data_upto;
+	__u64 stripe_set_size;
+	__u64 num_stripe_sets;
+	__u64 data_in_extent;
+	int num_raid_sets;
+
+	if (data_end <= comp_start)
+		return 0;
+
+	data_upto = min_t(__u64, (__u64)data_end,
+			  data_lsme->lsme_extent.e_end);
+	ec_split_stripes(data_lsme->lsme_stripe_count,
+			 parity_lsme->lsme_dstripe_count, &sc);
+	num_raid_sets = sc.esc_n0 + sc.esc_n1;
+
+	stripe_set_size = (__u64)data_lsme->lsme_stripe_count *
+			  data_lsme->lsme_stripe_size;
+	data_in_extent = data_upto - comp_start;
+	num_stripe_sets = (data_in_extent + stripe_set_size - 1) /
+			  stripe_set_size;
+
+	return num_stripe_sets * num_raid_sets *
+	       parity_lsme->lsme_cstripe_count *
+	       parity_lsme->lsme_stripe_size;
+}
+
+/**
+ * lov_io_find_data_comp() - Find data component matching parity extent
+ * @obj: lov object
+ * @data_lre: data mirror entry
+ * @parity_ext: parity component extent
+ *
+ * Return: matching layout entry, or NULL
+ */
+static struct lov_layout_entry *
+lov_io_find_data_comp(struct lov_object *obj, struct lov_mirror_entry *data_lre,
+		      struct lu_extent *parity_ext)
+{
+	struct lov_layout_entry *data_lle;
+
+	lov_foreach_mirror_layout_entry(obj, data_lle, data_lre) {
+		if (lu_extent_is_equal(parity_ext,
+				       &data_lle->lle_lsme->lsme_extent))
+			return data_lle;
+	}
+
+	return NULL;
+}
+
+/**
+ * lov_io_parity_eof() - Parity mirror EOF from @data_size and RAID geometry
+ * @obj: lov object
+ * @mirror_index: parity mirror index
+ * @data_size: data mirror file size
+ *
+ * For each parity component below @data_size, add lov_io_parity_size_comp() to
+ * its extent start; return the maximum. May overestimate but not underestimate.
+ *
+ * Return: parity EOF in file offset space, or 0 on error
+ */
+static loff_t lov_io_parity_eof(struct lov_object *obj, int mirror_index,
+				loff_t data_size)
+{
+	struct lov_mirror_entry *parity_lre;
+	struct lov_mirror_entry *data_lre;
+	struct lov_layout_entry *parity_lle;
+	struct lov_layout_entry *data_lle;
+	struct lu_extent *ext;
+	__u16 data_mirror_id;
+	loff_t parity_eof = 0;
+
+	if (data_size == 0)
+		return 0;
+
+	parity_lre = lov_mirror_entry(obj, mirror_index);
+	parity_lle = lov_entry(obj, parity_lre->lre_start);
+
+	if (!(parity_lle->lle_lsme->lsme_pattern & LOV_PATTERN_PARITY))
+		return 0;
+
+	data_mirror_id = parity_lle->lle_lsme->lsme_mirror_link_id;
+	data_lre = lov_mirror_by_id(obj, data_mirror_id);
+	if (data_lre == NULL)
+		return 0;
+
+	lov_foreach_mirror_layout_entry(obj, parity_lle, parity_lre) {
+		loff_t seg_eof;
+
+		ext = &parity_lle->lle_lsme->lsme_extent;
+		if (data_size <= ext->e_start)
+			continue;
+
+		data_lle = lov_io_find_data_comp(obj, data_lre, ext);
+		if (data_lle == NULL) {
+			CERROR(DFID ": no data component matching parity extent "DEXT" (parity mirror %u, data mirror %u)\n",
+			       PFID(lu_object_fid(lov2lu(obj))), PEXT(ext),
+			       parity_lre->lre_mirror_id, data_mirror_id);
+			continue;
+		}
+
+		/*
+		 * Or we could just find the last valid data component,
+		 * e.g. the one with actual data written？For security, I
+		 * prefer not to do this here.
+		 */
+		seg_eof = ext->e_start +
+			  lov_io_parity_size_comp(data_lle->lle_lsme,
+						  parity_lle->lle_lsme,
+						  data_size);
+		if (seg_eof > parity_eof)
+			parity_eof = seg_eof;
+	}
+
+	CDEBUG(D_INODE, DFID ": parity EOF calc: data_size=%lld parity_eof=%lld\n",
+	       PFID(lu_object_fid(lov2lu(obj))), data_size, parity_eof);
+
+	return parity_eof;
+}
+
+static loff_t lov_io_top_file_size(const struct lu_env *env,
+				   struct lov_object *obj)
+{
+	struct cl_object *top_obj = cl_object_top(&obj->lo_cl);
+	struct cl_attr attr = { 0 };
+
+	cl_object_attr_lock(top_obj);
+	if (top_obj->co_ops->coo_attr_get)
+		top_obj->co_ops->coo_attr_get(env, top_obj, &attr);
+	cl_object_attr_unlock(top_obj);
+
+	return attr.cat_size;
+}
+
+static int lov_io_mirror_init(const struct lu_env *env, struct lov_io *lio,
+			      struct lov_object *obj, struct cl_io *io)
 {
 	struct lov_layout_composite *comp = &obj->u.composite;
+	bool skipped_parity = false;
 	int index;
 	int i;
 	int result;
@@ -365,7 +524,37 @@ static int lov_io_mirror_init(struct lov_io *lio, struct lov_object *obj,
 			index++;
 		}
 
-		RETURN(lio->lis_mirror_index < 0 ? -EINVAL : 0);
+		if (lio->lis_mirror_index < 0)
+			RETURN(-EINVAL);
+
+		/* Set ci_parity_io if this is a parity mirror */
+		io->ci_parity_io =
+			lov_mirror_entry(obj, lio->lis_mirror_index)->lre_parity;
+
+		/* Calculate parity EOF if this is a parity mirror */
+		if (io->ci_parity_io) {
+			loff_t file_size;
+
+			/*
+			 * Get file size from the top (VVP) layer only.
+			 * We can't use cl_object_attr_get() here because it
+			 * walks through all layers and the LOV layer would
+			 * reset cat_size to 0 before recalculating from
+			 * stripe attributes (which may not be populated yet).
+			 * The VVP layer's coo_attr_get reads i_size directly
+			 * from the inode.
+			 */
+			file_size = lov_io_top_file_size(env, obj);
+
+			io->ci_parity_eof = lov_io_parity_eof(obj,
+					lio->lis_mirror_index, file_size);
+			CDEBUG(D_INODE, "designated parity IO: mirror_idx=%d, "
+			       "file_size=%llu, parity_eof=%lld\n",
+			       lio->lis_mirror_index, file_size,
+			       io->ci_parity_eof);
+		}
+
+		RETURN(0);
 	}
 
 	result = lov_io_mirror_write_intent(lio, obj, io);
@@ -419,6 +608,14 @@ static int lov_io_mirror_init(struct lov_io *lio, struct lov_object *obj,
 		if (lre->lre_foreign)
 			continue;
 
+		/* skip parity mirrors for read IOs unless designated */
+		if (lre->lre_parity &&
+		    (io->ci_type == CIT_READ || io->ci_type == CIT_FAULT) &&
+		    !io->ci_designated_mirror) {
+			skipped_parity = true;
+			continue;
+		}
+
 		lov_foreach_mirror_layout_entry(obj, lle, lre) {
 			if (!lle->lle_valid)
 				continue;
@@ -435,6 +632,14 @@ static int lov_io_mirror_init(struct lov_io *lio, struct lov_object *obj,
 	} /* each mirror */
 
 	if (i == comp->lo_mirror_count) {
+		/* If we only skipped parity mirrors, return EINVAL */
+		if (skipped_parity) {
+			CERROR(DFID": only parity mirrors available for read "
+			       "I/O at %llu\n",
+			       PFID(lu_object_fid(lov2lu(obj))), lio->lis_pos);
+			RETURN(-EINVAL);
+		}
+
 		CERROR(DFID": failed to find a component covering "
 		       "I/O region at %llu\n",
 		       PFID(lu_object_fid(lov2lu(obj))), lio->lis_pos);
@@ -451,6 +656,34 @@ static int lov_io_mirror_init(struct lov_io *lio, struct lov_object *obj,
 	       comp->lo_mirror_count);
 
 	lio->lis_mirror_index = index;
+
+	/* Set ci_parity_io if this is a parity mirror */
+	io->ci_parity_io = lov_mirror_entry(obj, index)->lre_parity;
+
+	/* Calculate parity EOF if this is a parity mirror */
+	if (io->ci_parity_io) {
+		loff_t file_size;
+
+		/*
+		 * Get file size from the top (VVP) layer only.
+		 * See comment in designated mirror path above.
+		 */
+		file_size = lov_io_top_file_size(env, obj);
+
+		io->ci_parity_eof = lov_io_parity_eof(obj, index, file_size);
+		CDEBUG(D_INODE, "mirror selection parity IO: mirror_idx=%d, "
+		       "file_size=%llu, parity_eof=%lld\n",
+		       index, file_size, io->ci_parity_eof);
+	}
+
+	/* we can't use parity mirrors for write unless designated */
+	if (lov_mirror_entry(obj, index)->lre_parity &&
+	    io->ci_type == CIT_WRITE &&
+	    io->ci_designated_mirror == 0) {
+		CERROR(DFID": trying to use parity mirror %d for write\n",
+		       PFID(lu_object_fid(lov2lu(obj))), index);
+		RETURN(-EINVAL);
+	}
 
 	/*
 	 * FLR: if all mirrors have been tried once, most likely the network
@@ -479,7 +712,7 @@ static int lov_io_mirror_init(struct lov_io *lio, struct lov_object *obj,
 	RETURN(0);
 }
 
-static int lov_io_slice_init(struct lov_io *lio,
+static int lov_io_slice_init(const struct lu_env *env, struct lov_io *lio,
 			     struct lov_object *obj, struct cl_io *io)
 {
 	int index;
@@ -503,8 +736,6 @@ static int lov_io_slice_init(struct lov_io *lio,
 		lio->lis_endpos = io->u.ci_rw.crw_pos + io->u.ci_rw.crw_bytes;
 		lio->lis_io_endpos = lio->lis_endpos;
 		if (cl_io_is_append(io)) {
-			LASSERT(io->ci_type == CIT_WRITE);
-
 			/*
 			 * If there is LOV EA hole, then we may cannot locate
 			 * the current file-tail exactly.
@@ -512,9 +743,6 @@ static int lov_io_slice_init(struct lov_io *lio,
 			if (unlikely(obj->lo_lsm->lsm_entries[0]->lsme_pattern &
 				     LOV_PATTERN_F_HOLE))
 				GOTO(out, result = -EIO);
-
-			lio->lis_pos = 0;
-			lio->lis_endpos = OBD_OBJECT_EOF;
 		}
 		break;
 
@@ -598,7 +826,7 @@ static int lov_io_slice_init(struct lov_io *lio,
 
 	LASSERT(obj->lo_lsm != NULL);
 
-	result = lov_io_mirror_init(lio, obj, io);
+	result = lov_io_mirror_init(env, lio, obj, io);
 	if (result)
 		GOTO(out, result);
 
@@ -627,6 +855,9 @@ static int lov_io_slice_init(struct lov_io *lio,
 		io->ci_write_intent.e_start = lio->lis_pos;
 		io->ci_write_intent.e_end = lio->lis_endpos;
 	}
+
+	CDEBUG(D_LAYOUT, "%llu %llu\n", io->ci_write_intent.e_start,
+	       io->ci_write_intent.e_end);
 
 	index = 0;
 	lov_foreach_io_layout(index, lio, &io->ci_write_intent) {
@@ -758,18 +989,18 @@ static void lov_io_sub_inherit(struct lov_io_sub *sub, struct lov_io *lio,
 		io->u.ci_fsync.fi_end = end;
 		io->u.ci_fsync.fi_fid = parent->u.ci_fsync.fi_fid;
 		io->u.ci_fsync.fi_mode = parent->u.ci_fsync.fi_mode;
+		io->u.ci_fsync.fi_prio = parent->u.ci_fsync.fi_prio;
 		break;
 	}
 	case CIT_READ:
 	case CIT_WRITE: {
 		io->u.ci_wr.wr_sync = cl_io_is_sync_write(parent);
 		io->ci_tried_all_mirrors = parent->ci_tried_all_mirrors;
-		if (cl_io_is_append(parent)) {
+		if (cl_io_is_append(parent))
 			io->u.ci_wr.wr_append = 1;
-		} else {
-			io->u.ci_rw.crw_pos = start;
-			io->u.ci_rw.crw_bytes = end - start;
-		}
+
+		io->u.ci_rw.crw_pos = start;
+		io->u.ci_rw.crw_bytes = end - start;
 		break;
 	}
 	case CIT_LADVISE: {
@@ -974,8 +1205,28 @@ static int lov_io_rw_iter_init(const struct lu_env *env,
 	LASSERT(io->ci_type == CIT_READ || io->ci_type == CIT_WRITE);
 	ENTRY;
 
-	if (cl_io_is_append(io))
+	if (cl_io_is_append(io)) {
+		struct lov_layout_entry *lle;
+		struct lov_mirror_entry *lre;
+		loff_t endpos = 0;
+
+		/* cover the whole inited region for append */
+		LASSERT(lio->lis_mirror_index >= 0);
+		lre = lov_mirror_entry(lio->lis_object, lio->lis_mirror_index);
+		lov_foreach_mirror_layout_entry(lio->lis_object, lle, lre) {
+			if (!lsme_inited(lle->lle_lsme))
+				break;
+
+			endpos = lle->lle_lsme->lsme_extent.e_end;
+		}
+
+		lio->lis_pos = 0;
+		if (endpos == OBD_OBJECT_EOF || lio->lis_endpos < endpos)
+			lio->lis_endpos = endpos;
+
+		io->u.ci_wr.wr_append_lockpos = lio->lis_endpos;
 		RETURN(lov_io_iter_init(env, ios));
+	}
 
 	index = lov_io_layout_at(lio, io->u.ci_rw.crw_pos);
 	if (index < 0) { /* non-existing layout component */
@@ -1186,9 +1437,9 @@ static void lov_io_unlock(const struct lu_env *env,
 	EXIT;
 }
 
-static int lov_io_read_ahead(const struct lu_env *env,
-			     const struct cl_io_slice *ios,
-			     pgoff_t start, struct cl_read_ahead *ra)
+static int lov_io_read_ahead_prep(const struct lu_env *env,
+				  const struct cl_io_slice *ios,
+				  pgoff_t start, struct cl_read_ahead *ra)
 {
 	struct lov_io		*lio = cl2lov_io(env, ios);
 	struct lov_object	*loo = lio->lis_object;
@@ -1224,8 +1475,8 @@ static int lov_io_read_ahead(const struct lu_env *env,
 		RETURN(PTR_ERR(sub));
 
 	lov_stripe_offset(loo->lo_lsm, index, offset, stripe, &suboff);
-	rc = cl_io_read_ahead(sub->sub_env, &sub->sub_io,
-			      suboff >> PAGE_SHIFT, ra);
+	rc = cl_io_read_ahead_prep(sub->sub_env, &sub->sub_io,
+				   suboff >> PAGE_SHIFT, ra);
 
 	CDEBUG(D_READA, DFID " cra_end = %lu, stripes = %d, rc = %d\n",
 	       PFID(lu_object_fid(lov2lu(loo))), ra->cra_end_idx,
@@ -1327,81 +1578,40 @@ static int lov_dio_submit(const struct lu_env *env,
 			  const struct cl_io_slice *ios,
 			  enum cl_req_type crt, struct cl_dio_pages *cdp)
 {
-	struct cl_page_list	*plist = &lov_env_info(env)->lti_plist;
-	struct lov_io		*lio = cl2lov_io(env, ios);
-	struct cl_2queue	*queue;
-	struct cl_page		*page;
-	struct cl_page_list	*qin;
-	struct lov_io_sub	*sub;
-	int index;
+	struct lov_io *lio = cl2lov_io(env, ios);
+	struct lov_io_sub *sub;
 	int rc = 0;
+	int index;
 	ENTRY;
 
-	cl_dio_pages_2queue(cdp);
-	queue = &cdp->cdp_queue;
-
-	qin = &queue->c2_qin;
-	page = cl_page_list_first(qin);
-
-	cl_page_list_init(plist);
-	while (qin->pl_nr > 0) {
-		struct cl_2queue  *cl2q = &lov_env_info(env)->lti_cl2q;
-
-		page = cl_page_list_first(qin);
-		if (lov_page_is_empty(page)) {
-			cl_page_list_move(&queue->c2_qout, qin, page);
-
-			/*
-			 * it could only be mirror read to get here therefore
-			 * the pages will be transient. We don't care about
-			 * the return code of cl_page_prep() at all.
-			 */
-			LASSERT(page->cp_type == CPT_TRANSIENT);
-			cl_page_completion(env, page, crt, 0);
-			continue;
-		}
-
-		cl_2queue_init(cl2q);
-		cl_page_list_move(&cl2q->c2_qin, qin, page);
-
-		index = page->cp_lov_index;
-		/* DIO is already split by stripe */
-		cl_page_list_splice(qin, &cl2q->c2_qin);
-
-		sub = lov_sub_get(env, lio, index);
-		if (!IS_ERR(sub)) {
-			rc = cl_io_submit_rw(sub->sub_env, &sub->sub_io,
-					     crt, cl2q);
-		} else {
-			rc = PTR_ERR(sub);
-		}
-
-		cl_page_list_splice(&cl2q->c2_qin, plist);
-		cl_page_list_splice(&cl2q->c2_qout, &queue->c2_qout);
-		cl_2queue_fini(env, cl2q);
-
-		if (rc != 0)
-			break;
+	if (lov_pages_is_empty(cdp)) {
+		cl_dio_pages_complete(env, cdp, cdp->cdp_page_count, 0);
+		RETURN(0);
 	}
 
-	cl_page_list_splice(plist, qin);
-	cl_page_list_fini(env, plist);
+	index = cdp->cdp_lov_index;
 
-	/* if submit failed, no pages were sent */
-	LASSERT(ergo(rc != 0, list_empty(&queue->c2_qout.pl_pages)));
-	while (queue->c2_qout.pl_nr > 0) {
-		struct cl_page *page;
-
-		page = cl_page_list_first(&queue->c2_qout);
-		cl_page_list_del(env, &queue->c2_qout, page, false);
+	sub = lov_sub_get(env, lio, index);
+	if (!IS_ERR(sub)) {
+		rc = cl_dio_submit_rw(sub->sub_env, &sub->sub_io,
+				      crt, cdp);
+	} else {
+		rc = PTR_ERR(sub);
 	}
 
 	RETURN(rc);
 }
 
 /**
+ * lov_io_submit() - lov implementation of cl_operations::cio_submit() method.
+ * @env: lustre execution environment
+ * @io: highlevel I/O request
+ * @ios: LOV specific IO
+ * @crt: Requested transfer type
+ * @queue: Page queue
+ *
  * lov implementation of cl_operations::cio_submit() method. It takes a list
- * of pages in \a queue, splits it into per-stripe sub-lists, invokes
+ * of pages in @queue, splits it into per-stripe sub-lists, invokes
  * cl_io_submit() on underlying devices to submit sub-lists, and then splices
  * everything back.
  *
@@ -1413,6 +1623,10 @@ static int lov_dio_submit(const struct lu_env *env,
  * not-memory cleansing context), and in case of memory shortage, these
  * pre-allocated resources are used by lov_io_submit() under
  * lov_device::ld_mutex mutex.
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int lov_io_submit(const struct lu_env *env,
 			 struct cl_io *io,
@@ -1447,7 +1661,7 @@ static int lov_io_submit(const struct lu_env *env,
 			 * the return code of cl_page_prep() at all.
 			 */
 			LASSERT(page->cp_type == CPT_TRANSIENT);
-			cl_page_completion(env, page, crt, 0);
+			cl_page_complete(env, page, crt, 0);
 			continue;
 		}
 
@@ -1493,10 +1707,11 @@ static int lov_io_submit(const struct lu_env *env,
 static int lov_io_commit_async(const struct lu_env *env,
 			       const struct cl_io_slice *ios,
 			       struct cl_page_list *queue, int from, int to,
-			       cl_commit_cbt cb)
+			       cl_commit_cbt cb, enum cl_io_priority prio)
 {
 	struct cl_page_list *plist = &lov_env_info(env)->lti_plist;
 	struct lov_io *lio = cl2lov_io(env, ios);
+	bool hp = cl_io_high_prio(prio);
 	struct lov_io_sub *sub;
 	struct cl_page *page;
 	int rc = 0;
@@ -1511,7 +1726,7 @@ static int lov_io_commit_async(const struct lu_env *env,
 		LASSERT(!IS_ERR(sub));
 		LASSERT(sub == &lio->lis_single_subio);
 		rc = cl_io_commit_async(sub->sub_env, &sub->sub_io, queue,
-					from, to, cb);
+					from, to, cb, prio);
 		RETURN(rc);
 	}
 
@@ -1541,7 +1756,8 @@ static int lov_io_commit_async(const struct lu_env *env,
 		sub = lov_sub_get(env, lio, index);
 		if (!IS_ERR(sub)) {
 			rc = cl_io_commit_async(sub->sub_env, &sub->sub_io,
-						plist, from, stripe_to, cb);
+						plist, from, stripe_to, cb,
+						prio);
 		} else {
 			rc = PTR_ERR(sub);
 			break;
@@ -1552,9 +1768,14 @@ static int lov_io_commit_async(const struct lu_env *env,
 
 		from = 0;
 
-		if (lov_comp_entry(index) !=
+		if (!hp && lov_comp_entry(index) !=
 		    lov_comp_entry(page->cp_lov_index))
-			cl_io_extent_release(sub->sub_env, &sub->sub_io);
+			cl_io_extent_release(sub->sub_env, &sub->sub_io, prio);
+	}
+
+	if (rc == 0 && hp) {
+		list_for_each_entry(sub, &lio->lis_subios, sub_list)
+			cl_io_extent_release(sub->sub_env, &sub->sub_io, prio);
 	}
 
 	/* for error case, add the page back into the qin list */
@@ -1846,14 +2067,14 @@ static const struct cl_io_operations lov_io_ops = {
 			.cio_fini      = lov_io_fini
 		}
 	},
-	.cio_read_ahead                = lov_io_read_ahead,
-	.cio_lru_reserve	       = lov_io_lru_reserve,
-	.cio_submit                    = lov_io_submit,
-	.cio_dio_submit                = lov_dio_submit,
-	.cio_commit_async              = lov_io_commit_async,
+	.cio_read_ahead_prep		= lov_io_read_ahead_prep,
+	.cio_lru_reserve		= lov_io_lru_reserve,
+	.cio_submit			= lov_io_submit,
+	.cio_dio_submit			= lov_dio_submit,
+	.cio_commit_async		= lov_io_commit_async,
 };
 
-/**
+/*
  * Empty lov io operations.
  */
 static void lov_empty_io_fini(const struct lu_env *env,
@@ -1894,7 +2115,7 @@ static void lov_empty_impossible(const struct lu_env *env,
 
 #define LOV_EMPTY_IMPOSSIBLE ((void *)lov_empty_impossible)
 
-/**
+/*
  * An io operation vector for files without stripes.
  */
 static const struct cl_io_operations lov_empty_io_ops = {
@@ -1957,7 +2178,7 @@ int lov_io_init_composite(const struct lu_env *env, struct cl_object *obj,
 	ENTRY;
 
 	INIT_LIST_HEAD(&lio->lis_active);
-	result = lov_io_slice_init(lio, lov, io);
+	result = lov_io_slice_init(env, lio, lov, io);
 	if (result)
 		GOTO(out, result);
 
@@ -1978,7 +2199,8 @@ int lov_io_init_empty(const struct lu_env *env, struct cl_object *obj,
 {
 	struct lov_object *lov = cl2lov(obj);
 	struct lov_io *lio = lov_env_io(env);
-	int result;
+	int result = 0;
+
 	ENTRY;
 
 	lio->lis_object = lov;
@@ -2087,8 +2309,17 @@ bool lov_io_layout_at_confirm(struct lov_io *lio, int entry, __u64 offset)
 		return true;
 	return false;
 }
+
 /**
+ * lov_io_layout_at() - Return the index in composite layout given file offset
+ * @lio: Pointer to struct lov_io
+ * @offset: Offset in the composite layout
+ *
  * Return the index in composite:lo_entries by the file offset
+ *
+ * Return:
+ * * %>=0 composite index where offset is located
+ * * %negative on error
  */
 int lov_io_layout_at(struct lov_io *lio, __u64 offset)
 {

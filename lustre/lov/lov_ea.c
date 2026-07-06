@@ -17,7 +17,6 @@
 
 #include <linux/math64.h>
 #include <linux/sort.h>
-#include <libcfs/libcfs.h>
 
 #include <obd_class.h>
 #include "lov_internal.h"
@@ -78,7 +77,7 @@ static int lsm_lmm_verify_v1v3(struct lov_mds_md *lmm, size_t lmm_size,
 		goto out;
 	}
 
-	if (!lov_pattern_supported(lov_pattern(pattern))) {
+	if (!lov_pattern_available(pattern)) {
 		static int nr;
 		static ktime_t time2_clear_nr;
 		ktime_t now = ktime_get();
@@ -132,7 +131,7 @@ static void lsme_free(struct lov_stripe_md_entry *lsme)
 	if (!lsme_inited(lsme) ||
 	    lsme->lsme_pattern & LOV_PATTERN_F_RELEASED ||
 	    !lov_supported_comp_magic(lsme->lsme_magic) ||
-	    !lov_pattern_supported(lov_pattern(lsme->lsme_pattern)))
+	    !lov_pattern_available(lsme->lsme_pattern))
 		stripe_count = 0;
 	for (i = 0; i < stripe_count; i++)
 		OBD_SLAB_FREE_PTR(lsme->lsme_oinfo[i], lov_oinfo_slab);
@@ -163,9 +162,19 @@ void lsm_free(struct kref *kref)
 }
 
 /**
- * Unpack a struct lov_mds_md into a struct lov_stripe_md_entry.
+ * lsme_unpack() - Unpack a struct lov_mds_md into a struct lov_stripe_md_entry.
+ * @lov: Pointer to LOV OBD
+ * @lmm: stripe info
+ * @buf_size: size of @lmm
+ * @pool_name: pool linked to stripe (optional)
+ * @inited: %true if stripe is initialized
+ * @objects: OST info for stripe
+ * @maxbytes: maximum object size [out]
  *
  * The caller should set id and extent.
+ *
+ * Returns pointer to struct lov_stripe_md_entry on success and %negative on
+ * error
  */
 static struct lov_stripe_md_entry *
 lsme_unpack(struct lov_obd *lov, struct lov_mds_md *lmm, size_t buf_size,
@@ -190,7 +199,7 @@ lsme_unpack(struct lov_obd *lov, struct lov_mds_md *lmm, size_t buf_size,
 
 	pattern = le32_to_cpu(lmm->lmm_pattern);
 	if (pattern & LOV_PATTERN_F_RELEASED || !inited ||
-	    !lov_pattern_supported(lov_pattern(pattern)))
+	    !lov_pattern_available(pattern))
 		stripe_count = 0;
 	else
 		stripe_count = le16_to_cpu(lmm->lmm_stripe_count);
@@ -626,9 +635,12 @@ lsm_unpackmd_comp_md_v1(struct lov_obd *lov, void *buf, size_t buf_size)
 		lsm->lsm_entries[i] = lsme;
 		lsme->lsme_id = le32_to_cpu(lcme->lcme_id);
 		lsme->lsme_flags = le32_to_cpu(lcme->lcme_flags);
-		if (lsme->lsme_flags & LCME_FL_NOSYNC)
-			lsme->lsme_timestamp =
-				le64_to_cpu(lcme->lcme_timestamp);
+		lsme->lsme_timestamp = lcme_timestamp_time_unpack(
+				le64_to_cpu(lcme->lcme_time_and_id));
+		lsme->lsme_mirror_link_id = lcme_timestamp_id_unpack(
+					le64_to_cpu(lcme->lcme_time_and_id));
+		lsme->lsme_dstripe_count = lcme->lcme_dstripe_count;
+		lsme->lsme_cstripe_count = lcme->lcme_cstripe_count;
 		lu_extent_le_to_cpu(&lsme->lsme_extent, &lcme->lcme_extent);
 
 		if (i == entry_count - 1) {
@@ -751,16 +763,16 @@ void dump_lsm(unsigned int level, const struct lov_stripe_md *lsm)
 				   (int)sizeof(lse->lsme_uuid), lse->lsme_uuid);
 		} else {
 			CDEBUG_LIMIT(level,
-				   DEXT ": id: %u, flags: %x, magic 0x%08X, layout_gen %u, stripe count %u, sstripe size %u, pool: ["LOV_POOLNAMEF"]\n",
+				   DEXT ": id: %u, flags: %x, magic 0x%08X, layout_gen %u, stripe count %u (%u/%u), stripe size %u, pool: ["LOV_POOLNAMEF"]\n",
 				   PEXT(&lse->lsme_extent), lse->lsme_id,
 				   lse->lsme_flags, lse->lsme_magic,
 				   lse->lsme_layout_gen, lse->lsme_stripe_count,
+				   lse->lsme_dstripe_count, lse->lsme_cstripe_count,
 				   lse->lsme_stripe_size, lse->lsme_pool_name);
 			if (!lsme_inited(lse) ||
 			    lse->lsme_pattern & LOV_PATTERN_F_RELEASED ||
 			    !lov_supported_comp_magic(lse->lsme_magic) ||
-			    !lov_pattern_supported(
-				    	lov_pattern(lse->lsme_pattern)))
+			    !lov_pattern_available(lse->lsme_pattern))
 				continue;
 			for (j = 0; j < lse->lsme_stripe_count; j++) {
 				CDEBUG_LIMIT(level,
@@ -775,6 +787,9 @@ void dump_lsm(unsigned int level, const struct lov_stripe_md *lsm)
 }
 
 /**
+ * lov_fix_ea_for_replay() - Fix EA before preparing reply
+ * @lovea: buffer holding LOV metadata
+ *
  * lmm_layout_gen overlaps stripe_offset field, it needs to be reset back when
  * sending to MDT for passing striping checks
  */

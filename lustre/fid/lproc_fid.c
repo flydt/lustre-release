@@ -17,7 +17,6 @@
 
 #define DEBUG_SUBSYSTEM S_FID
 
-#include <libcfs/libcfs.h>
 #include <linux/module.h>
 #include <obd.h>
 #include <obd_class.h>
@@ -75,7 +74,7 @@ ldebugfs_fid_write_common(const char __user *buffer, size_t count,
 	RETURN(0);
 }
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 /*
  * Server side debugfs stuff.
  */
@@ -105,6 +104,7 @@ static int
 ldebugfs_server_fid_space_seq_show(struct seq_file *m, void *unused)
 {
 	struct lu_server_seq *seq = (struct lu_server_seq *)m->private;
+
 	ENTRY;
 
 	mutex_lock(&seq->lss_mutex);
@@ -119,6 +119,7 @@ ldebugfs_server_fid_server_seq_show(struct seq_file *m, void *unused)
 {
 	struct lu_server_seq *seq = (struct lu_server_seq *)m->private;
 	struct client_obd *cli;
+
 	ENTRY;
 
 	if (seq->lss_cli) {
@@ -406,6 +407,7 @@ static ssize_t fldb_seq_write(struct file *file, const char __user *buf,
 	char			 _buffer[MAX_FID_RANGE_STRLEN];
 	char			*buffer = _buffer;
 	char *tmp;
+
 	ENTRY;
 
 	param = seq->private;
@@ -479,7 +481,7 @@ const struct file_operations seq_fld_debugfs_seq_fops = {
 	.release = fldb_seq_release,
 };
 
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 /* Client side debugfs stuff */
 static ssize_t
@@ -582,15 +584,16 @@ ldebugfs_client_fid_server_seq_show(struct seq_file *m, void *unused)
 {
 	struct lu_client_seq *seq = (struct lu_client_seq *)m->private;
 	struct client_obd *cli;
+
 	ENTRY;
 
 	if (seq->lcs_exp) {
 		cli = &seq->lcs_exp->exp_obd->u.cli;
 		seq_printf(m, "%s\n", cli->cl_target_uuid.uuid);
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	} else {
 		seq_printf(m, "%s\n", seq->lcs_srv->lss_name);
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 	}
 
 	RETURN(0);

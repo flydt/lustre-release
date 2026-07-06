@@ -93,7 +93,8 @@ struct svc_nego_data {
 };
 
 static int do_svc_downcall(gss_buffer_desc *out_handle, struct svc_cred *cred,
-			   gss_OID mechoid, gss_buffer_desc *ctx_token)
+			   gss_OID mechoid, gss_buffer_desc *ctx_token,
+			   char *nodemap)
 {
 	struct rsc_downcall_data *rsc_dd;
 	int blen, fd, size, rc = -1;
@@ -130,6 +131,13 @@ static int do_svc_downcall(gss_buffer_desc *out_handle, struct svc_cred *cred,
 	if (snprintf(rsc_dd->scd_mechname, sizeof(rsc_dd->scd_mechname),
 		     "%s", mechname) >= sizeof(rsc_dd->scd_mechname))
 		goto out;
+	if (nodemap && nodemap[0] != '\0') {
+		if (snprintf(rsc_dd->scd_nmname, sizeof(rsc_dd->scd_nmname),
+			     "%s", nodemap) >= sizeof(rsc_dd->scd_nmname))
+			goto out;
+	} else {
+		rsc_dd->scd_nmname[0] = '\0';
+	}
 
 	bp = rsc_dd->scd_val;
 	gss_buffer_write(&bp, &blen, out_handle->value, out_handle->length);
@@ -312,22 +320,23 @@ static int lookup_id(gss_name_t client_name, char *princ, lnet_nid_t nid,
 	return lookup_localname(client_name, princ, nid, uid);
 }
 
-static int
-get_ids(gss_name_t client_name, gss_OID mech, struct svc_cred *cred,
-	lnet_nid_t nid, uint32_t lustre_svc)
+static int get_ids(gss_name_t client_name, gss_OID mech, struct svc_cred *cred,
+		   lnet_nid_t nid, uint32_t lustre_svc, char *nm_buf,
+		   size_t nm_buflen)
 {
-	u_int32_t	maj_stat, min_stat;
-	gss_buffer_desc	name;
-	char		*sname, *host, *realm;
-	const int	namebuf_size = 512;
-	char		namebuf[namebuf_size];
-	int		res = -1;
-	gss_OID		name_type = GSS_C_NO_OID;
-	struct passwd	*pw;
+	char *sname, *host, *realm, *service_nm = NULL;
+	gss_OID name_type = GSS_C_NO_OID;
+	u_int32_t maj_stat, min_stat;
+	const int max_namelen = 512;
+	char hostname[max_namelen];
+	gss_buffer_desc name;
+	struct passwd *pw;
+	int res = -1;
 
 	cred->cr_remote = 0;
 	cred->cr_usr_root = cred->cr_usr_mds = cred->cr_usr_oss = 0;
 	cred->cr_uid = cred->cr_mapped_uid = cred->cr_gid = -1;
+	nm_buf[0] = '\0';
 
 	maj_stat = gss_display_name(&min_stat, client_name, &name, &name_type);
 	if (maj_stat != GSS_S_COMPLETE) {
@@ -370,25 +379,56 @@ get_ids(gss_name_t client_name, gss_OID mech, struct svc_cred *cred,
 		goto out_free;
 	}
 
+	/* No host for GSSD_SERVICE_ROLE, just <NODEMAP_NAME> */
+	if (strcmp(sname, GSSD_SERVICE_ROLE) == 0) {
+		service_nm = host;
+		host = NULL;
+		if (nm_buflen < LUSTRE_NODEMAP_NAME_LENGTH + 1 ||
+		    strlen(service_nm) > LUSTRE_NODEMAP_NAME_LENGTH) {
+			printerr(LL_ERR, "invalid creds %s/%s@%s from %s\n",
+				 sname, service_nm, realm, libcfs_nid2str(nid));
+			goto out_free;
+		}
+		snprintf(nm_buf, nm_buflen, "%s", service_nm);
+	}
+
 	/* 1. check host part */
 	if (host) {
-		if (lnet_nid2hostname(nid, namebuf, namebuf_size)) {
+		/* host part is in the form <HOSTNAME>/<NODEMAP_NAME> */
+		service_nm = strchr(host, '/');
+		if (!service_nm)
+			goto hostcheck;
+
+		*service_nm++ = '\0';
+		if (nm_buflen < LUSTRE_NODEMAP_NAME_LENGTH + 1 ||
+		    strlen(service_nm) > LUSTRE_NODEMAP_NAME_LENGTH) {
+			/* ignore invalid nm name, could be something else */
+			*(service_nm - 1) = '/';
+			service_nm = NULL;
+			goto hostcheck;
+		}
+		snprintf(nm_buf, nm_buflen, "%s", service_nm);
+
+hostcheck:
+		if (lnet_nid2hostname(nid, hostname, max_namelen)) {
 			printerr(LL_ERR,
-				 "ERROR: failed to resolve hostname for %s/%s@%s from %s\n",
-				 sname, host, realm, libcfs_nid2str(nid));
+				 "ERROR: failed to resolve hostname for %s/%s%s%s@%s from %s\n",
+				 sname, host, service_nm ? "/" : "",
+				 service_nm ?: "", realm, libcfs_nid2str(nid));
 			goto out_free;
 		}
 
-		if (strcasecmp(host, namebuf)) {
+		if (strcasecmp(host, hostname)) {
 			printerr(LL_ERR,
-				 "ERROR: %s/%s@%s claimed hostname doesn't match %s, nid %s\n",
-				 sname, host, realm,
-				 namebuf, libcfs_nid2str(nid));
+				 "ERROR: %s/%s%s%s@%s claimed hostname doesn't match %s, nid %s\n",
+				 sname, host, service_nm ? "/" : "",
+				 service_nm ?: "", realm,
+				 hostname, libcfs_nid2str(nid));
 			goto out_free;
 		}
 	} else {
-		if (!strcmp(sname, GSSD_SERVICE_MDS) ||
-		    !strcmp(sname, GSSD_SERVICE_OSS)) {
+		if (strcmp(sname, GSSD_SERVICE_MDS) == 0 ||
+		    strcmp(sname, GSSD_SERVICE_OSS) == 0) {
 			printerr(LL_ERR,
 				 "ERROR: %s@%s from %s doesn't bind with hostname\n",
 				 sname, realm, libcfs_nid2str(nid));
@@ -406,9 +446,10 @@ get_ids(gss_name_t client_name, gss_OID mech, struct svc_cred *cred,
 			/* Prevent access to unmapped user from remote realm */
 			if (cred->cr_mapped_uid == -1) {
 				printerr(LL_ERR,
-					 "ERROR: %s%s%s@%s from %s is remote but without mapping\n",
+					 "ERROR: %s%s%s%s%s@%s from %s is remote but without mapping\n",
 					 sname, host ? "/" : "",
-					 host ? host : "", realm,
+					 host ?: "", service_nm ? "/" : "",
+					 service_nm ?: "", realm,
 					 libcfs_nid2str(nid));
 				break;
 			}
@@ -417,8 +458,9 @@ get_ids(gss_name_t client_name, gss_OID mech, struct svc_cred *cred,
 
 		/* Now we know we are dealing with a local realm */
 
-		if (!strcmp(sname, LUSTRE_ROOT_NAME) ||
-		    !strcmp(sname, GSSD_SERVICE_HOST)) {
+		if (strcmp(sname, LUSTRE_ROOT_NAME) == 0 ||
+		    strcmp(sname, GSSD_SERVICE_HOST) == 0 ||
+		    strcmp(sname, GSSD_SERVICE_ROLE) == 0) {
 			cred->cr_uid = 0;
 			cred->cr_usr_root = 1;
 			goto valid;
@@ -447,8 +489,10 @@ get_ids(gss_name_t client_name, gss_OID mech, struct svc_cred *cred,
 				 sname, cred->cr_uid);
 			goto valid;
 		}
-		printerr(LL_ERR, "ERROR: invalid user, %s/%s@%s from %s\n",
-			 sname, host, realm, libcfs_nid2str(nid));
+		printerr(LL_ERR, "ERROR: invalid user, %s%s%s%s%s@%s from %s\n",
+			 sname, host ? "/" : "", host ?: "",
+			 service_nm ? "/" : "", service_nm ?: "",
+			 realm, libcfs_nid2str(nid));
 		break;
 
 valid:
@@ -461,8 +505,9 @@ valid:
 		}
 		fallthrough;
 	case LUSTRE_GSS_SVC_OSS:
-		if (!strcmp(sname, LUSTRE_ROOT_NAME) ||
-		    !strcmp(sname, GSSD_SERVICE_HOST)) {
+		if (strcmp(sname, LUSTRE_ROOT_NAME) == 0 ||
+		    strcmp(sname, GSSD_SERVICE_HOST) == 0 ||
+		    strcmp(sname, GSSD_SERVICE_ROLE) == 0) {
 			cred->cr_uid = 0;
 			cred->cr_usr_root = 1;
 		} else if (!strcmp(sname, GSSD_SERVICE_MDS)) {
@@ -490,12 +535,105 @@ valid:
 
 out_free:
 	if (!res)
-		printerr(LL_WARN, "%s: authenticated %s%s%s@%s from %s\n",
+		printerr(LL_WARN, "%s: authenticated %s%s%s%s%s@%s from %s\n",
 			 lustre_svc_name[lustre_svc], sname,
-			 host ? "/" : "", host ? host : "", realm,
-			 libcfs_nid2str(nid));
+			 host ? "/" : "", host ?: "",
+			 service_nm ? "/" : "", service_nm ?: "",
+			 realm, libcfs_nid2str(nid));
 	free(sname);
 	return res;
+}
+
+/**
+ * nodemap_lookup_by_sha() - Send a nodemap ioctl that takes the sha256 of name
+ *			     as input and receives a nodemap name in the reply.
+ * @sha:		 sha256 of nodemap name
+ * @nodemap_name:	 buffer to store returned nodemap name
+ * @nodemap_name_bufsz:	 size of the nodemap_name buffer
+ *
+ * Return:
+ * * %0		success
+ * * %-errno	on failure
+ */
+int nodemap_lookup_by_sha(gss_buffer_desc *sha, char *nodemap_name,
+			  int nodemap_name_bufsz)
+{
+	struct lustre_cfg_bufs bufs;
+	struct lustre_cfg *lcfg = NULL;
+	struct obd_ioctl_data data;
+	char rawbuf[MAX_IOC_BUFLEN];
+	char *buf = rawbuf;
+	int rc;
+
+	if (!sha->value || !sha->length || !nodemap_name ||
+	    nodemap_name_bufsz < LUSTRE_NODEMAP_NAME_LENGTH + 1)
+		return -EINVAL;
+
+	llapi_register_ioc_dev(OBD_DEV_ID, OBD_DEV_PATH);
+	if (srv_ioc_dev < 0) {
+		rc = set_srv_ioc_dev();
+		if (rc < 0) {
+			printerr(LL_ERR, "no device for ioctl: %s\n",
+				 strerror(-rc));
+			goto out;
+		}
+	}
+
+	memset(&data, 0, sizeof(data));
+	data.ioc_dev = srv_ioc_dev;
+	data.ioc_version = OBD_IOCTL_VERSION;
+
+	lustre_cfg_bufs_reset(&bufs, NULL);
+	lustre_cfg_bufs_set(&bufs, 1, sha->value, sha->length);
+
+	lcfg = malloc(lustre_cfg_len(bufs.lcfg_bufcount, bufs.lcfg_buflen));
+	if (!lcfg) {
+		errno = ENOMEM;
+		rc = -errno;
+		goto out;
+	}
+	lustre_cfg_init(lcfg, LCFG_NODEMAP_LOOKUP_SHA, &bufs);
+	rc = lustre_cfg_sanity_check(lcfg, lustre_cfg_len(bufs.lcfg_bufcount,
+							  bufs.lcfg_buflen));
+	if (rc)
+		goto out;
+	data.ioc_type = LUSTRE_CFG_TYPE;
+	data.ioc_plen1 = lustre_cfg_len(lcfg->lcfg_bufcount,
+					lcfg->lcfg_buflens);
+	data.ioc_pbuf1 = (void *)lcfg;
+
+	memset(buf, 0, sizeof(rawbuf));
+	rc = llapi_ioctl_pack(&data, &buf, sizeof(rawbuf));
+	if (rc) {
+		printerr(LL_ERR, "invalid ioctl input: %s\n", strerror(-rc));
+		goto out;
+	}
+
+	rc = l_ioctl(OBD_DEV_ID, OBD_IOC_NODEMAP, buf);
+	if (rc < 0) {
+		rc = -errno;
+		printerr(LL_ERR, "nodemap ioctl failed: %s\n", strerror(-rc));
+		goto out;
+	}
+
+	rc = llapi_ioctl_unpack(&data, buf, sizeof(rawbuf));
+	if (rc) {
+		printerr(LL_ERR, "cannot unpack ioctl response: %s\n",
+			 strerror(-rc));
+		goto out;
+	}
+
+	if (data.ioc_plen1 < LUSTRE_NODEMAP_NAME_LENGTH + 1) {
+		rc = -EINVAL;
+		goto out;
+	}
+	memcpy(nodemap_name, data.ioc_pbuf1, LUSTRE_NODEMAP_NAME_LENGTH + 1);
+
+out:
+	/* close OBD_DEV_ID now that we do not need it anymore */
+	llapi_unregister_ioc_dev(OBD_DEV_ID);
+	free(lcfg);
+	return rc;
 }
 
 static int handle_sk(struct svc_nego_data *snd)
@@ -505,12 +643,13 @@ static int handle_sk(struct svc_nego_data *snd)
 	struct svc_cred cred;
 	gss_buffer_desc bufs[SK_INIT_BUFFERS];
 	gss_buffer_desc remote_pub_key = GSS_C_EMPTY_BUFFER;
-	char *target;
+	char *target, *nmname_out = NULL;
 	uint32_t rc = GSS_S_DEFECTIVE_TOKEN;
 	uint32_t version;
 	uint32_t flags;
-	int i;
-	int attempts = 0;
+	void *user_keys = NULL;
+	void *keyp = NULL;
+	int attempts = 0, i, ret;
 
 	printerr(LL_DEBUG, "Handling sk request\n");
 	memset(bufs, 0, sizeof(gss_buffer_desc) * SK_INIT_BUFFERS);
@@ -552,7 +691,29 @@ static int handle_sk(struct svc_nego_data *snd)
 	}
 	memcpy(&flags, bufs[SK_INIT_FLAGS].value, sizeof(flags));
 
-	skc = sk_create_cred(target, snd->nm_name, be32toh(flags));
+	/* Check that the cluster hash matches the hash of nodemap name */
+	rc = sk_verify_hash(snd->nm_name, EVP_sha256(), &bufs[SK_INIT_NODEMAP]);
+	if (rc != GSS_S_COMPLETE) {
+		/* sha256 of nodemap name contained in request from client does
+		 * not match nodemap inferred by server from client NID.
+		 * So try to fetch nodemap name corresponding to client sha256.
+		 */
+		ret = nodemap_lookup_by_sha(&bufs[SK_INIT_NODEMAP],
+					    snd->nm_name, sizeof(snd->nm_name));
+		if (ret) {
+			printerr(LL_ERR,
+				 "Cluster hash failed validation: 0x%x\n", rc);
+			goto cleanup_buffers;
+		}
+	}
+	nmname_out = snd->nm_name;
+	printerr(LL_DEBUG, "Using nodemap name %s for authentication\n",
+		 snd->nm_name);
+
+create_cred:
+	sk_free_cred(skc);
+	skc = sk_create_cred(target, snd->nm_name, NULL, be32toh(flags),
+			     &user_keys, &keyp);
 	if (!skc) {
 		printerr(LL_ERR, "Failed to create sk credentials\n");
 		goto cleanup_buffers;
@@ -567,7 +728,7 @@ static int handle_sk(struct svc_nego_data *snd)
 		printerr(LL_ERR,
 			 "Peer DHKE prime does not meet the size required by keyfile: %zd bits\n",
 			 skc->sc_p.length * 8);
-		goto cleanup_buffers;
+		goto create_cred;
 	}
 
 	/* Throw out the p from the server and use the wire data */
@@ -579,7 +740,7 @@ static int handle_sk(struct svc_nego_data *snd)
 	if (bufs[SK_INIT_RANDOM].length !=
 	    sizeof(skc->sc_kctx.skc_peer_random)) {
 		printerr(LL_ERR, "Invalid size for client random\n");
-		goto cleanup_buffers;
+		goto create_cred;
 	}
 
 	memcpy(&skc->sc_kctx.skc_peer_random, bufs[SK_INIT_RANDOM].value,
@@ -597,14 +758,13 @@ static int handle_sk(struct svc_nego_data *snd)
 	if (rc != GSS_S_COMPLETE) {
 		printerr(LL_ERR, "HMAC verification error: 0x%x from peer %s\n",
 			 rc, libcfs_nid2str((lnet_nid_t)snd->nid));
-		goto cleanup_partial;
-	}
-
-	/* Check that the cluster hash matches the hash of nodemap name */
-	rc = sk_verify_hash(snd->nm_name, EVP_sha256(), &skc->sc_nodemap_hash);
-	if (rc != GSS_S_COMPLETE) {
-		printerr(LL_ERR, "Cluster hash failed validation: 0x%x\n", rc);
-		goto cleanup_partial;
+		skc->sc_p.value = NULL;
+		skc->sc_p.length = 0;
+		skc->sc_nodemap_hash.value = NULL;
+		skc->sc_nodemap_hash.length = 0;
+		skc->sc_hmac.value = NULL;
+		skc->sc_hmac.length = 0;
+		goto create_cred;
 	}
 
 redo:
@@ -701,7 +861,8 @@ redo:
 	if (skc->sc_flags & LGSS_ROOT_CRED_OST)
 		cred.cr_usr_oss = 1;
 
-	do_svc_downcall(&snd->out_handle, &cred, snd->mech, &snd->ctx_token);
+	do_svc_downcall(&snd->out_handle, &cred, snd->mech, &snd->ctx_token,
+			nmname_out);
 
 	/* cleanup ctx_token, out_tok is cleaned up in handle_channel_request */
 	if (remote_pub_key.length != 0) {
@@ -722,6 +883,7 @@ cleanup_buffers:
 	for (i = 0; i < SK_INIT_BUFFERS; i++)
 		free(bufs[i].value);
 	sk_free_cred(skc);
+	free(user_keys);
 	snd->maj_stat = rc;
 	return -1;
 
@@ -807,7 +969,8 @@ static int handle_null(struct svc_nego_data *snd)
 	if (flags & LGSS_ROOT_CRED_OST)
 		cred.cr_usr_oss = 1;
 
-	do_svc_downcall(&snd->out_handle, &cred, snd->mech, &snd->ctx_token);
+	do_svc_downcall(&snd->out_handle, &cred, snd->mech, &snd->ctx_token,
+			NULL);
 
 	/* cleanup ctx_token, out_tok is cleaned up in handle_channel_req */
 	free(snd->ctx_token.value);
@@ -818,13 +981,14 @@ static int handle_null(struct svc_nego_data *snd)
 
 static int handle_krb(struct svc_nego_data *snd)
 {
-	u_int32_t               ret_flags;
-	gss_name_t              client_name;
-	gss_buffer_desc         ignore_out_tok = {.value = NULL};
-	gss_OID                 mech = GSS_C_NO_OID;
-	gss_cred_id_t           svc_cred;
-	u_int32_t               ignore_min_stat;
-	struct svc_cred         cred;
+	gss_buffer_desc ignore_out_tok = {.value = NULL};
+	char nodemap[LUSTRE_NODEMAP_NAME_LENGTH + 1];
+	gss_OID mech = GSS_C_NO_OID;
+	u_int32_t ignore_min_stat;
+	gss_name_t client_name;
+	gss_cred_id_t svc_cred;
+	struct svc_cred cred;
+	u_int32_t ret_flags;
 
 	svc_cred = gssd_select_svc_cred(snd->lustre_svc);
 	if (!svc_cred) {
@@ -855,13 +1019,17 @@ static int handle_krb(struct svc_nego_data *snd)
 		goto out_err;
 	}
 
-	if (get_ids(client_name, mech, &cred, snd->nid, snd->lustre_svc)) {
+	if (get_ids(client_name, mech, &cred, snd->nid,
+		    snd->lustre_svc, nodemap, sizeof(nodemap))) {
 		/* get_ids() prints error msg */
 		snd->maj_stat = GSS_S_BAD_NAME; /* XXX ? */
 		gss_release_name(&ignore_min_stat, &client_name);
 		goto out_err;
 	}
 	gss_release_name(&ignore_min_stat, &client_name);
+	if (nodemap[0])
+		printerr(LL_DEBUG, "using nodemap %s for authentication\n",
+			 nodemap);
 
 	/* Context complete. Pass handle_seq in out_handle to use
 	 * for context lookup in the kernel. */
@@ -884,7 +1052,8 @@ static int handle_krb(struct svc_nego_data *snd)
 		gss_delete_sec_context(&ignore_min_stat, &snd->ctx,
 				       &ignore_out_tok);
 
-	do_svc_downcall(&snd->out_handle, &cred, mech, &snd->ctx_token);
+	do_svc_downcall(&snd->out_handle, &cred, mech,
+			&snd->ctx_token, nodemap);
 	/* We no longer need the context token */
 	if (snd->ctx_token.length)
 		(void)gss_release_buffer(&ignore_min_stat, &snd->ctx_token);

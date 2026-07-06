@@ -20,6 +20,7 @@
 #define DEBUG_SUBSYSTEM S_LFSCK
 
 #include <linux/kthread.h>
+#include <lustre_compat/linux/dcache.h>
 #include <uapi/linux/lustre/lustre_idl.h>
 #include <lustre_disk.h>
 #include <dt_object.h>
@@ -37,8 +38,16 @@
 #define SCRUB_BAD_OIMAP_DECAY_INTERVAL	60
 
 /**
- * Add mapping into scrub.os_inconsistent_item list, and the OI scrub thread
- * will fix them in priority.
+ * osd_scrub_oi_insert() - Add mapping into scrub.os_inconsistent_item list,
+ *                         and the OI scrub thread will fix them in priority.
+ * @dev: OSD device
+ * @fid: FID for object (being inserted)
+ * @id: Target osd_indode_id
+ * @insert: insert(1) or update(0) mapping
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 int osd_scrub_oi_insert(struct osd_device *dev, const struct lu_fid *fid,
 			struct osd_inode_id *id, int insert)
@@ -164,11 +173,21 @@ static inline int osd_scrub_has_window(struct lustre_scrub *scrub,
 }
 
 /**
- * update/insert/delete the specified OI mapping (@fid @id) according to the ops
+ * osd_scrub_refresh_mapping() - update/insert/delete the specified OI mapping
+ *                               (@fid @id) according to the ops
+ * @info: thread environment
+ * @dev: OSD device
+ * @fid: FID for object (OI mapping is being updated/insert/deleted)
+ * @id: Target osd_indode_id
+ * @ops: Operation
+ * @force: %True actual scrub will be done
+ * @flags: flags for operation
+ * @exist: if target is already there [out]
  *
- * \retval   1, changed nothing
- * \retval   0, changed successfully
- * \retval -ve, on error
+ * Return:
+ * * %1 changed nothing
+ * * %0 changed successfully
+ * * %negative on error
  */
 int osd_scrub_refresh_mapping(struct osd_thread_info *info,
 			      struct osd_device *dev,
@@ -523,8 +542,14 @@ again:
 }
 
 /**
- * \retval SCRUB_NEXT_OSTOBJ_OLD: FID-on-OST
- * \retval 0: FID-on-MDT
+ * osd_scrub_check_local_fldb() - Check local fldb
+ * @info: thread environment
+ * @dev: OSD device
+ * @fid: unused
+ *
+ * Return:
+ * * %SCRUB_NEXT_OSTOBJ_OLD FID-on-OST
+ * * %0 FID-on-MDT
  */
 static int osd_scrub_check_local_fldb(struct osd_thread_info *info,
 				      struct osd_device *dev,
@@ -646,11 +671,9 @@ static int osd_iit_iget(struct osd_thread_info *info, struct osd_device *dev,
 		RETURN(SCRUB_NEXT_CONTINUE);
 
 	 /* Skip project quota inode since it is greater than s_first_ino. */
-#ifdef HAVE_PROJECT_QUOTA
 	if (ldiskfs_has_feature_project(sb) &&
 	    pos == le32_to_cpu(LDISKFS_SB(sb)->s_es->s_prj_quota_inum))
 		RETURN(SCRUB_NEXT_CONTINUE);
-#endif
 
 	osd_id_gen(lid, pos, OSD_OII_NOGEN);
 	inode = osd_iget(info, dev, lid, LDISKFS_IGET_NO_CHECKS);
@@ -1311,7 +1334,6 @@ noenv:
 typedef int (*scandir_t)(struct osd_thread_info *, struct osd_device *,
 			 struct dentry *, filldir_t filldir);
 
-#ifdef HAVE_FILLDIR_USE_CTX
 static FILLDIR_TYPE
 osd_ios_varfid_fill(struct dir_context *buf, const char *name, int namelen,
 		    loff_t offset, __u64 ino, unsigned int d_type);
@@ -1327,16 +1349,6 @@ osd_ios_dl_fill(struct dir_context *buf, const char *name, int namelen,
 static FILLDIR_TYPE
 osd_ios_uld_fill(struct dir_context *buf, const char *name, int namelen,
 		 loff_t offset, __u64 ino, unsigned int d_type);
-#else
-static int osd_ios_varfid_fill(void *buf, const char *name, int namelen,
-			       loff_t offset, __u64 ino, unsigned int d_type);
-static int osd_ios_lf_fill(void *buf, const char *name, int namelen,
-			   loff_t offset, __u64 ino, unsigned int d_type);
-static int osd_ios_dl_fill(void *buf, const char *name, int namelen,
-			   loff_t offset, __u64 ino, unsigned int d_type);
-static int osd_ios_uld_fill(void *buf, const char *name, int namelen,
-			    loff_t offset, __u64 ino, unsigned int d_type);
-#endif
 
 static int
 osd_ios_general_scan(struct osd_thread_info *info, struct osd_device *dev,
@@ -1844,10 +1856,22 @@ log:
 
 /**
  * osd_ios_scan_one() - check/fix LMA FID and OI entry for one inode
+ * @info: is the osd thread info passed by the caller
+ * @dev: OSD device
+ * @parent: Parent directory inode
+ * @inode: Inode for File/dir which is getting scanned
+ * @fid: FID for @inode
+ * @name: Name of File/dir
+ * @namelen: Length of @name
+ * @flags: Flags for scan
  *
- * The passed \a inode's \a fid is verified against the LMA FID. If the \a fid
+ * The passed @inode's @fid is verified against the LMA FID. If the @fid
  * is NULL or is empty the IGIF FID is used. The FID is verified in the OI to
  * reference the inode, or fixed if it is missing or references another inode.
+ *
+ * * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int
 osd_ios_scan_one(struct osd_thread_info *info, struct osd_device *dev,
@@ -1961,17 +1985,14 @@ osd_ios_scan_one(struct osd_thread_info *info, struct osd_device *dev,
 	RETURN(rc);
 }
 
-/**
+/*
  * It scans the /lost+found, and for the OST-object (with filter_fid
  * or filter_fid_18_23), move them back to its proper /O/<seq>/d<x>.
  */
-#ifdef HAVE_FILLDIR_USE_CTX
 static FILLDIR_TYPE do_osd_ios_lf_fill(struct dir_context *buf,
-#else
-static int osd_ios_lf_fill(void *buf,
-#endif
-			   const char *name, int namelen,
-			   loff_t offset, __u64 ino, unsigned int d_type)
+				       const char *name, int namelen,
+				       loff_t offset, u64 ino,
+				       unsigned int d_type)
 {
 	struct osd_ios_filldir_buf *fill_buf =
 		(struct osd_ios_filldir_buf *)buf;
@@ -1993,7 +2014,7 @@ static int osd_ios_lf_fill(void *buf,
 		RETURN(0);
 
 	scrub->os_lf_scanned++;
-	child = osd_lookup_one_len(dev, name, parent, namelen);
+	child = osd_lookup_noperm(dev, &QSTR_LEN(name, namelen), parent);
 	if (IS_ERR(child)) {
 		rc = PTR_ERR(child);
 		CDEBUG(D_LFSCK, "%s: cannot lookup child '%.*s': rc = %d\n",
@@ -2048,13 +2069,10 @@ put:
 }
 WRAP_FILLDIR_FN(do_, osd_ios_lf_fill)
 
-#ifdef HAVE_FILLDIR_USE_CTX
 static FILLDIR_TYPE do_osd_ios_varfid_fill(struct dir_context *buf,
-#else
-static int osd_ios_varfid_fill(void *buf,
-#endif
-			       const char *name, int namelen,
-			       loff_t offset, __u64 ino, unsigned int d_type)
+					   const char *name, int namelen,
+					   loff_t offset, u64 ino,
+					   unsigned int d_type)
 {
 	struct osd_ios_filldir_buf *fill_buf =
 		(struct osd_ios_filldir_buf *)buf;
@@ -2069,7 +2087,8 @@ static int osd_ios_varfid_fill(void *buf,
 	if (name[0] == '.')
 		RETURN(0);
 
-	child = osd_lookup_one_len(dev, name, fill_buf->oifb_dentry, namelen);
+	child = osd_lookup_noperm(dev, &QSTR_LEN(name, namelen),
+				  fill_buf->oifb_dentry);
 	if (IS_ERR(child))
 		RETURN(PTR_ERR(child));
 
@@ -2085,13 +2104,10 @@ static int osd_ios_varfid_fill(void *buf,
 }
 WRAP_FILLDIR_FN(do_, osd_ios_varfid_fill)
 
-#ifdef HAVE_FILLDIR_USE_CTX
 static FILLDIR_TYPE do_osd_ios_dl_fill(struct dir_context *buf,
-#else
-static int osd_ios_dl_fill(void *buf,
-#endif
-			   const char *name, int namelen,
-			   loff_t offset, __u64 ino, unsigned int d_type)
+				       const char *name, int namelen,
+				       loff_t offset, u64 ino,
+				       unsigned int d_type)
 {
 	struct osd_ios_filldir_buf *fill_buf =
 		(struct osd_ios_filldir_buf *)buf;
@@ -2118,7 +2134,8 @@ static int osd_ios_dl_fill(void *buf,
 	if (map->olm_name == NULL)
 		RETURN(0);
 
-	child = osd_lookup_one_len(dev, name, fill_buf->oifb_dentry, namelen);
+	child = osd_lookup_noperm(dev, &QSTR_LEN(name, namelen),
+				  fill_buf->oifb_dentry);
 	if (IS_ERR(child))
 		RETURN(PTR_ERR(child));
 
@@ -2131,13 +2148,10 @@ static int osd_ios_dl_fill(void *buf,
 }
 WRAP_FILLDIR_FN(do_, osd_ios_dl_fill)
 
-#ifdef HAVE_FILLDIR_USE_CTX
 static FILLDIR_TYPE do_osd_ios_uld_fill(struct dir_context *buf,
-#else
-static int osd_ios_uld_fill(void *buf,
-#endif
-			    const char *name, int namelen,
-			    loff_t offset, __u64 ino, unsigned int d_type)
+					const char *name, int namelen,
+					loff_t offset, u64 ino,
+					unsigned int d_type)
 {
 	struct osd_ios_filldir_buf *fill_buf =
 		(struct osd_ios_filldir_buf *)buf;
@@ -2153,7 +2167,8 @@ static int osd_ios_uld_fill(void *buf,
 	if (name[0] != '[')
 		RETURN(0);
 
-	child = osd_lookup_one_len(dev, name, fill_buf->oifb_dentry, namelen);
+	child = osd_lookup_noperm(dev, &QSTR_LEN(name, namelen),
+				  fill_buf->oifb_dentry);
 	if (IS_ERR(child))
 		RETURN(PTR_ERR(child));
 
@@ -2171,13 +2186,10 @@ static int osd_ios_uld_fill(void *buf,
 }
 WRAP_FILLDIR_FN(do_, osd_ios_uld_fill)
 
-#ifdef HAVE_FILLDIR_USE_CTX
 static FILLDIR_TYPE do_osd_ios_root_fill(struct dir_context *buf,
-#else
-static int osd_ios_root_fill(void *buf,
-#endif
-			     const char *name, int namelen,
-			     loff_t offset, __u64 ino, unsigned int d_type)
+					 const char *name, int namelen,
+					 loff_t offset, u64 ino,
+					 unsigned int d_type)
 {
 	struct osd_ios_filldir_buf *fill_buf =
 		(struct osd_ios_filldir_buf *)buf;
@@ -2204,7 +2216,8 @@ static int osd_ios_root_fill(void *buf,
 	if (map->olm_name == NULL)
 		RETURN(0);
 
-	child = osd_lookup_one_len(dev, name, fill_buf->oifb_dentry, namelen);
+	child = osd_lookup_noperm(dev, &QSTR_LEN(name, namelen),
+				  fill_buf->oifb_dentry);
 	if (IS_ERR(child))
 		RETURN(PTR_ERR(child));
 	else if (!child->d_inode)
@@ -2290,8 +2303,7 @@ osd_ios_ROOT_scan(struct osd_thread_info *info, struct osd_device *dev,
 	spin_lock(&scrub->os_lock);
 	scrub->os_convert_igif = 1;
 	spin_unlock(&scrub->os_lock);
-	child = osd_lookup_one_len_unlocked(dev, dot_lustre_name, dentry,
-					    strlen(dot_lustre_name));
+	child = osd_lookup_noperm_unlocked(dev, &QSTR(dot_lustre_name), dentry);
 	if (IS_ERR(child)) {
 		if (PTR_ERR(child) != -ENOENT)
 			RETURN(PTR_ERR(child));
@@ -2365,8 +2377,7 @@ osd_ios_OBJECTS_scan(struct osd_thread_info *info, struct osd_device *dev,
 			RETURN(rc);
 	}
 
-	child = osd_lookup_one_len_unlocked(dev, ADMIN_USR, dentry,
-					    strlen(ADMIN_USR));
+	child = osd_lookup_noperm_unlocked(dev, &QSTR(ADMIN_USR), dentry);
 	if (IS_ERR(child)) {
 		rc = PTR_ERR(child);
 	} else {
@@ -2381,8 +2392,7 @@ osd_ios_OBJECTS_scan(struct osd_thread_info *info, struct osd_device *dev,
 	if (rc != 0 && rc != -ENOENT)
 		GOTO(out, rc);
 
-	child = osd_lookup_one_len_unlocked(dev, ADMIN_GRP, dentry,
-					    strlen(ADMIN_GRP));
+	child = osd_lookup_noperm_unlocked(dev, &QSTR(ADMIN_GRP), dentry);
 	if (IS_ERR(child))
 		GOTO(out, rc = PTR_ERR(child));
 
@@ -2446,9 +2456,9 @@ static void osd_initial_OI_scrub(struct osd_thread_info *info,
 			continue;
 		}
 
-		child = osd_lookup_one_len_unlocked(dev, map->olm_name,
-						    osd_sb(dev)->s_root,
-						    map->olm_namelen);
+		child = osd_lookup_noperm_unlocked(dev, &QSTR_LEN(map->olm_name,
+						   map->olm_namelen),
+						   osd_sb(dev)->s_root);
 		if (PTR_ERR(child) == -ENOENT ||
 		    (!IS_ERR(child) && !child->d_inode))
 			osd_scrub_refresh_mapping(info, dev, &map->olm_fid,
@@ -2941,7 +2951,15 @@ static __u64 osd_otable_it_store(const struct lu_env *env,
 }
 
 /**
- * Set the OSD layer iteration start position as the specified hash.
+ * osd_otable_it_load() - Set the OSD layer iteration start position as the
+ *                        specified hash.
+ * @env: Lustre environment
+ * @di: osd iterator
+ * @hash: Hash to start
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int osd_otable_it_load(const struct lu_env *env,
 			      const struct dt_it *di, __u64 hash)
@@ -3148,9 +3166,13 @@ static int osd_scan_ml_file(const struct lu_env *env, struct osd_device *dev,
 	    ((strlen(name) != oie->oie_dirent->oied_namelen) ||
 	     strncmp(oie->oie_dirent->oied_name, name,
 		     oie->oie_dirent->oied_namelen) != 0)) {
-		CDEBUG(D_LFSCK, "%s: the file O/%s/%s/%s is corrupted\n",
-		       osd_name(dev), info->oti_seq_dirent->oied_name,
+		CDEBUG(D_LFSCK, "%s: the file O/%.*s/%.*s/%.*s is corrupted\n",
+		       osd_name(dev),
+		       info->oti_seq_dirent->oied_namelen,
+		       info->oti_seq_dirent->oied_name,
+		       info->oti_dir_dirent->oied_namelen,
 		       info->oti_dir_dirent->oied_name,
+		       oie->oie_dirent->oied_namelen,
 		       oie->oie_dirent->oied_name);
 
 		rc = osd_remove_ml_file(info, dev, dir, inode, oie);
@@ -3322,8 +3344,11 @@ static int osd_scan_lastid_dir(const struct lu_env *env, struct osd_device *dev,
 	if (strlen(LASTID) != oie->oie_dirent->oied_namelen ||
 	    strncmp(oie->oie_dirent->oied_name, LASTID,
 		    oie->oie_dirent->oied_namelen) != 0) {
-		CDEBUG(D_LFSCK, "%s: the file O/%s/%s is unexpected\n",
-		       osd_name(dev), info->oti_seq_dirent->oied_name,
+		CDEBUG(D_LFSCK, "%s: the file O/%.*s/%.*s is unexpected\n",
+		       osd_name(dev),
+		       info->oti_seq_dirent->oied_namelen,
+		       info->oti_seq_dirent->oied_name,
+		       oie->oie_dirent->oied_namelen,
 		       oie->oie_dirent->oied_name);
 		GOTO(out, rc = 0);
 	}
@@ -3361,12 +3386,19 @@ static int osd_scan_lastid_seq(const struct lu_env *env, struct osd_device *dev,
 	if (!S_ISDIR(inode->i_mode))
 		GOTO(out, rc = 0);
 
-	rc = kstrtoull(oie->oie_dirent->oied_name, 16, &seq);
+	if (oie->oie_dirent->oied_namelen + 1 > sizeof(info->oti_name))
+		GOTO(out, rc = -ENAMETOOLONG);
+
+	memcpy(info->oti_name, oie->oie_dirent->oied_name,
+	       oie->oie_dirent->oied_namelen);
+	info->oti_name[oie->oie_dirent->oied_namelen] = '\0';
+
+	rc = kstrtoull(info->oti_name, 16, &seq);
 	if (rc)
 		GOTO(out, rc);
 
 	if (seq < 0x1F) {
-		rc = kstrtoull(oie->oie_dirent->oied_name, 10, &seq);
+		rc = kstrtoull(info->oti_name, 10, &seq);
 		if (rc)
 			GOTO(out, rc);
 	}
@@ -3406,8 +3438,7 @@ static int osd_scan_lastid_seq(const struct lu_env *env, struct osd_device *dev,
 			 lma);
 	if (rc && rc != -ENODATA) {
 		CDEBUG(D_LFSCK, "%s: failed to get the xattr %s for O/%s/%s\n",
-		       osd_name(dev), XATTR_NAME_LMA,
-		       oie->oie_dirent->oied_name, LASTID);
+		       osd_name(dev), XATTR_NAME_LMA, info->oti_name, LASTID);
 		GOTO(out, rc);
 	}
 
@@ -3486,12 +3517,19 @@ static int osd_scan_O_seq(const struct lu_env *env, struct osd_device *dev,
 	if (!S_ISDIR(inode->i_mode))
 		GOTO(out, rc = 0);
 
-	rc = kstrtoull(oie->oie_dirent->oied_name, 16, &seq);
+	if (oie->oie_dirent->oied_namelen + 1 > sizeof(info->oti_name))
+		GOTO(out, rc = -ENAMETOOLONG);
+
+	memcpy(info->oti_name, oie->oie_dirent->oied_name,
+	       oie->oie_dirent->oied_namelen);
+	info->oti_name[oie->oie_dirent->oied_namelen] = '\0';
+
+	rc = kstrtoull(info->oti_name, 16, &seq);
 	if (rc)
 		GOTO(out, rc);
 
 	if (seq < 0x1F) {
-		rc = kstrtoull(oie->oie_dirent->oied_name, 10, &seq);
+		rc = kstrtoull(info->oti_name, 10, &seq);
 		if (rc)
 			GOTO(out, rc);
 	}
@@ -3526,4 +3564,63 @@ static int osd_scan_O_main(const struct lu_env *env, struct osd_device *dev)
 {
 	return osd_scan_dir(env, dev, dev->od_ost_map->om_root->d_inode,
 			    osd_scan_O_seq);
+}
+
+static int osd_seq_dir_helper(const struct lu_env *env,
+			       struct osd_device *osd, struct inode *dir,
+			       struct osd_it_ea *oie)
+{
+	struct osd_thread_info *info = osd_oti_get(env);
+	struct lu_fid *fid = &info->oti_fid;
+	struct inode *inode;
+	struct osd_inode_id id;
+	__u64 seq;
+	int rc = 0;
+
+	ENTRY;
+
+	osd_id_gen(&id, oie->oie_dirent->oied_ino, OSD_OII_NOGEN);
+	inode = osd_iget(info, osd, &id, 0);
+	if (IS_ERR(inode))
+		RETURN(PTR_ERR(inode));
+
+	if (!S_ISDIR(inode->i_mode))
+		GOTO(out, rc);
+
+	if (oie->oie_dirent->oied_namelen + 1 > sizeof(info->oti_name))
+		GOTO(out, rc = -ENAMETOOLONG);
+
+	memcpy(info->oti_name, oie->oie_dirent->oied_name,
+	       oie->oie_dirent->oied_namelen);
+	info->oti_name[oie->oie_dirent->oied_namelen] = '\0';
+
+	rc = kstrtoull(info->oti_name, 16, &seq);
+	if (!rc && seq >= FID_SEQ_NORMAL && seq > fid_seq(fid))
+		fid->f_seq = seq;
+
+out:
+	iput(inode);
+	RETURN(rc);
+}
+
+int osd_last_seq_get(const struct lu_env *env, struct dt_device *dt,
+		     __u64 *seq)
+{
+	struct osd_thread_info *info = osd_oti_get(env);
+	struct osd_device *osd = osd_dt_dev(dt);
+	struct lu_fid *fid = &info->oti_fid;
+	int rc;
+
+	ENTRY;
+
+	if (!osd->od_is_ost)
+		RETURN(-EINVAL);
+
+	fid_zero(fid);
+	rc = osd_scan_dir(env, osd, osd->od_ost_map->om_root->d_inode,
+			  osd_seq_dir_helper);
+	if (!rc)
+		*seq = fid_seq(fid);
+
+	RETURN(rc);
 }

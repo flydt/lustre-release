@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 #
 # Run select tests by setting ONLY, or as arguments to the script.
 # Skip specific tests by setting EXCEPT.
@@ -504,6 +504,8 @@ test_10() {
 
 	# get rid of gss context and credentials for user
 	$RUNAS $LFS flushctx -k -r $MOUNT || error "can't flush context (1)"
+	# give time for userland
+	sleep 5
 	$RUNAS grep lgssc /proc/keys
 	stack_trap restore_krb5_cred EXIT
 
@@ -513,6 +515,8 @@ test_10() {
 	# revoke session keyring for user and access to fs in the same su -
 	su - $(id -n -u $RUNAS_ID) -c "keyctl revoke @s && ls -ld $DIR/$tdir" ||
 		error "revoke + ls failed"
+	# give time for userland
+	sleep 5
 	$RUNAS grep lgssc /proc/keys
 
 	# refcount on lgssc keys should be 2
@@ -523,6 +527,8 @@ test_10() {
 
 	# get rid of gss context for user
 	$RUNAS $LFS flushctx $MOUNT || error "can't flush context (2)"
+	# give time for userland
+	sleep 5
 	$RUNAS grep lgssc /proc/keys
 	count=$($RUNAS grep lgssc /proc/keys | grep -v "Running as" | wc -l)
 	[[ $count == 0 ]] || error "remaining $count keys for user"
@@ -583,6 +589,63 @@ test_11() {
 	kdestroy
 }
 run_test 11 "KCM ccache"
+
+test_13() {
+	local count
+
+	$LFS mkdir -i 0 -c $MDSCOUNT $DIR/$tdir ||
+		error "mkdir $DIR/$tdir failed"
+	chmod 0777 $DIR/$tdir || error "chmod $DIR/$tdir failed"
+	$RUNAS ls -ld $DIR/$tdir || error "ls -ld $DIR/$tdir failed"
+	$RUNAS grep lgssc /proc/keys
+
+	# get rid of gss context and credentials for user
+	$RUNAS $LFS flushctx -k -r $MOUNT || error "can't flush context"
+	stack_trap restore_krb5_cred EXIT
+	# give time for userland
+	sleep 5
+	$RUNAS grep lgssc /proc/keys
+
+	# restore krb credentials
+	restore_krb5_cred
+
+	# unlink user keyring from session keyring, and access file system
+	su - $(id -n -u $RUNAS_ID) -c "keyctl unlink @u @s && \
+				       ls -ld $DIR/$tdir" ||
+		error "unlink + ls failed"
+	# give time for userland
+	sleep 5
+	$RUNAS grep lgssc /proc/keys
+	count=$($RUNAS grep -c lgssc /proc/keys | grep -v "Running as")
+	(( count == MDSCOUNT )) ||
+		error "expected $MDSCOUNT keys in the keyring, found $count (1)"
+
+	# unlink user keyring, and get rid of gss context and user credentials
+	su - $(id -n -u $RUNAS_ID) -c "keyctl unlink @u @s && \
+				       $LFS flushctx -k -r $MOUNT" ||
+		error "unlink + flushctx failed"
+	# give time for userland
+	sleep 5
+	$RUNAS grep lgssc /proc/keys
+	count=$($RUNAS grep -c lgssc /proc/keys | grep -v "Running as")
+	(( count == 0 )) ||
+		error "expecting 0 keys remaining, found $count"
+
+	# restore krb credentials
+	restore_krb5_cred
+
+	# unlink user keyring from session keyring, and access file system
+	su - $(id -n -u $RUNAS_ID) -c "keyctl unlink @u @s && \
+				       ls -ld $DIR/$tdir" ||
+		error "unlink + ls failed"
+	# give time for userland
+	sleep 5
+	$RUNAS grep lgssc /proc/keys
+	count=$($RUNAS grep -c lgssc /proc/keys | grep -v "Running as")
+	(( count == MDSCOUNT )) ||
+		error "expected $MDSCOUNT keys in the keyring, found $count (2)"
+}
+run_test 13 "Support unlinked user keyring"
 
 #
 # following tests will manipulate flavors and may end with any flavor set,
@@ -1038,6 +1101,78 @@ test_200() {
 	(( count < 4 )) || error "expired reverse contexts should be <= 3 (2)"
 }
 run_test 200 "check expired reverse gss contexts"
+
+cleanup_201() {
+	# unmount to get rid of old context
+	umount_client $MOUNT
+	kdestroy
+	if is_mounted $MOUNT2; then
+		umount_client $MOUNT2
+	fi
+
+	# restore original krb5.conf
+	cp -f /etc/krb5.conf.bkp /etc/krb5.conf
+	rm -f /etc/krb5.conf.bkp
+
+	# remount client
+	mount_client $MOUNT ${MOUNT_OPTS} || error "mount $MOUNT failed"
+	if is_mounted $MOUNT2; then
+		mount_client $MOUNT2 ${MOUNT_OPTS} ||
+			error "mount $MOUNT2 failed"
+	fi
+}
+
+test_201() {
+	local nid=$(lctl list_nids | grep ${NETTYPE} | head -n1)
+	local nidstr="peer_nid: ${nid},"
+	local count
+
+	lfs df -h
+	$LFS mkdir -i 0 -c 1 $DIR/$tdir || error "mkdir $DIR/$tdir failed"
+	stack_trap cleanup_201 EXIT
+
+	# unmount to get rid of old context
+	umount_client $MOUNT || error "umount $MOUNT failed"
+	kdestroy
+	if is_mounted $MOUNT2; then
+		umount_client $MOUNT2 || error "umount $MOUNT2 failed"
+	fi
+
+	# update ticket lifetime to be 90s
+	sed -i.bkp s+[^#]ticket_lifetime.*+ticket_lifetime\ =\ 90s+ \
+		/etc/krb5.conf
+	# establish new contexts
+	mount_client $MOUNT ${MOUNT_OPTS} || error "remount failed"
+	mount_client $MOUNT2 ${MOUNT_OPTS} || error "remount 2 failed"
+	lfs df -h
+
+	# have ldlm lock on first mount
+	touch $DIR/${tfile}_1
+	stack_trap "rm -f $DIR/${tfile}*" EXIT
+	# and make second mount take it
+	touch $DIR2/$tdir/file001
+
+	# wait lifetime + 30s to have expired contexts
+	echo Wait for gss contexts to expire... 120s
+	sleep 120
+
+	do_facet $SINGLEMDS $LCTL get_param -n \
+		mdt.*-MDT0000.gss.srpc_serverctx | grep "$nidstr"
+	count=$(do_facet $SINGLEMDS $LCTL get_param -n \
+		mdt.*-MDT0000.gss.srpc_serverctx | grep "$nidstr" |
+		grep -vc 'delta: -')
+	echo "found $count valid reverse contexts"
+	(( count == 0 )) || error "all contexts should have expired"
+
+	# make first mount reclaim ldlm lock
+	touch $DIR/${tfile}_2
+	$LFS df $MOUNT2
+	# this should not evict the second mount
+	client_evicted $HOSTNAME && error "client got evicted"
+
+	exit 0
+}
+run_test 201 "allow expired ctx for ldlm callback"
 
 complete_test $SECONDS
 set_flavor_all null

@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
@@ -141,11 +121,15 @@ const char *jt_cmdname(const char *func);
 
 /* lustre_param.c */
 struct param_opts;
+struct param;
+struct param_dir;
 int jt_clean_path(struct param_opts *popt, char *path);
 int jt_lcfg_getparam(int argc, char **argv);
 int jt_lcfg_setparam(int argc, char **argv);
 int jt_lcfg_listparam(int argc, char **argv);
 int jt_lcfg_setparam_client(int argc, char **argv, struct param_opts *popt);
+int jt_lctl_findparam(int argc, char **argv);
+int jt_lctl_helpparam(int argc, char **argv);
 
 /* lustre_cfg.c */
 int lcfg_set_devname(char *name);
@@ -163,6 +147,7 @@ int jt_lcfg_param(int argc, char **argv);
 int jt_lcfg_confparam(int argc, char **argv);
 int jt_lcfg_applyyaml(int argc, char **argv);
 int jt_lcfg_setparam_perm(int argc, char **argv, struct param_opts *popt);
+int yaml_get_limit_uid(const char *config);
 
 int jt_pool_cmd(int argc, char **argv);
 int jt_del_ost(int argc, char **argv);
@@ -178,9 +163,14 @@ int jt_snapshot_modify(int argc, char **argv);
 int jt_snapshot_list(int argc, char **argv);
 int jt_snapshot_mount(int argc, char **argv);
 int jt_snapshot_umount(int argc, char **argv);
+int lctl_lqa_new(int argc, char **argv);
+int lctl_lqa_add(int argc, char **argv);
+int lctl_lqa_rem(int argc, char **argv);
+int lctl_lqa_del(int argc, char **argv);
+int lctl_lqa_list(int argc, char **argv);
 #endif /* HAVE_SERVER_SUPPORT */
 int jt_nodemap_activate(int argc, char **argv);
-int jt_nodemap_add(int argc, char **argv);
+int jt_nodemap_new(int argc, char **argv);
 int jt_nodemap_del(int argc, char **argv);
 int jt_nodemap_modify(int argc, char **argv);
 int jt_nodemap_add_offset(int argc, char **argv);
@@ -192,7 +182,13 @@ int jt_nodemap_add_idmap(int argc, char **argv);
 int jt_nodemap_del_idmap(int argc, char **argv);
 int jt_nodemap_test_id(int argc, char **argv);
 int jt_nodemap_set_fileset(int argc, char **argv);
+int jt_nodemap_fileset_add(int argc, char **argv);
+int jt_nodemap_fileset_del(int argc, char **argv);
+int jt_nodemap_fileset_modify(int argc, char **argv);
+int jt_nodemap_banlist_add(int argc, char **argv);
+int jt_nodemap_banlist_del(int argc, char **argv);
 int jt_nodemap_set_sepol(int argc, char **argv);
+int jt_nodemap_set_cap(int argc, char **argv);
 int jt_nodemap_info(int argc, char **argv);
 int jt_changelog_register(int argc, char **argv);
 int jt_changelog_deregister(int argc, char **argv);

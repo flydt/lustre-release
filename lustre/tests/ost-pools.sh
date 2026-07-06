@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 #
 # Run select tests by setting ONLY, or as arguments to the script.
 # Skip specific tests by setting EXCEPT.
@@ -1400,6 +1400,8 @@ test_23b() {
 	done
 
 	df -h
+	rm -rf $POOL_ROOT
+	wait_delete_completed
 }
 run_test 23b "OST pools and OOS"
 
@@ -1603,7 +1605,7 @@ test_28() {
 	local pool="$($LFS getstripe -p $DIR/$tfile)"
 	[[ "$pool" == "$POOL" ]] ||
 		error "$tfile is in '$pool', not created on $POOL"
-	$LFS_MIGRATE -y -p $POOL2 $DIR/$tfile ||
+	$LFS migrate -p $POOL2 $DIR/$tfile ||
 		error "migrate $tfile to $POOL2 failed"
 	$LFS getstripe $DIR/$tfile
 	pool="$($LFS getstripe -p $DIR/$tfile)"
@@ -1611,7 +1613,7 @@ test_28() {
 		error "$tfile is in '$pool', not migrated to $POOL2"
 	local csum2=$(cksum $DIR/$tfile)
 	[[ "$csum" == "$csum2" ]] || error "checksum error after migration"
-	$LFS_MIGRATE -y -v $DIR/$tfile ||
+	$LFS migrate -v $DIR/$tfile ||
 		error "migrate $tfile without explicit pool failed"
 	$LFS getstripe $DIR/$tfile
 	pool="$($LFS getstripe -p $DIR/$tfile)"
@@ -1621,7 +1623,7 @@ test_28() {
 	[[ "$csum" == "$csum2" ]] || error "checksum error after pool migration"
 	stop_full_debug_logging
 }
-run_test 28 "lfs_migrate with pool name"
+run_test 28 "lfs migrate with pool name"
 
 fill_ost_pool_cnt=0
 
@@ -1937,7 +1939,7 @@ test_32() { # LU-15707
 	$LFS setstripe -p ignore $DIR/$tdir/$tfile ||
 		error "setstripe fail on $DIR/$tdir/$tfile"
 
-	! ( $LFS getstripe -p $DIR/$tdir/$tfile | egrep -q "[^ ]+" ) ||
+	! ( $LFS getstripe -p $DIR/$tdir/$tfile | grep -E -q "[^ ]+" ) ||
 		error "fail to create $DIR/$tdir/$tfile without pool"
 
 	# Test with start index

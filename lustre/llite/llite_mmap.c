@@ -11,16 +11,17 @@
  * This file is part of Lustre, http://www.lustre.org/
  */
 
-#include <linux/errno.h>
 #include <linux/delay.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
+#include <linux/errno.h>
 #include <linux/file.h>
+#include <linux/kernel.h>
+#include <linux/rwsem.h>
+#include <linux/mm.h>
+#include <lustre_compat/linux/mmap_lock.h>
 
 #define DEBUG_SUBSYSTEM S_LLITE
 
 #include "llite_internal.h"
-#include <lustre_compat.h>
 
 static const struct vm_operations_struct ll_file_vm_ops;
 
@@ -133,9 +134,8 @@ restart:
 	RETURN(io);
 }
 
-/* Sharing code of page_mkwrite method for rhel5 and rhel6 */
-static int ll_page_mkwrite0(struct vm_area_struct *vma, struct page *vmpage,
-			    bool *retry)
+static int __ll_page_mkwrite(struct vm_area_struct *vma, struct page *vmpage,
+			     bool *retry)
 {
 	struct lu_env           *env;
 	struct cl_io            *io;
@@ -153,7 +153,7 @@ static int ll_page_mkwrite0(struct vm_area_struct *vma, struct page *vmpage,
 	if (IS_ERR(env))
 		RETURN(PTR_ERR(env));
 
-	io = ll_fault_io_init(env, vma, vmpage->index, true);
+	io = ll_fault_io_init(env, vma, folio_index_page(vmpage), true);
 	if (IS_ERR(io))
 		GOTO(out, result = PTR_ERR(io));
 
@@ -196,7 +196,7 @@ static int ll_page_mkwrite0(struct vm_area_struct *vma, struct page *vmpage,
 			unlock_page(vmpage);
 
 			CDEBUG(D_MMAP, "Race on page_mkwrite %p/%lu, page has been written out, retry.\n",
-			       vmpage, vmpage->index);
+			       vmpage, folio_index_page(vmpage));
 
 			*retry = true;
 			result = -EAGAIN;
@@ -255,7 +255,7 @@ int ll_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	 */
 	do {
 		seq = read_seqbegin(&ll_i2info(inode)->lli_page_inv_lock);
-		ret = __ll_filemap_fault(vma, vmf);
+		ret = filemap_fault(vmf);
 	} while (read_seqretry(&ll_i2info(inode)->lli_page_inv_lock, seq) &&
 		 (ret & VM_FAULT_SIGBUS));
 
@@ -263,7 +263,7 @@ int ll_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 }
 
 /**
- * ll_fault0() - Lustre implementation of a vm_operations_struct::fault()
+ * __ll_fault() - Lustre implementation of a vm_operations_struct::fault()
  * method, called by VM to server page fault (both in kernel and user space).
  * @vma: is virtiual area struct related to page fault
  * @vmf: structure which describe type and address where hit fault
@@ -273,7 +273,7 @@ int ll_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
  * * VM_FAULT_ERROR on general error
  * * NOPAGE_OOM not have memory for allocate new page
  */
-static vm_fault_t ll_fault0(struct vm_area_struct *vma, struct vm_fault *vmf)
+static vm_fault_t __ll_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	struct inode *inode = file_inode(vma->vm_file);
 	struct lu_env           *env;
@@ -364,14 +364,9 @@ out:
 	RETURN(fault_ret);
 }
 
-#ifdef HAVE_VM_OPS_USE_VM_FAULT_ONLY
 static vm_fault_t ll_fault(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
-#else
-static vm_fault_t ll_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
-{
-#endif
 	int count = 0;
 	bool printed = false;
 	bool cached;
@@ -402,7 +397,7 @@ static vm_fault_t ll_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 		return VM_FAULT_SIGBUS;
 
 restart:
-	result = ll_fault0(vma, vmf);
+	result = __ll_fault(vma, vmf);
 	if (vmf->page &&
 	    !(result & (VM_FAULT_RETRY | VM_FAULT_ERROR | VM_FAULT_LOCKED))) {
 		struct page *vmpage = vmf->page;
@@ -437,7 +432,7 @@ restart:
 	if (vmf->page && result == VM_FAULT_LOCKED) {
 		ll_rw_stats_tally(ll_i2sbi(file_inode(vma->vm_file)),
 				  current->pid, vma->vm_file->private_data,
-				  vmf->page->index << PAGE_SHIFT, PAGE_SIZE,
+				  vmf->pgoff << PAGE_SHIFT, PAGE_SIZE,
 				  READ);
 		ll_stats_ops_tally(ll_i2sbi(file_inode(vma->vm_file)),
 				   LPROC_LL_FAULT,
@@ -453,15 +448,9 @@ restart:
 	return result;
 }
 
-#ifdef HAVE_VM_OPS_USE_VM_FAULT_ONLY
 static vm_fault_t ll_page_mkwrite(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
-#else
-static vm_fault_t ll_page_mkwrite(struct vm_area_struct *vma,
-				  struct vm_fault *vmf)
-{
-#endif
 	int count = 0;
 	bool printed = false;
 	bool retry;
@@ -473,7 +462,7 @@ static vm_fault_t ll_page_mkwrite(struct vm_area_struct *vma,
 	       "START file %s:"DFID", vma=%p start=%#lx end=%#lx vm_flags=%#lx idx=%lu\n",
 	       file_dentry(vma->vm_file)->d_name.name,
 	       PFID(&ll_i2info(file_inode(vma->vm_file))->lli_fid), vma,
-	       vma->vm_start, vma->vm_end, vma->vm_flags, vmf->page->index);
+	       vma->vm_start, vma->vm_end, vma->vm_flags, vmf->pgoff);
 
 	result = pcc_page_mkwrite(vma, vmf, &cached);
 	if (cached)
@@ -482,7 +471,7 @@ static vm_fault_t ll_page_mkwrite(struct vm_area_struct *vma,
 	file_update_time(vma->vm_file);
 	do {
 		retry = false;
-		result = ll_page_mkwrite0(vma, vmf->page, &retry);
+		result = __ll_page_mkwrite(vma, vmf->page, &retry);
 
 		if (!printed && ++count > 16) {
 			const struct dentry *de = file_dentry(vma->vm_file);
@@ -517,7 +506,7 @@ static vm_fault_t ll_page_mkwrite(struct vm_area_struct *vma,
 	if (result == VM_FAULT_LOCKED) {
 		ll_rw_stats_tally(ll_i2sbi(file_inode(vma->vm_file)),
 				  current->pid, vma->vm_file->private_data,
-				  vmf->page->index << PAGE_SHIFT, PAGE_SIZE,
+				  vmf->pgoff << PAGE_SHIFT, PAGE_SIZE,
 				  WRITE);
 		ll_stats_ops_tally(ll_i2sbi(file_inode(vma->vm_file)),
 				   LPROC_LL_MKWRITE,
@@ -528,7 +517,7 @@ static vm_fault_t ll_page_mkwrite(struct vm_area_struct *vma,
 	       "COMPLETED: "DFID": vma=%p start=%#lx end=%#lx vm_flags=%#lx idx=%lu, rc %d\n",
 	       PFID(&ll_i2info(file_inode(vma->vm_file))->lli_fid),
 	       vma, vma->vm_start, vma->vm_end, vma->vm_flags,
-	       vmf->page->index, result);
+	       vmf->pgoff, result);
 	return result;
 }
 

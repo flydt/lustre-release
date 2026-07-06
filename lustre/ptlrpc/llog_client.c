@@ -18,7 +18,6 @@
 #define DEBUG_SUBSYSTEM S_LOG
 
 #include <linux/list.h>
-#include <libcfs/libcfs.h>
 
 #include <obd_class.h>
 #include <lustre_log.h>
@@ -65,6 +64,7 @@ static int llog_client_open(const struct lu_env *env,
 	struct llogd_body *body;
 	struct llog_ctxt *ctxt = lgh->lgh_ctxt;
 	struct ptlrpc_request *req = NULL;
+	char *tmp;
 	int rc;
 
 	ENTRY;
@@ -81,9 +81,10 @@ static int llog_client_open(const struct lu_env *env,
 	if (!req)
 		GOTO(out, rc = -ENOMEM);
 
-	if (name)
-		req_capsule_set_size(&req->rq_pill, &RMF_NAME, RCL_CLIENT,
-				     strlen(name) + 1);
+	/* we have to set varlen name buffer even if name is not defined,
+	 * to be able to set mdt_body buffer after */
+	req_capsule_set_size(&req->rq_pill, &RMF_NAME, RCL_CLIENT,
+			name ? strlen(name) + 1 : 1);
 
 	rc = ptlrpc_request_pack(req, LUSTRE_LOG_VERSION,
 				 LLOG_ORIGIN_HANDLE_CREATE);
@@ -99,16 +100,14 @@ static int llog_client_open(const struct lu_env *env,
 		body->lgd_logid = *logid;
 	body->lgd_ctxt_idx = ctxt->loc_idx - 1;
 
-	if (name) {
-		char *tmp;
-
-		tmp = req_capsule_client_sized_get(&req->rq_pill, &RMF_NAME,
-						   strlen(name) + 1);
-		LASSERT(tmp);
+	tmp = req_capsule_client_sized_get(&req->rq_pill, &RMF_NAME,
+					   name ? strlen(name) + 1 : 1);
+	LASSERT(tmp);
+	if (name)
 		strcpy(tmp, name);
-
-		do_pack_body(req);
-	}
+	else
+		tmp[0] = '\0';
+	do_pack_body(req);
 
 	rc = ptlrpc_queue_wait(req);
 	if (rc)
@@ -163,17 +162,18 @@ static int llog_client_next_block(const struct lu_env *env,
 	ptlrpc_request_set_replen(req);
 	rc = ptlrpc_queue_wait(req);
 	/*
-	 * -EBADR has a special meaning here. If llog_osd_next_block()
+	 * -EBADR/EIO has a special meaning here. If llog_osd_next_block()
 	 * reaches the end of the log without finding the desired
 	 * record then it updates *cur_offset and *cur_idx and returns
-	 * -EBADR. In llog_process_thread() we use this to detect
+	 * -EBADR/EIO. In llog_process_thread() we use this to detect
 	 * EOF. But we must be careful to distinguish between -EBADR
 	 * coming from llog_osd_next_block() and -EBADR coming from
-	 * ptlrpc or below.
+	 * ptlrpc or below. Older servers use EIO and newer servers use EBADR.
 	 */
-	if (rc == -EBADR) {
+	if (rc == -EBADR || rc == -EIO) {
 		if (!req->rq_repmsg ||
-		    lustre_msg_get_status(req->rq_repmsg) != -EBADR)
+		    (lustre_msg_get_status(req->rq_repmsg) != -EBADR &&
+		     lustre_msg_get_status(req->rq_repmsg) != -EIO))
 			GOTO(out, rc);
 	} else if (rc < 0) {
 		GOTO(out, rc);

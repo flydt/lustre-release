@@ -1,6 +1,7 @@
 /*.log
 /*.xml
 /Makefile.in
+/Makefile
 /XMLCONFIG
 /aheadmany
 /aiocp
@@ -19,6 +20,7 @@
 /llapi_hsm_test
 /llapi_layout_test
 /llapi_root_test
+/llapi_pool_test
 /createdestroy
 /createmany
 /createtest
@@ -95,6 +97,7 @@
 /tchmod
 /test_brw
 /testreq
+/test_parity_read
 /toexcl
 /truncate
 /unlinkmany

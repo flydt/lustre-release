@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: LGPL-2.1+
 /*
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
@@ -38,6 +18,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <errno.h>
+#include <poll.h>
 
 #include <lustre/lustreapi.h>
 
@@ -97,8 +78,46 @@ int libcfs_ukuc_get_rfd(struct lustre_kernelcomm *link)
 
 #define lhsz sizeof(*kuch)
 
+/* Read exactly @count bytes from the pipe into @buf, looping over short
+ * reads. Returns 0 on success, a negative errno on failure.
+ */
+static int ukuc_full_read(int fd, char *buf, size_t count)
+{
+	size_t total = 0;
+
+	while (total < count) {
+		ssize_t rc = read(fd, buf + total, count - total);
+
+		if (rc > 0) {
+			total += rc;
+		} else if (rc == 0) {
+			return -EPIPE;
+		} else if (errno == EINTR) {
+			continue;
+		} else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+			struct pollfd pfd = { .fd = fd, .events = POLLIN };
+
+			/* No bytes yet: propagate EAGAIN so that O_NONBLOCK
+			 * callers multiplexing with poll(2) keep working.
+			 */
+			if (total == 0)
+				return -EAGAIN;
+
+			/* Mid-message: we have already consumed part of a
+			 * framed message and must finish it to stay in sync.
+			 * Wait for the remainder.
+			 */
+			if (poll(&pfd, 1, -1) < 0 && errno != EINTR)
+				return -errno;
+		} else {
+			return -errno;
+		}
+	}
+	return 0;
+}
+
 /** Read a message from the link.
- * Allocates memory, returns handle
+ * Reads one complete message into @a buf (caller-allocated).
  *
  * @param link Private descriptor for pipe/socket.
  * @param buf Buffer to read into, must include size for kuc_hdr
@@ -112,15 +131,17 @@ int libcfs_ukuc_msg_get(struct lustre_kernelcomm *link, char *buf, int maxsize,
 	struct kuc_hdr *kuch;
 	int rc = 0;
 
+	if (buf == NULL || maxsize < 0 || maxsize < lhsz)
+		return -EINVAL;
+
 	memset(buf, 0, maxsize);
 
 	while (1) {
 		/* Read header first to get message size */
-		rc = read(link->lk_rfd, buf, lhsz);
-		if (rc <= 0) {
-			rc = -errno;
+		rc = ukuc_full_read(link->lk_rfd, buf, lhsz);
+		if (rc < 0)
 			break;
-		}
+
 		kuch = (struct kuc_hdr *)buf;
 
 		if (kuch->kuc_magic != KUC_MAGIC) {
@@ -131,24 +152,20 @@ int libcfs_ukuc_msg_get(struct lustre_kernelcomm *link, char *buf, int maxsize,
 			break;
 		}
 
+		if (kuch->kuc_msglen < lhsz) {
+			rc = -EPROTO;
+			break;
+		}
+
 		if (kuch->kuc_msglen > maxsize) {
 			rc = -EMSGSIZE;
 			break;
 		}
 
 		/* Read payload */
-		rc = read(link->lk_rfd, buf + lhsz, kuch->kuc_msglen - lhsz);
-		if (rc < 0) {
-			rc = -errno;
+		rc = ukuc_full_read(link->lk_rfd, buf + lhsz, kuch->kuc_msglen - lhsz);
+		if (rc < 0)
 			break;
-		}
-		if (rc < (kuch->kuc_msglen - lhsz)) {
-			llapi_err_noerrno(LLAPI_MSG_ERROR,
-					  "short read: got %d of %d bytes\n",
-					  rc, kuch->kuc_msglen);
-			rc = -EPROTO;
-			break;
-		}
 
 		if (kuch->kuc_transport == transport ||
 		    kuch->kuc_transport == KUC_TRANSPORT_GENERIC) {

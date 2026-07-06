@@ -23,7 +23,10 @@ static void free_entry(struct upcall_cache *cache,
 	list_del(&entry->ue_hash);
 	CDEBUG(D_OTHER, "destroy cache entry %p for key %llu\n",
 	       entry, entry->ue_key);
-	LIBCFS_FREE(entry, sizeof(*entry));
+	if (cache->uc_ops->free_delay)
+		cache->uc_ops->free_delay(entry);
+	else
+		OBD_FREE(entry, sizeof(*entry));
 }
 
 static inline void get_entry(struct upcall_cache_entry *entry)
@@ -40,7 +43,7 @@ static inline void put_entry(struct upcall_cache *cache,
 	}
 }
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 void refresh_entry_internal(struct upcall_cache *cache,
 			    struct upcall_cache_entry *entry,
 			    __u32 fsgid, struct group_info **ginfo);
@@ -48,7 +51,7 @@ int upcall_cache_get_entry_internal(struct upcall_cache *cache,
 				    struct upcall_cache_entry *entry,
 				    void *args, gid_t *fsgid,
 				    struct group_info **ginfo);
-#else /* HAVE_SERVER_SUPPORT */
+#else /* CONFIG_LUSTRE_FS_SERVER */
 static inline
 void refresh_entry_internal(struct upcall_cache *cache,
 			    struct upcall_cache_entry *entry,

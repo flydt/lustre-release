@@ -30,12 +30,21 @@ struct lov_stripe_md_entry {
 	u32			lsme_magic;
 	u32			lsme_flags;
 	u32			lsme_pattern;
-	u64			lsme_timestamp;
+	union {
+		u64		lsme_time_and_id;
+		struct {
+			u64	lsme_timestamp:48;
+			u16	lsme_mirror_link_id;
+		};
+	};
 	union {
 		struct { /* For stripe objects */
+			/* EC info */
 			u32	lsme_stripe_size;
 			u16	lsme_stripe_count;
 			u16	lsme_layout_gen;
+			u8	lsme_dstripe_count;
+			u8	lsme_cstripe_count;
 			char	lsme_pool_name[LOV_MAXPOOLNAME + 1];
 			struct lov_oinfo	*lsme_oinfo[];
 		};
@@ -98,6 +107,17 @@ struct lov_stripe_md {
 };
 
 #define lsm_foreign(lsm) (lsm->lsm_entries[0])
+
+static inline bool lsme_is_parity(const struct lov_stripe_md_entry *lsme)
+{
+	return lsme->lsme_flags & LCME_FL_PARITY;
+}
+
+static inline bool lsm_entry_is_parity(const struct lov_stripe_md *lsm,
+					int index)
+{
+	return lsme_is_parity(lsm->lsm_entries[index]);
+}
 
 static inline bool lsme_is_foreign(const struct lov_stripe_md_entry *lsme)
 {
@@ -273,7 +293,7 @@ pgoff_t lov_stripe_pgoff(struct lov_stripe_md *lsm, int index,
 
 /* lov_request.c */
 int lov_prep_statfs_set(struct obd_device *obd, struct obd_info *oinfo,
-                        struct lov_request_set **reqset);
+			struct lov_request_set **reqset);
 int lov_fini_statfs_set(struct lov_request_set *set);
 
 /* lov_obd.c */
@@ -291,6 +311,7 @@ __u16 lov_get_stripe_count(struct lov_obd *lov, __u32 magic,
 int lov_connect_obd(struct obd_device *obd, u32 index, int activate,
 		    struct obd_connect_data *data);
 int lov_setup(struct obd_device *obd, struct lustre_cfg *lcfg);
+int lov_cleanup(struct obd_device *obd);
 int lov_process_config_base(struct obd_device *obd, struct lustre_cfg *lcfg,
 			    u32 *indexp, int *genp);
 int lov_del_target(struct obd_device *obd, u32 index,
@@ -326,8 +347,9 @@ int lov_pool_remove(struct obd_device *obd, char *poolname, char *ostname);
 
 static inline struct lov_stripe_md *lsm_addref(struct lov_stripe_md *lsm)
 {
-	kref_get(&lsm->lsm_refc);
-	return lsm;
+	if (kref_get_unless_zero(&lsm->lsm_refc))
+		return lsm;
+	return NULL;
 }
 
 static inline bool lov_oinfo_is_dummy(const struct lov_oinfo *loi)

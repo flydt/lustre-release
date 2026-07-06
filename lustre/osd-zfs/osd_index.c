@@ -16,7 +16,6 @@
 
 #define DEBUG_SUBSYSTEM S_OSD
 
-#include <libcfs/libcfs.h>
 #include <obd_support.h>
 #include <lustre_net.h>
 #include <obd.h>
@@ -218,15 +217,15 @@ int __osd_xattr_load_by_oid(struct osd_device *osd, uint64_t oid, nvlist_t **sa)
 	return rc;
 }
 /**
- * Get the object's FID from its LMA EA.
+ * osd_get_fid_by_oid() - Get the object's FID from its LMA EA.
+ * @env: pointer to the thread context
+ * @osd: pointer to the OSD device
+ * @oid: the object's local identifier
+ * @fid: the buffer to hold the object's FID [out]
  *
- * \param[in] env	pointer to the thread context
- * \param[in] osd	pointer to the OSD device
- * \param[in] oid	the object's local identifier
- * \param[out] fid	the buffer to hold the object's FID
- *
- * \retval		0 for success
- * \retval		negative error number on failure
+ * Return:
+ * * %0 for success
+ * * %negative error number on failure
  */
 int osd_get_fid_by_oid(const struct lu_env *env, struct osd_device *osd,
 		       uint64_t oid, struct lu_fid *fid)
@@ -967,15 +966,16 @@ int osd_remote_fid(const struct lu_env *env, struct osd_device *osd,
 }
 
 /**
- *      Inserts (key, value) pair in \a directory object.
+ * osd_dir_insert() - Inserts (key, value) pair in @dt(directory) object.
+ * @env: Lustre environment
+ * @dt: osd index object
+ * @key: key for index
+ * @rec: record reference
+ * @th: transaction handler
  *
- *      \param  dt      osd index object
- *      \param  key     key for index
- *      \param  rec     record reference
- *      \param  th      transaction handler
- *
- *      \retval  0  success
- *      \retval -ve failure
+ * Return:
+ * * %0  success
+ * * %negative failure
  */
 static int osd_dir_insert(const struct lu_env *env, struct dt_object *dt,
 			  const struct dt_rec *rec, const struct dt_key *key,
@@ -1220,14 +1220,15 @@ static struct dt_it *osd_dir_it_init(const struct lu_env *env,
 }
 
 /**
- *  Move Iterator to record specified by \a key
+ *  osd_dir_it_get() - Move Iterator to record specified by @key
+ *  @env: Lustre environment
+ *  @di: osd iterator
+ *  @key: key for index
  *
- *  \param  di      osd iterator
- *  \param  key     key for index
- *
- *  \retval +ve  di points to record with least key not larger than key
- *  \retval  0   di points to exact matched key
- *  \retval -ve  failure
+ * Return:
+ *  * %positive @di points to record with least key not larger than key
+ *  * %0 @di points to exact matched key
+ *  * %negative  failure
  */
 static int osd_dir_it_get(const struct lu_env *env,
 			  struct dt_it *di, const struct dt_key *key)
@@ -1308,14 +1309,15 @@ static int osd_index_retrieve_skip_dots(struct osd_zap_it *it,
 }
 
 /**
- * to load a directory entry at a time and stored it in
- * iterator's in-memory data structure.
+ * osd_dir_it_next() - load a directory entry at a time and stored it in
+ *                     iterator's in-memory data structure.
+ * @env: Lustre environment
+ * @di: Iterator(in memory structure)
  *
- * \param di, struct osd_it_ea, iterator's in memory structure
- *
- * \retval +ve, iterator reached to end
- * \retval   0, iterator not reached to end
- * \retval -ve, on error
+ * Return:
+ * * %positive iterator reached to end
+ * * %0 iterator not reached to end
+ * * %negative on error
  */
 static int osd_dir_it_next(const struct lu_env *env, struct dt_it *di)
 {
@@ -1417,7 +1419,7 @@ osd_dirent_update(const struct lu_env *env, struct osd_device *dev,
 		RETURN(-ENOMEM);
 
 	dmu_tx_hold_zap(tx, zap, TRUE, NULL);
-	rc = -dmu_tx_assign(tx, TXG_WAIT);
+	rc = -dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (!rc)
 		rc = -zap_update(dev->od_os, zap, key, 8, sizeof(*zde) / 8,
 				 (const void *)zde, tx);
@@ -1447,7 +1449,7 @@ static int osd_update_entry_for_agent(const struct lu_env *env,
 
 	dmu_tx_hold_sa_create(tx, osd_find_dnsize(osd, OSD_BASE_EA_IN_BONUS));
 	dmu_tx_hold_zap(tx, zap, FALSE, NULL);
-	rc = -dmu_tx_assign(tx, TXG_WAIT);
+	rc = -dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (rc) {
 		dmu_tx_abort(tx);
 		GOTO(out, rc);

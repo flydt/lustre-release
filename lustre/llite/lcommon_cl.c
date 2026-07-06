@@ -15,7 +15,6 @@
 
 #define DEBUG_SUBSYSTEM S_LLITE
 
-#include <libcfs/libcfs.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -65,7 +64,6 @@ int cl_setattr_ost(struct inode *inode, const struct iattr *attr,
 
 	io = vvp_env_new_io(env);
 	io->ci_obj = obj;
-	io->ci_verify_layout = 1;
 
 	io->u.ci_setattr.sa_attr.lvb_atime = attr->ia_atime.tv_sec;
 	io->u.ci_setattr.sa_attr.lvb_mtime = attr->ia_mtime.tv_sec;
@@ -98,6 +96,7 @@ again:
 			vio->vui_fd = attr->ia_file->private_data;
 
 		result = cl_io_loop(env, io);
+		CFS_FAIL_TIMEOUT(OBD_FAIL_LLITE_TRUNC_PAUSE, 2);
 	} else {
 		result = io->ci_result;
 	}
@@ -156,7 +155,7 @@ int cl_file_inode_init(struct inode *inode, struct lustre_md *md)
 		 * unnecessary to perform lookup-alloc-lookup-insert, just
 		 * alloc and insert directly.
 		 */
-		if (!(inode->i_state & I_NEW)) {
+		if (!(inode_state_read(inode) & I_NEW)) {
 			result = -EIO;
 			CERROR("%s: unexpected not-NEW inode "DFID": rc = %d\n",
 			       ll_i2sbi(inode)->ll_fsname, PFID(fid), result);

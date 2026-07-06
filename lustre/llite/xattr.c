@@ -15,9 +15,6 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/xattr.h>
-#ifdef HAVE_LINUX_SELINUX_IS_ENABLED
-#include <linux/selinux.h>
-#endif
 
 #define DEBUG_SUBSYSTEM S_LLITE
 
@@ -26,13 +23,6 @@
 #include <lustre_swab.h>
 
 #include "llite_internal.h"
-
-#ifndef HAVE_XATTR_HANDLER_NAME
-static inline const char *xattr_prefix(const struct xattr_handler *handler)
-{
-	return handler->prefix;
-}
-#endif
 
 const struct xattr_handler *get_xattr_type(const char *name)
 {
@@ -92,9 +82,6 @@ static int ll_xattr_set_common(const struct xattr_handler *handler,
 	int rc;
 
 	ENTRY;
-	/* VFS has locked the inode before calling this */
-	ll_set_inode_lock_owner(inode);
-
 	/* When setxattr() is called with a size of 0 the value is
 	 * unconditionally replaced by "". When removexattr() is
 	 * called we get a NULL value and XATTR_REPLACE for flags.
@@ -103,11 +90,6 @@ static int ll_xattr_set_common(const struct xattr_handler *handler,
 		valid = OBD_MD_FLXATTRRM;
 	else
 		valid = OBD_MD_FLXATTR;
-
-	/* FIXME: enable IMA when the conditions are ready */
-	if (handler->flags == XATTR_SECURITY_T &&
-	    (!strcmp(name, "ima") || !strcmp(name, "evm")))
-		GOTO(out, rc = -EOPNOTSUPP);
 
 	rc = xattr_type_filter(sbi, handler);
 	if (rc)
@@ -123,6 +105,11 @@ static int ll_xattr_set_common(const struct xattr_handler *handler,
 	    ((handler->flags == XATTR_TRUSTED_T && !strcmp(name, "lov")) ||
 	     (handler->flags == XATTR_LUSTRE_T && !strcmp(name, "lov"))))
 		GOTO(out, rc = 0);
+
+	/* FIXME: enable IMA when the conditions are ready */
+	if (handler->flags == XATTR_SECURITY_T &&
+	    (!strcmp(name, "ima") || !strcmp(name, "evm")))
+		GOTO(out, rc = -EOPNOTSUPP);
 
 	rc = ll_security_secctx_name_filter(sbi, handler->flags, name);
 	if (rc)
@@ -193,6 +180,7 @@ static int ll_xattr_set_common(const struct xattr_handler *handler,
 		}
 		GOTO(out, rc);
 	}
+
 	ll_i2info(inode)->lli_synced_to_mds = false;
 
 	ptlrpc_req_put(req);
@@ -201,8 +189,6 @@ static int ll_xattr_set_common(const struct xattr_handler *handler,
 				LPROC_LL_REMOVEXATTR : LPROC_LL_SETXATTR,
 			   ktime_us_delta(ktime_get(), kstart));
 out:
-	ll_clear_inode_lock_owner(inode);
-
 	RETURN(rc);
 }
 
@@ -242,6 +228,7 @@ static int ll_adjust_lum(struct inode *inode, struct lov_user_md *lump,
 {
 	struct lov_comp_md_v1 *comp_v1 = (struct lov_comp_md_v1 *)lump;
 	struct lov_user_md *v1 = lump;
+	struct ll_sb_info *sbi = ll_i2sbi(inode);
 	bool need_clear_release = false;
 	bool release_checked = false;
 	bool default_offset = false;
@@ -252,6 +239,9 @@ static int ll_adjust_lum(struct inode *inode, struct lov_user_md *lump,
 	if (!lump)
 		return 0;
 
+	CDEBUG(D_LAYOUT, "ll_adjust_lum: magic=0x%x, size=%zu\n",
+	       lump->lmm_magic, size);
+
 	if (lump->lmm_magic == LOV_USER_MAGIC_COMP_V1) {
 		if (size < sizeof(*comp_v1))
 			return -ERANGE;
@@ -259,6 +249,18 @@ static int ll_adjust_lum(struct inode *inode, struct lov_user_md *lump,
 		entry_count = comp_v1->lcm_entry_count;
 		if (size < offsetof(typeof(*comp_v1), lcm_entries[entry_count]))
 			return -ERANGE;
+
+		/* Check for EC layouts when erasure coding is disabled */
+		if (!sbi->ll_enable_erasure_coding) {
+			for (i = 0; i < entry_count; i++) {
+				if (comp_v1->lcm_entries[i].lcme_flags &
+				    LCME_FL_PARITY) {
+					CDEBUG(D_LAYOUT,
+					       "Rejecting EC layout: erasure coding disabled\n");
+					return -EOPNOTSUPP;
+				}
+			}
+		}
 
 		for (i = 0; i < entry_count; i++) {
 			void *ptr = comp_v1;
@@ -304,11 +306,9 @@ static int ll_adjust_lum(struct inode *inode, struct lov_user_md *lump,
 			v1 = (struct lov_user_md *)ptr;
 		}
 
-		/*
-		 * Attributes that are saved via getxattr will always
-		 * have the stripe_offset as 0. Instead, the MDS
-		 * should be allowed to pick the starting OST index.
-		 * b=17846
+		/* Attributes that are saved via getxattr will always have
+		 * the stripe_offset as 0. Instead, the MDS should be
+		 * allowed to pick the starting OST index. b=17846
 		 */
 		if (default_offset)
 			v1->lmm_stripe_offset = LOV_OFFSET_DEFAULT;
@@ -337,7 +337,7 @@ static int ll_adjust_lum(struct inode *inode, struct lov_user_md *lump,
 static int ll_setstripe_ea(struct dentry *dentry, struct lov_user_md *lump,
 			   size_t size)
 {
-	struct inode *inode = dentry->d_inode;
+	struct inode *inode = d_inode(dentry);
 	int rc = 0;
 
 	/*
@@ -353,6 +353,7 @@ static int ll_setstripe_ea(struct dentry *dentry, struct lov_user_md *lump,
 		 */
 		return -ERANGE;
 	}
+
 	rc = ll_adjust_lum(inode, lump, size);
 	if (rc)
 		return rc;
@@ -406,9 +407,6 @@ static int ll_xattr_set(const struct xattr_handler *handler,
 	LASSERT(inode);
 	LASSERT(name);
 
-	/* VFS has locked the inode before calling this */
-	ll_set_inode_lock_owner(inode);
-
 	CDEBUG(D_VFSTRACE, "VFS Op:inode=" DFID "(%p), xattr %s\n",
 	       PFID(ll_inode2fid(inode)), inode, name);
 
@@ -429,12 +427,45 @@ static int ll_xattr_set(const struct xattr_handler *handler,
 	    (__swab32(((struct lov_user_md *)value)->lmm_magic) &
 	    le32_to_cpu(LOV_MAGIC_MASK)) == le32_to_cpu(LOV_MAGIC_MAGIC))
 		lustre_swab_lov_user_md((struct lov_user_md *)value, 0);
+	else if (strcmp(name, "lmv") == 0) {
+		struct lmv_user_md *lmu = (struct lmv_user_md *)value;
+
+		/* sanity 102n setxattr(lmv) with garbage, but it expects
+		 * server silently ignores such op if magic is not
+		 * LMV_USER_MAGIC.
+		 */
+		if (lmu->lum_magic != le32_to_cpu(LMV_USER_MAGIC) &&
+		    lmu->lum_magic != le32_to_cpu(LMV_USER_MAGIC_SPECIFIC) &&
+		    (lmu->lum_magic == LMV_USER_MAGIC ||
+		     lmu->lum_magic == LMV_USER_MAGIC_SPECIFIC)) {
+			rc = -EINVAL;
+			if (lmv_user_md_size(lmu->lum_stripe_count,
+					     lmu->lum_magic) != size)
+				goto out;
+			lustre_swab_lmv_user_md(lmu);
+		}
+
+		/* old client default hash is fnv_1a_64, and 2.12 server may
+		 * treat unknown hash as error. Use a hash type it can
+		 * understand.
+		 */
+		if (!(exp_connect_flags2(ll_i2sbi(inode)->ll_md_exp) &
+		      OBD_CONNECT2_CRUSH)) {
+			if ((lmu->lum_hash_type &
+			     cpu_to_le32(LMV_HASH_TYPE_MASK)) ==
+			    cpu_to_le32(LMV_HASH_TYPE_UNKNOWN)) {
+				lmu->lum_hash_type ^=
+					cpu_to_le32(LMV_HASH_TYPE_UNKNOWN);
+				lmu->lum_hash_type |=
+					cpu_to_le32(LMV_HASH_TYPE_FNV_1A_64);
+			}
+			lmu->lum_hash_type ^= cpu_to_le32(LMV_HASH_FLAG_FIXED);
+		}
+	}
 
 	rc = ll_xattr_set_common(handler, map, dentry, inode, name,
 				 value, size, flags);
 out:
-	ll_clear_inode_lock_owner(inode);
-
 	return rc;
 }
 
@@ -514,8 +545,7 @@ out:
 }
 
 static int ll_xattr_get_common(const struct xattr_handler *handler,
-			       struct dentry *dentry,
-			       struct inode *inode,
+			       struct dentry *dentry, struct inode *inode,
 			       const char *name, void *buffer, size_t size)
 {
 	struct ll_sb_info *sbi = ll_i2sbi(inode);
@@ -524,7 +554,6 @@ static int ll_xattr_get_common(const struct xattr_handler *handler,
 	int rc;
 
 	ENTRY;
-
 	rc = xattr_type_filter(sbi, handler);
 	if (rc)
 		RETURN(rc);
@@ -541,6 +570,8 @@ static int ll_xattr_get_common(const struct xattr_handler *handler,
 	if (handler->flags == XATTR_ACL_ACCESS_T) {
 		struct ll_inode_info *lli = ll_i2info(inode);
 		struct posix_acl *acl;
+		size_t acl_sz;
+		void *value = NULL;
 
 		read_lock(&lli->lli_lock);
 		acl = posix_acl_dup(lli->lli_posix_acl);
@@ -548,8 +579,20 @@ static int ll_xattr_get_common(const struct xattr_handler *handler,
 
 		if (!acl)
 			RETURN(-ENODATA);
-
-		rc = posix_acl_to_xattr(&init_user_ns, acl, buffer, size);
+		value = posix_acl_to_xattr(&init_user_ns, acl, &acl_sz,
+					   GFP_NOFS);
+		/* caller wants size */
+		if (!buffer || !size)
+			GOTO(out_acl, rc = acl_sz);
+		if (!value)
+			GOTO(out_acl, rc = -ENOMEM);
+		/* setfacl, getxattr() checks for -ERANGE */
+		if (acl_sz > size)
+			GOTO(out_acl, rc = -ERANGE);
+		rc = acl_sz;
+		memcpy(buffer, value, acl_sz);
+out_acl:
+		kfree(value);
 		posix_acl_release(acl);
 		RETURN(rc);
 	}
@@ -709,7 +752,7 @@ static int ll_xattr_get(const struct xattr_handler *handler,
 
 ssize_t ll_listxattr(struct dentry *dentry, char *buffer, size_t size)
 {
-	struct inode *inode = dentry->d_inode;
+	struct inode *inode = d_inode(dentry);
 	struct ll_sb_info *sbi = ll_i2sbi(inode);
 	ktime_t kstart = ktime_get();
 	char *xattr_name;
@@ -803,206 +846,46 @@ out:
 	RETURN(rc + sizeof(XATTR_LUSTRE_LOV));
 }
 
-#ifdef HAVE_XATTR_HANDLER_SIMPLIFIED
-static int ll_xattr_get_common_4_3(const struct xattr_handler *handler,
-				   struct dentry *dentry, const char *name,
-				   void *buffer, size_t size)
-{
-	return ll_xattr_get_common(handler, dentry, dentry->d_inode, name,
-				   buffer, size);
-}
-
-static int ll_xattr_get_4_3(const struct xattr_handler *handler,
-			    struct dentry *dentry, const char *name,
-			    void *buffer, size_t size)
-{
-	return ll_xattr_get(handler, dentry, dentry->d_inode, name, buffer,
-			    size);
-}
-
-static int ll_xattr_set_common_4_3(const struct xattr_handler *handler,
-				   struct dentry *dentry, const char *name,
-				   const void *value, size_t size, int flags)
-{
-	return ll_xattr_set_common(handler, dentry, dentry->d_inode, name,
-				   value, size, flags);
-}
-
-static int ll_xattr_set_4_3(const struct xattr_handler *handler,
-			    struct dentry *dentry, const char *name,
-			    const void *value, size_t size, int flags)
-{
-	return ll_xattr_set(handler, dentry, dentry->d_inode, name, value,
-			    size, flags);
-}
-
-#elif !defined(HAVE_USER_NAMESPACE_ARG) && \
-!defined(HAVE_XATTR_HANDLER_INODE_PARAM)
-const struct xattr_handler *get_xattr_handler(int handler_flag)
-{
-	int i = 0;
-
-	while (ll_xattr_handlers[i]) {
-		if (ll_xattr_handlers[i]->flags == handler_flag)
-			return ll_xattr_handlers[i];
-		i++;
-	}
-	return NULL;
-}
-
-static int ll_xattr_get_common_3_11(struct dentry *dentry, const char *name,
-				   void *buffer, size_t size, int handler_flags)
-{
-	const struct xattr_handler *handler = get_xattr_handler(handler_flags);
-
-	if (!handler)
-		return -ENXIO;
-
-	return ll_xattr_get_common(handler, dentry, dentry->d_inode, name,
-				   buffer, size);
-}
-
-static int ll_xattr_get_3_11(struct dentry *dentry, const char *name,
-			    void *buffer, size_t size, int handler_flags)
-{
-	const struct xattr_handler *handler = get_xattr_handler(handler_flags);
-
-	if (!handler)
-		return -ENXIO;
-
-	return ll_xattr_get(handler, dentry, dentry->d_inode, name, buffer,
-			    size);
-}
-
-static int ll_xattr_set_common_3_11(struct dentry *dentry, const char *name,
-				   const void *value, size_t size, int flags,
-				   int handler_flags)
-{
-	const struct xattr_handler *handler = get_xattr_handler(handler_flags);
-
-	if (!handler)
-		return -ENXIO;
-
-	return ll_xattr_set_common(handler, NULL, dentry, dentry->d_inode, name,
-				   value, size, flags);
-}
-
-static int ll_xattr_set_3_11(struct dentry *dentry, const char *name,
-			    const void *value, size_t size, int flags,
-			    int handler_flags)
-{
-	const struct xattr_handler *handler = get_xattr_handler(handler_flags);
-
-	if (!handler)
-		return -ENXIO;
-
-	return ll_xattr_set(handler, NULL, dentry, dentry->d_inode, name, value,
-			    size, flags);
-}
-#endif
-
 static const struct xattr_handler ll_user_xattr_handler = {
-	.prefix = XATTR_USER_PREFIX,
-	.flags = XATTR_USER_T,
-#if defined(HAVE_XATTR_HANDLER_SIMPLIFIED)
-	.get = ll_xattr_get_common_4_3,
-	.set = ll_xattr_set_common_4_3,
-#elif !defined(HAVE_USER_NAMESPACE_ARG) && \
-!defined(HAVE_XATTR_HANDLER_INODE_PARAM)
-	.get = ll_xattr_get_common_3_11,
-	.set = ll_xattr_set_common_3_11,
-#else
-	.get = ll_xattr_get_common,
-	.set = ll_xattr_set_common,
-#endif
+	.prefix		= XATTR_USER_PREFIX,
+	.flags		= XATTR_USER_T,
+	.get		= ll_xattr_get_common,
+	.set		= ll_xattr_set_common,
 };
 
 static const struct xattr_handler ll_trusted_xattr_handler = {
-	.prefix = XATTR_TRUSTED_PREFIX,
-	.flags = XATTR_TRUSTED_T,
-#if defined(HAVE_XATTR_HANDLER_SIMPLIFIED)
-	.get = ll_xattr_get_4_3,
-	.set = ll_xattr_set_4_3,
-#elif !defined(HAVE_USER_NAMESPACE_ARG) && \
-!defined(HAVE_XATTR_HANDLER_INODE_PARAM)
-	.get = ll_xattr_get_3_11,
-	.set = ll_xattr_set_3_11,
-#else
-	.get = ll_xattr_get,
-	.set = ll_xattr_set,
-#endif
+	.prefix		= XATTR_TRUSTED_PREFIX,
+	.flags		= XATTR_TRUSTED_T,
+	.get		= ll_xattr_get,
+	.set		= ll_xattr_set,
 };
 
 static const struct xattr_handler ll_security_xattr_handler = {
-	.prefix = XATTR_SECURITY_PREFIX,
-	.flags = XATTR_SECURITY_T,
-#if defined(HAVE_XATTR_HANDLER_SIMPLIFIED)
-	.get = ll_xattr_get_common_4_3,
-	.set = ll_xattr_set_common_4_3,
-#elif !defined(HAVE_USER_NAMESPACE_ARG) && \
-!defined(HAVE_XATTR_HANDLER_INODE_PARAM)
-	.get = ll_xattr_get_common_3_11,
-	.set = ll_xattr_set_common_3_11,
-#else
-	.get = ll_xattr_get_common,
-	.set = ll_xattr_set_common,
-#endif
+	.prefix		= XATTR_SECURITY_PREFIX,
+	.flags		= XATTR_SECURITY_T,
+	.get		= ll_xattr_get_common,
+	.set		= ll_xattr_set_common,
 };
 
 static const struct xattr_handler ll_acl_access_xattr_handler = {
-#ifdef HAVE_XATTR_HANDLER_NAME
-	.name = XATTR_NAME_POSIX_ACL_ACCESS,
-#else
-	.prefix = XATTR_NAME_POSIX_ACL_ACCESS,
-#endif
-	.flags = XATTR_ACL_ACCESS_T,
-#if defined(HAVE_XATTR_HANDLER_SIMPLIFIED)
-	.get = ll_xattr_get_common_4_3,
-	.set = ll_xattr_set_common_4_3,
-#elif !defined(HAVE_USER_NAMESPACE_ARG) && \
-!defined(HAVE_XATTR_HANDLER_INODE_PARAM)
-	.get = ll_xattr_get_common_3_11,
-	.set = ll_xattr_set_common_3_11,
-#else
-	.get = ll_xattr_get_common,
-	.set = ll_xattr_set_common,
-#endif
+	.name		= XATTR_NAME_POSIX_ACL_ACCESS,
+	.flags		= XATTR_ACL_ACCESS_T,
+	.get		= ll_xattr_get_common,
+	.set		= ll_xattr_set_common,
 };
 
 static const struct xattr_handler ll_acl_default_xattr_handler = {
-#ifdef HAVE_XATTR_HANDLER_NAME
-	.name = XATTR_NAME_POSIX_ACL_DEFAULT,
-#else
-	.prefix = XATTR_NAME_POSIX_ACL_DEFAULT,
-#endif
-	.flags = XATTR_ACL_DEFAULT_T,
-#if defined(HAVE_XATTR_HANDLER_SIMPLIFIED)
-	.get = ll_xattr_get_common_4_3,
-	.set = ll_xattr_set_common_4_3,
-#elif !defined(HAVE_USER_NAMESPACE_ARG) && \
-!defined(HAVE_XATTR_HANDLER_INODE_PARAM)
-	.get = ll_xattr_get_common_3_11,
-	.set = ll_xattr_set_common_3_11,
-#else
-	.get = ll_xattr_get_common,
-	.set = ll_xattr_set_common,
-#endif
+	.name		= XATTR_NAME_POSIX_ACL_DEFAULT,
+	.flags		= XATTR_ACL_DEFAULT_T,
+	.get		= ll_xattr_get_common,
+	.set		= ll_xattr_set_common,
 };
 
 static const struct xattr_handler ll_lustre_xattr_handler = {
-	.prefix = XATTR_LUSTRE_PREFIX,
-	.flags = XATTR_LUSTRE_T,
-#if defined(HAVE_XATTR_HANDLER_SIMPLIFIED)
-	.get = ll_xattr_get_4_3,
-	.set = ll_xattr_set_4_3,
-#elif !defined(HAVE_USER_NAMESPACE_ARG) && \
-!defined(HAVE_XATTR_HANDLER_INODE_PARAM)
-	.get = ll_xattr_get_3_11,
-	.set = ll_xattr_set_3_11,
-#else
-	.get = ll_xattr_get,
-	.set = ll_xattr_set,
-#endif
+	.prefix		= XATTR_LUSTRE_PREFIX,
+	.flags		= XATTR_LUSTRE_T,
+	.get		= ll_xattr_get,
+	.set		= ll_xattr_set,
 };
 
 const struct xattr_handler *ll_xattr_handlers[] = {

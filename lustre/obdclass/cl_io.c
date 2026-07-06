@@ -91,11 +91,11 @@ void cl_io_fini(const struct lu_env *env, struct cl_io *io)
 	case CIT_WRITE:
 	case CIT_DATA_VERSION:
 	case CIT_FAULT:
+	case CIT_SETATTR:
 		break;
 	case CIT_FSYNC:
 		LASSERT(!io->ci_need_restart);
 		break;
-	case CIT_SETATTR:
 	case CIT_MISC:
 		/* Check ignore layout change conf */
 		LASSERT(ergo(io->ci_ignore_layout || !io->ci_verify_layout,
@@ -567,10 +567,10 @@ EXPORT_SYMBOL(cl_io_end);
 /*
  * Called by read IO, to decide the readahead extent
  *
- * see cl_io_operations::cio_read_ahead()
+ * see cl_io_operations::cio_read_ahead_prep()
  */
-int cl_io_read_ahead(const struct lu_env *env, struct cl_io *io,
-		     pgoff_t start, struct cl_read_ahead *ra)
+int cl_io_read_ahead_prep(const struct lu_env *env, struct cl_io *io,
+			  pgoff_t start, struct cl_read_ahead *ra)
 {
 	const struct cl_io_slice *scan;
 	int result = 0;
@@ -583,16 +583,17 @@ int cl_io_read_ahead(const struct lu_env *env, struct cl_io *io,
 	ENTRY;
 
 	list_for_each_entry(scan, &io->ci_layers, cis_linkage) {
-		if (scan->cis_iop->cio_read_ahead == NULL)
+		if (scan->cis_iop->cio_read_ahead_prep == NULL)
 			continue;
 
-		result = scan->cis_iop->cio_read_ahead(env, scan, start, ra);
+		result = scan->cis_iop->cio_read_ahead_prep(env, scan,
+							    start, ra);
 		if (result != 0)
 			break;
 	}
 	RETURN(result > 0 ? 0 : result);
 }
-EXPORT_SYMBOL(cl_io_read_ahead);
+EXPORT_SYMBOL(cl_io_read_ahead_prep);
 
 /*
  * Called before IO start, to reserve enough LRU slots to avoid
@@ -631,13 +632,14 @@ EXPORT_SYMBOL(cl_io_lru_reserve);
  * @from: Starting position
  * @to: Ending position
  * @cb: callback function
+ * @prio: I/O priority
  *
  * Returns 0 if all pages committed, or errcode if error occurred.
  * see cl_io_operations::cio_commit_async()
  */
 int cl_io_commit_async(const struct lu_env *env, struct cl_io *io,
 		       struct cl_page_list *queue, int from, int to,
-		       cl_commit_cbt cb)
+		       cl_commit_cbt cb, enum cl_io_priority prio)
 {
 	const struct cl_io_slice *scan;
 	int result = 0;
@@ -647,7 +649,7 @@ int cl_io_commit_async(const struct lu_env *env, struct cl_io *io,
 		if (scan->cis_iop->cio_commit_async == NULL)
 			continue;
 		result = scan->cis_iop->cio_commit_async(env, scan, queue,
-							 from, to, cb);
+							 from, to, cb, prio);
 		if (result != 0)
 			break;
 	}
@@ -655,7 +657,8 @@ int cl_io_commit_async(const struct lu_env *env, struct cl_io *io,
 }
 EXPORT_SYMBOL(cl_io_commit_async);
 
-void cl_io_extent_release(const struct lu_env *env, struct cl_io *io)
+void cl_io_extent_release(const struct lu_env *env, struct cl_io *io,
+			  enum cl_io_priority prio)
 {
 	const struct cl_io_slice *scan;
 	ENTRY;
@@ -663,7 +666,7 @@ void cl_io_extent_release(const struct lu_env *env, struct cl_io *io)
 	list_for_each_entry(scan, &io->ci_layers, cis_linkage) {
 		if (scan->cis_iop->cio_extent_release == NULL)
 			continue;
-		scan->cis_iop->cio_extent_release(env, scan);
+		scan->cis_iop->cio_extent_release(env, scan, prio);
 	}
 	EXIT;
 }
@@ -1243,31 +1246,13 @@ EXPORT_SYMBOL(cl_sync_io_wait);
 
 static inline void dio_aio_complete(struct kiocb *iocb, ssize_t res)
 {
-#ifdef HAVE_AIO_COMPLETE
-	aio_complete(iocb, res, 0);
-#else
 	if (iocb->ki_complete)
-# ifdef HAVE_KIOCB_COMPLETE_2ARGS
+#ifdef HAVE_KIOCB_COMPLETE_2ARGS
 		iocb->ki_complete(iocb, res);
-# else
+#else
 		iocb->ki_complete(iocb, res, 0);
-# endif
 #endif
 }
-
-void cl_dio_pages_2queue(struct cl_dio_pages *cdp)
-{
-	int i = 0;
-
-	cl_2queue_init(&cdp->cdp_queue);
-
-	for (i = 0; i < cdp->cdp_count; i++) {
-		struct cl_page *page = cdp->cdp_cl_pages[i];
-
-		cl_page_list_add(&cdp->cdp_queue.c2_qin, page, false);
-	}
-}
-EXPORT_SYMBOL(cl_dio_pages_2queue);
 
 static void cl_dio_aio_end(const struct lu_env *env, struct cl_sync_io *anchor)
 {
@@ -1301,7 +1286,7 @@ static void cl_sub_dio_end(const struct lu_env *env, struct cl_sync_io *anchor)
 	ENTRY;
 
 	if (cdp->cdp_cl_pages) {
-		for (i = 0; i < cdp->cdp_count; i++) {
+		for (i = 0; i < cdp->cdp_page_count; i++) {
 			struct cl_page *page = cdp->cdp_cl_pages[i];
 			/* if we failed allocating pages, the page array may be
 			 * incomplete, so check the pointers
@@ -1318,7 +1303,7 @@ static void cl_sub_dio_end(const struct lu_env *env, struct cl_sync_io *anchor)
 				array_incomplete = true;
 		}
 		OBD_FREE_PTR_ARRAY_LARGE(cdp->cdp_cl_pages,
-					 cdp->cdp_count);
+					 cdp->cdp_page_count);
 	}
 
 	if (sdio->csd_unaligned) {
@@ -1332,7 +1317,7 @@ static void cl_sub_dio_end(const struct lu_env *env, struct cl_sync_io *anchor)
 		if (!sdio->csd_write && sdio->csd_bytes > 0)
 			ret = ll_dio_user_copy(sdio);
 		ll_free_dio_buffer(cdp);
-		/* handle the freeing here rather than in cl_sub_dio_free
+		/* handle freeing here rather than in cl_sub_dio_free
 		 * because we have the unmodified iovec pointer
 		 */
 		csd_dup_free(&sdio->csd_dup);
@@ -1340,7 +1325,7 @@ static void cl_sub_dio_end(const struct lu_env *env, struct cl_sync_io *anchor)
 		/* unaligned DIO does not get user pages, so it doesn't have to
 		 * release them, but aligned I/O must
 		 */
-		ll_release_user_pages(cdp->cdp_pages, cdp->cdp_count);
+		ll_release_user_pages(cdp->cdp_pages, cdp->cdp_page_count);
 	}
 	cl_sync_io_note(env, &sdio->csd_ll_aio->cda_sync, ret);
 
@@ -1398,7 +1383,8 @@ struct cl_sub_dio *cl_sub_dio_alloc(struct cl_dio_aio *ll_aio,
 		sdio->csd_creator_free = sync;
 		sdio->csd_write = write;
 		sdio->csd_unaligned = unaligned;
-		spin_lock_init(&sdio->csd_lock);
+		init_waitqueue_head(&sdio->csd_write_waitq);
+		spin_lock_init(&sdio->csd_write_lock);
 
 		atomic_add(1,  &ll_aio->cda_sync.csi_sync_nr);
 
@@ -1486,34 +1472,32 @@ int ll_allocate_dio_buffer(struct cl_dio_pages *cdp, size_t io_size)
 	 * io_size, making the rest of the calculation aligned
 	 */
 	if (pg_offset) {
-		cdp->cdp_count++;
+		cdp->cdp_page_count++;
 		io_size -= min_t(size_t, PAGE_SIZE - pg_offset, io_size);
 	}
 
 	/* calculate pages for the rest of the buffer */
-	cdp->cdp_count += (io_size + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	cdp->cdp_page_count += (io_size + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
-#ifdef HAVE_DIO_ITER
-	cdp->cdp_pages = kvzalloc(cdp->cdp_count * sizeof(struct page *),
+	cdp->cdp_pages = kvzalloc(cdp->cdp_page_count * sizeof(struct page *),
 				  GFP_NOFS);
-#else
-	OBD_ALLOC_PTR_ARRAY_LARGE(cdp->cdp_pages, cdp->cdp_count);
-#endif
 	if (cdp->cdp_pages == NULL)
 		GOTO(out, result = -ENOMEM);
 
-	result = obd_pool_get_pages_array(cdp->cdp_pages, cdp->cdp_count);
+	if (CFS_FAIL_CHECK(OBD_FAIL_LLITE_DIO_BUFFER_ALLOC) ||
+	    CFS_FAIL_CHECK(OBD_FAIL_LLITE_DIO_DRAIN_RETRY))
+		GOTO(out, result = -ENOMEM);
+
+	result = obd_pool_get_pages_array(cdp->cdp_pages, cdp->cdp_page_count);
 	if (result)
 		GOTO(out, result);
 
 out:
-	if (result) {
-		if (cdp->cdp_pages)
-			ll_free_dio_buffer(cdp);
-	}
+	if (result)
+		ll_free_dio_buffer(cdp);
 
 	if (result == 0)
-		result = cdp->cdp_count;
+		result = cdp->cdp_page_count;
 
 	RETURN(result);
 }
@@ -1521,13 +1505,13 @@ EXPORT_SYMBOL(ll_allocate_dio_buffer);
 
 void ll_free_dio_buffer(struct cl_dio_pages *cdp)
 {
-	obd_pool_put_pages_array(cdp->cdp_pages, cdp->cdp_count);
+	if (!cdp->cdp_pages)
+		return;
 
-#ifdef HAVE_DIO_ITER
+	obd_pool_put_pages_array(cdp->cdp_pages, cdp->cdp_page_count);
+
 	kvfree(cdp->cdp_pages);
-#else
-	OBD_FREE_PTR_ARRAY_LARGE(cdp->cdp_pages, cdp->cdp_count);
-#endif
+	cdp->cdp_pages = NULL;
 }
 EXPORT_SYMBOL(ll_free_dio_buffer);
 
@@ -1550,11 +1534,7 @@ void ll_release_user_pages(struct page **pages, int npages)
 		put_page(pages[i]);
 	}
 
-#if defined(HAVE_DIO_ITER)
 	kvfree(pages);
-#else
-	OBD_FREE_PTR_ARRAY_LARGE(pages, npages);
-#endif
 }
 EXPORT_SYMBOL(ll_release_user_pages);
 
@@ -1571,6 +1551,57 @@ EXPORT_SYMBOL(ll_release_user_pages);
 #define kthread_unuse_mm(mm) unuse_mm(mm)
 #endif
 
+static inline size_t folio_from_iter(struct page *pg,
+				     unsigned long offset, size_t bytes,
+				     struct iov_iter *iter)
+{
+	size_t copied; /* bytes successfully copied */
+
+#if defined(HAVE_COPY_FOLIO_FROM_ITER_ATOMIC)
+	struct folio *folio = page_folio(pg);
+	int pgno = folio_page_idx(folio, pg);
+
+	offset += pgno * PAGE_SIZE;
+	copied = copy_folio_from_iter_atomic(folio, offset, bytes, iter);
+	flush_dcache_folio(folio);
+#elif defined(HAVE_COPY_PAGE_FROM_ITER_ATOMIC)
+	copied = copy_page_from_iter_atomic(pg, offset, bytes, iter);
+	flush_dcache_page(pg);
+#else
+	copied = iov_iter_copy_from_user_atomic(pg, iter, offset, bytes);
+	iov_iter_advance(iter, copied);
+	flush_dcache_page(pg);
+#endif
+	return copied;
+}
+
+static inline size_t folio_to_iter(struct page *pg,
+				   unsigned long offset, size_t bytes,
+				   struct iov_iter *iter)
+{
+	size_t copied; /* bytes successfully copied */
+
+#ifdef HAVE___FILEMAP_GET_FOLIO
+	struct folio *folio = page_folio(pg);
+	int pgno = folio_page_idx(folio, pg);
+
+	offset += pgno * PAGE_SIZE;
+	copied = copy_folio_to_iter(folio, offset, bytes, iter);
+#else
+	copied = copy_page_to_iter(pg, offset, bytes, iter);
+#endif
+	return copied;
+}
+
+static inline size_t folio_iter(struct page *page,
+				unsigned long offset, size_t bytes,
+				struct iov_iter *iter, int rw)
+{
+	if (rw == WRITE)
+		return folio_from_iter(page, offset, bytes, iter);
+	return folio_to_iter(page, offset, bytes, iter);
+}
+
 /* copy IO data to/from internal buffer and userspace iovec */
 static ssize_t __ll_dio_user_copy(struct cl_sub_dio *sdio)
 {
@@ -1582,9 +1613,8 @@ static ssize_t __ll_dio_user_copy(struct cl_sub_dio *sdio)
 	size_t original_count = count;
 	int short_copies = 0;
 	bool mm_used = false;
-	bool locked = false;
+	unsigned int i = 0;
 	int status = 0;
-	int i = 0;
 	int rw;
 
 	ENTRY;
@@ -1599,15 +1629,44 @@ static ssize_t __ll_dio_user_copy(struct cl_sub_dio *sdio)
 	/* read copying is protected by the reference count on the sdio, since
 	 * it's done as part of getting rid of the sdio, but write copying is
 	 * done at the start, where there may be multiple ptlrpcd threads
-	 * using this sdio, so we must lock and check if the copying has
-	 * been done
+	 * using this sdio, so we must synchronize access
 	 */
 	if (rw == WRITE) {
-		spin_lock(&sdio->csd_lock);
-		locked = true;
-		if (sdio->csd_write_copied)
-			GOTO(out, status = 0);
+		unsigned long flags;
+
+		/* Use the wait queue's internal spinlock to protect state.
+		 * We only hold it briefly to check/update flags, not during
+		 * the actual copy operations which can sleep.
+		 */
+		spin_lock_irqsave(&sdio->csd_write_lock, flags);
+
+		/* Wait if another thread is currently copying */
+		while (sdio->csd_write_copying && !sdio->csd_write_copied) {
+			DEFINE_WAIT(wait);
+
+			prepare_to_wait(&sdio->csd_write_waitq, &wait,
+					TASK_UNINTERRUPTIBLE);
+			spin_unlock_irqrestore(&sdio->csd_write_lock, flags);
+
+			schedule();
+
+			spin_lock_irqsave(&sdio->csd_write_lock, flags);
+			finish_wait(&sdio->csd_write_waitq, &wait);
+		}
+
+		/* If copy is already done (or failed), return the status */
+		if (sdio->csd_write_copied) {
+			ssize_t ret = sdio->csd_write_status;
+
+			spin_unlock_irqrestore(&sdio->csd_write_lock, flags);
+			RETURN(ret);
+		}
+
+		/* We're the first thread here, claim the copy operation */
+		sdio->csd_write_copying = true;
+		spin_unlock_irqrestore(&sdio->csd_write_lock, flags);
 	}
+
 	/* if there's no mm, io is being done from a kernel thread, so there's
 	 * no need to transition to its mm context anyway.
 	 *
@@ -1631,6 +1690,9 @@ static ssize_t __ll_dio_user_copy(struct cl_sub_dio *sdio)
 			GOTO(out, status = -EFAULT);
 	}
 
+	if (CFS_FAIL_CHECK(OBD_FAIL_LLITE_DIO_COPY_ERR))
+		GOTO(out, status = -EFAULT);
+
 	/* modeled on kernel generic_file_buffered_read/write()
 	 *
 	 * note we only have one 'chunk' of i/o here, so we do not copy the
@@ -1644,14 +1706,14 @@ static ssize_t __ll_dio_user_copy(struct cl_sub_dio *sdio)
 		size_t copied; /* bytes successfully copied */
 		size_t bytes; /* bytes to copy for this page */
 
-		LASSERT(i < cdp->cdp_count);
+		LASSERT(i < cdp->cdp_page_count);
 
 		offset = pos & ~PAGE_MASK;
 		bytes = min_t(unsigned long, PAGE_SIZE - offset, count);
 
 		CDEBUG(D_VFSTRACE,
-		       "count %zd, offset %lu, pos %lld, cdp_count %lu\n",
-		       count, offset, pos, cdp->cdp_count);
+		       "count %zd, offset %lu, pos %lld, cdp_page_count %u\n",
+		       count, offset, pos, cdp->cdp_page_count);
 
 		if (fatal_signal_pending(current)) {
 			status = -EINTR;
@@ -1667,22 +1729,7 @@ static ssize_t __ll_dio_user_copy(struct cl_sub_dio *sdio)
 		 */
 		flush_dcache_page(page);
 
-		/* write requires a few extra steps */
-		if (rw == WRITE) {
-#ifndef HAVE_COPY_PAGE_FROM_ITER_ATOMIC
-			copied = iov_iter_copy_from_user_atomic(page, iter,
-								offset, bytes);
-			iov_iter_advance(iter, copied);
-#else
-			copied = copy_page_from_iter_atomic(page, offset, bytes,
-							    iter);
-#endif
-			flush_dcache_page(page);
-
-		} else /* READ */ {
-			copied = copy_page_to_iter(page, offset, bytes, iter);
-		}
-
+		copied = folio_iter(page, offset, bytes, iter, rw);
 		pos += copied;
 		count -= copied;
 
@@ -1716,20 +1763,32 @@ static ssize_t __ll_dio_user_copy(struct cl_sub_dio *sdio)
 		i++;
 	}
 
-	if (rw == WRITE && status == 0)
-		sdio->csd_write_copied = true;
-
 	/* if we complete successfully, we should reach all of the pages */
-	LASSERTF(ergo(status == 0, i == cdp->cdp_count - 1),
-		 "status: %d, i: %d, cdp->cdp_count %zu, count %zu\n",
-		  status, i, cdp->cdp_count, count);
+	LASSERTF(ergo(status == 0, i == cdp->cdp_page_count - 1),
+		 "status: %d, i: %d, cdp->cdp_page_count %u, count %zu\n",
+		  status, i, cdp->cdp_page_count, count);
 
 out:
 	if (mm_used)
 		kthread_unuse_mm(mm);
 
-	if (locked)
-		spin_unlock(&sdio->csd_lock);
+	/* For write operations, update state and wake any waiting threads */
+	if (rw == WRITE) {
+		unsigned long flags;
+		ssize_t result = original_count - count ?
+			original_count - count : status;
+
+		spin_lock_irqsave(&sdio->csd_write_lock, flags);
+		/* Store result (bytes copied or error) for waiting threads */
+		sdio->csd_write_status = result;
+		/* Mark copy as complete (successfully or not) */
+		sdio->csd_write_copied = true;
+		sdio->csd_write_copying = false;
+		spin_unlock_irqrestore(&sdio->csd_write_lock, flags);
+
+		/* Wake up any threads waiting for the copy to complete */
+		wake_up_all(&sdio->csd_write_waitq);
+	}
 
 	/* the total bytes copied, or status */
 	RETURN(original_count - count ? original_count - count : status);
@@ -1789,19 +1848,34 @@ EXPORT_SYMBOL(ll_dio_user_copy);
 /*
  * Indicate that transfer of a single page completed.
  */
-void cl_sync_io_note(const struct lu_env *env, struct cl_sync_io *anchor,
-		     int ioret)
+void __cl_sync_io_note(const struct lu_env *env, struct cl_sync_io *anchor,
+		       int count, int ioret)
 {
+	int sync_nr;
+
 	ENTRY;
 
 	if (anchor->csi_sync_rc == 0 && ioret < 0)
 		anchor->csi_sync_rc = ioret;
+
+	/* because there is no atomic_sub_and_lock, we have to do this slightly
+	 * awkward subtraction when we have count > 1, handling all but 1 of
+	 * our 'count' entries
+	 */
+	if (count > 1)
+		sync_nr = atomic_sub_return(count - 1, &anchor->csi_sync_nr);
+	else
+		sync_nr = atomic_read(&anchor->csi_sync_nr);
+
+	CDEBUG(D_VFSTRACE,
+	       "Noting completion of %d items, %d items remaining.\n",
+	       count, sync_nr - 1);
 	/*
 	 * Synchronous IO done without releasing page lock (e.g., as a part of
 	 * ->{prepare,commit}_write(). Completion is used to signal the end of
 	 * IO.
 	 */
-	LASSERT(atomic_read(&anchor->csi_sync_nr) > 0);
+	LASSERT(sync_nr > 0);
 	LASSERT(atomic_read(&anchor->csi_complete) == 0);
 	if (atomic_dec_and_lock(&anchor->csi_sync_nr,
 				&anchor->csi_waitq.lock)) {
@@ -1854,6 +1928,13 @@ void cl_sync_io_note(const struct lu_env *env, struct cl_sync_io *anchor,
 		}
 	}
 	EXIT;
+}
+EXPORT_SYMBOL(__cl_sync_io_note);
+
+void cl_sync_io_note(const struct lu_env *env, struct cl_sync_io *anchor,
+		     int ioret)
+{
+	__cl_sync_io_note(env, anchor, 1, ioret);
 }
 EXPORT_SYMBOL(cl_sync_io_note);
 

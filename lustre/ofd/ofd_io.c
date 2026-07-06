@@ -66,8 +66,8 @@ static void ofd_inconsistency_verify_one(const struct lu_env *env,
 		LASSERT(rc <= 0);
 
 		if (rc < 0)
-			CDEBUG(D_LFSCK, "%s: fail to verify OST local stored "
-			       "PFID xattr for "DFID", the client given PFID "
+			CDEBUG(D_LFSCK, "%s: fail to verify OST local stored PFID xattr for "
+			       DFID", the client given PFID "
 			       DFID", OST local stored PFID "DFID": rc = %d\n",
 			       ofd_name(ofd), PFID(&fo->ofo_header.loh_fid),
 			       PFID(&client_ff->ff_parent),
@@ -80,15 +80,14 @@ static void ofd_inconsistency_verify_one(const struct lu_env *env,
 
 		ofd->ofd_inconsistency_self_detected++;
 		if (rc < 0)
-			CDEBUG(D_LFSCK, "%s: fail to verify the client given "
-			       "PFID for "DFID", the client given PFID "DFID
+			CDEBUG(D_LFSCK, "%s: fail to verify the client given PFID for "
+			       DFID", the client given PFID "DFID
 			       ", local stored PFID "DFID": rc = %d\n",
 			       ofd_name(ofd), PFID(&fo->ofo_header.loh_fid),
 			       PFID(&client_ff->ff_parent),
 			       PFID(&local_ff->ff_parent), rc);
 		else
-			CDEBUG(D_LFSCK, "%s: both the client given PFID and "
-			       "the OST local stored PFID are stale for the "
+			CDEBUG(D_LFSCK, "%s: both the client given PFID and the OST local stored PFID are stale for the "
 			       "OST-object "DFID", client given PFID is "DFID
 			       ", local stored PFID is "DFID"\n",
 			       ofd_name(ofd), PFID(&fo->ofo_header.loh_fid),
@@ -99,15 +98,15 @@ static void ofd_inconsistency_verify_one(const struct lu_env *env,
 		ofd->ofd_inconsistency_self_detected++;
 		if (rc == 0) {
 			ofd->ofd_inconsistency_self_repaired++;
-			CDEBUG(D_LFSCK, "%s: fixed the staled OST PFID xattr "
-			       "for "DFID", with the client given PFID "DFID
+			CDEBUG(D_LFSCK, "%s: fixed the staled OST PFID xattr for "
+			       DFID", with the client given PFID "DFID
 			       ", the old stored PFID "DFID"\n",
 			       ofd_name(ofd), PFID(&fo->ofo_header.loh_fid),
 			       PFID(&client_ff->ff_parent),
 			       PFID(&local_ff->ff_parent));
 		} else if (rc < 0) {
-			CDEBUG(D_LFSCK, "%s: fail to fix the OST PFID xattr "
-			       "for "DFID", client given PFID "DFID", local "
+			CDEBUG(D_LFSCK, "%s: fail to fix the OST PFID xattr for "
+			       DFID", client given PFID "DFID", local "
 			       "stored PFID "DFID": rc = %d\n",
 			       ofd_name(ofd), PFID(&fo->ofo_header.loh_fid),
 			       PFID(&client_ff->ff_parent),
@@ -155,6 +154,7 @@ static int ofd_inconsistency_verification_main(void *_args)
 	struct ofd_device *ofd = args->od_ofd;
 	struct ofd_inconsistency_item *oii;
 	struct lfsck_req_local *lrl = &args->od_lrl;
+
 	ENTRY;
 
 	lrl->lrl_event = LEL_PAIRS_VERIFY_LOCAL;
@@ -369,6 +369,7 @@ int ofd_verify_ff(const struct lu_env *env, struct ofd_object *fo,
 {
 	struct lu_fid *pfid = &fo->ofo_ff.ff_parent;
 	int rc = 0;
+
 	ENTRY;
 
 	if (fid_is_sane(pfid)) {
@@ -541,7 +542,7 @@ trans:
 	if (rc)
 		GOTO(out_tx, rc);
 
-	rc = dt_trans_start_local(env, ofd->ofd_osd , th);
+	rc = dt_trans_start_local(env, ofd->ofd_osd, th);
 	if (rc) {
 		CERROR("%s: cannot start transaction: rc = %d\n",
 		       ofd_name(ofd), rc);
@@ -605,7 +606,12 @@ static int ofd_preprw_read(const struct lu_env *env, struct obd_export *exp,
 	if (!ofd_object_exists(fo))
 		GOTO(obj_put, rc = -ENOENT);
 
-	if (ptlrpc_connection_is_local(exp->exp_connection))
+	rc = ofd_check_repair_resource_ids(env, fo, oa);
+	if (unlikely(rc))
+		GOTO(obj_put, rc);
+
+	if (exp->exp_connection &&
+	    LNetIsPeerLocal(&exp->exp_connection->c_peer.nid))
 		dbt |= DT_BUFS_TYPE_LOCAL;
 
 	begin = -1;
@@ -764,9 +770,12 @@ static int ofd_preprw_write(const struct lu_env *env, struct obd_export *exp,
 	 * transactions to complete. */
 	tgt_grant_prepare_write(env, exp, oa, rnb, obj->ioo_bufcnt);
 
+	if (CFS_FAIL_CHECK(OBD_FAIL_OST_GRANT_PREPARE))
+		GOTO(err_commit, rc = -EIO);
+
 	fo = ofd_object_find(env, ofd, fid);
 	if (IS_ERR(fo))
-		GOTO(out, rc = PTR_ERR(fo));
+		GOTO(err_commit, rc = PTR_ERR(fo));
 	LASSERT(fo != NULL);
 
 	ofd_info(env)->fti_obj = fo;
@@ -774,11 +783,11 @@ static int ofd_preprw_write(const struct lu_env *env, struct obd_export *exp,
 	if (!ofd_object_exists(fo)) {
 		CERROR("%s: BRW to missing obj "DOSTID"\n",
 		       exp->exp_obd->obd_name, POSTID(&obj->ioo_oid));
-		ofd_object_put(env, fo);
-		GOTO(out, rc = -ENOENT);
+		GOTO(err_put, rc = -ENOENT);
 	}
 
-	if (ptlrpc_connection_is_local(exp->exp_connection))
+	if (exp->exp_connection &&
+	    LNetIsPeerLocal(&exp->exp_connection->c_peer.nid))
 		dbt |= DT_BUFS_TYPE_LOCAL;
 
 	begin = -1;
@@ -854,9 +863,13 @@ err:
 	ofd_read_unlock(env, fo);
 err_nolock:
 	dt_bufs_put(env, ofd_object_child(fo), lnb, *nr_local);
+err_put:
 	ofd_object_put(env, fo);
+err_commit:
 	/* tgt_grant_prepare_write() was called, so we must commit */
 	tgt_grant_commit(exp, oa->o_grant_used, rc);
+	/* dealloc grants, client won't receive them */
+	tgt_grant_dealloc(exp, oa);
 out:
 	/* let's still process incoming grant information packed in the oa,
 	 * but without enforcing grant since we won't proceed with the write.
@@ -1053,14 +1066,14 @@ ofd_write_attr_set(const struct lu_env *env, struct ofd_device *ofd,
 
 	if (oa->o_valid & (OBD_MD_FLFID | OBD_MD_FLOSTLAYOUT |
 			   OBD_MD_LAYOUT_VERSION)) {
-		rc = dt_declare_xattr_set(env, dt_obj, &info->fti_buf,
+		rc = dt_declare_xattr_set(env, dt_obj, NULL, &info->fti_buf,
 					  XATTR_NAME_FID, 0, th);
 		if (rc)
 			GOTO(out_tx, rc);
 	}
 	/* We don't need a transno for this operation which will be re-executed
 	 * anyway when the OST_WRITE (with a transno assigned) is replayed */
-	rc = dt_trans_start_local(env, ofd->ofd_osd , th);
+	rc = dt_trans_start_local(env, ofd->ofd_osd, th);
 	if (rc)
 		GOTO(out_tx, rc);
 
@@ -1080,6 +1093,9 @@ ofd_write_attr_set(const struct lu_env *env, struct ofd_device *ofd,
 		rc = dt_attr_set(env, dt_obj, la, th);
 		if (rc)
 			GOTO(out_unlock, rc);
+
+		if (!(la->la_mode & (S_ISUID | S_ISGID | S_ISVTX)))
+			ofd_obj->ofo_resource_ids_set = 1;
 	}
 
 	fl = ofd_object_ff_update(env, ofd_obj, oa, ff);
@@ -1245,6 +1261,10 @@ ofd_commitrw_write(const struct lu_env *env, struct obd_export *exp,
 	if (!ofd_object_exists(fo))
 		GOTO(out, rc = -ENOENT);
 
+	rc = ofd_check_resource_ids(env, fo, oa);
+	if (unlikely(rc))
+		GOTO(out, rc);
+
 	/*
 	 * The first write to each object must set some attributes.  It is
 	 * important to set the uid/gid before calling
@@ -1399,6 +1419,9 @@ out:
 	ofd_object_put(env, fo);
 	if (granted > 0)
 		tgt_grant_commit(exp, granted, old_rc);
+	if (rc)
+		/* dealloc grants, client won't receive them */
+		tgt_grant_dealloc(exp, oa);
 	RETURN(rc);
 }
 
@@ -1476,12 +1499,22 @@ int ofd_commitrw(const struct lu_env *env, int cmd, struct obd_export *exp,
 						       NODEMAP_FS_TO_CLIENT,
 						       oa->o_projid);
 		} else if (old_rc == 0) {
-			old_rc = PTR_ERR(nodemap);
+			/* always allow ECHO client */
+			if (strcmp(obd_uuid2str(&exp->exp_client_uuid),
+				   LUSTRE_ECHO_UUID) != 0 ||
+			    exp->exp_connection)
+				old_rc = PTR_ERR(nodemap);
 		}
 
 		if (!IS_ERR_OR_NULL(nodemap)) {
-			/* do not bypass quota enforcement if squashed uid */
-			if (unlikely(mapped_uid == nodemap->nm_squash_uid)) {
+			/* do not bypass quota enforcement if squashed uid or
+			 * offset root without local_admin RBAC role.
+			 * "mapped_uid == 0" is an optimization to avoid calling
+			 * is_local_root() which returns false for regular users
+			 */
+			if (unlikely(mapped_uid == nodemap->nm_squash_uid ||
+				     (mapped_uid == 0 &&
+				      !is_local_root(oa->o_uid, nodemap)))) {
 				int idx;
 
 				for (idx = 0; idx < npages; idx++)

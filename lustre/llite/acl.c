@@ -31,7 +31,8 @@ ll_get_acl_common(struct inode *inode, int type, bool rcu)
 	if (rcu)
 		return ERR_PTR(-ECHILD);
 
-	if (type == ACL_TYPE_ACCESS && lli->lli_posix_acl)
+	if (type == ACL_TYPE_ACCESS &&
+	    test_bit(LLIF_ACL_VALID, &lli->lli_flags))
 		goto lli_acl;
 
 	switch (type) {
@@ -111,7 +112,6 @@ struct posix_acl *ll_get_acl(
 	return ll_get_acl_common(inode, type, rcu);
 }
 
-#ifdef HAVE_IOP_SET_ACL
 int ll_set_acl(struct mnt_idmap *map,
 #ifdef HAVE_ACL_WITH_DENTRY
 	       struct dentry *dentry,
@@ -150,14 +150,10 @@ int ll_set_acl(struct mnt_idmap *map,
 		return rc;
 
 	if (acl) {
-		value_size = posix_acl_xattr_size(acl->a_count);
-		value = kmalloc(value_size, GFP_NOFS);
-		if (value == NULL)
+		value = posix_acl_to_xattr(&init_user_ns, acl, &value_size,
+					   GFP_NOFS);
+		if (!value)
 			GOTO(out, rc = -ENOMEM);
-
-		rc = posix_acl_to_xattr(&init_user_ns, acl, value, value_size);
-		if (rc < 0)
-			GOTO(out_value, rc);
 	}
 
 	rc = md_setxattr(sbi->ll_md_exp, ll_inode2fid(inode),
@@ -169,13 +165,16 @@ int ll_set_acl(struct mnt_idmap *map,
 		ll_i2info(inode)->lli_synced_to_mds = false;
 
 	ptlrpc_req_put(req);
-out_value:
-	kfree(value);
 out:
-	if (rc)
+	kfree(value);
+	if (rc) {
 		forget_cached_acl(inode, type);
-	else
-		set_cached_acl(inode, type, acl);
-	RETURN(rc);
+		RETURN(rc);
+	}
+
+	set_cached_acl(inode, type, acl);
+	if (type == ACL_TYPE_ACCESS)
+		lli_install_acl(ll_i2info(inode), posix_acl_dup(acl));
+
+	RETURN(0);
 }
-#endif /* HAVE_IOP_SET_ACL */

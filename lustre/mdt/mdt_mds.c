@@ -60,7 +60,7 @@ module_param(mds_cpu_bind, uint, 0444);
 MODULE_PARM_DESC(mds_cpu_bind,
 		 "bind MDS threads to particular CPU partitions");
 
-int mds_max_io_threads = 512;
+static int mds_max_io_threads = 512;
 module_param(mds_max_io_threads, int, 0444);
 MODULE_PARM_DESC(mds_max_io_threads,
 		 "maximum number of MDS IO service threads");
@@ -95,6 +95,11 @@ static char *mds_rdpg_num_cpts;
 module_param(mds_rdpg_num_cpts, charp, 0444);
 MODULE_PARM_DESC(mds_rdpg_num_cpts,
 		 "CPU partitions MDS readpage threads should run on");
+
+unsigned int mdt_enable_flr_ec;
+module_param(mdt_enable_flr_ec, uint, 0644);
+MODULE_PARM_DESC(mdt_enable_flr_ec,
+		 "enable FLR EC connect flag, off by default");
 
 /* device init/fini methods */
 static void mds_stop_ptlrpc_service(struct mds_device *m)
@@ -471,6 +476,7 @@ static int mds_start_ptlrpc_service(struct mds_device *m)
 				break;
 			}
 		}
+		rc = 0;
 	}
 
 	memset(&conf, 0, sizeof(conf));
@@ -643,9 +649,11 @@ static int mds_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 {
 	struct obd_device *obd = exp->exp_obd;
 	struct obd_ioctl_data *data;
+	bool dynamic = true;
 	int rc = 0;
 
 	ENTRY;
+
 	CDEBUG(D_IOCTL, "%s: cmd=%x len=%u karg=%pK uarg=%pK\n",
 	       obd->obd_name, cmd, len, karg, uarg);
 
@@ -654,7 +662,7 @@ static int mds_iocontrol(unsigned int cmd, struct obd_export *exp, int len,
 	if (cmd != OBD_IOC_NODEMAP)
 		GOTO(out, rc = -EINVAL);
 
-	rc = server_iocontrol_nodemap(obd, data, true);
+	rc = server_iocontrol_nodemap(obd, data, &dynamic, NULL, NULL);
 	if (rc)
 		GOTO(out, rc);
 

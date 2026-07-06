@@ -19,13 +19,8 @@
 
 #include "lov_cl_internal.h"
 
-/** \addtogroup lov
- *  @{
- */
+/* LOV-sub device and device type functions. */
 
-/**
- * Lov-sub device and device type functions.
- */
 static int lovsub_device_init(const struct lu_env *env, struct lu_device *d,
 			      const char *name, struct lu_device *next)
 {
@@ -37,7 +32,7 @@ static int lovsub_device_init(const struct lu_env *env, struct lu_device *d,
 	next->ld_site = d->ld_site;
 	ldt = next->ld_type;
 	LASSERT(ldt != NULL);
-	rc = ldt->ldt_ops->ldto_device_init(env, next, ldt->ldt_name, NULL);
+	rc = ldto_device_init(env, next, ldt->ldt_name, NULL);
 	if (rc) {
 		next->ld_site = NULL;
 		RETURN(rc);
@@ -93,7 +88,7 @@ static struct lu_device *lovsub_device_alloc(const struct lu_env *env,
 		result = cl_device_init(&lsd->acid_cl, t);
 		if (result == 0) {
 			d = lovsub2lu_dev(lsd);
-			d->ld_ops         = &lovsub_lu_ops;
+			d->ld_ops = &lovsub_lu_ops;
 		} else
 			d = ERR_PTR(result);
 	} else
@@ -117,7 +112,3 @@ struct lu_device_type lovsub_device_type = {
 	.ldt_ops      = &lovsub_device_type_ops,
 	.ldt_ctx_tags = LCT_CL_THREAD
 };
-
-
-/** @} lov */
-

@@ -16,9 +16,6 @@
 
 #include <linux/types.h>
 #include <linux/security.h>
-#ifdef HAVE_LINUX_SELINUX_IS_ENABLED
-#include <linux/selinux.h>
-#endif
 #include <linux/xattr.h>
 #include "llite_internal.h"
 
@@ -37,7 +34,8 @@
 /*
  * Check for LL_SBI_FILE_SECCTX before calling.
  */
-int ll_dentry_init_security(struct dentry *dentry, int mode, struct qstr *name,
+int ll_dentry_init_security(struct dentry *dentry, int mode,
+			    const struct qstr *name,
 			    const char **secctx_name, __u32 *secctx_name_size,
 			    void **secctx, __u32 *secctx_size, int *secctx_slot)
 {
@@ -46,7 +44,7 @@ int ll_dentry_init_security(struct dentry *dentry, int mode, struct qstr *name,
 	const char *secctx_name_lsm = NULL;
 #endif
 #ifdef HAVE_SECURITY_DENTRY_INIT_SECURTY_WITH_CTX
-	struct lsmcontext ctx = {};
+	struct lsm_context ctx = {};
 #endif
 	int rc;
 

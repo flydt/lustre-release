@@ -237,7 +237,8 @@ static int ll_read_ahead_page(const struct lu_env *env, struct cl_io *io,
 		GOTO(out, rc = -EBUSY);
 	}
 
-	cp = cl_page_find(env, clob, vmpage->index, vmpage, CPT_CACHEABLE);
+	cp = cl_page_find(env, clob, folio_index_page(vmpage), vmpage,
+			  CPT_CACHEABLE);
 	if (IS_ERR(cp)) {
 		which = RA_STAT_FAILED_GRAB_PAGE;
 		msg   = "cl_page_find failed";
@@ -289,7 +290,7 @@ static inline int stride_io_mode(struct ll_readahead_state *ras)
 	return ras->ras_consecutive_stride_requests > 1;
 }
 
-/* stride_byte_count() - The function calculates how many bytes will be read in
+/* stride_page_count() - The function calculates how many pages will be read in
  *
  * [off, off + length], in such stride IO area,
  * stride_offset = st_off, stride_lengh = st_len,
@@ -308,50 +309,54 @@ static inline int stride_io_mode(struct ll_readahead_state *ras)
  *          =   |<----->|  +  |-------------------------------------| +   |---|
  *             start_left                 st_bytes * i                 end_left
  */
-static loff_t stride_byte_count(loff_t st_off, loff_t st_len, loff_t st_bytes,
-				loff_t off, loff_t length)
+static unsigned long stride_page_count(loff_t st_off, loff_t st_len,
+				       loff_t st_bytes, unsigned long off,
+				       unsigned long length)
 {
-	u64 start = off > st_off ? off - st_off : 0;
-	u64 end = off + length > st_off ? off + length - st_off : 0;
-	u64 start_left;
-	u64 end_left;
-	u64 bytes_count;
+	unsigned long start, end;
+	unsigned long start_left, end_left;
+	unsigned long pages;
+	unsigned long st_off_pgs, st_len_pgs, st_bytes_pgs;
+
+	st_off_pgs = st_off >> PAGE_SHIFT;
+	st_len_pgs = DIV_ROUND_UP(st_off + st_len, PAGE_SIZE) - st_off_pgs;
+	st_bytes_pgs = DIV_ROUND_UP(st_off + st_bytes, PAGE_SIZE) - st_off_pgs;
+
+	start = off > st_off_pgs ? off - st_off_pgs : 0;
+	end = off + length > st_off_pgs ? off + length - st_off_pgs : 0;
 
 	if (st_len == 0 || length == 0 || end == 0)
 		return length;
 
-	start = div64_u64_rem(start, st_len, &start_left);
-	if (start_left < st_bytes)
-		start_left = st_bytes - start_left;
+	start_left = do_div(start, st_len_pgs);
+	if (start_left < st_bytes_pgs)
+		start_left = st_bytes_pgs - start_left;
 	else
 		start_left = 0;
 
-	end = div64_u64_rem(end, st_len, &end_left);
-	if (end_left > st_bytes)
-		end_left = st_bytes;
+	end_left = do_div(end, st_len_pgs);
+	if (end_left > st_bytes_pgs)
+		end_left = st_bytes_pgs;
 
-	CDEBUG(D_READA, "start %llu, end %llu start_left %llu end_left %llu\n",
+	CDEBUG(D_READA, "start %lu, end %lu start_left %lu end_left %lu\n",
 	       start, end, start_left, end_left);
 
 	if (start == end)
-		bytes_count = end_left - (st_bytes - start_left);
+		pages = end_left - (st_bytes_pgs - start_left);
 	else
-		bytes_count = start_left +
-			st_bytes * (end - start - 1) + end_left;
+		pages = start_left + st_bytes_pgs * (end - start) + end_left;
 
 	CDEBUG(D_READA,
-	       "st_off %llu, st_len %llu st_bytes %llu off %llu length %llu bytescount %llu\n",
-	       st_off, st_len, st_bytes, off, length, bytes_count);
+	       "st_off %llu, st_len %llu st_bytes %llu off %lu length %lu pages %lu\n",
+	       st_off, st_len, st_bytes, off, length, pages);
 
-	return bytes_count;
+	return pages;
 }
 
 static unsigned long ria_page_count(struct ra_io_arg *ria)
 {
-	loff_t length_bytes = ria->ria_end_idx >= ria->ria_start_idx ?
-		(loff_t)(ria->ria_end_idx -
-			 ria->ria_start_idx + 1) << PAGE_SHIFT : 0;
-	loff_t bytes_count;
+	unsigned long length = ria->ria_end_idx >= ria->ria_start_idx ?
+			ria->ria_end_idx - ria->ria_start_idx + 1 : 0;
 
 	if (ria->ria_length > ria->ria_bytes && ria->ria_bytes &&
 	    (ria->ria_length & ~PAGE_MASK || ria->ria_bytes & ~PAGE_MASK ||
@@ -359,15 +364,13 @@ static unsigned long ria_page_count(struct ra_io_arg *ria)
 		/* Over-estimate un-aligned page stride read */
 		unsigned long pg_count = ((ria->ria_bytes +
 					   PAGE_SIZE - 1) >> PAGE_SHIFT) + 1;
-		pg_count *= length_bytes / ria->ria_length + 1;
+		pg_count *= (loff_t)(length << PAGE_SHIFT) /
+				ria->ria_length + 1;
 
 		return pg_count;
 	}
-	bytes_count = stride_byte_count(ria->ria_stoff, ria->ria_length,
-					ria->ria_bytes,
-					(loff_t)ria->ria_start_idx<<PAGE_SHIFT,
-					length_bytes);
-	return (bytes_count + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	return stride_page_count(ria->ria_stoff, ria->ria_length,
+				 ria->ria_bytes, ria->ria_start_idx, length);
 }
 
 static pgoff_t ras_align(struct ll_readahead_state *ras, pgoff_t index)
@@ -414,34 +417,28 @@ ll_read_ahead_pages(const struct lu_env *env, struct cl_io *io,
 {
 	struct cl_read_ahead *ra = NULL;
 	/* busy page count is per stride */
-	int rc = 0, count = 0, busy_page_count = 0;
+	int busy_page_count = 0;
 	pgoff_t page_idx;
+	int count = 0;
+	int rc = 0;
 
-	LASSERT(ria != NULL);
 	RIA_DEBUG(ria);
 
 	for (page_idx = ria->ria_start_idx;
-	     page_idx <= ria->ria_end_idx && ria->ria_reserved > 0;
+	     page_idx <= ria->ria_end_idx;
 	     page_idx++) {
 		if (skip_index && page_idx == skip_index)
 			continue;
+		/* if the page is in the window, proceed to do readahead */
 		if (ras_inside_ra_window(page_idx, ria)) {
+			/* if we haven't checked lock coverage yet or if we're
+			 * outside the current lock, we must call in to
+			 * cl_io_read_ahead to check for a lock and ensure we're
+			 * inside that lock
+			 */
 			if (!ra || ra->cra_end_idx == 0 ||
 			    ra->cra_end_idx < page_idx) {
 				pgoff_t end_idx;
-
-				/*
-				 * Do not shrink ria_end_idx at any case until
-				 * the minimum end of current read is covered.
-				 *
-				 * Do not extend read lock accross stripe if
-				 * lock contention detected.
-				 */
-				if (ra && ra->cra_contention &&
-				    page_idx > ria->ria_end_idx_min) {
-					ria->ria_end_idx = *ra_end;
-					break;
-				}
 
 				OBD_ALLOC_PTR(ra);
 				if (ra == NULL)
@@ -449,17 +446,20 @@ ll_read_ahead_pages(const struct lu_env *env, struct cl_io *io,
 					break;
 
 				INIT_LIST_HEAD(&ra->cra_linkage);
-				rc = cl_io_read_ahead(env, io, page_idx, ra);
+				/* cl_io_read_ahead may not set rpc pages */
+				ra->cra_rpc_pages = ras->ras_rpc_pages;
+				rc = cl_io_read_ahead_prep(env, io, page_idx,
+							   ra);
 				if (rc < 0) {
 					OBD_FREE_PTR(ra);
 					break;
 				}
+				ras->ras_rpc_pages = ra->cra_rpc_pages;
 
 				list_add_tail(&ra->cra_linkage,
 					      &ria->ria_cl_ra_list);
-				/*
-				 * Only shrink ria_end_idx if the matched
-				 * LDLM lock doesn't cover more.
+				/* if the LDLM lock doesn't cover the required
+				 * range, reduce the readahead end and stop here
 				 */
 				if (page_idx > ra->cra_end_idx) {
 					ria->ria_end_idx = ra->cra_end_idx;
@@ -469,16 +469,7 @@ ll_read_ahead_pages(const struct lu_env *env, struct cl_io *io,
 				CDEBUG(D_READA, "idx: %lu, ra: %lu, rpc: %lu\n",
 				       page_idx, ra->cra_end_idx,
 				       ra->cra_rpc_pages);
-				LASSERTF(ra->cra_end_idx >= page_idx,
-					 "object: %px, indcies %lu / %lu\n",
-					 io->ci_obj, ra->cra_end_idx, page_idx);
-				/* update read ahead RPC size.
-				 * NB: it's racy but doesn't matter */
-				if (ras->ras_rpc_pages != ra->cra_rpc_pages &&
-				    ra->cra_rpc_pages > 0)
-					ras->ras_rpc_pages = ra->cra_rpc_pages;
 				if (!skip_index) {
-					/* trim (align with optimal RPC size) */
 					end_idx = ras_align(ras,
 							ria->ria_end_idx + 1);
 					if (end_idx > 0 && !ria->ria_eof)
@@ -490,7 +481,6 @@ ll_read_ahead_pages(const struct lu_env *env, struct cl_io *io,
 			if (page_idx > ria->ria_end_idx)
 				break;
 
-			/* If the page is inside the read-ahead window */
 			rc = ll_read_ahead_page(env, io, queue, page_idx,
 						MAYNEED);
 			if (rc < 0 && rc != -EBUSY)
@@ -499,7 +489,7 @@ ll_read_ahead_pages(const struct lu_env *env, struct cl_io *io,
 				busy_page_count++;
 				CDEBUG(D_READA,
 				       "skip busy page: %lu\n", page_idx);
-				/* For page unaligned readahead the first
+				/* For page unaligned readahead the first and
 				 * last pages of each region can be read by
 				 * another reader on the same node, and so
 				 * may be busy. So only stop for > 2 busy
@@ -514,14 +504,17 @@ ll_read_ahead_pages(const struct lu_env *env, struct cl_io *io,
 			 * really did readahead on that page.
 			 */
 			if (rc == 0) {
-				ria->ria_reserved--;
 				count++;
+				ria->ria_reserved--;
+				/* no more reserved pages */
+				if (ria->ria_reserved == 0)
+					break;
 			}
+		/* this page isn't in the readahead window, but if we're in
+		 * strided, it might be this is the stride gap - check and move
+		 * the window to the next stride if so
+		 */
 		} else if (stride_io_mode(ras)) {
-			/* If it is not in the read-ahead window, and it is
-			 * read-ahead mode, then check whether it should skip
-			 * the stride gap.
-			 */
 			loff_t pos = (loff_t)page_idx << PAGE_SHIFT;
 			u64 offset;
 
@@ -1024,68 +1017,66 @@ static void ras_init_stride_detector(struct ll_readahead_state *ras,
 	RAS_CDEBUG(ras);
 }
 
-static unsigned long
-stride_page_count(struct ll_readahead_state *ras, loff_t len)
-{
-	loff_t bytes_count =
-		stride_byte_count(ras->ras_stride_offset,
-				  ras->ras_stride_length, ras->ras_stride_bytes,
-				  ras->ras_window_start_idx << PAGE_SHIFT, len);
-
-	return (bytes_count + PAGE_SIZE - 1) >> PAGE_SHIFT;
-}
-
-/* Stride Read-ahead window will be increased inc_len according to
+/* Stride Read-ahead window will be increased inc_pages according to
  * stride I/O pattern
  */
 static void ras_stride_increase_window(struct ll_readahead_state *ras,
-				       struct ll_ra_info *ra, loff_t inc_bytes)
+				       struct ll_ra_info *ra,
+				       unsigned long inc_pages)
 {
-	loff_t window_bytes, stride_bytes;
-	u64 left_bytes;
-	u64 step;
-	loff_t end;
+	unsigned long window_pages, stride_pgs;
+	unsigned long left, end;
+	unsigned long stride_offset_pgs, stride_length_pgs, stride_bytes_pgs;
+
+	stride_offset_pgs = ras->ras_stride_offset >> PAGE_SHIFT;
+	stride_length_pgs = DIV_ROUND_UP(ras->ras_stride_offset +
+					 ras->ras_stride_length, PAGE_SIZE) -
+			    stride_offset_pgs;
+	stride_bytes_pgs = DIV_ROUND_UP(ras->ras_stride_offset +
+					ras->ras_stride_bytes, PAGE_SIZE) -
+			   stride_offset_pgs;
 
 	/* temporarily store in page units to reduce LASSERT() cost below */
 	end = ras->ras_window_start_idx + ras->ras_window_pages;
 
 	LASSERT(ras->ras_stride_length > 0);
-	LASSERTF(end >= (ras->ras_stride_offset >> PAGE_SHIFT),
+	LASSERTF(end >= stride_offset_pgs,
 		 "window_start_idx %lu, window_pages %lu stride_offset %llu\n",
 		 ras->ras_window_start_idx, ras->ras_window_pages,
 		 ras->ras_stride_offset);
 
-	end <<= PAGE_SHIFT;
-	if (end <= ras->ras_stride_offset)
-		stride_bytes = 0;
+	if (end <= stride_offset_pgs)
+		stride_pgs = 0;
 	else
-		stride_bytes = end - ras->ras_stride_offset;
+		stride_pgs = end - stride_offset_pgs;
 
-	div64_u64_rem(stride_bytes, ras->ras_stride_length, &left_bytes);
-	window_bytes = (ras->ras_window_pages << PAGE_SHIFT);
-	if (left_bytes < ras->ras_stride_bytes) {
-		if (ras->ras_stride_bytes - left_bytes >= inc_bytes) {
-			window_bytes += inc_bytes;
+	left = do_div(stride_pgs, stride_length_pgs);
+	window_pages = ras->ras_window_pages;
+	if (left < stride_bytes_pgs) {
+		if (stride_bytes_pgs - left >= inc_pages) {
+			window_pages += inc_pages;
 			goto out;
 		} else {
-			window_bytes += (ras->ras_stride_bytes - left_bytes);
-			inc_bytes -= (ras->ras_stride_bytes - left_bytes);
+			window_pages += (stride_bytes_pgs - left);
+			inc_pages -= (stride_bytes_pgs - left);
 		}
 	} else {
-		window_bytes += (ras->ras_stride_length - left_bytes);
+		window_pages += (stride_length_pgs - left);
 	}
 
 	LASSERT(ras->ras_stride_bytes != 0);
 
-	step = div64_u64_rem(inc_bytes, ras->ras_stride_bytes, &left_bytes);
+	left = do_div(inc_pages, stride_bytes_pgs);
 
-	window_bytes += step * ras->ras_stride_length + left_bytes;
-	LASSERT(window_bytes > 0);
+	window_pages += inc_pages * stride_length_pgs + left;
+	LASSERT(window_pages > 0);
 
 out:
-	if (stride_page_count(ras, window_bytes) <=
+	if (stride_page_count(ras->ras_stride_offset, ras->ras_stride_length,
+			      ras->ras_stride_bytes, ras->ras_window_start_idx,
+			      window_pages) <=
 	    ra->ra_max_pages_per_file || ras->ras_window_pages == 0)
-		ras->ras_window_pages = (window_bytes >> PAGE_SHIFT);
+		ras->ras_window_pages = window_pages;
 
 	LASSERT(ras->ras_window_pages > 0);
 
@@ -1101,8 +1092,7 @@ static void ras_increase_window(struct inode *inode,
 	 * information from lower layer. FIXME later
 	 */
 	if (stride_io_mode(ras)) {
-		ras_stride_increase_window(ras, ra,
-				      (loff_t)ras->ras_rpc_pages << PAGE_SHIFT);
+		ras_stride_increase_window(ras, ra, ras->ras_rpc_pages);
 	} else {
 		pgoff_t window_pages;
 
@@ -1272,7 +1262,9 @@ void ll_ras_enter(struct file *f, loff_t pos, size_t bytes)
 	struct inode *inode = file_inode(f);
 	struct ll_sb_info *sbi = ll_i2sbi(inode);
 
-	spin_lock(&ras->ras_lock);
+	if (!spin_trylock(&ras->ras_lock))
+		return;
+
 	ras->ras_requests++;
 	ras->ras_consecutive_requests++;
 	ras->ras_need_increase_window = false;
@@ -1475,101 +1467,10 @@ out_unlock:
 	spin_unlock(&ras->ras_lock);
 }
 
-int ll_writepage(struct page *vmpage, struct writeback_control *wbc)
-{
-	struct inode	       *inode = vmpage->mapping->host;
-	struct ll_inode_info   *lli   = ll_i2info(inode);
-	struct lu_env          *env;
-	struct cl_io           *io;
-	struct cl_page         *page;
-	struct cl_object       *clob;
-	bool redirtied = false;
-	bool unlocked = false;
-	int result;
-	__u16 refcheck;
-
-	ENTRY;
-
-	LASSERT(PageLocked(vmpage));
-	LASSERT(!PageWriteback(vmpage));
-
-	LASSERT(ll_i2dtexp(inode) != NULL);
-
-	env = cl_env_get(&refcheck);
-	if (IS_ERR(env))
-		GOTO(out, result = PTR_ERR(env));
-
-	clob  = ll_i2info(inode)->lli_clob;
-	LASSERT(clob != NULL);
-
-	io = vvp_env_new_io(env);
-	io->ci_obj = clob;
-	io->ci_ignore_layout = 1;
-	result = cl_io_init(env, io, CIT_MISC, clob);
-	if (result == 0) {
-		page = cl_page_find(env, clob, vmpage->index,
-				    vmpage, CPT_CACHEABLE);
-		if (!IS_ERR(page)) {
-			cl_page_assume(env, io, page);
-			result = cl_page_flush(env, io, page);
-			if (result != 0) {
-				/*
-				 * Re-dirty page on error so it retries write,
-				 * but not in case when IO has actually
-				 * occurred and completed with an error.
-				 */
-				if (!PageError(vmpage)) {
-					redirty_page_for_writepage(wbc, vmpage);
-					result = 0;
-					redirtied = true;
-				}
-			}
-			cl_page_disown(env, io, page);
-			unlocked = true;
-			cl_page_put(env, page);
-		} else {
-			result = PTR_ERR(page);
-		}
-	}
-	cl_io_fini(env, io);
-
-	if (redirtied && wbc->sync_mode == WB_SYNC_ALL) {
-		loff_t offset = vmpage->index << PAGE_SHIFT;
-
-		/* Flush page failed because the extent is being written out.
-		 * Wait for the write of extent to be finished to avoid
-		 * breaking kernel which assumes ->writepage should mark
-		 * PageWriteback or clean the page.
-		 */
-		result = cl_sync_file_range(inode, offset,
-					    offset + PAGE_SIZE - 1,
-					    CL_FSYNC_LOCAL, 1);
-		if (result > 0) {
-			/* May have written more than one page. decreasing this
-			 * page because the caller will count it.
-			 */
-			wbc->nr_to_write -= result - 1;
-			result = 0;
-		}
-	}
-
-	cl_env_put(env, &refcheck);
-	GOTO(out, result);
-
-out:
-	if (result < 0) {
-		if (!lli->lli_async_rc)
-			lli->lli_async_rc = result;
-		SetPageError(vmpage);
-		if (!unlocked)
-			unlock_page(vmpage);
-	}
-	return result;
-}
-
 int ll_writepages(struct address_space *mapping, struct writeback_control *wbc)
 {
 	struct inode *inode = mapping->host;
+	enum cl_io_priority prio = IO_PRIO_NORMAL;
 	loff_t start;
 	loff_t end;
 	enum cl_fsync_mode mode;
@@ -1611,8 +1512,11 @@ int ll_writepages(struct address_space *mapping, struct writeback_control *wbc)
 		wb = inode_to_wb(inode);
 		if (wbc->for_background ||
 		    (wb->start_all_reason == WB_REASON_VMSCAN &&
-		     test_bit(WB_start_all, &wb->state)))
+		     test_bit(WB_start_all, &wb->state))) {
 			mode = CL_FSYNC_RECLAIM;
+			if (wb->dirty_exceeded)
+				prio = IO_PRIO_DIRTY_EXCEEDED;
+		}
 		spin_unlock(&inode->i_lock);
 #else
 		/*
@@ -1627,14 +1531,15 @@ int ll_writepages(struct address_space *mapping, struct writeback_control *wbc)
 #endif
 	}
 
-	if (ll_i2info(inode)->lli_clob == NULL || (inode->i_state & I_FREEING))
+	if (ll_i2info(inode)->lli_clob == NULL ||
+	    (inode_state_read(inode) & I_FREEING))
 		RETURN(0);
 
 	/* for directio, it would call writepages() to evict cached pages
 	 * inside the IO context of write, which will cause deadlock at
 	 * layout_conf since it waits for active IOs to complete.
 	 */
-	result = cl_sync_file_range(inode, start, end, mode, 1);
+	result = cl_sync_file_range(inode, start, end, mode, 1, prio);
 	if (result > 0) {
 		wbc->nr_to_write -= result;
 		result = 0;
@@ -1706,8 +1611,7 @@ int ll_io_read_page(const struct lu_env *env, struct cl_io *io,
 	struct cl_sync_io	  *anchor = NULL;
 	int			   rc = 0, rc2 = 0;
 	bool			   uptodate;
-	struct vvp_io *vio = vvp_env_io(env);
-	bool mmap = !vio->vui_ra_valid;
+	bool mmap = !!(io->ci_type == CIT_FAULT);
 	pgoff_t ra_start_index = 0;
 	pgoff_t io_start_index;
 	pgoff_t io_end_index;
@@ -1954,10 +1858,8 @@ int ll_readpage(struct file *file, struct page *vmpage)
 	struct cl_page *page;
 	struct vvp_io *vio;
 	int result;
-	int flags;
 
 	ENTRY;
-
 	if (CFS_FAIL_PRECHECK(OBD_FAIL_LLITE_READPAGE_PAUSE)) {
 		unlock_page(vmpage);
 		CFS_FAIL_TIMEOUT(OBD_FAIL_LLITE_READPAGE_PAUSE, cfs_fail_val);
@@ -2019,7 +1921,8 @@ int ll_readpage(struct file *file, struct page *vmpage)
 		struct ll_readahead_state *ras = &lfd->fd_ras;
 		struct lu_env  *local_env = NULL;
 
-		CDEBUG(D_VFSTRACE, "fast read pgno: %ld\n", vmpage->index);
+		CDEBUG(D_VFSTRACE, "fast read pgno: %ld\n",
+		       folio_index_page(vmpage));
 
 		result = -ENODATA;
 
@@ -2030,7 +1933,7 @@ int ll_readpage(struct file *file, struct page *vmpage)
 		if (page == NULL) {
 			unlock_page(vmpage);
 			CDEBUG(D_READA, "fast read: failed to find page %ld\n",
-				vmpage->index);
+			       folio_index_page(vmpage));
 			ll_ra_stats_inc_sbi(sbi, RA_STAT_FAILED_FAST_READ);
 			RETURN(result);
 		}
@@ -2103,13 +2006,16 @@ int ll_readpage(struct file *file, struct page *vmpage)
 		 * This should never occur except in kernels with the bug
 		 * mentioned above.
 		 */
-		if (vmpage->index >= lcc->lcc_end_index) {
+		if (folio_index_page(vmpage) >= lcc->lcc_end_index) {
 			CDEBUG(D_VFSTRACE,
 			       "pgno:%ld, beyond read end_index:%ld\n",
-			       vmpage->index, lcc->lcc_end_index);
+			       folio_index_page(vmpage), lcc->lcc_end_index);
 
-			result = cl_io_read_ahead(env, io, vmpage->index, &ra);
-			if (result < 0 || vmpage->index > ra.cra_end_idx) {
+			result = cl_io_read_ahead_prep(env, io,
+						       folio_index_page(vmpage),
+						       &ra);
+			if (result < 0 ||
+			    folio_index_page(vmpage) > ra.cra_end_idx) {
 				cl_read_ahead_release(env, &ra);
 				unlock_page(vmpage);
 				RETURN(AOP_TRUNCATED_PAGE);
@@ -2117,15 +2023,28 @@ int ll_readpage(struct file *file, struct page *vmpage)
 		}
 	}
 
+	vio = vvp_env_io(env);
 	/* this is a sequence of checks verifying that kernel readahead is
 	 * truly disabled
 	 */
-	if (lcc && lcc->lcc_type == LCC_MMAP) {
-		if (io->u.ci_fault.ft_index != vmpage->index) {
+	if (lcc && lcc->lcc_type == LCC_MMAP &&
+	    io->u.ci_fault.ft_index != folio_index_page(vmpage)) {
+		if (!(vio->u.fault.ft_vma->vm_flags & VM_HUGEPAGE)) {
+
 			CERROR("%s: ft_index %lu, vmpage index %lu\n",
 			       sbi->ll_fsname, io->u.ci_fault.ft_index,
-			       vmpage->index);
+			       folio_index_page(vmpage));
 			ra_assert = true;
+		} else {
+			result = cl_io_read_ahead_prep(env, io,
+						       folio_index_page(vmpage),
+						       &ra);
+			if (result < 0 ||
+			    folio_index_page(vmpage) > ra.cra_end_idx) {
+				cl_read_ahead_release(env, &ra);
+				unlock_page(vmpage);
+				RETURN(AOP_TRUNCATED_PAGE);
+			}
 		}
 	}
 
@@ -2136,25 +2055,20 @@ int ll_readpage(struct file *file, struct page *vmpage)
 		ra_assert = true;
 	}
 
-
-#ifdef HAVE_BDI_IO_PAGES
 	if (ra_assert || sb->s_bdi->io_pages != 0) {
 		CERROR("%s: bdi io_pages %lu\n",
 		       sbi->ll_fsname, sb->s_bdi->io_pages);
 		ra_assert = true;
 	}
-#endif
 	if (ra_assert)
 		LASSERT(!ra_assert);
 
-	vio = vvp_env_io(env);
 	/*
 	 * Direct read can fall back to buffered read, but DIO is done
 	 * with lockless i/o, and buffered requires LDLM locking, so in
 	 * this case we must restart without lockless.
 	 */
-	flags = iocb_ki_flags_get(file, vio->vui_iocb);
-	if (iocb_ki_flags_check(flags, DIRECT) &&
+	if (iocb_ki_flags_check(vio->vui_iocb, IOCB_DIRECT) &&
 	    lcc && lcc->lcc_type == LCC_RW &&
 	    !io->ci_dio_lock) {
 		unlock_page(vmpage);
@@ -2164,7 +2078,8 @@ int ll_readpage(struct file *file, struct page *vmpage)
 	}
 
 	LASSERT(io->ci_state == CIS_IO_GOING);
-	page = cl_page_find(env, clob, vmpage->index, vmpage, CPT_CACHEABLE);
+	page = cl_page_find(env, clob, folio_index_page(vmpage), vmpage,
+			    CPT_CACHEABLE);
 	if (!IS_ERR(page)) {
 		LASSERT(page->cp_type == CPT_CACHEABLE);
 		if (likely(!PageUptodate(vmpage))) {
@@ -2181,7 +2096,7 @@ int ll_readpage(struct file *file, struct page *vmpage)
 		unlock_page(vmpage);
 		result = PTR_ERR(page);
 		CDEBUG(D_CACHE, "failed to alloc page@%pK index%ld: rc = %d\n",
-		       vmpage, vmpage->index, result);
+		       vmpage, folio_index_page(vmpage), result);
 	}
 
 out:

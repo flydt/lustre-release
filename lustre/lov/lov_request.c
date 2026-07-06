@@ -14,7 +14,6 @@
 #define DEBUG_SUBSYSTEM S_LOV
 
 #include <linux/delay.h>
-#include <libcfs/libcfs.h>
 
 #include <obd_class.h>
 #include "lov_internal.h"
@@ -72,7 +71,8 @@ static int lov_check_set(struct lov_obd *lov, int idx)
 	tgt = lov_tgt(lov, idx);
 	if (!tgt || tgt->ltd_active ||
 	    (tgt->ltd_exp &&
-	     class_exp2cliimp(tgt->ltd_exp)->imp_connect_tried))
+	     test_bit(IMPF_CONNECT_TRIED,
+		      class_exp2cliimp(tgt->ltd_exp)->imp_flags)))
 		rc = 1;
 
 	mutex_unlock(&ltd->ltd_mutex);
@@ -103,7 +103,7 @@ static int lov_check_and_wait_active(struct lov_obd *lov, int ost_idx)
 
 	if (tgt->ltd_exp)
 		imp = class_exp2cliimp(tgt->ltd_exp);
-	if (imp && imp->imp_connect_tried)
+	if (imp && test_bit(IMPF_CONNECT_TRIED, imp->imp_flags))
 		GOTO(out, rc = 0);
 	if (imp && imp->imp_state == LUSTRE_IMP_IDLE)
 		GOTO(out, rc = 0);

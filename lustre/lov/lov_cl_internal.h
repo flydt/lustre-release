@@ -19,7 +19,6 @@
 #ifndef LOV_CL_INTERNAL_H
 #define LOV_CL_INTERNAL_H
 
-#include <libcfs/libcfs.h>
 #include <obd.h>
 #include <cl_object.h>
 #include "lov_internal.h"
@@ -211,7 +210,8 @@ struct lov_mirror_entry {
 	unsigned short	lre_stale:1,	/* set if any components is stale */
 			/* set if one of components in this mirror is valid */
 			lre_valid:1,
-			lre_foreign:1;	/* set if it is a foreign component */
+			lre_foreign:1,	/* set if it is a foreign component */
+			lre_parity:1;	/* set if mirror has parity component */
 	int		lre_preference;	/* overall preference of this mirror */
 
 	unsigned short	lre_start;	/* idx(lo_entries) start idx (mirror) */
@@ -221,7 +221,6 @@ struct lov_mirror_entry {
 enum lov_object_flags {
 	/* Layout is invalid, set when layout lock is lost */
 	LO_LAYOUT_INVALID	= 0x1,
-	LO_NEED_INODE_LOCK	= 0x2,
 };
 
 /*
@@ -372,6 +371,22 @@ lov_mirror_entry(struct lov_object *lov, int i)
 	     lre <= lov_mirror_entry(lov,				\
 				lov->u.composite.lo_mirror_count - 1);	\
 	     lre++)
+
+static inline struct lov_mirror_entry *
+lov_mirror_by_id(struct lov_object *lov, __u16 mirror_id)
+{
+	struct lov_mirror_entry *lre;
+
+	if (!lov_is_flr(lov))
+		return NULL;
+
+	lov_foreach_mirror_entry(lov, lre) {
+		if (lre->lre_mirror_id == mirror_id)
+			return lre;
+	}
+
+	return NULL;
+}
 
 static inline unsigned
 lov_layout_entry_index(struct lov_object *lov, struct lov_layout_entry *entry)
@@ -556,11 +571,24 @@ enum {
 	CP_LOV_INDEX_EMPTY = -1U,
 };
 
+static inline bool lov_pages_is_empty(struct cl_dio_pages *cdp)
+{
+	return cdp->cdp_lov_index == CP_LOV_INDEX_EMPTY;
+}
+
 static inline bool lov_page_is_empty(const struct cl_page *cp)
 {
 	return cp->cp_lov_index == CP_LOV_INDEX_EMPTY;
 }
 
+
+int lov_dio_pages_init_empty(const struct lu_env *env, struct cl_object *obj,
+			     struct cl_dio_pages *cdp, pgoff_t index);
+int lov_dio_pages_init_composite(const struct lu_env *env,
+				 struct cl_object *obj,
+				 struct cl_dio_pages *cdp, pgoff_t index);
+int lov_dio_pages_init_foreign(const struct lu_env *env, struct cl_object *obj,
+			       struct cl_dio_pages *cdp, pgoff_t index);
 int   lov_page_init_empty(const struct lu_env *env, struct cl_object *obj,
 			   struct cl_page *page, pgoff_t index);
 int   lov_page_init_composite(const struct lu_env *env, struct cl_object *obj,

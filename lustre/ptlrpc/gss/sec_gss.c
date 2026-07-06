@@ -1077,11 +1077,16 @@ int gss_sec_create_common(struct gss_sec *gsec,
 	sec->ps_import = class_import_get(imp);
 	spin_lock_init(&sec->ps_lock);
 	INIT_LIST_HEAD(&sec->ps_gc_list);
+	sec->ps_nm_name[0] = '\0';
 
 	if (!svcctx) {
 		sec->ps_gc_interval = GSS_GC_INTERVAL;
 	} else {
 		LASSERT(sec_is_reverse(sec));
+
+		if (svcctx->sc_nodemap)
+			strscpy(sec->ps_nm_name, svcctx->sc_nodemap,
+				sizeof(sec->ps_nm_name));
 
 		/* never do gc on reverse sec */
 		sec->ps_gc_interval = 0;
@@ -1987,7 +1992,7 @@ int gss_svc_handle_init(struct ptlrpc_request *req, struct gss_wire_ctx *gw)
 
 	uuid = (struct obd_uuid *) uuid_obj.data;
 	target = class_uuid2obd(uuid);
-	if (!target || target->obd_stopping ||
+	if (!target || test_bit(OBDF_STOPPING, target->obd_flags) ||
 	    !test_bit(OBDF_SET_UP, target->obd_flags)) {
 		char *target_start;
 		int target_len;
@@ -2002,7 +2007,7 @@ int gss_svc_handle_init(struct ptlrpc_request *req, struct gss_wire_ctx *gw)
 			       target_len, target_start,
 			       libcfs_nidstr(&req->rq_peer.nid),
 			       target ?
-			       (target->obd_stopping ?
+			       (test_bit(OBDF_STOPPING, target->obd_flags) ?
 				"stopping" : "not set up") :
 			       "no target");
 		RETURN(rc);
@@ -2371,6 +2376,7 @@ int gss_svc_accept(struct ptlrpc_sec_policy *policy, struct ptlrpc_request *req)
 
 	grctx->src_base.sc_policy = sptlrpc_policy_get(policy);
 	atomic_set(&grctx->src_base.sc_refcount, 1);
+	grctx->src_base.sc_nodemap = NULL;
 	req->rq_svc_ctx = &grctx->src_base;
 	gw = &grctx->src_wirectx;
 
@@ -2405,6 +2411,8 @@ int gss_svc_accept(struct ptlrpc_sec_policy *policy, struct ptlrpc_request *req)
 	switch (rc) {
 	case SECSVC_OK:
 		LASSERT (grctx->src_ctx);
+
+		grctx->src_base.sc_nodemap = grctx->src_ctx->gsc_nm_name;
 
 		req->rq_auth_gss = 1;
 		req->rq_auth_usr_mdt = grctx->src_ctx->gsc_usr_mds;
@@ -2907,5 +2915,5 @@ MODULE_DESCRIPTION("Lustre GSS security policy");
 MODULE_VERSION(LUSTRE_VERSION_STRING);
 MODULE_LICENSE("GPL");
 
-module_init(sptlrpc_gss_init);
+late_initcall_sync(sptlrpc_gss_init);
 module_exit(sptlrpc_gss_exit);

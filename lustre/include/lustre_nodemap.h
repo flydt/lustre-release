@@ -17,25 +17,46 @@
 
 #include <uapi/linux/lustre/lustre_disk.h>
 #include <uapi/linux/lustre/lustre_ioctl.h>
+#include <crypto/hash.h>
+#ifdef HAVE_CRYPTO_SHA2_HEADER
+#include <crypto/sha2.h>
+#else
+#include <crypto/sha.h>
+#endif
+#include <linux/rhashtable.h>
 
 #define LUSTRE_NODEMAP_NAME "nodemap"
 
-#define LUSTRE_NODEMAP_DEFAULT_ID 0
+#define LUSTRE_NODEMAP_DEFAULT_ID	0
+#define LUSTRE_NODEMAP_MAX_ID		UINT_MAX
 
 static const struct nodemap_rbac_name {
 	enum nodemap_rbac_roles nrn_mode;
 	const char	       *nrn_name;
 } nodemap_rbac_names[] = {
-	{ NODEMAP_RBAC_FILE_PERMS,	"file_perms"	},
-	{ NODEMAP_RBAC_DNE_OPS,		"dne_ops"	},
-	{ NODEMAP_RBAC_QUOTA_OPS,	"quota_ops"	},
-	{ NODEMAP_RBAC_BYFID_OPS,	"byfid_ops"	},
-	{ NODEMAP_RBAC_CHLG_OPS,	"chlg_ops"	},
-	{ NODEMAP_RBAC_FSCRYPT_ADMIN,   "fscrypt_admin"	},
-	{ NODEMAP_RBAC_SERVER_UPCALL,	"server_upcall"	},
-	{ NODEMAP_RBAC_IGN_ROOT_PRJQUOTA,	"ignore_root_prjquota"	},
-	{ NODEMAP_RBAC_HSM_OPS,		"hsm_ops"	},
-	{ NODEMAP_RBAC_LOCAL_ADMIN,	"local_admin"	},
+	{ NODEMAP_RBAC_FILE_PERMS,	"file_perms"		 },
+	{ NODEMAP_RBAC_DNE_OPS,		"dne_ops"		 },
+	{ NODEMAP_RBAC_QUOTA_OPS,	"quota_ops"		 },
+	{ NODEMAP_RBAC_BYFID_OPS,	"byfid_ops"		 },
+	{ NODEMAP_RBAC_CHLG_OPS,	"chlg_ops"		 },
+	{ NODEMAP_RBAC_FSCRYPT_ADMIN,   "fscrypt_admin"		 },
+	{ NODEMAP_RBAC_SERVER_UPCALL,	"server_upcall"		 },
+	{ NODEMAP_RBAC_IGN_ROOT_PRJQUOTA, "ignore_root_prjquota" },
+	{ NODEMAP_RBAC_HSM_OPS,		"hsm_ops"		 },
+	{ NODEMAP_RBAC_LOCAL_ADMIN,	"local_admin"		 },
+	{ NODEMAP_RBAC_POOL_QUOTA_OPS,	"pool_quota_ops"	 },
+	{ NODEMAP_RBAC_LQA_QUOTA_OPS,	"lqa_quota_ops"		 },
+	{ NODEMAP_RBAC_PROJID_SET,	"projid_set"		 },
+	{ NODEMAP_RBAC_FOREIGN_OPS,	"foreign_ops"		 },
+};
+
+static const struct nodemap_captype_name {
+	enum nodemap_cap_type ncn_type;
+	const char	     *ncn_name;
+} nodemap_captype_names[] = {
+	{ NODEMAP_CAP_OFF,	"off"	},
+	{ NODEMAP_CAP_MASK,	"mask"	},
+	{ NODEMAP_CAP_SET,	"set"	},
 };
 
 struct nodemap_pde {
@@ -55,6 +76,27 @@ static const struct nodemap_priv_name {
 	{ NODEMAP_RAISE_PRIV_RO,		"readonly_mount"	},
 	/* NODEMAP_RAISE_PRIV_RBAC uses the rbac roles directly */
 	{ NODEMAP_RAISE_PRIV_FORBID_ENC,	"forbid_encryption"	},
+	{ NODEMAP_RAISE_PRIV_CAPS,		"caps"	},
+	{ NODEMAP_RAISE_PRIV_DENY_MNT,		"deny_mount"		},
+};
+
+enum fileset_modify_type {
+	FSM_TYPE_NONE		= 0,
+	FSM_TYPE_PRIMARY	= 1,
+	FSM_TYPE_ALTERNATE	= 2,
+};
+
+enum fileset_modify_access {
+	FSM_ACCESS_NONE		= 0,
+	FSM_ACCESS_RO		= 1,
+	FSM_ACCESS_RW		= 2,
+};
+
+struct lu_nodemap_fileset_modify {
+	/* the renamed fileset path */
+	char				*nfm_fileset;
+	enum fileset_modify_type	nfm_type;
+	enum fileset_modify_access	nfm_access;
 };
 
 /** The nodemap id 0 will be the default nodemap. It will have a configuration
@@ -73,7 +115,8 @@ struct lu_nodemap {
 				 nmf_forbid_encryption:1,
 				 nmf_readonly_mount:1,
 				 nmf_deny_mount:1,
-				 nmf_fileset_use_iam:1;
+				 nmf_fileset_use_iam:1,
+				 nmf_gss_identify:1;
 	/* bitmap for mapping type */
 	enum nodemap_mapping_modes nmf_map_mode;
 	/* bitmap for rbac, enum nodemap_rbac_roles */
@@ -82,6 +125,8 @@ struct lu_nodemap {
 	enum nodemap_raise_privs nmf_raise_privs;
 	/* bitmap for rbac raise, enum nodemap_rbac_roles */
 	enum nodemap_rbac_roles nmf_rbac_raise;
+	/* bitmap for capabilities type */
+	enum nodemap_cap_type	 nmf_caps_type;
 	/* unique ID set by MGS */
 	unsigned int		 nm_id;
 	/* nodemap ref counter */
@@ -94,6 +139,8 @@ struct lu_nodemap {
 	projid_t		 nm_squash_projid;
 	/* NID range list */
 	struct list_head	 nm_ranges;
+	/* Banned NID range list */
+	struct list_head	 nm_ban_ranges;
 	/* lock for idmap red/black trees */
 	struct rw_semaphore	 nm_idmap_lock;
 	/* UID map keyed by local UID */
@@ -115,15 +162,17 @@ struct lu_nodemap {
 	struct hlist_node	 nm_hash;
 	struct nodemap_pde	*nm_pde_data;
 	/* primary fileset this nodemap is restricted to */
-	char			 *nm_prim_fileset;
-	unsigned int		 nm_prim_fileset_size;
+	char			 *nm_fileset_prim;
+	unsigned int		 nm_fileset_prim_size;
+	bool			 nm_fileset_prim_ro;
 	/* lock for fileset red/black tree */
 	struct rw_semaphore	 nm_fileset_alt_lock;
 	/* alternate fileset map */
 	struct rb_root		 nm_fileset_alt;
+	/* alternate fileset map size (# elements) */
+	unsigned int		 nm_fileset_alt_sz;
 	/* information about the expected SELinux policy on the nodes */
 	char			 nm_sepol[LUSTRE_NODEMAP_SEPOL_LENGTH + 1];
-
 	/* used when loading/unloading nodemaps */
 	struct list_head	 nm_list;
 	/* is a dynamic nodemap */
@@ -146,6 +195,15 @@ struct lu_nodemap {
 	struct list_head	 nm_parent_entry;
 	/* link to parent nodemap */
 	struct lu_nodemap	*nm_parent_nm;
+	/* user capabilities */
+	kernel_cap_t		 nm_capabilities;
+	struct lprocfs_stats    *nm_dt_stats;
+	struct lprocfs_stats    *nm_md_stats;
+	struct mutex		 nm_stats_lock;
+	/* sha256 of the nodemap name */
+	char			 nm_sha[SHA256_DIGEST_SIZE];
+	/* access by nodemap name sha hash */
+	struct rhash_head	 nm_sha_hash;
 };
 
 /* Store handles to local MGC storage to save config locally. In future
@@ -159,10 +217,16 @@ struct nm_config_file {
 };
 
 int nodemap_activate(const bool value);
+struct lu_nodemap *nodemap_lookup_unlocked(const char *name);
 int nodemap_add(const char *nodemap_name, bool dynamic);
-int nodemap_del(const char *nodemap_name);
-int nodemap_add_member(struct lnet_nid *nid, struct obd_export *exp);
+int nodemap_del(const char *nodemap_name, bool *out_clean_llog_fileset);
+void nodemap_clear_dynamic_nodemaps(void);
+bool nodemap_has_dynamic_nodemaps(void);
+int nodemap_add_member(struct ptlrpc_svc_ctx *svc_ctx, struct lnet_nid *nid,
+		       struct obd_export *exp);
 void nodemap_del_member(struct obd_export *exp);
+int nodemap_member_switch(struct obd_export *exp, char *new_nm_name,
+			  bool gssonly);
 int nodemap_parse_range(const char *range_string, struct lnet_nid range[2],
 			u8 *netmask);
 int nodemap_parse_idmap(const char *nodemap_name, char *idmap_str,
@@ -170,6 +234,10 @@ int nodemap_parse_idmap(const char *nodemap_name, char *idmap_str,
 int nodemap_add_range(const char *name, const struct lnet_nid nid[2],
 		      u8 netmask);
 int nodemap_del_range(const char *name, const struct lnet_nid nid[2],
+		      u8 netmask);
+int nodemap_add_banlist(const char *name, const struct lnet_nid nid[2],
+		      u8 netmask);
+int nodemap_del_banlist(const char *name, const struct lnet_nid nid[2],
 		      u8 netmask);
 int nodemap_set_allow_root(const char *name, bool allow_root);
 int nodemap_set_trust_client_ids(const char *name, bool trust_client_ids);
@@ -188,22 +256,34 @@ int nodemap_set_raise_privs(const char *name, enum nodemap_raise_privs privs,
 			    enum nodemap_rbac_roles rbac_raise);
 int nodemap_set_readonly_mount(const char *name, bool readonly_mount);
 int nodemap_set_deny_mount(const char *name, bool deny_mount);
-bool nodemap_can_setquota(struct lu_nodemap *nodemap, __u32 qc_type, __u32 id);
+int nodemap_set_gss_identify(const char *name, bool gss_identify);
+bool nodemap_can_setquota(struct lu_nodemap *nodemap, __u32 qc_cmd,
+			  __u32 qc_type, __u32 id);
 int nodemap_add_idmap(const char *nodemap_name, enum nodemap_id_type id_type,
 		      const __u32 map[2]);
 int nodemap_del_idmap(const char *nodemap_name, enum nodemap_id_type id_type,
 		      const __u32 map[2]);
-int nodemap_set_fileset(const char *name, const char *fileset, bool checkperm,
-			bool ioctl_op);
-char *nodemap_get_fileset(const struct lu_nodemap *nodemap);
+int nodemap_set_fileset_prim_lproc(const char *nodemap_name,
+				   const char *fileset_path, bool checkperm);
+char *nodemap_get_fileset_prim(const struct lu_nodemap *nodemap);
+int nodemap_fileset_get_root(struct lu_nodemap *nodemap,
+			     const char *fileset_src, char **fileset_out,
+			     int *fileset_size_out, bool *fileset_ro_out);
 int nodemap_set_sepol(const char *name, const char *sepol, bool checkperm);
 const char *nodemap_get_sepol(const struct lu_nodemap *nodemap);
+int nodemap_set_capabilities(const char *nodemap_name, char *caps);
 __u32 nodemap_map_id(struct lu_nodemap *nodemap,
 		     enum nodemap_id_type id_type,
 		     enum nodemap_tree_type tree_type, __u32 id);
 ssize_t nodemap_map_acl(struct lu_nodemap *nodemap, void *buf, size_t size,
 			enum nodemap_tree_type tree_type);
-#ifdef HAVE_SERVER_SUPPORT
+int nodemap_map_suppgid(struct lu_nodemap *nodemap, int suppgid);
+bool nodemap_id_is_squashed(struct lu_nodemap *nodemap, __u32 id,
+			    enum nodemap_id_type type,
+			    enum nodemap_tree_type tree_type);
+int nodemap_check_resource_ids(struct obd_export *exp, __u32 fs_uid,
+			       __u32 fs_gid);
+#ifdef CONFIG_LUSTRE_FS_SERVER
 void nodemap_test_nid(struct lnet_nid *nid, char *name_buf, size_t name_len);
 #else
 #define nodemap_test_nid(nid, name_buf, name_len) do {} while (0)
@@ -212,8 +292,8 @@ int nodemap_test_id(struct lnet_nid *nid, enum nodemap_id_type idtype,
 		    u32 client_id, u32 *fs_id);
 
 int server_iocontrol_nodemap(struct obd_device *obd,
-			     struct obd_ioctl_data *data, bool dynamic);
-
+			     struct obd_ioctl_data *data, bool *dynamic,
+			     bool *out_clean_llog_fileset, bool *out_ro_cmd);
 
 struct nm_config_file *nm_config_file_register_mgs(const struct lu_env *env,
 						   struct dt_object *obj,
@@ -229,11 +309,11 @@ void nm_config_file_deregister_tgt(const struct lu_env *env,
 struct lu_nodemap *nodemap_get_from_exp(struct obd_export *exp);
 void nodemap_putref(struct lu_nodemap *nodemap);
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 
 struct nodemap_range_tree {
-	struct interval_tree_root nmrt_range_interval_root;
-	unsigned int nmrt_range_highest_id;
+	struct rb_root_cached	nmrt_range_interval_root;
+	unsigned int		nmrt_range_highest_id;
 };
 
 struct nodemap_config {
@@ -246,8 +326,11 @@ struct nodemap_config {
 	/* Pointer to default nodemap as it is needed more often */
 	struct lu_nodemap *nmc_default_nodemap;
 
-	/* list of netmask + address prefix */
+	/* list of netmask + address prefix for regular nid ranges */
 	struct list_head nmc_netmask_setup;
+
+	/* list of netmask + address prefix for banned nid ranges */
+	struct list_head nmc_ban_netmask_setup;
 
 	/**
 	 * Lock required to access the range tree.
@@ -256,10 +339,25 @@ struct nodemap_config {
 	struct nodemap_range_tree nmc_range_tree;
 
 	/**
+	 * Lock required to access the banned range tree.
+	 */
+	struct rw_semaphore nmc_ban_range_tree_lock;
+	struct nodemap_range_tree nmc_ban_range_tree;
+
+	/**
 	 * Hash keyed on nodemap name containing all
 	 * nodemaps
 	 */
 	struct cfs_hash *nmc_nodemap_hash;
+
+	/**
+	 * Hash keyed on nodemap name sha
+	 * containing all nodemaps
+	 */
+	struct rhashtable nmc_nodemap_sha_hash;
+
+	/* Number of dynamic nodemaps in this config */
+	atomic_t nmc_dyn_count;
 };
 
 struct nodemap_config *nodemap_config_alloc(void);
@@ -275,7 +373,7 @@ static inline int nodemap_process_idx_pages(void *config,
 					    union lu_page *lip,
 					    struct lu_nodemap **recent_nodemap)
 { return 0; }
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 int nodemap_get_config_req(struct obd_device *mgs_obd,
 			   struct ptlrpc_request *req);

@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
-
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License version 2 for more details.  A copy is
- * included in the COPYING file that accompanied this code.
-
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2012, 2017, Intel Corporation.
  */
@@ -125,14 +105,14 @@ static void usage_start(void)
 	fprintf(stdout, "start LFSCK\n"
 		"usage:\n"
 		"lfsck_start [-M | --device {MDT,OST}_device]\n"
-		"	     [-A | --all] [-c | --create_ostobj [on | off]]\n"
-		"	     [-C | --create_mdtobj [on | off]]\n"
-		"	     [-d | --delay_create_ostobj [on | off]]\n"
-		"	     [-e | --error {continue | abort}] [-h | --help]\n"
-		"	     [-n | --dryrun [on | off]] [-o | --orphan]\n"
+		"            [-A | --all] [-c | --create_ostobj [on | off]]\n"
+		"            [-C | --create_mdtobj [on | off]]\n"
+		"            [-d | --delay_create_ostobj [on | off]]\n"
+		"            [-e | --error {continue | abort}] [-h | --help]\n"
+		"            [-n | --dryrun [on | off]] [-o | --orphan]\n"
 		"            [-r | --reset] [-s | --speed ops_per_sec_limit]\n"
 		"            [-t | --type check_type[,check_type...]]\n"
-		"	     [-w | --window_size size]\n"
+		"            [-w | --window_size size]\n"
 		"options:\n"
 		"-M: device to start LFSCK/scrub on\n"
 		"-A: start LFSCK on all nodes via the specified MDT device "
@@ -174,7 +154,7 @@ static void usage_query(void)
 		"usage:\n"
 		"lfsck_query [-M | --device MDT_device] [-h | --help]\n"
 		"            [-t | --type check_type[,check_type...]]\n"
-		"            [-t | --wait]\n"
+		"            [-w | --wait]\n"
 		"options:\n"
 		"-M: device to query LFSCK on\n"
 		"-t: LFSCK type(s) to be queried (default is all)\n"

@@ -32,7 +32,8 @@ static ssize_t active_show(struct kobject *kobj, struct attribute *attr,
 	int rc;
 
 	with_imp_locked(obd, imp, rc)
-		rc = sprintf(buf, "%d\n", !imp->imp_deactive);
+		rc = scnprintf(buf, PAGE_SIZE, "%d\n",
+			       !test_bit(IMPF_DEACTIVE, imp->imp_flags));
 
 	return rc;
 }
@@ -55,7 +56,7 @@ static ssize_t active_store(struct kobject *kobj, struct attribute *attr,
 	if (rc)
 		return rc;
 	/* opposite senses */
-	if (imp->imp_deactive == val)
+	if (test_bit(IMPF_DEACTIVE, imp->imp_flags) == val)
 		rc = ptlrpc_set_import_active(imp, val);
 	else
 		CDEBUG(D_CONFIG, "activate %u: ignoring repeat request\n",
@@ -148,7 +149,7 @@ static ssize_t max_dirty_mb_store(struct kobject *kobj,
 
 	pages_number = round_up(pages_number, 1024 * 1024) >> PAGE_SHIFT;
 	if (pages_number >= MiB_TO_PAGES(OSC_MAX_DIRTY_MB_MAX) ||
-	    pages_number > cfs_totalram_pages() / 4) /* 1/4 of RAM */
+	    pages_number > compat_totalram_pages() / 4) /* 1/4 of RAM */
 		return -ERANGE;
 
 	spin_lock(&cli->cl_loi_list_lock);
@@ -219,7 +220,7 @@ static ssize_t osc_cached_mb_seq_write(struct file *file,
 
 		env = cl_env_get(&refcheck);
 		if (!IS_ERR(env)) {
-			(void)osc_lru_shrink(env, cli, rc, true);
+			(void)osc_lru_shrink(env, cli, rc, true, NULL);
 			cl_env_put(env, &refcheck);
 		}
 	}
@@ -264,7 +265,8 @@ static ssize_t osc_unevict_cached_mb_store(struct kobject *kobj,
 			 * list.
 			 */
 			(void)osc_lru_shrink(env, cli,
-				atomic_long_read(&cli->cl_lru_in_list), true);
+					atomic_long_read(&cli->cl_lru_in_list),
+					true, NULL);
 			cl_env_put(env, &refcheck);
 		}
 		return count;
@@ -514,6 +516,8 @@ static ssize_t destroys_in_flight_show(struct kobject *kobj,
 LUSTRE_RO_ATTR(destroys_in_flight);
 
 LUSTRE_RW_ATTR(max_pages_per_rpc);
+LUSTRE_RW_ATTR(max_mb_per_rpc_read);
+LUSTRE_RW_ATTR(max_mb_per_rpc_write);
 LUSTRE_RW_ATTR(short_io_bytes);
 
 static int osc_unstable_stats_seq_show(struct seq_file *m, void *v)
@@ -661,29 +665,44 @@ LDEBUGFS_SEQ_FOPS_RO_TYPE(osc, timeouts);
 LDEBUGFS_SEQ_FOPS_RO_TYPE(osc, state);
 LDEBUGFS_SEQ_FOPS_RW_TYPE(osc, import);
 
-struct ldebugfs_vars ldebugfs_osc_obd_vars[] = {
-	{ .name	=	"connect_flags",
-	  .fops	=	&osc_connect_flags_fops		},
-	{ .name	=	"ost_server_uuid",
-	  .fops	=	&osc_server_uuid_fops		},
-	{ .name	=	"osc_cached_mb",
-	  .fops	=	&osc_cached_mb_fops		},
-	{ .name	=	"timeouts",
-	  .fops	=	&osc_timeouts_fops		},
-	{ .name	=	"import",
-	  .fops	=	&osc_import_fops		},
-	{ .name	=	"state",
-	  .fops	=	&osc_state_fops			},
-	{ .name	=	"unstable_stats",
-	  .fops	=	&osc_unstable_stats_fops	},
-	{ NULL }
-};
+static int osc_io_latency_stats_seq_show(struct seq_file *seq, void *v)
+{
+	struct obd_device *obd = seq->private;
+	struct client_obd *cli = &obd->u.cli;
+	int num_buckets = PTLRPC_MAX_BRW_BITS - PAGE_SHIFT;
+
+	return obd_io_latency_stats_seq_show(seq,
+					     cli->cl_read_io_latency_by_size,
+					     cli->cl_write_io_latency_by_size,
+					     num_buckets,
+					     cli->cl_io_latency_stats_init,
+					     &cli->cl_loi_list_lock);
+}
+
+static ssize_t osc_io_latency_stats_seq_write(struct file *file,
+					       const char __user *buf,
+					       size_t len, loff_t *off)
+{
+	struct seq_file *seq = file->private_data;
+	struct obd_device *obd = seq->private;
+	struct client_obd *cli = &obd->u.cli;
+	int num_buckets = PTLRPC_MAX_BRW_BITS - PAGE_SHIFT;
+
+	obd_io_latency_stats_clear(cli->cl_read_io_latency_by_size,
+				   cli->cl_write_io_latency_by_size,
+				   num_buckets, &cli->cl_io_latency_stats_init);
+
+	return len;
+}
+LDEBUGFS_SEQ_FOPS(osc_io_latency_stats);
 
 static int osc_rpc_stats_seq_show(struct seq_file *seq, void *v)
 {
 	struct obd_device *obd = seq->private;
 	struct client_obd *cli = &obd->u.cli;
 	unsigned long read_tot = 0, write_tot = 0, read_cum, write_cum;
+	unsigned long read_lat_tot, read_lat_cum;
+	unsigned long write_lat_tot, write_lat_cum;
 	int i;
 
 	spin_lock(&cli->cl_loi_list_lock);
@@ -770,6 +789,37 @@ static int osc_rpc_stats_seq_show(struct seq_file *seq, void *v)
                         break;
         }
 
+	seq_puts(seq, "\n");
+	seq_puts(seq, "\t\t\tread\t\t\twrite\n");
+	seq_puts(seq, "RPC latency (us)       count   % cum % |");
+	seq_puts(seq, "       count   % cum %\n");
+
+	read_lat_tot = lprocfs_oh_sum(&cli->cl_read_io_latency_hist);
+	write_lat_tot = lprocfs_oh_sum(&cli->cl_write_io_latency_hist);
+
+	read_lat_cum = 0;
+	write_lat_cum = 0;
+	for (i = 0; i < OBD_HIST_MAX; i++) {
+		unsigned long read_lat =
+			cli->cl_read_io_latency_hist.oh_buckets[i];
+		unsigned long write_lat =
+			cli->cl_write_io_latency_hist.oh_buckets[i];
+
+		read_lat = binary_usec_to_dec(read_lat);
+		write_lat = binary_usec_to_dec(write_lat);
+		read_lat_cum += read_lat;
+		write_lat_cum += write_lat;
+		seq_printf(seq, "%d:\t\t%10lu %3u %3u   | %10lu %3u %3u\n",
+			   (i == 0) ? 0 : 1 << (i - 1),
+			   read_lat, pct(read_lat, read_lat_tot),
+			   pct(read_lat_cum, read_lat_tot),
+			   write_lat, pct(write_lat, write_lat_tot),
+			   pct(write_lat_cum, write_lat_tot));
+		if (read_lat_cum == read_lat_tot &&
+		    write_lat_cum == write_lat_tot)
+			break;
+	}
+
 	spin_unlock(&cli->cl_loi_list_lock);
 
         return 0;
@@ -789,6 +839,8 @@ static ssize_t osc_rpc_stats_seq_write(struct file *file,
 	lprocfs_oh_clear(&cli->cl_write_page_hist);
 	lprocfs_oh_clear(&cli->cl_read_offset_hist);
 	lprocfs_oh_clear(&cli->cl_write_offset_hist);
+	lprocfs_oh_clear(&cli->cl_read_io_latency_hist);
+	lprocfs_oh_clear(&cli->cl_write_io_latency_hist);
 	cli->cl_stats_init = ktime_get_real();
 
 	return len;
@@ -822,16 +874,31 @@ static ssize_t osc_stats_seq_write(struct file *file,
 
 	return len;
 }
-
 LDEBUGFS_SEQ_FOPS(osc_stats);
 
-static void ldebugfs_osc_attach_seqstat(struct obd_device *obd)
-{
-	debugfs_create_file("osc_stats", 0644, obd->obd_debugfs_entry, obd,
-			    &osc_stats_fops);
-	debugfs_create_file("rpc_stats", 0644, obd->obd_debugfs_entry, obd,
-			    &osc_rpc_stats_fops);
-}
+static struct ldebugfs_vars ldebugfs_osc_obd_vars[] = {
+	{ .name	=	"connect_flags",
+	  .fops	=	&osc_connect_flags_fops		},
+	{ .name	=	"import",
+	  .fops	=	&osc_import_fops		},
+	{ .name	=	"io_latency_stats",
+	  .fops	=	&osc_io_latency_stats_fops	},
+	{ .name	=	"osc_cached_mb",
+	  .fops	=	&osc_cached_mb_fops		},
+	{ .name	=	"osc_stats",
+	  .fops	=	&osc_stats_fops			},
+	{ .name	=	"ost_server_uuid",
+	  .fops	=	&osc_server_uuid_fops		},
+	{ .name	=	"rpc_stats",
+	  .fops	=	&osc_rpc_stats_fops		},
+	{ .name	=	"state",
+	  .fops	=	&osc_state_fops			},
+	{ .name	=	"timeouts",
+	  .fops	=	&osc_timeouts_fops		},
+	{ .name	=	"unstable_stats",
+	  .fops	=	&osc_unstable_stats_fops	},
+	{ NULL }
+};
 
 LUSTRE_OBD_UINT_PARAM_ATTR(at_min);
 LUSTRE_OBD_UINT_PARAM_ATTR(at_max);
@@ -851,6 +918,8 @@ static struct attribute *osc_attrs[] = {
 	&lustre_attr_destroys_in_flight.attr,
 	&lustre_attr_grant_shrink_interval.attr,
 	&lustre_attr_max_dirty_mb.attr,
+	&lustre_attr_max_mb_per_rpc_read.attr,
+	&lustre_attr_max_mb_per_rpc_write.attr,
 	&lustre_attr_max_pages_per_rpc.attr,
 	&lustre_attr_max_rpcs_in_flight.attr,
 	&lustre_attr_osc_unevict_cached_mb.attr,
@@ -870,19 +939,17 @@ static struct attribute *osc_attrs[] = {
 	NULL,
 };
 
-KOBJ_ATTRIBUTE_GROUPS(osc); /* creates osc_groups */
+ATTRIBUTE_GROUPS(osc); /* creates osc_groups */
 
 int osc_tunables_init(struct obd_device *obd)
 {
 	int rc;
 
 	obd->obd_debugfs_vars = ldebugfs_osc_obd_vars;
-	obd->obd_ktype.default_groups = KOBJ_ATTR_GROUPS(osc);
+	obd->obd_ktype.default_groups = osc_groups;
 	rc = lprocfs_obd_setup(obd, false);
 	if (rc)
 		return rc;
-
-	ldebugfs_osc_attach_seqstat(obd);
 
 	rc = sptlrpc_lprocfs_cliobd_attach(obd);
 	if (rc) {

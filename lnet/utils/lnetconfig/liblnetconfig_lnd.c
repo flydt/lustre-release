@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LGPL-2.1
+// SPDX-License-Identifier: LGPL-2.1+
 
 /*
  * Copyright (c) 2015, James Simmons
@@ -67,6 +67,16 @@ lustre_o2iblnd_show_tun(struct cYAML *lndparams,
 	return LUSTRE_CFG_RC_NO_ERR;
 }
 
+static int
+lustre_efalnd_show_tun(struct cYAML *lndparams,
+		       struct lnet_ioctl_config_efalnd_tunables *lnd_cfg)
+{
+	if (cYAML_create_number(lndparams, "nqps",
+				lnd_cfg->lnd_nqps) == NULL)
+		return LUSTRE_CFG_RC_OUT_OF_MEM;
+
+	return LUSTRE_CFG_RC_NO_ERR;
+}
 
 static int
 lustre_socklnd_show_tun(struct cYAML *lndparams,
@@ -122,6 +132,7 @@ lustre_kfilnd_show_tun(struct cYAML *lndparams,
 }
 #endif
 
+#ifdef HAVE_GNILND
 static int
 lustre_gnilnd_show_tun(struct cYAML *lndparams,
 			struct lnet_ioctl_config_gnilnd_tunables *lnd_cfg)
@@ -132,6 +143,7 @@ lustre_gnilnd_show_tun(struct cYAML *lndparams,
 
 	return LUSTRE_CFG_RC_NO_ERR;
 }
+#endif
 
 int
 lustre_net_show_tunables(struct cYAML *tunables,
@@ -175,6 +187,9 @@ lustre_ni_show_tunables(struct cYAML *lnd_tunables,
 	if (net_type == O2IBLND)
 		rc = lustre_o2iblnd_show_tun(lnd_tunables,
 					     &lnd->lnd_tun_u.lnd_o2ib);
+	else if (net_type == EFALND)
+		rc = lustre_efalnd_show_tun(lnd_tunables,
+					    &lnd->lnd_tun_u.lnd_efa);
 	else if (net_type == SOCKLND)
 		rc = lustre_socklnd_show_tun(lnd_tunables,
 					     &lnd->lnd_tun_u.lnd_sock);
@@ -184,13 +199,15 @@ lustre_ni_show_tunables(struct cYAML *lnd_tunables,
 					    &lnd->lnd_tun_u.lnd_kfi,
 					    backup);
 #endif
+#ifdef HAVE_GNILND
 	else if (net_type == GNILND)
 		rc = lustre_gnilnd_show_tun(lnd_tunables,
 					    &lnd->lnd_tun_u.lnd_gni);
+#endif
 	return rc;
 }
 
-static void
+static bool
 yaml_extract_o2ib_tun(struct cYAML *tree,
 		      struct lnet_ioctl_config_o2iblnd_tunables *lnd_cfg)
 {
@@ -200,9 +217,9 @@ yaml_extract_o2ib_tun(struct cYAML *tree,
 	struct cYAML *conns_per_peer = NULL, *ntx = NULL;
 	struct cYAML *tos = NULL;
 
-	lndparams = cYAML_get_object_item(tree, "lnd tunables");
+	lndparams = cYAML_get_object_child(tree, "lnd tunables");
 	if (!lndparams)
-		return;
+		return false;
 
 	map_on_demand = cYAML_get_object_item(lndparams, "map_on_demand");
 	lnd_cfg->lnd_map_on_demand =
@@ -235,10 +252,12 @@ yaml_extract_o2ib_tun(struct cYAML *tree,
 	tos = cYAML_get_object_item(lndparams, "tos");
 	lnd_cfg->lnd_tos =
 		(tos) ? tos->cy_valueint : -1;
+
+	return true;
 }
 
 #ifdef HAVE_KFILND
-static void
+static bool
 yaml_extract_kfi_tun(struct cYAML *tree,
 		      struct lnet_ioctl_config_kfilnd_tunables *lnd_cfg)
 {
@@ -248,9 +267,9 @@ yaml_extract_kfi_tun(struct cYAML *tree,
 	struct cYAML *traffic_class = NULL;
 	struct cYAML *lndparams = NULL;
 
-	lndparams = cYAML_get_object_item(tree, "lnd tunables");
+	lndparams = cYAML_get_object_child(tree, "lnd tunables");
 	if (!lndparams)
-		return;
+		return false;
 
 	prov_major_version =
 		cYAML_get_object_item(lndparams, "prov_major_version");
@@ -271,10 +290,29 @@ yaml_extract_kfi_tun(struct cYAML *tree,
 	    strlen(traffic_class->cy_valuestring) < LNET_MAX_STR_LEN)
 		strcpy(&lnd_cfg->lnd_traffic_class_str[0],
 		       traffic_class->cy_valuestring);
+
+	return true;
 }
 #endif
 
-static void
+static bool
+yaml_extract_efa_tun(struct cYAML *tree,
+		     struct lnet_ioctl_config_efalnd_tunables *lnd_cfg)
+{
+	struct cYAML *lndparams = NULL;
+	struct cYAML *nqps = NULL;
+
+	lndparams = cYAML_get_object_child(tree, "lnd tunables");
+	if (!lndparams)
+		return false;
+
+	nqps = cYAML_get_object_item(lndparams, "nqps");
+	lnd_cfg->lnd_nqps = (nqps) ? nqps->cy_valueint : 0;
+
+	return true;
+}
+
+static bool
 yaml_extract_sock_tun(struct cYAML *tree,
 			 struct lnet_ioctl_config_socklnd_tunables *lnd_cfg)
 {
@@ -282,9 +320,9 @@ yaml_extract_sock_tun(struct cYAML *tree,
 	struct cYAML *tos = NULL;
 	struct cYAML *lndparams = NULL;
 
-	lndparams = cYAML_get_object_item(tree, "lnd tunables");
+	lndparams = cYAML_get_object_child(tree, "lnd tunables");
 	if (!lndparams)
-		return;
+		return false;
 
 	conns_per_peer = cYAML_get_object_item(lndparams, "conns_per_peer");
 	lnd_cfg->lnd_conns_per_peer =
@@ -293,23 +331,29 @@ yaml_extract_sock_tun(struct cYAML *tree,
 	tos = cYAML_get_object_item(lndparams, "tos");
 	lnd_cfg->lnd_tos =
 		(tos) ? tos->cy_valueint : -1;
+
+	return true;
 }
 
-void
+bool
 lustre_yaml_extract_lnd_tunables(struct cYAML *tree,
 				 __u32 net_type,
 				 struct lnet_lnd_tunables *tun)
 {
 	if (net_type == O2IBLND)
-		yaml_extract_o2ib_tun(tree,
+		return yaml_extract_o2ib_tun(tree,
 				      &tun->lnd_tun_u.lnd_o2ib);
+	else if (net_type == EFALND)
+		return yaml_extract_efa_tun(tree,
+					    &tun->lnd_tun_u.lnd_efa);
 	else if (net_type == SOCKLND)
-		yaml_extract_sock_tun(tree,
-				      &tun->lnd_tun_u.lnd_sock);
+		return yaml_extract_sock_tun(tree,
+					     &tun->lnd_tun_u.lnd_sock);
 #ifdef HAVE_KFILND
 	else if (net_type == KFILND)
-		yaml_extract_kfi_tun(tree,
-				     &tun->lnd_tun_u.lnd_kfi);
+		return yaml_extract_kfi_tun(tree,
+					    &tun->lnd_tun_u.lnd_kfi);
 #endif
+	return false;
 }
 

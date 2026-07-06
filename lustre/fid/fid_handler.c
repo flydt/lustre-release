@@ -17,14 +17,15 @@
 
 #define DEBUG_SUBSYSTEM S_FID
 
-#include <libcfs/libcfs.h>
 #include <linux/module.h>
+
 #include <obd.h>
 #include <obd_class.h>
 #include <dt_object.h>
 #include <obd_support.h>
 #include <lustre_req_layout.h>
 #include <lustre_fid.h>
+
 #include "fid_internal.h"
 
 /* Assigns client to sequence controller node. */
@@ -32,6 +33,7 @@ int seq_server_set_cli(const struct lu_env *env, struct lu_server_seq *seq,
 		       struct lu_client_seq *cli)
 {
 	int rc = 0;
+
 	ENTRY;
 
 	/*
@@ -98,6 +100,7 @@ static int __seq_server_alloc_super(struct lu_server_seq *seq,
 {
 	struct lu_seq_range *space = &seq->lss_space;
 	int rc;
+
 	ENTRY;
 
 	LASSERT(lu_seq_range_is_sane(space));
@@ -123,6 +126,7 @@ int seq_server_alloc_super(struct lu_server_seq *seq,
 			   const struct lu_env *env)
 {
 	int rc;
+
 	ENTRY;
 
 	mutex_lock(&seq->lss_mutex);
@@ -138,6 +142,7 @@ int seq_server_alloc_spec(struct lu_server_seq *seq,
 {
 	struct lu_seq_range *space = &seq->lss_space;
 	int rc = -ENOSPC;
+
 	ENTRY;
 
 	/*
@@ -159,7 +164,7 @@ int seq_server_alloc_spec(struct lu_server_seq *seq,
 		space->lsr_start = spec->lsr_end;
 		rc = seq_store_update(env, seq, spec, 1 /* sync */);
 
-		LCONSOLE_INFO("%s: "DRANGE" sequences allocated: rc = %d \n",
+		LCONSOLE_INFO("%s: "DRANGE" sequences allocated: rc = %d\n",
 			      seq->lss_name, PRANGE(spec), rc);
 	}
 	mutex_unlock(&seq->lss_mutex);
@@ -310,9 +315,10 @@ static int __seq_server_alloc_meta(struct lu_server_seq *seq,
 
 	LASSERT(lu_seq_range_is_sane(space));
 
+restart:
 	rc = seq_server_check_and_alloc_super(env, seq);
 	if (rc < 0) {
-		if (rc == -EINPROGRESS) {
+		if (rc == -EINPROGRESS || rc == -EAGAIN) {
 			static int printed;
 
 			if (printed++ % 8 == 0)
@@ -328,6 +334,26 @@ static int __seq_server_alloc_meta(struct lu_server_seq *seq,
 	if (seq->lss_set_width) {
 		rc = range_alloc_set(env, out, seq);
 	} else {
+		__u64 last_seq;
+
+		rc = dt_last_seq_get(env, seq->lss_dev, &last_seq);
+		if (!rc) {
+			if (last_seq + 1 >= space->lsr_end) {
+				LCONSOLE_INFO("%s: On disk last known sequence %#llx beyond super-sequence "
+					      DRANGE", getting new super-sequence\n",
+					      seq->lss_name, last_seq,
+					      PRANGE(space));
+				space->lsr_start = space->lsr_end;
+				GOTO(restart, rc);
+			}
+			if (last_seq >= space->lsr_start) {
+				LCONSOLE_INFO("%s: On disk last known sequence %#llx within super-sequence "
+					      DRANGE", updating super-sequence\n",
+					      seq->lss_name, last_seq,
+					      PRANGE(space));
+				space->lsr_start = last_seq + 1;
+			}
+		}
 		range_alloc(out, space, seq->lss_width);
 		rc = seq_store_update(env, seq, NULL, 1);
 	}
@@ -349,6 +375,7 @@ int seq_server_alloc_meta(struct lu_server_seq *seq,
 			  const struct lu_env *env)
 {
 	int rc;
+
 	ENTRY;
 
 	mutex_lock(&seq->lss_mutex);
@@ -366,6 +393,7 @@ static int seq_server_handle(struct lu_site *site,
 	int rc;
 	struct seq_server_site *ss_site;
 	struct dt_device *dev;
+
 	ENTRY;
 
 	ss_site = lu_site2seq(site);
@@ -479,6 +507,7 @@ int seq_server_init(const struct lu_env *env, struct lu_server_seq *seq,
 		    bool set_batch_width)
 {
 	int rc, is_srv = (type == LUSTRE_SEQ_SERVER);
+
 	ENTRY;
 
 	LASSERT(dev != NULL);

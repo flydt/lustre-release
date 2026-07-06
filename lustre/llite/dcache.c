@@ -51,8 +51,6 @@ static void ll_release(struct dentry *de)
 /**
  * ll_dcompare() - Compare if two dentries are the same. Don't match if the
  * existing dentry is marked invalid.
- *
- * @parent: parent directory
  * @dentry: directory which is being compared
  * @len: length
  * @str: name of directory being compared
@@ -73,17 +71,11 @@ static void ll_release(struct dentry *de)
  * * %0 - if the same
  * * %1 - if different
  */
-#if defined(HAVE_D_COMPARE_5ARGS)
-static int ll_dcompare(const struct dentry *parent, const struct dentry *dentry,
+static int ll_dcompare(const struct dentry *dentry,
 		       unsigned int len, const char *str,
 		       const struct qstr *name)
-#elif defined(HAVE_D_COMPARE_4ARGS)
-static int ll_dcompare(const struct dentry *dentry, unsigned int len,
-		       const char *str, const struct qstr *name)
-#endif
 {
 	ENTRY;
-
 	if (len != name->len)
 		RETURN(1);
 
@@ -92,7 +84,7 @@ static int ll_dcompare(const struct dentry *dentry, unsigned int len,
 
 	CDEBUG(D_DENTRY, "found name "DNAME"(%p) flags %#x refc %d\n",
 	       encode_fn_qstr(*name), dentry, dentry->d_flags,
-	       ll_d_count(dentry));
+	       d_count(dentry));
 
 	/* mountpoint is always valid */
 	if (d_mountpoint((struct dentry *)dentry))
@@ -139,7 +131,6 @@ static int ll_ddelete(const struct dentry *de)
 	RETURN(0);
 }
 
-#ifdef HAVE_D_INIT
 static int ll_d_init(struct dentry *de)
 {
 	struct ll_dentry_data *lld;
@@ -149,40 +140,6 @@ static int ll_d_init(struct dentry *de)
 	de->d_fsdata = lld;
 	return 0;
 }
-#else /* !HAVE_D_INIT */
-
-bool ll_d_setup(struct dentry *de, bool do_put)
-{
-	struct ll_dentry_data *lld;
-	bool success = true;
-
-	if (de->d_fsdata)
-		return success;
-
-	OBD_ALLOC_PTR(lld);
-	if (likely(lld)) {
-		spin_lock(&de->d_lock);
-		/* Since the first d_fsdata test was not
-		 * done under the spinlock it could have
-		 * changed by time the memory is allocated.
-		 */
-		if (!de->d_fsdata) {
-			lld->lld_invalid = 1;
-			de->d_fsdata = lld;
-		}
-		spin_unlock(&de->d_lock);
-		/* See if we lost the race to set d_fsdata. */
-		if (de->d_fsdata != lld)
-			OBD_FREE_PTR(lld);
-	} else {
-		success = false;
-		if (do_put)
-			dput(de);
-	}
-
-	return success;
-}
-#endif /* !HAVE_D_INIT */
 
 void ll_intent_drop_lock(struct lookup_intent *it)
 {
@@ -225,7 +182,7 @@ void ll_intent_release(struct lookup_intent *it)
 	if (it_disposition(it, DISP_ENQ_CREATE_REF)) /* create rec */
 		ptlrpc_req_put(it->it_request);
 
-	it->it_disposition = 0;
+	it_clear_disposition(it, DISP_ALL);
 	it->it_request = NULL;
 	EXIT;
 }
@@ -243,7 +200,7 @@ void ll_prune_aliases(struct inode *inode)
 	       PFID(ll_inode2fid(inode)), inode);
 
 	spin_lock(&inode->i_lock);
-	hlist_for_each_entry(dentry, &inode->i_dentry, d_alias)
+	hlist_for_each_entry(dentry, &inode->i_dentry, d_u.d_alias)
 		d_lustre_invalidate(dentry);
 	spin_unlock(&inode->i_lock);
 
@@ -304,7 +261,11 @@ void ll_lookup_finish_locks(struct lookup_intent *it, struct dentry *dentry)
 		ll_intent_drop_lock(it);
 }
 
-static int ll_revalidate_dentry(struct dentry *dentry,
+static int ll_revalidate_dentry(
+#ifdef HAVE_D_REVALIDATE_WITH_INODE_NAME
+				struct inode *inode, const struct qstr *qstr,
+#endif
+				struct dentry *dentry,
 				unsigned int lookup_flags)
 {
 	struct dentry *parent;
@@ -370,9 +331,7 @@ static int ll_revalidate_dentry(struct dentry *dentry,
 }
 
 const struct dentry_operations ll_d_ops = {
-#ifdef HAVE_D_INIT
 	.d_init		= ll_d_init,
-#endif
 	.d_revalidate	= ll_revalidate_dentry,
 	.d_release	= ll_release,
 	.d_delete	= ll_ddelete,

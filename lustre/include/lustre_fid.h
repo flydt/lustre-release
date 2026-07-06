@@ -127,7 +127,8 @@
  *  Even so, the MDT and OST resources are also in different LDLM namespaces.
  */
 
-#include <libcfs/libcfs.h>
+#include <linux/hash.h>
+
 #include <lu_object.h>
 #include <uapi/linux/lustre/lustre_fid.h>
 #include <uapi/linux/lustre/lustre_idl.h>
@@ -202,6 +203,7 @@ enum local_oid {
 	 * SLAVE_LLOG_CATALOGS_OID	= 4124UL,
 	 */
 	BATCHID_COMMITTED_OID   = 4125UL,
+	OFD_FAILURE_DOMAIN_OID	= 4126UL,
 };
 
 static inline void lu_local_obj_fid(struct lu_fid *fid, __u32 oid)
@@ -284,7 +286,7 @@ static inline int fid_is_fs_root(const struct lu_fid *fid)
 			 fid_oid(fid) == OSD_FS_ROOT_OID));
 }
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 static inline int fid_is_namespace_visible(const struct lu_fid *fid)
 {
 	const __u64 seq = fid_seq(fid);
@@ -348,7 +350,7 @@ static inline void filter_fid_le_to_cpu(struct filter_fid *dst,
 
 	/* XXX: Add more if filter_fid is enlarged in the future. */
 }
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 static inline void lu_last_id_fid(struct lu_fid *fid, __u64 seq, __u32 ost_idx)
 {
@@ -615,14 +617,6 @@ static inline void fid_extract_from_quota_res(struct lu_fid *glb_fid,
 		(__u32)(res->name[LUSTRE_RES_ID_QUOTA_VER_OID_OFF] >> 32);
 }
 
-static inline void
-fid_build_pdo_res_name(const struct lu_fid *fid, unsigned int hash,
-		       struct ldlm_res_id *res)
-{
-	fid_build_reg_res_name(fid, res);
-	res->name[LUSTRE_RES_ID_HSH_OFF] = hash;
-}
-
 /**
  * Build DLM resource name from object id & seq, which will be removed
  * finally, when we replace ost_id with FID in data stack.
@@ -750,15 +744,6 @@ static inline void ost_fid_from_resid(struct lu_fid *fid,
 		/* new resid */
 		fid_extract_from_res_name(fid, name);
 	}
-}
-
-static inline __u32 fid_hash(const struct lu_fid *f, int bits)
-{
-	/*
-	 * All objects with same id and different versions will belong to same
-	 * collisions list.
-	 */
-	return cfs_hash_long(fid_flatten64(f), bits);
 }
 
 u32 lu_fid_hash(const void *data, u32 len, u32 seed);

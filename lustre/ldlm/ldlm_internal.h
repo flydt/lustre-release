@@ -124,7 +124,7 @@ void ldlm_lock_decref_internal_nolock(struct ldlm_lock *l,
 				      enum ldlm_mode mode);
 void ldlm_add_ast_work_item(struct ldlm_lock *lock, struct ldlm_lock *new,
 			    struct list_head *work_list);
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 int ldlm_reprocess_queue(struct ldlm_resource *res, struct list_head *queue,
 			 struct list_head *work_list,
 			 enum ldlm_process_intention intention,
@@ -138,11 +138,13 @@ void ldlm_clear_blocking_data(struct ldlm_lock *lock);
 int ldlm_run_ast_work(struct ldlm_namespace *ns, struct list_head *rpc_list,
 		      ldlm_desc_ast_t ast_type);
 int ldlm_work_gl_ast_lock(struct ptlrpc_request_set *rqset, void *opaq);
-int ldlm_lock_remove_from_lru_check(struct ldlm_lock *lock, ktime_t last_use);
+int ldlm_lock_remove_from_lru_check(struct ldlm_lock *lock, ktime_t last_use,
+				    bool reuse);
 #define ldlm_lock_remove_from_lru(lock) \
-		ldlm_lock_remove_from_lru_check(lock, ktime_set(0, 0))
+		ldlm_lock_remove_from_lru_check(lock, ktime_set(0, 0), false)
 int ldlm_lock_remove_from_lru_nolock(struct ldlm_lock *lock);
 void ldlm_lock_add_to_lru_nolock(struct ldlm_lock *lock);
+void ldlm_lock_lru_demote_to_normal_nolock(struct ldlm_lock *lock);
 void ldlm_lock_touch_in_lru(struct ldlm_lock *lock);
 void ldlm_lock_destroy_nolock(struct ldlm_lock *lock);
 
@@ -164,7 +166,7 @@ void ldlm_handle_bl_callback(struct ldlm_namespace *ns,
 			     struct ldlm_lock_desc *ld, struct ldlm_lock *lock);
 void ldlm_bl_desc2lock(const struct ldlm_lock_desc *ld, struct ldlm_lock *lock);
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 /* ldlm_plain.c */
 int ldlm_process_plain_lock(struct ldlm_lock *lock, __u64 *flags,
 			    enum ldlm_process_intention intention,
@@ -187,7 +189,7 @@ int ldlm_process_extent_lock(struct ldlm_lock *lock, __u64 *flags,
 #endif
 void ldlm_extent_add_lock(struct ldlm_resource *res, struct ldlm_lock *lock);
 void ldlm_extent_unlink_lock(struct ldlm_lock *lock);
-void ldlm_extent_search(struct interval_tree_root *root,
+void ldlm_extent_search(struct rb_root_cached *root,
 			u64 start, u64 end,
 			bool (*matches)(struct ldlm_lock *lock, void *data),
 			void *data);
@@ -379,7 +381,7 @@ void ldlm_flock_policy_local_to_wire(const union ldlm_policy_data *lpolicy,
 				     union ldlm_wire_policy_data *wpolicy);
 
 /* ldlm_reclaim.c */
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 extern u64 ldlm_reclaim_threshold;
 extern u64 ldlm_lock_limit;
 extern u64 ldlm_reclaim_threshold_mb;
@@ -399,5 +401,6 @@ static inline bool ldlm_res_eq(const struct ldlm_res_id *res0,
 	return memcmp(res0, res1, sizeof(*res0)) == 0;
 }
 
-/* exports for testing */
-struct ldlm_lock *ldlm_lock_new_testing(struct ldlm_resource *resource);
+/* ldlm_cache_policy.c */
+extern struct ldlm_lock_cache_ops ldlm_lru_cache_ops;
+extern struct ldlm_lock_cache_ops ldlm_lfru_cache_ops;

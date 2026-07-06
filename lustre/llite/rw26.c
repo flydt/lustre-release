@@ -24,11 +24,11 @@
 #include <linux/unistd.h>
 #include <linux/writeback.h>
 #include <linux/migrate.h>
+#include <lustre_compat/linux/uio.h>
 
 #define DEBUG_SUBSYSTEM S_LLITE
 
 #include "llite_internal.h"
-#include <lustre_compat.h>
 
 #ifdef HAVE_INVALIDATE_FOLIO
 /**
@@ -93,21 +93,16 @@ static void ll_invalidate_folio(struct folio *folio, size_t offset, size_t len)
  * as a result of explicit truncate, or when inode is removed from memory
  * (as a result of final iput(), umount, or memory pressure induced icache
  * shrinking).
- *
  * @vmpage: pointer to struct page (single page)
  * @offset: Starting offset in bytes
+ * @length: Length to release
  *
  * [0, offset] bytes of the page remain valid (this is for a case of not-page
  * aligned truncate). Lustre leaves partially truncated page in the cache,
  * relying on struct inode::i_size to limit further accesses.
  */
 static void ll_invalidatepage(struct page *vmpage,
-#ifdef HAVE_INVALIDATE_RANGE
-				unsigned int offset, unsigned int length
-#else
-				unsigned long offset
-#endif
-			     )
+			      unsigned int offset, unsigned int length)
 {
 	struct inode     *inode;
 	struct lu_env    *env;
@@ -122,11 +117,7 @@ static void ll_invalidatepage(struct page *vmpage,
 	 * below because they are run with page locked and all our io is
 	 * happening with locked page too
 	 */
-#ifdef HAVE_INVALIDATE_RANGE
 	if (offset == 0 && length == PAGE_SIZE) {
-#else
-	if (offset == 0) {
-#endif
 		/* See the comment in ll_releasepage() */
 		env = cl_env_percpu_get();
 		LASSERT(!IS_ERR(env));
@@ -230,98 +221,6 @@ static int ll_releasepage(struct page *vmpage, RELEASEPAGE_ARG_TYPE gfp_mask)
 }
 #endif /* HAVE_AOPS_RELEASE_FOLIO */
 
-static ssize_t ll_get_user_pages(int rw, struct iov_iter *iter,
-				struct cl_dio_pages *cdp,
-				size_t maxsize)
-{
-#if defined(HAVE_DIO_ITER)
-	size_t start;
-	size_t result;
-
-	result = iov_iter_get_pages_alloc2(iter, &cdp->cdp_pages, maxsize,
-					  &start);
-	if (result > 0) {
-		cdp->cdp_count = DIV_ROUND_UP(result + start, PAGE_SIZE);
-		if (user_backed_iter(iter))
-			iov_iter_revert(iter, result);
-	}
-	return result;
-#else
-	unsigned long addr;
-	size_t page_count;
-	size_t size;
-	long result;
-
-	if (!maxsize)
-		return 0;
-
-	if (!iter->nr_segs)
-		return 0;
-
-	addr = (unsigned long)iter->iov->iov_base + iter->iov_offset;
-	if (addr & ~PAGE_MASK)
-		return -EINVAL;
-
-	size = min_t(size_t, maxsize, iter->iov->iov_len);
-	page_count = (size + PAGE_SIZE - 1) >> PAGE_SHIFT;
-	OBD_ALLOC_PTR_ARRAY_LARGE(cdp->cdp_pages, page_count);
-	if (cdp->cdp_pages == NULL)
-		return -ENOMEM;
-
-	mmap_read_lock(current->mm);
-	result = get_user_pages(current, current->mm, addr, page_count,
-				rw == READ, 0, cdp->cdp_pages, NULL);
-	mmap_read_unlock(current->mm);
-
-	if (unlikely(result != page_count)) {
-		ll_release_user_pages(cdp->cdp_pages, page_count);
-		cdp->cdp_pages = NULL;
-
-		if (result >= 0)
-			return -EFAULT;
-
-		return result;
-	}
-	cdp->cdp_count = page_count;
-
-	return size;
-#endif
-}
-
-/* iov_iter_alignment() is introduced in 3.16 similar to HAVE_DIO_ITER */
-#if defined(HAVE_DIO_ITER)
-static unsigned long iov_iter_alignment_vfs(const struct iov_iter *i)
-{
-	return iov_iter_alignment(i);
-}
-#else /* copied from alignment_iovec() */
-static unsigned long iov_iter_alignment_vfs(const struct iov_iter *i)
-{
-	const struct iovec *iov = i->iov;
-	unsigned long res;
-	size_t size = i->count;
-	size_t n;
-
-	if (!size)
-		return 0;
-
-	res = (unsigned long)iov->iov_base + i->iov_offset;
-	n = iov->iov_len - i->iov_offset;
-	if (n >= size)
-		return res | size;
-
-	size -= n;
-	res |= n;
-	while (size > (++iov)->iov_len) {
-		res |= (unsigned long)iov->iov_base | iov->iov_len;
-		size -= iov->iov_len;
-	}
-	res |= (unsigned long)iov->iov_base | size;
-
-	return res;
-}
-#endif
-
 /*
  * Lustre could relax a bit for alignment, io count is not
  * necessary page alignment.
@@ -339,17 +238,17 @@ bool ll_iov_iter_is_unaligned(struct iov_iter *i)
 		return true;
 
 	if (!count)
-		return iov_iter_alignment_vfs(i) & ~PAGE_MASK;
+		return iov_iter_alignment(i) & ~PAGE_MASK;
 
 	if (orig_size > PAGE_SIZE) {
 		iov_iter_truncate(i, orig_size - count);
-		res = iov_iter_alignment_vfs(i);
+		res = iov_iter_alignment(i);
 		iov_iter_reexpand(i, orig_size);
 
 		return res & ~PAGE_MASK;
 	}
 
-	res = iov_iter_alignment_vfs(i);
+	res = iov_iter_alignment(i);
 	/* start address is page aligned */
 	if ((res & ~PAGE_MASK) == orig_size)
 		return false;
@@ -368,21 +267,9 @@ ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 	int iot = rw == READ ? CRT_READ : CRT_WRITE;
 	loff_t offset = cdp->cdp_file_offset;
 	ssize_t rc = 0;
-	int i = 0;
+	unsigned int i = 0;
 
 	ENTRY;
-
-	cdp->cdp_from = offset & ~PAGE_MASK;
-	cdp->cdp_to = (offset + size) & ~PAGE_MASK;
-
-	/* this is a special temporary allocation which lets us track the
-	 * cl_pages and convert them to a list
-	 *
-	 * this is used in 'pushing down' the conversion to a page queue
-	 */
-	OBD_ALLOC_PTR_ARRAY_LARGE(cdp->cdp_cl_pages, cdp->cdp_count);
-	if (!cdp->cdp_cl_pages)
-		GOTO(out, rc = -ENOMEM);
 
 	while (size > 0) {
 		size_t from = offset & ~PAGE_MASK;
@@ -422,10 +309,10 @@ ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 	/* on success, we should hit every page in the cdp and have no bytes
 	 * left in 'size'
 	 */
-	LASSERT(i == cdp->cdp_count);
+	LASSERT(i == cdp->cdp_page_count);
 	LASSERT(size == 0);
 
-	atomic_add(cdp->cdp_count, &anchor->csi_sync_nr);
+	atomic_add(cdp->cdp_page_count, &anchor->csi_sync_nr);
 	/*
 	 * Avoid out-of-order execution of adding inflight
 	 * modifications count and io submit.
@@ -433,9 +320,9 @@ ll_direct_rw_pages(const struct lu_env *env, struct cl_io *io, size_t size,
 	smp_mb();
 	rc = cl_dio_submit_rw(env, io, iot, cdp);
 	if (rc != 0) {
-		atomic_add(-cdp->cdp_count,
+		atomic_add(-cdp->cdp_page_count,
 			   &anchor->csi_sync_nr);
-		for (i = 0; i < cdp->cdp_count; i++) {
+		for (i = 0; i < cdp->cdp_page_count; i++) {
 			page = cdp->cdp_cl_pages[i];
 			page->cp_sync_io = NULL;
 		}
@@ -448,22 +335,16 @@ out:
 	RETURN(rc);
 }
 
-#ifdef KMALLOC_MAX_SIZE
-#define MAX_MALLOC KMALLOC_MAX_SIZE
-#else
-#define MAX_MALLOC (128 * 1024)
-#endif
-
 /* This is the maximum size of a single O_DIRECT request, based on the
  * kmalloc limit.  We need to fit all of the brw_page structs, each one
  * representing PAGE_SIZE worth of user data, into a single buffer, and
  * then truncate this to be a full-sized RPC.  For 4kB PAGE_SIZE this is
- * up to 22MB for 128kB kmalloc and up to 682MB for 4MB kmalloc. */
-#define MAX_DIO_SIZE ((MAX_MALLOC / sizeof(struct brw_page) * PAGE_SIZE) & \
+ * up to 22MB for 128kB kmalloc and up to 682MB for 4MB kmalloc.
+ */
+#define MAX_DIO_SIZE ((KMALLOC_MAX_SIZE / sizeof(struct brw_page) * PAGE_SIZE) & \
 		      ~((size_t)DT_MAX_BRW_SIZE - 1))
 
-static ssize_t
-ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
+static ssize_t ll_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 {
 	struct ll_cl_context *lcc;
 	const struct lu_env *env;
@@ -472,16 +353,17 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 	struct inode *inode = file->f_mapping->host;
 	struct cl_dio_aio *ll_dio_aio;
 	struct cl_sub_dio *sdio;
-	size_t count = iov_iter_count(iter);
+	size_t bytes = iov_iter_count(iter);
 	ssize_t tot_bytes = 0, result = 0;
+	ssize_t bytes_at_drain = 0;
 	loff_t file_offset = iocb->ki_pos;
+	int rw = iov_iter_rw(iter);
 	bool sync_submit = false;
 	bool unaligned;
 	struct vvp_io *vio;
 	ssize_t rc2;
 
 	ENTRY;
-
 	if (file_offset & ~PAGE_MASK)
 		unaligned = true;
 	else
@@ -499,18 +381,25 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 
 	CDEBUG(D_VFSTRACE,
 	       "VFS Op:inode="DFID"(%p), size=%zd (max %lu), offset=%lld=%#llx, pages %zd (max %lu)%s%s%s%s\n",
-	       PFID(ll_inode2fid(inode)), inode, count, MAX_DIO_SIZE,
+	       PFID(ll_inode2fid(inode)), inode, bytes, MAX_DIO_SIZE,
 	       file_offset, file_offset,
-	       (count >> PAGE_SHIFT) + !!(count & ~PAGE_MASK),
+	       (bytes >> PAGE_SHIFT) + !!(bytes & ~PAGE_MASK),
 	       MAX_DIO_SIZE >> PAGE_SHIFT,
 	       io->ci_dio_lock ? ", locked" : ", lockless",
 	       io->ci_parallel_dio ? ", parallel" : "",
 	       unaligned ? ", unaligned" : "",
 	       io->ci_hybrid_switched ? ", hybrid" : "");
 
-	/* Check EOF by ourselves */
-	if (rw == READ && file_offset >= i_size_read(inode))
-		RETURN(0);
+	/* Check EOF by ourselves.
+	 * For parity IO, use ci_parity_eof which is calculated from RAID
+	 * geometry in the LOV layer.
+	 */
+	if (rw == READ) {
+		loff_t eof = io->ci_parity_io ? io->ci_parity_eof :
+						i_size_read(inode);
+		if (file_offset >= eof)
+			RETURN(0);
+	}
 
 	/* if one part of an I/O is unaligned, just handle all of it that way -
 	 * otherwise we create significant complexities with managing the iovec
@@ -535,9 +424,14 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 
 	/* the requirement to not return EIOCBQUEUED for pipes (see bottom of
 	 * this function) plays havoc with the unaligned I/O lifecycle, so
-	 * don't allow unaligned I/O on pipes
+	 * don't allow unaligned I/O on pipes.
+	 *
+	 * Additionally, pipe iterators don't have user pages that can be
+	 * pinned for DIO - iov_iter_get_pages_alloc2() will fail or return 0
+	 * for pipes, so reject all pipe iterators for DIO and fall back to
+	 * buffered I/O.
 	 */
-	if (unaligned && iov_iter_is_pipe(iter))
+	if (iov_iter_is_pipe(iter))
 		RETURN(0);
 
 	/* returning 0 here forces the remaining I/O through buffered I/O
@@ -566,13 +460,22 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 	while (iov_iter_count(iter)) {
 		struct cl_dio_pages *cdp;
 
-		count = min_t(size_t, iov_iter_count(iter), MAX_DIO_SIZE);
+		bytes = min_t(size_t, iov_iter_count(iter), MAX_DIO_SIZE);
+		/* Cap sub_dio size for drain+retry testing */
+		if (CFS_FAIL_PRECHECK(OBD_FAIL_LLITE_DIO_DRAIN_RETRY))
+			bytes = min_t(size_t, bytes, PAGE_SIZE);
+
+		/* For parity IO, use ci_parity_eof which is calculated from
+		 * RAID geometry in the LOV layer.
+		 */
 		if (rw == READ) {
-			if (file_offset >= i_size_read(inode))
+			loff_t eof = io->ci_parity_io ? io->ci_parity_eof :
+						       i_size_read(inode);
+			if (file_offset >= eof)
 				break;
 
-			if (file_offset + count > i_size_read(inode))
-				count = i_size_read(inode) - file_offset;
+			if (file_offset + bytes > eof)
+				bytes = eof - file_offset;
 		}
 
 		/* if we are doing sync_submit, then we free this below,
@@ -586,37 +489,52 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 
 		cdp = &sdio->csd_dio_pages;
 		cdp->cdp_file_offset = file_offset;
-
-		if (!unaligned) {
-			result = ll_get_user_pages(rw, iter, cdp, count);
-			/* ll_get_user_pages returns bytes in the IO or error*/
-			count = result;
-		} else {
-			/* explictly handle the ubuf() case for el9.4 */
-			size_t len = iter_is_ubuf(iter) ? iov_iter_count(iter)
-				   : iter_iov(iter)->iov_len;
-
-			/* same calculation used in ll_get_user_pages */
-			count = min_t(size_t, count, len);
-			result = ll_allocate_dio_buffer(cdp, count);
-			/* allocate_dio_buffer returns number of pages or
-			 * error, so do not set count = result
-			 */
-		}
-
-		/* now we have the actual count, so store it in the sdio */
-		sdio->csd_bytes = count;
-
+		result = cl_dio_pages_init(env, ll_dio_aio->cda_obj, cdp,
+					   iter, rw, bytes, file_offset,
+					   unaligned);
 		if (unlikely(result <= 0)) {
-			cl_sync_io_note(env, &sdio->csd_sync, result);
+			bool retry = (result == -ENOMEM && unaligned
+				      && tot_bytes > bytes_at_drain);
+
+			/* Note the failed sub_dio.  When retrying,
+			 * pass rc=0 so the alloc ENOMEM doesn't
+			 * poison the parent anchor's sync_rc.
+			 */
+			cl_sync_io_note(env, &sdio->csd_sync,
+					retry ? 0 : result);
 			if (sync_submit) {
 				LASSERT(sdio->csd_creator_free);
 				cl_sub_dio_free(sdio);
 			}
+			if (retry) {
+				/* ENOMEM but we have in-flight sub_dios
+				 * holding pages.  Drain them to reclaim
+				 * pages, then retry.
+				 *
+				 * By calling cl_sync_io_wait_recycle,
+				 * cl_dio_aio_end runs — but unaligned
+				 * DIO is never AIO, so it won't
+				 * prematurely complete to userspace.
+				 */
+				LASSERT(!ll_dio_aio->cda_is_aio);
+				rc2 = cl_sync_io_wait_recycle(env,
+					&ll_dio_aio->cda_sync, 0, 0);
+				if (rc2 < 0)
+					GOTO(out, result = rc2);
+				bytes_at_drain = tot_bytes;
+				result = 0;
+				CDEBUG(D_VFSTRACE,
+				       "DIO pool ENOMEM, drained at %zd bytes, retrying\n",
+				       tot_bytes);
+				continue;
+			}
 			GOTO(out, result);
 		}
+		/* now we have the actual bytes, so store it in the sdio */
+		bytes = result;
+		sdio->csd_bytes = bytes;
 
-		result = ll_direct_rw_pages(env, io, count, rw, inode, sdio);
+		result = ll_direct_rw_pages(env, io, bytes, rw, inode, sdio);
 		/* if the i/o was unsuccessful, we zero the number of bytes to
 		 * copy back.  Note that partial I/O completion isn't possible
 		 * here - I/O either completes or fails.  So there's no need to
@@ -646,13 +564,13 @@ ll_direct_IO_impl(struct kiocb *iocb, struct iov_iter *iter, int rw)
 		if (unlikely(result < 0))
 			GOTO(out, result);
 
-		iov_iter_advance(iter, count);
+		iov_iter_advance(iter, bytes);
 
-		tot_bytes += count;
-		file_offset += count;
+		tot_bytes += bytes;
+		file_offset += bytes;
 		CDEBUG(D_VFSTRACE,
 		       "result %zd tot_bytes %zd count %zd file_offset %lld\n",
-		       result, tot_bytes, count, file_offset);
+		       result, tot_bytes, bytes, file_offset);
 	}
 
 out:
@@ -669,42 +587,6 @@ out:
 
 	RETURN(result);
 }
-
-#ifdef HAVE_DIO_ITER
-static ssize_t ll_direct_IO(
-#ifndef HAVE_IOV_ITER_RW
-	     int rw,
-#endif
-	     struct kiocb *iocb, struct iov_iter *iter
-#ifndef HAVE_DIRECTIO_2ARGS
-	     , loff_t file_offset
-#endif
-	     )
-{
-	int nrw;
-
-#ifndef HAVE_IOV_ITER_RW
-	nrw = rw;
-#else
-	nrw = iov_iter_rw(iter);
-#endif
-
-	return ll_direct_IO_impl(iocb, iter, nrw);
-}
-
-#else /* !defined(HAVE_DIO_ITER) */
-
-static ssize_t
-ll_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
-	     loff_t file_offset, unsigned long nr_segs)
-{
-	struct iov_iter iter;
-
-	iov_iter_init(&iter, iov, nr_segs, iov_length(iov, nr_segs), 0);
-	return ll_direct_IO_impl(iocb, &iter, rw);
-}
-
-#endif /* !defined(HAVE_DIO_ITER) */
 
 /**
  * ll_prepare_partial_page() - Prepare partially written-to page for a write.
@@ -741,10 +623,10 @@ static int ll_prepare_partial_page(const struct lu_env *env, struct cl_io *io,
 	 * purposes here we can treat it like i_size.
 	 */
 	if (attr->cat_kms <= offset) {
-		char *kaddr = kmap_atomic(pg->cp_vmpage);
+		char *kaddr = kmap_local_page(pg->cp_vmpage);
 
 		memset(kaddr, 0, PAGE_SIZE);
-		kunmap_atomic(kaddr);
+		kunmap_local(kaddr);
 		GOTO(out, result = 0);
 	}
 
@@ -789,7 +671,13 @@ static int ll_tiny_write_begin(struct page *vmpage, struct address_space *mappin
  * to hold data for buffered i/o on the 'write' path.
  * Called by generic_perform_write() to allocate one page [or one folio]
  */
-static int ll_write_begin(struct file *file, struct address_space *mapping,
+static int ll_write_begin(
+#ifdef HAVE_WRITE_BEGIN_KIOCB
+			  const struct kiocb *kiocb,
+#else
+			  struct file *file,
+#endif
+			  struct address_space *mapping,
 			  loff_t pos, unsigned int len,
 #ifdef HAVE_GRAB_CACHE_PAGE_WRITE_BEGIN_WITH_FLAGS
 			  unsigned int flags,
@@ -800,7 +688,10 @@ static int ll_write_begin(struct file *file, struct address_space *mapping,
 	const struct lu_env  *env = NULL;
 	struct vvp_io *vio;
 	struct cl_io   *io = NULL;
-	struct cl_page *page = NULL;
+	struct cl_page *cl_page = NULL;
+#ifdef HAVE_WRITE_BEGIN_KIOCB
+	struct file *file = kiocb->ki_filp;
+#endif
 	struct inode *inode = file_inode(file);
 	struct cl_object *clob = ll_i2info(mapping->host)->lli_clob;
 	pgoff_t index = pos >> PAGE_SHIFT;
@@ -808,9 +699,8 @@ static int ll_write_begin(struct file *file, struct address_space *mapping,
 	unsigned from = pos & (PAGE_SIZE - 1);
 	unsigned to = from + len;
 	int result = 0;
-	int iocb_flags;
-	ENTRY;
 
+	ENTRY;
 	CDEBUG(D_VFSTRACE, "Writing %lu of %d to %d bytes\n", index, from, len);
 
 	lcc = ll_cl_find(inode);
@@ -825,8 +715,7 @@ static int ll_write_begin(struct file *file, struct address_space *mapping,
 	io  = lcc->lcc_io;
 	vio = vvp_env_io(env);
 
-	iocb_flags = iocb_ki_flags_get(file, vio->vui_iocb);
-	if (iocb_ki_flags_check(iocb_flags, DIRECT)) {
+	if (iocb_ki_flags_check(vio->vui_iocb, IOCB_DIRECT)) {
 		/* direct IO failed because it couldn't clean up cached pages,
 		 * this causes a problem for mirror write because the cached
 		 * page may belong to another mirror, which will result in
@@ -854,7 +743,7 @@ again:
 		struct vvp_io *vio = vvp_env_io(env);
 		struct cl_page_list *plist = &vio->u.readwrite.vui_queue;
 
-                /* if the page is already in dirty cache, we have to commit
+		/* if the page is already in dirty cache, we have to commit
 		 * the pages right now; otherwise, it may cause deadlock
 		 * because it holds page lock of a dirty page and request for
 		 * more grants. It's okay for the dirty page to be the first
@@ -866,7 +755,7 @@ again:
 		}
 
 		/* commit pages and then wait for page lock */
-		result = vvp_io_write_commit(env, io);
+		result = vvp_io_write_commit(env, io, IO_PRIO_NORMAL);
 		if (result < 0)
 			GOTO(out, result);
 
@@ -890,26 +779,28 @@ again:
 		goto again;
 	}
 
-	page = cl_page_find(env, clob, vmpage->index, vmpage, CPT_CACHEABLE);
-	if (IS_ERR(page))
-		GOTO(out, result = PTR_ERR(page));
+	cl_page = cl_page_find(env, clob, folio_index_page(vmpage), vmpage,
+			    CPT_CACHEABLE);
+	if (IS_ERR(cl_page))
+		GOTO(out, result = PTR_ERR(cl_page));
 
-	lcc->lcc_page = page;
+	lcc->lcc_page = cl_page;
 
-	cl_page_assume(env, io, page);
+	cl_page_assume(env, io, cl_page);
 	if (!PageUptodate(vmpage)) {
 		/*
 		 * We're completely overwriting an existing page,
 		 * so _don't_ set it up to date until commit_write
 		 */
 		if (from == 0 && to == PAGE_SIZE) {
-			CL_PAGE_HEADER(D_PAGE, env, page, "full page write\n");
-			POISON_PAGE(vmpage, 0x11);
+			CL_PAGE_HEADER(D_PAGE, env, cl_page,
+				       "full page write\n");
 		} else {
 			/* TODO: can be optimized at OSC layer to check if it
 			 * is a lockless IO. In that case, it's not necessary
 			 * to read the data. */
-			result = ll_prepare_partial_page(env, io, page, file);
+			result = ll_prepare_partial_page(env, io, cl_page,
+							 file);
 			if (result) {
 				/* vmpage should have been unlocked */
 				put_page(vmpage);
@@ -929,9 +820,8 @@ out:
 			put_page(vmpage);
 		}
 		/* On tiny_write failure, page and io are always null. */
-		if (!IS_ERR_OR_NULL(page)) {
-			cl_page_put(env, page);
-		}
+		if (!IS_ERR_OR_NULL(cl_page))
+			cl_page_put(env, cl_page);
 		if (io)
 			io->ci_result = result;
 	} else {
@@ -977,17 +867,28 @@ out:
 	RETURN(rc);
 }
 
-static int ll_write_end(struct file *file, struct address_space *mapping,
+/* called by generic_perform_write after each page/folio is filled */
+static int ll_write_end(
+#ifdef HAVE_WRITE_BEGIN_KIOCB
+			const struct kiocb *kiocb,
+#else
+			struct file *file,
+#endif
+			struct address_space *mapping,
 			loff_t pos, unsigned len, unsigned copied,
-			struct wbe_folio *vmfolio, void *fsdata)
+			struct wbe_folio *folio, void *fsdata)
 {
 	struct ll_cl_context *lcc = fsdata;
 	const struct lu_env *env;
+#ifdef HAVE_WRITE_BEGIN_KIOCB
+	struct file *file = kiocb->ki_filp;
+#endif
 	struct cl_io *io;
 	struct vvp_io *vio;
-	struct cl_page *page;
-	struct page *vmpage = wbe_folio_page(vmfolio);
+	struct cl_page *cl_page;
+	struct page *vmpage = wbe_folio_page(folio);
 	unsigned from = pos & (PAGE_SIZE - 1);
+	enum cl_io_priority prio = IO_PRIO_NORMAL;
 	bool unplug = false;
 	int result = 0;
 	ENTRY;
@@ -1004,26 +905,46 @@ static int ll_write_end(struct file *file, struct address_space *mapping,
 
 	LASSERT(lcc != NULL);
 	env  = lcc->lcc_env;
-	page = lcc->lcc_page;
+	cl_page = lcc->lcc_page;
 	io   = lcc->lcc_io;
 	vio  = vvp_env_io(env);
 
-	LASSERT(cl_page_is_owned(page, io));
+	LASSERT(cl_page_is_owned(cl_page, io));
 	if (copied > 0) {
 		struct cl_page_list *plist = &vio->u.readwrite.vui_queue;
+#ifdef SB_I_CGROUPWB
+		struct inode *inode = file_inode(file);
+		struct bdi_writeback *wb;
 
-		lcc->lcc_page = NULL; /* page will be queued */
+		__mark_inode_dirty(inode, I_DIRTY_PAGES);
+		spin_lock(&inode->i_lock);
+		wb = inode_to_wb(inode);
+		LASSERT(wb != NULL);
+		if (wb->dirty_exceeded) {
+			unplug = true;
+			prio = IO_PRIO_URGENT;
+			CDEBUG(D_IOTRACE, "wb@%pK dirty_ratelimit=%lu balanced_dirty_ratelimit=%lu dirty_exceeded=%d state=%lX last_old_flush=%lu\n",
+			       wb, wb->dirty_ratelimit,
+			       wb->balanced_dirty_ratelimit,
+			       wb->dirty_exceeded, wb->state,
+			       wb->last_old_flush);
+		}
+		spin_unlock(&inode->i_lock);
+#endif
+
+		lcc->lcc_page = NULL; /* cl_page will be queued */
 
 		/* Add it into write queue */
-		cl_page_list_add(plist, page, true);
-		if (plist->pl_nr == 1) /* first page */
+		cl_page_list_add(plist, cl_page, true);
+		if (plist->pl_nr == 1) /* first cl_page */
 			vio->u.readwrite.vui_from = from;
 		else
 			LASSERT(from == 0);
 		vio->u.readwrite.vui_to = from + copied;
 
 		/* To address the deadlock in balance_dirty_pages() where
-		 * this dirty page may be written back in the same thread. */
+		 * this dirty cl_page may be written back in the same thread.
+		 */
 		if (PageDirty(vmpage))
 			unplug = true;
 
@@ -1031,15 +952,15 @@ static int ll_write_end(struct file *file, struct address_space *mapping,
 		if (plist->pl_nr >= PTLRPC_MAX_BRW_PAGES)
 			unplug = true;
 
-		CL_PAGE_DEBUG(D_VFSTRACE, env, page,
-			      "queued page: %d.\n", plist->pl_nr);
+		CL_PAGE_DEBUG(D_VFSTRACE, env, cl_page,
+			      "queued cl_page: %d.\n", plist->pl_nr);
 	} else {
-		cl_page_disown(env, io, page);
+		cl_page_disown(env, io, cl_page);
 
 		lcc->lcc_page = NULL;
-		cl_page_put(env, page);
+		cl_page_put(env, cl_page);
 
-		/* page list is not contiguous now, commit it now */
+		/* cl_page list is not contiguous now, commit it now */
 		unplug = true;
 	}
 	/* the last call into ->write_begin() can unplug the queue */
@@ -1047,11 +968,10 @@ static int ll_write_end(struct file *file, struct address_space *mapping,
 	    io->u.ci_rw.crw_pos + io->u.ci_rw.crw_bytes)
 		unplug = true;
 	if (unplug)
-		result = vvp_io_write_commit(env, io);
+		result = vvp_io_write_commit(env, io, prio);
 
 	if (result < 0)
 		io->ci_result = result;
-
 
 out:
 	RETURN(result >= 0 ? copied : result);
@@ -1089,7 +1009,6 @@ const struct address_space_operations ll_aops = {
 	.releasepage		= (void *)ll_releasepage,
 #endif
 	.direct_IO		= ll_direct_IO,
-	.writepage		= ll_writepage,
 	.writepages		= ll_writepages,
 	.write_begin		= ll_write_begin,
 	.write_end		= ll_write_end,

@@ -18,7 +18,6 @@
 
 #define DEBUG_SUBSYSTEM S_OSD
 
-#include <libcfs/libcfs.h>
 #include <obd_support.h>
 #include <lustre_net.h>
 #include <obd.h>
@@ -426,6 +425,7 @@ void __osd_xattr_declare_set(const struct lu_env *env, struct osd_object *obj,
 }
 
 int osd_declare_xattr_set(const struct lu_env *env, struct dt_object *dt,
+			  const struct lu_attr *attr,
 			  const struct lu_buf *buf, const char *name,
 			  int fl, struct thandle *handle)
 {
@@ -770,7 +770,7 @@ __osd_xattr_set(const struct lu_env *env, struct osd_object *obj,
 	}
 
 	/* Finally write the xattr value */
-	dmu_write(osd->od_os, xa_data_obj, 0, buf->lb_len, buf->lb_buf, tx);
+	osd_dmu_write(osd, xa_data_dn, 0, buf->lb_len, buf->lb_buf, tx);
 
 	size = buf->lb_len;
 	rc = -sa_update(sa_hdl, SA_ZPL_SIZE(osd), &size, 8, tx);
@@ -905,6 +905,7 @@ int osd_xattr_set(const struct lu_env *env, struct dt_object *dt,
 	down_write(&obj->oo_guard);
 	CDEBUG(D_INODE, "Setting xattr %s with size %d\n",
 		name, (int)buf->lb_len);
+
 	/* For the OST migrated from ldiskfs, the PFID EA may
 	 * be stored in LMA because of ldiskfs inode size.
 	 */
@@ -918,8 +919,11 @@ int osd_xattr_set(const struct lu_env *env, struct dt_object *dt,
 		rc = osd_xattr_handle_linkea(env, osd, obj, buf, oh);
 	}
 
-	if (!rc)
+	if (!rc) {
 		rc = osd_xattr_set_internal(env, obj, buf, name, fl, oh);
+		if (unlikely(!strcmp(name, XATTR_NAME_LMV)) && !rc)
+			obj->oo_lmv_updated = 1;
+	}
 	up_write(&obj->oo_guard);
 
 	RETURN(rc);

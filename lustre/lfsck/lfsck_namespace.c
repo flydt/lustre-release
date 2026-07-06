@@ -250,13 +250,14 @@ static void lfsck_namespace_record_failure(const struct lu_env *env,
 }
 
 /**
- * Load the MDT bitmap from the lfsck_namespace trace file.
+ * lfsck_namespace_load_bitmap() - Load the MDT bitmap from the lfsck_namespace
+ *                                 trace file.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- *
- * \retval		0 for success
- * \retval		negative error number on failure or data corruption
+ * Return:
+ * * %0 for success
+ * * %negative error number on failure or data corruption
  */
 static int lfsck_namespace_load_bitmap(const struct lu_env *env,
 				       struct lfsck_component *com)
@@ -318,13 +319,14 @@ static int lfsck_namespace_load_bitmap(const struct lu_env *env,
 }
 
 /**
- * Load namespace LFSCK statistics information from the trace file.
+ * lfsck_namespace_load() - Load namespace LFSCK statistics information from the
+ *                          trace file.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- *
- * \retval		0 for success
- * \retval		negative error number on failure
+ * Return:
+ * * %0 for success
+ * * %negative error number on failure
  */
 static int lfsck_namespace_load(const struct lu_env *env,
 				struct lfsck_component *com)
@@ -390,14 +392,14 @@ static int lfsck_namespace_store(const struct lu_env *env,
 	if (IS_ERR(handle))
 		GOTO(log, rc = PTR_ERR(handle));
 
-	rc = dt_declare_xattr_set(env, obj,
+	rc = dt_declare_xattr_set(env, obj, NULL,
 				  lfsck_buf_get(env, com->lc_file_disk, len),
 				  XATTR_NAME_LFSCK_NAMESPACE, 0, handle);
 	if (rc != 0)
 		GOTO(out, rc);
 
 	if (bitmap != NULL) {
-		rc = dt_declare_xattr_set(env, obj,
+		rc = dt_declare_xattr_set(env, obj, NULL,
 				lfsck_buf_get(env, bitmap, nbits >> 3),
 				XATTR_NAME_LFSCK_BITMAP, 0, handle);
 		if (rc != 0)
@@ -449,16 +451,17 @@ static int lfsck_namespace_init(const struct lu_env *env,
 }
 
 /**
- * Update the namespace LFSCK trace file for the given @fid
+ * lfsck_namespace_trace_update() - Update the namespace LFSCK trace file for
+ *                                  the given @fid
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @fid: the fid which flags to be updated in the lfsck trace file
+ * @flags: tracefile flag
+ * @add: true if add new flags, otherwise remove flags
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] fid	the fid which flags to be updated in the lfsck
- *			trace file
- * \param[in] add	true if add new flags, otherwise remove flags
- *
- * \retval		0 for success or nothing to be done
- * \retval		negative error number on failure
+ * Return:
+ * * %0 for success or nothing to be done
+ * * %negative error number on failure
  */
 int lfsck_namespace_trace_update(const struct lu_env *env,
 				 struct lfsck_component *com,
@@ -613,7 +616,7 @@ static int lfsck_declare_namespace_exec_dir(const struct lu_env *env,
 	rc = dt_declare_xattr_del(env, obj, XATTR_NAME_LINK, handle);
 	if (rc == 0)
 		/* For insert new linkEA entry. */
-		rc = dt_declare_xattr_set(env, obj,
+		rc = dt_declare_xattr_set(env, obj, NULL,
 			lfsck_buf_get_const(env, NULL, MAX_LINKEA_SIZE),
 			XATTR_NAME_LINK, 0, handle);
 	return rc;
@@ -661,16 +664,16 @@ int __lfsck_links_read(const struct lu_env *env, struct dt_object *obj,
 }
 
 /**
- * Remove linkEA for the given object.
+ * lfsck_namespace_links_remove() - Remove linkEA for the given object.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @obj: pointer to the dt_object to be handled
  *
  * The caller should take the ldlm lock before the calling.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] obj	pointer to the dt_object to be handled
- *
- * \retval		0 for repaired cases
- * \retval		negative error number on failure
+ * Return:
+ * * %0 for repaired cases
+ * * %negative error number on failure
  */
 static int lfsck_namespace_links_remove(const struct lu_env *env,
 					struct lfsck_component *com,
@@ -858,23 +861,15 @@ static int lfsck_namespace_filter_linkea_entry(struct linkea_data *ldata,
 }
 
 /**
- * Insert orphan into .lustre/lost+found/MDTxxxx/ locally.
- *
- * Add the specified orphan MDT-object to the .lustre/lost+found/MDTxxxx/
- * with the given type to generate the name, the detailed rules for name
- * have been described as following.
- *
- * The function also generates the linkEA corresponding to the name entry
- * under the .lustre/lost+found/MDTxxxx/ for the orphan MDT-object.
- *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] orphan	pointer to the orphan MDT-object
- * \param[in] infix	additional information for the orphan name, such as
- *			the FID for original
- * \param[in] type	the type for describing why the orphan MDT-object is
- *			created. The rules are as following:
- *
+ * lfsck_namespace_insert_orphan() - Insert orphan into
+ *                                   .lustre/lost+found/MDTxxxx/ locally.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @orphan: pointer to the orphan MDT-object
+ * @infix: additional information for the orphan name, such as the FID for
+ *         original
+ * @type: the type for describing why the orphan MDT-object is created.
+ *        The rules are as following:
  *  type "D":		The MDT-object is a directory, it may knows its parent
  *			but because there is no valid linkEA, the LFSCK cannot
  *			know where to put it back to the namespace.
@@ -883,17 +878,25 @@ static int lfsck_namespace_filter_linkea_entry(struct linkea_data *ldata,
  *
  *  type "S":		The orphan MDT-object is a shard of a striped directory
  *
- * \see lfsck_layout_recreate_parent() for more types.
+ * see lfsck_layout_recreate_parent() for more types.
  *
  * The orphan name will be like:
  * ${FID}-${infix}-${type}-${conflict_version}
  *
- * \param[out] count	if some others inserted some linkEA entries by race,
- *			then return the linkEA entries count.
+ * @count: if some others inserted some linkEA entries by race, then return
+ *         the linkEA entries count.
  *
- * \retval		positive number for repaired cases
- * \retval		0 if needs to repair nothing
- * \retval		negative error number on failure
+ * Add the specified orphan MDT-object to the .lustre/lost+found/MDTxxxx/
+ * with the given type to generate the name, the detailed rules for name
+ * have been described as following.
+ *
+ * The function also generates the linkEA corresponding to the name entry
+ * under the .lustre/lost+found/MDTxxxx/ for the orphan MDT-object.
+ *
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if needs to repair nothing
+ * * %negative error number on failure
  */
 static int lfsck_namespace_insert_orphan(const struct lu_env *env,
 					 struct lfsck_component *com,
@@ -998,7 +1001,7 @@ again:
 			GOTO(stop, rc);
 	}
 
-	rc = dt_declare_xattr_set(env, orphan, &linkea_buf,
+	rc = dt_declare_xattr_set(env, orphan, NULL, &linkea_buf,
 				  XATTR_NAME_LINK, 0, th);
 	if (rc != 0)
 		GOTO(stop, rc);
@@ -1116,7 +1119,7 @@ static int lfsck_lmv_set(const struct lu_env *env,
 	if (IS_ERR(th))
 		RETURN(PTR_ERR(th));
 
-	rc = dt_declare_xattr_set(env, obj, &buf, XATTR_NAME_LMV, 0, th);
+	rc = dt_declare_xattr_set(env, obj, NULL, &buf, XATTR_NAME_LMV, 0, th);
 	if (rc)
 		GOTO(stop, rc);
 
@@ -1194,7 +1197,15 @@ static inline int lfsck_object_is_shard(const struct lu_env *env,
 }
 
 /**
- * Add the specified name entry back to namespace.
+ * lfsck_namespace_insert_normal() - Add the specified name entry back to
+ *                                   namespace.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @parent: pointer to the directory under which the name entry will be
+ *          inserted into
+ * @child: pointer to the object referenced by the name entry that to be
+ *         inserted into the parent
+ * @lname: the name for the child in the parent directory
  *
  * If there is a linkEA entry that back references a name entry under
  * some parent directory, but such parent directory does not have the
@@ -1207,17 +1218,10 @@ static inline int lfsck_object_is_shard(const struct lu_env *env,
  * if \a parent has LMV, we need to delete it before insertion because
  * now parent's striping is broken and can't be parsed correctly.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] parent	pointer to the directory under which the name entry
- *			will be inserted into
- * \param[in] child	pointer to the object referenced by the name entry
- *			that to be inserted into the parent
- * \param[in] lname	the name for the child in the parent directory
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int lfsck_namespace_insert_normal(const struct lu_env *env,
 					 struct lfsck_component *com,
@@ -1328,8 +1332,8 @@ static int lfsck_namespace_insert_normal(const struct lu_env *env,
 	}
 
 	if (parent_lmv_lost) {
-		rc = dt_declare_xattr_set(env, parent, &buf, XATTR_NAME_LMV,
-					  0, th);
+		rc = dt_declare_xattr_set(env, parent, NULL, &buf,
+					  XATTR_NAME_LMV, 0, th);
 		if (rc)
 			GOTO(stop, rc);
 	}
@@ -1402,20 +1406,20 @@ log:
 }
 
 /**
- * Create the specified orphan directory.
+ * lfsck_namespace_create_orphan_dir() - Create the specified orphan directory.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @orphan: pointer to the orphan MDT-object to be created
+ * @lmv: pointer to master LMV EA that will be set to the orphan
  *
  * For the case that the parent MDT-object stored in some MDT-object's
  * linkEA entry is lost, the LFSCK will re-create the parent object as
  * an orphan and insert it into .lustre/lost+found/MDTxxxx/ directory
  * with the name ${FID}-P-${conflict_version}.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] orphan	pointer to the orphan MDT-object to be created
- * \param[in] lmv	pointer to master LMV EA that will be set to the orphan
- *
- * \retval		positive number for repaired cases
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %negative error number on failure
  */
 static int lfsck_namespace_create_orphan_dir(const struct lu_env *env,
 					     struct lfsck_component *com,
@@ -1570,15 +1574,15 @@ again:
 		lmv->lmv_master_mdt_index = lfsck_dev_idx(lfsck);
 		lfsck_lmv_header_cpu_to_le(lmv2, lmv);
 		lfsck_buf_init(&lmv_buf, lmv2, sizeof(*lmv2));
-		rc = dt_declare_xattr_set(env, orphan, &lmv_buf, XATTR_NAME_LMV,
-					  0, th);
+		rc = dt_declare_xattr_set(env, orphan, NULL, &lmv_buf,
+					  XATTR_NAME_LMV, 0, th);
 		if (rc != 0)
 			GOTO(stop, rc);
 	}
 
 	lfsck_buf_init(&linkea_buf, ldata.ld_buf->lb_buf,
 		       ldata.ld_leh->leh_len);
-	rc = dt_declare_xattr_set(env, orphan, &linkea_buf,
+	rc = dt_declare_xattr_set(env, orphan, NULL, &linkea_buf,
 				  XATTR_NAME_LINK, 0, th);
 	if (rc != 0)
 		GOTO(stop, rc);
@@ -1667,24 +1671,24 @@ log:
 }
 
 /**
- * Remove the specified entry from the linkEA.
+ * lfsck_namespace_shrink_linkea() - Remove the specified entry from the linkEA.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @obj: pointer to the dt_object to be handled
+ * @ldata:  pointer to the buffer that holds the linkEA [out]
+ * @cname: the name for the child in the parent directory
+ * @pfid: the parent directory's FID for the linkEA
+ * @next: if true, then remove the first found linkEA entry, and move the
+ *        ldata->ld_lee to next entry
  *
  * Locate the linkEA entry with the given @cname and @pfid, then
  * remove this entry or the other entries those are repeated with
  * this entry.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] obj	pointer to the dt_object to be handled
- * \param[in,out]ldata  pointer to the buffer that holds the linkEA
- * \param[in] cname	the name for the child in the parent directory
- * \param[in] pfid	the parent directory's FID for the linkEA
- * \param[in] next	if true, then remove the first found linkEA
- *			entry, and move the ldata->ld_lee to next entry
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int lfsck_namespace_shrink_linkea(const struct lu_env *env,
 					 struct lfsck_component *com,
@@ -1732,7 +1736,7 @@ again:
 		GOTO(unlock1, rc = PTR_ERR(th));
 
 	if (buflen != 0)
-		rc = dt_declare_xattr_set(env, obj, &linkea_buf,
+		rc = dt_declare_xattr_set(env, obj, NULL, &linkea_buf,
 					  XATTR_NAME_LINK, 0, th);
 	else
 		rc = dt_declare_xattr_del(env, obj, XATTR_NAME_LINK, th);
@@ -1813,23 +1817,24 @@ log:
 }
 
 /**
- * Conditionally remove the specified entry from the linkEA.
+ * lfsck_namespace_shrink_linkea_cond() - Conditionally remove the specified
+ *                                        entry from the linkEA.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @parent: pointer to the parent directory
+ * @child: pointer to the child object that holds the linkEA
+ * @ldata:  pointer to the buffer that holds the linkEA [out]
+ * @cname: the name for the child in the parent directory
+ * @pfid: the parent directory's FID for the linkEA
  *
  * Take the parent lock firstly, then check whether the specified
  * name entry exists or not: if yes, do nothing; otherwise, call
  * lfsck_namespace_shrink_linkea() to remove the linkea entry.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] parent	pointer to the parent directory
- * \param[in] child	pointer to the child object that holds the linkEA
- * \param[in,out]ldata  pointer to the buffer that holds the linkEA
- * \param[in] cname	the name for the child in the parent directory
- * \param[in] pfid	the parent directory's FID for the linkEA
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int lfsck_namespace_shrink_linkea_cond(const struct lu_env *env,
 					      struct lfsck_component *com,
@@ -1899,7 +1904,15 @@ static int lfsck_namespace_shrink_linkea_cond(const struct lu_env *env,
 }
 
 /**
- * Conditionally replace name entry in the parent.
+ * lfsck_namespace_replace_cond() - Conditionally replace name entry in the
+ *                                  parent.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @parent: pointer to the parent directory
+ * @child: pointer to the MDT-object that may be the real MDT-object
+ *         corresponding to the name entry in parent
+ * @cfid: the current FID in the name entry
+ * @cname: contains the name of the child in the parent directory
  *
  * As required, the LFSCK may re-create the lost MDT-object for dangling
  * name entry, but such repairing may be wrong because of bad FID in the
@@ -1908,17 +1921,10 @@ static int lfsck_namespace_shrink_linkea_cond(const struct lu_env *env,
  * has been modified or not, if not, then destroy it and update the name
  * entry in the parent to reference the real MDT-object.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] parent	pointer to the parent directory
- * \param[in] child	pointer to the MDT-object that may be the real
- *			MDT-object corresponding to the name entry in parent
- * \param[in] cfid	the current FID in the name entry
- * \param[in] cname	contains the name of the child in the parent directory
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int lfsck_namespace_replace_cond(const struct lu_env *env,
 					struct lfsck_component *com,
@@ -2105,18 +2111,19 @@ log:
 }
 
 /**
- * Overwrite the linkEA for the object with the given ldata.
+ * lfsck_namespace_rebuild_linkea() - Overwrite the linkEA for the object with
+ *                                    the given ldata.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @obj: pointer to the dt_object to be handled
+ * @ldata: pointer to the new linkEA data
  *
  * The caller should take the ldlm lock before the calling.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] obj	pointer to the dt_object to be handled
- * \param[in] ldata	pointer to the new linkEA data
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 int lfsck_namespace_rebuild_linkea(const struct lu_env *env,
 				   struct lfsck_component *com,
@@ -2139,7 +2146,7 @@ int lfsck_namespace_rebuild_linkea(const struct lu_env *env,
 
 	lfsck_buf_init(&linkea_buf, ldata->ld_buf->lb_buf,
 		       ldata->ld_leh->leh_len);
-	rc = dt_declare_xattr_set(env, obj, &linkea_buf,
+	rc = dt_declare_xattr_set(env, obj, NULL, &linkea_buf,
 				  XATTR_NAME_LINK, 0, th);
 	if (rc != 0)
 		GOTO(stop, rc);
@@ -2178,25 +2185,25 @@ log:
 }
 
 /**
- * Repair invalid name entry.
+ * lfsck_namespace_repair_dirent() - Repair invalid name entry.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @parent: pointer to the parent directory
+ * @child: pointer to the object referenced by the name entry
+ * @name: the old name of the child under the parent directory
+ * @name2: the new name of the child under the parent directory
+ * @type: the type claimed by the name entry
+ * @update: update the name entry if true; otherwise, remove it
+ * @dec: decrease the parent nlink count if true
  *
  * If the name entry contains invalid information, such as bad file type
  * or (and) corrupted object FID, then either remove the name entry or
  * udpate the name entry with the given (right) information.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] parent	pointer to the parent directory
- * \param[in] child	pointer to the object referenced by the name entry
- * \param[in] name	the old name of the child under the parent directory
- * \param[in] name2	the new name of the child under the parent directory
- * \param[in] type	the type claimed by the name entry
- * \param[in] update	update the name entry if true; otherwise, remove it
- * \param[in] dec	decrease the parent nlink count if true
- *
- * \retval		positive number for repaired successfully
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired successfully
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 int lfsck_namespace_repair_dirent(const struct lu_env *env,
 				  struct lfsck_component *com,
@@ -2340,22 +2347,23 @@ log:
 }
 
 /**
- * Update the ".." name entry for the given object.
+ * lfsck_namespace_repair_unmatched_pairs() - Update the ".." name entry for the
+ *                                            given object.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @obj: pointer to the dt_object to be handled
+ * @pfid: the new fid for the object's ".." name entry
+ * @cname: the name for the @obj in the parent directory
  *
  * The object's ".." is corrupted, this function will update the ".." name
  * entry with the given pfid, and the linkEA with the given ldata.
  *
  * The caller should take the ldlm lock before the calling.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] obj	pointer to the dt_object to be handled
- * \param[in] pfid	the new fid for the object's ".." name entry
- * \param[in] cname	the name for the @obj in the parent directory
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int lfsck_namespace_repair_unmatched_pairs(const struct lu_env *env,
 						  struct lfsck_component *com,
@@ -2401,7 +2409,7 @@ static int lfsck_namespace_repair_unmatched_pairs(const struct lu_env *env,
 	if (rc != 0)
 		GOTO(stop, rc);
 
-	rc = dt_declare_xattr_set(env, obj, &linkea_buf,
+	rc = dt_declare_xattr_set(env, obj, NULL, &linkea_buf,
 				  XATTR_NAME_LINK, 0, th);
 	if (rc != 0)
 		GOTO(stop, rc);
@@ -2448,7 +2456,14 @@ log:
 }
 
 /**
- * Handle orphan @obj during Double Scan Directory.
+ * lfsck_namespace_dsd_orphan() - Handle orphan @obj during Double Scan
+ *                                Directory.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @obj: pointer to the orphan object to be handled
+ * @pfid: the new fid for the object's ".." name entry
+ * @lh: ldlm lock handler for the given @obj [out]
+ * @type: to tell the caller what the inconsistency is [out]
  *
  * Remove the @obj's current (invalid) linkEA entries, and insert
  * it in the directory .lustre/lost+found/MDTxxxx/ with the name:
@@ -2456,16 +2471,10 @@ log:
  *
  * The caller should take the ldlm lock before the calling.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] obj	pointer to the orphan object to be handled
- * \param[in] pfid	the new fid for the object's ".." name entry
- * \param[in,out] lh	ldlm lock handler for the given @obj
- * \param[out] type	to tell the caller what the inconsistency is
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int
 lfsck_namespace_dsd_orphan(const struct lu_env *env,
@@ -2512,7 +2521,18 @@ lfsck_namespace_dsd_orphan(const struct lu_env *env,
 }
 
 /**
- * Double Scan Directory object for single linkEA entry case.
+ * lfsck_namespace_dsd_single() - Double Scan Directory object for single linkEA
+ *                                entry case.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @child: pointer to the directory to be double scanned
+ * @pfid: the FID corresponding to the ".." entry
+ * @ldata: pointer to the linkEA data for the given @child
+ * @lh: ldlm lock handler for the given @child [out]
+ * @type: to tell the caller what the inconsistency is [out]
+ * @retry: if found inconsistency, but the caller does not hold ldlm lock on the
+ *         @child, then set @retry as true
+ * @unknown: set if does not know how to repair the inconsistency
  *
  * The given @child has unique linkEA entry. If the linkEA entry is valid,
  * then check whether the name is in the namespace or not, if not, add the
@@ -2520,20 +2540,10 @@ lfsck_namespace_dsd_orphan(const struct lu_env *env,
  * then remove it and insert the @child in the .lustre/lost+found/MDTxxxx/
  * as an orphan.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] child	pointer to the directory to be double scanned
- * \param[in] pfid	the FID corresponding to the ".." entry
- * \param[in] ldata	pointer to the linkEA data for the given @child
- * \param[in,out] lh	ldlm lock handler for the given @child
- * \param[out] type	to tell the caller what the inconsistency is
- * \param[in] retry	if found inconsistency, but the caller does not hold
- *			ldlm lock on the @child, then set @retry as true
- * \param[in] unknown	set if does not know how to repair the inconsistency
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int
 lfsck_namespace_dsd_single(const struct lu_env *env,
@@ -2808,7 +2818,17 @@ out:
 }
 
 /**
- * Double Scan Directory object for multiple linkEA entries case.
+ * lfsck_namespace_dsd_multiple() - Double Scan Directory object for multiple
+ *                                  linkEA entries case.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @child: pointer to the directory to be double scanned
+ * @pfid: the FID corresponding to the ".." entry
+ * @ldata: pointer to the linkEA data for the given @child
+ * @lh: ldlm lock handler for the given @child [out]
+ * @type: to tell the caller what the inconsistency is [out]
+ * @lpf: true if the ".." entry is under lost+found/MDTxxxx/
+ * @unknown: set if does not know how to repair the inconsistency
  *
  * The given @child has multiple linkEA entries. There is at most one linkEA
  * entry will be valid, all the others will be removed. Firstly, the function
@@ -2817,19 +2837,10 @@ out:
  * ".." name entry, then tries to find out the first linkEA entry that both the
  * parent and the name entry exist to rebuild a new ".." name entry.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] child	pointer to the directory to be double scanned
- * \param[in] pfid	the FID corresponding to the ".." entry
- * \param[in] ldata	pointer to the linkEA data for the given @child
- * \param[in,out] lh	ldlm lock handler for the given @child
- * \param[out] type	to tell the caller what the inconsistency is
- * \param[in] lpf	true if the ".." entry is under lost+found/MDTxxxx/
- * \param[in] unknown	set if does not know how to repair the inconsistency
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int
 lfsck_namespace_dsd_multiple(const struct lu_env *env,
@@ -3083,7 +3094,11 @@ next:
 }
 
 /**
- * Repair the object's nlink attribute.
+ * lfsck_namespace_repair_nlink() - Repair the object's nlink attribute.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @obj: pointer to the dt_object to be handled
+ * @la: pointer to buffer to object's attribute before/after the repairing [out]
  *
  * If all the known name entries have been verified, then the object's hard
  * link attribute should match the object's linkEA entries count unless the
@@ -3091,15 +3106,10 @@ next:
  * should have been marked in the LFSCK trace file. Otherwise, trust the
  * linkEA to update the object's nlink attribute.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] obj	pointer to the dt_object to be handled
- * \param[in,out] la	pointer to buffer to object's attribute before
- *			and after the repairing
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int lfsck_namespace_repair_nlink(const struct lu_env *env,
 					struct lfsck_component *com,
@@ -3194,7 +3204,12 @@ log:
 }
 
 /**
- * Double scan the directory object for namespace LFSCK.
+ * lfsck_namespace_double_scan_dir() - Double scan the directory object for
+ *                                     namespace LFSCK.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @child: pointer to the directory object to be handled
+ * @flags: to indicate the specical checking on the @child
  *
  * This function will verify the <parent, child> pairs in the namespace tree:
  * the parent references the child via some name entry that should be in the
@@ -3221,14 +3236,10 @@ log:
  *    in the .lustre/lost+found/MDTxxxx/ with the name:
  *    ${self_FID}-${PFID}-D-${conflict_version}
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] child	pointer to the directory object to be handled
- * \param[in] flags	to indicate the specical checking on the @child
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int lfsck_namespace_double_scan_dir(const struct lu_env *env,
 					   struct lfsck_component *com,
@@ -3454,7 +3465,12 @@ lfsck_namespace_linkea_stale_overflow(struct linkea_data *ldata,
 }
 
 /**
- * Clear the object's linkEA overflow timestamp.
+ * lfsck_namespace_linkea_clear_overflow() - Clear the object's linkEA overflow
+ *                                           timestamp.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @ldata: pointer to the linkEA data for the given @obj
+ * @obj: pointer to the dt_object to be handled
  *
  * If the MDT-object has too many hard links as to the linkEA cannot hold
  * all of them, then overflow timestamp will be set in the linkEA header.
@@ -3462,14 +3478,10 @@ lfsck_namespace_linkea_stale_overflow(struct linkea_data *ldata,
  * other missed linkEA entries. If the namespace LFSCK have added all the
  * related linkEA entries, then it will remove the overflow timestamp.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] ldata	pointer to the linkEA data for the given @obj
- * \param[in] obj	pointer to the dt_object to be handled
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int lfsck_namespace_linkea_clear_overflow(const struct lu_env *env,
 						 struct lfsck_component *com,
@@ -3499,7 +3511,7 @@ static int lfsck_namespace_linkea_clear_overflow(const struct lu_env *env,
 	if (IS_ERR(th))
 		GOTO(log, rc = PTR_ERR(th));
 
-	rc = dt_declare_xattr_set(env, obj,
+	rc = dt_declare_xattr_set(env, obj, NULL,
 			lfsck_buf_get_const(env, NULL, MAX_LINKEA_SIZE),
 			XATTR_NAME_LINK, 0, th);
 	if (rc != 0)
@@ -3544,20 +3556,20 @@ log:
 }
 
 /**
- * Verify the object's agent entry.
+ * lfsck_namespace_check_agent_entry() - Verify the object's agent entry.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @obj: pointer to the dt_object to be handled
  *
  * If the object claims to have agent entry but the linkEA does not contain
  * remote parent, then remove the agent entry. Otherwise, if the object has
  * no agent entry but its linkEA contains remote parent, then will generate
  * agent entry for it.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] obj	pointer to the dt_object to be handled
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int lfsck_namespace_check_agent_entry(const struct lu_env *env,
 					     struct lfsck_component *com,
@@ -3634,7 +3646,7 @@ static int lfsck_namespace_check_agent_entry(const struct lu_env *env,
 
 		lfsck_buf_init(&linkea_buf, ldata.ld_buf->lb_buf,
 			       ldata.ld_leh->leh_len);
-		rc = dt_declare_xattr_set(env, obj, &linkea_buf,
+		rc = dt_declare_xattr_set(env, obj, NULL, &linkea_buf,
 				XATTR_NAME_LINK, LU_XATTR_REPLACE, handle);
 		if (rc)
 			GOTO(stop, rc);
@@ -3686,7 +3698,12 @@ out:
 }
 
 /**
- * Double scan the MDT-object for namespace LFSCK.
+ * lfsck_namespace_double_scan_one() - Double scan the MDT-object for namespace
+ *                                     LFSCK.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @child: pointer to the dt_object to be handled
+ * @flags: some hints to indicate how the @child should be handled
  *
  * If the MDT-object contains invalid or repeated linkEA entries, then drop
  * those entries from the linkEA; if the linkEA becomes empty or the object
@@ -3695,14 +3712,10 @@ out:
  * the remote parent; if the name entry corresponding to some linkEA entry
  * is lost, then add the name entry back to the namespace.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] child	pointer to the dt_object to be handled
- * \param[in] flags	some hints to indicate how the @child should be handled
- *
- * \retval		positive number for repaired cases
- * \retval		0 if nothing to be repaired
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for repaired cases
+ * * %0 if nothing to be repaired
+ * * %negative error number on failure
  */
 static int lfsck_namespace_double_scan_one(const struct lu_env *env,
 					   struct lfsck_component *com,
@@ -4345,7 +4358,6 @@ static void lfsck_namespace_close_dir(const struct lu_env *env,
 	struct lu_attr *la = &lfsck_env_info(env)->lti_la2;
 	__u32 size = sizeof(*lnr) + LFSCK_TMPBUF_LEN;
 	int rc;
-	bool wakeup = false;
 
 	ENTRY;
 	if (llmv == NULL)
@@ -4383,9 +4395,8 @@ static void lfsck_namespace_close_dir(const struct lu_env *env,
 	lnr->lnr_type = lso->lso_attr.la_mode;
 
 	spin_lock(&lad->lad_lock);
-	if (lad->lad_assistant_status < 0 ||
-	    unlikely(!thread_is_running(&lfsck->li_thread) ||
-		     !thread_is_running(&lad->lad_thread))) {
+	if (lad->lad_assistant_status < 0 || lfsck_should_stop(lfsck) ||
+	    !lad->lad_task) {
 		spin_unlock(&lad->lad_lock);
 		lfsck_namespace_assistant_req_fini(env, &lnr->lnr_lar);
 		ns->ln_striped_dirs_skipped++;
@@ -4395,13 +4406,10 @@ static void lfsck_namespace_close_dir(const struct lu_env *env,
 
 	list_add_tail(&lnr->lnr_lar.lar_list, &lad->lad_req_list);
 	if (lad->lad_prefetched == 0)
-		wakeup = true;
+		wake_up_var(lfsck);
 
 	lad->lad_prefetched++;
 	spin_unlock(&lad->lad_lock);
-	if (wakeup)
-		wake_up(&lad->lad_thread.t_ctl_waitq);
-
 	EXIT;
 }
 
@@ -4706,17 +4714,11 @@ static int lfsck_namespace_exec_dir(const struct lu_env *env,
 	struct lfsck_instance *lfsck = com->lc_lfsck;
 	struct lfsck_namespace_req *lnr;
 	struct lfsck_bookmark *bk = &lfsck->li_bookmark_ram;
-	struct ptlrpc_thread *mthread = &lfsck->li_thread;
-	struct ptlrpc_thread *athread = &lad->lad_thread;
-	bool wakeup = false;
 
-	wait_event_idle(mthread->t_ctl_waitq,
-			lad->lad_prefetched < bk->lb_async_windows ||
-			!thread_is_running(mthread) ||
-			!thread_is_running(athread));
+	wait_var_event(lfsck, lad->lad_prefetched < bk->lb_async_windows ||
+			lfsck_should_stop(lfsck) || !lad->lad_task);
 
-	if (unlikely(!thread_is_running(mthread) ||
-		     !thread_is_running(athread)))
+	if (unlikely(lfsck_should_stop(lfsck) || !lad->lad_task))
 		return 0;
 
 	if (unlikely(lfsck_is_dead_obj(lfsck->li_obj_dir)))
@@ -4731,9 +4733,8 @@ static int lfsck_namespace_exec_dir(const struct lu_env *env,
 	}
 
 	spin_lock(&lad->lad_lock);
-	if (lad->lad_assistant_status < 0 ||
-	    unlikely(!thread_is_running(mthread) ||
-		     !thread_is_running(athread))) {
+	if (unlikely(lad->lad_assistant_status < 0 ||
+		     lfsck_should_stop(lfsck) || !lad->lad_task)) {
 		spin_unlock(&lad->lad_lock);
 		lfsck_namespace_assistant_req_fini(env, &lnr->lnr_lar);
 		return lad->lad_assistant_status;
@@ -4741,12 +4742,10 @@ static int lfsck_namespace_exec_dir(const struct lu_env *env,
 
 	list_add_tail(&lnr->lnr_lar.lar_list, &lad->lad_req_list);
 	if (lad->lad_prefetched == 0)
-		wakeup = true;
+		wake_up_var(lfsck);
 
 	lad->lad_prefetched++;
 	spin_unlock(&lad->lad_lock);
-	if (wakeup)
-		wake_up(&lad->lad_thread.t_ctl_waitq);
 
 	down_write(&com->lc_sem);
 	com->lc_new_checked++;
@@ -4991,22 +4990,21 @@ static int lfsck_namespace_double_scan(const struct lu_env *env,
 {
 	struct lfsck_namespace *ns = com->lc_file_ram;
 	struct lfsck_assistant_data *lad = com->lc_data;
-	struct lfsck_tgt_descs *ltds = &com->lc_lfsck->li_mdt_descs;
-	struct lfsck_tgt_desc *ltd;
-	struct lfsck_tgt_desc *next;
 	int rc;
 
 	rc = lfsck_double_scan_generic(env, com, ns->ln_status);
-	if (thread_is_stopped(&lad->lad_thread)) {
+	if (test_bit(LAD_STOPPED, &lad->lad_flags)) {
+		struct lfsck_instance *lfsck = com->lc_lfsck;
+		struct list_head *tmp;
+		struct list_head *next;
+
 		LASSERT(list_empty(&lad->lad_req_list));
 		LASSERT(list_empty(&lad->lad_mdt_phase1_list));
 
-		spin_lock(&ltds->ltd_lock);
-		list_for_each_entry_safe(ltd, next, &lad->lad_mdt_phase2_list,
-					 ltd_namespace_phase_list) {
-			list_del_init(&ltd->ltd_namespace_phase_list);
-		}
-		spin_unlock(&ltds->ltd_lock);
+		spin_lock(&lfsck->li_mdt_descs.ltd_lock);
+		list_for_each_safe(tmp, next, &lad->lad_mdt_phase2_list)
+			list_del_init(tmp);
+		spin_unlock(&lfsck->li_mdt_descs.ltd_lock);
 	}
 
 	return rc;
@@ -5021,8 +5019,7 @@ static void lfsck_namespace_data_release(const struct lu_env *env,
 	struct lfsck_tgt_desc *next;
 
 	LASSERT(lad != NULL);
-	LASSERT(thread_is_init(&lad->lad_thread) ||
-		thread_is_stopped(&lad->lad_thread));
+	LASSERT(!lad->lad_task);
 	LASSERT(list_empty(&lad->lad_req_list));
 
 	com->lc_data = NULL;
@@ -5053,30 +5050,16 @@ static void lfsck_namespace_quit(const struct lu_env *env,
 				 struct lfsck_component *com)
 {
 	struct lfsck_assistant_data *lad = com->lc_data;
-	struct lfsck_tgt_descs *ltds = &com->lc_lfsck->li_mdt_descs;
-	struct lfsck_tgt_desc *ltd;
-	struct lfsck_tgt_desc *next;
 
 	LASSERT(lad != NULL);
 
-	lfsck_quit_generic(env, com);
+	lfsck_stop_assistant(lad);
 
-	LASSERT(thread_is_init(&lad->lad_thread) ||
-		thread_is_stopped(&lad->lad_thread));
 	LASSERT(list_empty(&lad->lad_req_list));
+	LASSERT(list_empty(&lad->lad_mdt_phase1_list));
+	LASSERT(list_empty(&lad->lad_mdt_phase2_list));
 
 	lfsck_namespace_release_lmv(env, com);
-
-	spin_lock(&ltds->ltd_lock);
-	list_for_each_entry_safe(ltd, next, &lad->lad_mdt_phase1_list,
-				 ltd_namespace_phase_list) {
-		list_del_init(&ltd->ltd_namespace_phase_list);
-	}
-	list_for_each_entry_safe(ltd, next, &lad->lad_mdt_phase2_list,
-				 ltd_namespace_phase_list) {
-		list_del_init(&ltd->ltd_namespace_phase_list);
-	}
-	spin_unlock(&ltds->ltd_lock);
 }
 
 static int lfsck_namespace_in_notify(const struct lu_env *env,
@@ -5190,7 +5173,7 @@ static int lfsck_namespace_in_notify(const struct lu_env *env,
 		stop->ls_flags = lr->lr_param & ~LPF_BROADCAST;
 		lfsck_stop(env, lfsck->li_bottom, stop);
 	} else if (lfsck_phase2_next_ready(lad)) {
-		wake_up(&lad->lad_thread.t_ctl_waitq);
+		wake_up_var(lfsck);
 	}
 
 	RETURN(0);
@@ -5292,7 +5275,13 @@ static const struct lfsck_operations lfsck_namespace_ops = {
 };
 
 /**
- * Repair dangling name entry.
+ * lfsck_namespace_repair_dangling() - Repair dangling name entry.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @parent: pointer to the dir object that contains the dangling name entry
+ * @child: pointer to the object corresponding to the dangling name entry
+ * @lnr: pointer to the namespace request that contains the name's name,
+ *       parent object, parent's LMV, and ect.
  *
  * For the name entry with dangling reference, we need to repare the
  * inconsistency according to the LFSCK sponsor's requirement:
@@ -5304,18 +5293,10 @@ static const struct lfsck_operations lfsck_namespace_ops = {
  *
  * 2) Re-create the missing MDT-object with the FID information.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] parent	pointer to the dir object that contains the dangling
- *			name entry
- * \param[in] child	pointer to the object corresponding to the dangling
- *			name entry
- * \param[in] lnr	pointer to the namespace request that contains the
- *			name's name, parent object, parent's LMV, and ect.
- *
- * \retval		positive number if no need to repair
- * \retval		zero for repaired successfully
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number if no need to repair
+ * * %0 for repaired successfully
+ * * %negative error number on failure
  */
 int lfsck_namespace_repair_dangling(const struct lu_env *env,
 				    struct lfsck_component *com,
@@ -5478,7 +5459,7 @@ int lfsck_namespace_repair_dangling(const struct lu_env *env,
 
 			lfsck_lmv_header_cpu_to_le(lmv2, lmv2);
 			lfsck_buf_init(&lmv_buf, lmv2, sizeof(*lmv2));
-			rc = dt_declare_xattr_set(env, child, &lmv_buf,
+			rc = dt_declare_xattr_set(env, child, NULL, &lmv_buf,
 						  XATTR_NAME_LMV, 0, th);
 			if (rc != 0)
 				GOTO(stop, rc);
@@ -5488,7 +5469,7 @@ int lfsck_namespace_repair_dangling(const struct lu_env *env,
 	/* 6a. insert linkEA for child */
 	lfsck_buf_init(&linkea_buf, ldata.ld_buf->lb_buf,
 		       ldata.ld_leh->leh_len);
-	rc = dt_declare_xattr_set(env, child, &linkea_buf,
+	rc = dt_declare_xattr_set(env, child, NULL, &linkea_buf,
 				  XATTR_NAME_LINK, 0, th);
 	if (rc != 0)
 		GOTO(stop, rc);
@@ -6132,7 +6113,12 @@ trace:
 }
 
 /**
- * Handle one orphan under the backend /lost+found directory
+ * lfsck_namespace_scan_local_lpf_one() - Handle one orphan under the backend
+ *                                        /lost+found directory
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @parent: pointer to the object for the backend /lost+found
+ * @ent: pointer to the name entry for the target under the backend /lost+found
  *
  * Insert the orphan FID into the namespace LFSCK trace file for further
  * processing (via the subsequent namespace LFSCK second-stage scanning).
@@ -6148,15 +6134,10 @@ trace:
  * next time, it can record the object (that ctime is 1) in the namespace
  * LFSCK trace file during the first-stage scanning.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] parent	pointer to the object for the backend /lost+found
- * \param[in] ent	pointer to the name entry for the target under the
- *			backend /lost+found
- *
- * \retval		positive for repaired
- * \retval		0 if needs to repair nothing
- * \retval		negative error number on failure
+ * Return:
+ * * %positive for repaired
+ * * %0 if needs to repair nothing
+ * * %negative error number on failure
  */
 static int lfsck_namespace_scan_local_lpf_one(const struct lu_env *env,
 					      struct lfsck_component *com,
@@ -6292,7 +6273,10 @@ out:
 }
 
 /**
- * Handle orphans under the backend /lost+found directory
+ * lfsck_namespace_scan_local_lpf() - Handle orphans under the backend
+ *                                    /lost+found directory
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
  *
  * Some backend checker, such as e2fsck for ldiskfs may find some orphans
  * and put them under the backend /lost+found directory that is invisible
@@ -6302,9 +6286,6 @@ out:
  * them as other objects to be double scanned: either move back to normal
  * namespace, or to the global visible orphan directory:
  * /ROOT/.lustre/lost+found/MDTxxxx/
- *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
  */
 static void lfsck_namespace_scan_local_lpf(const struct lu_env *env,
 					   struct lfsck_component *com)
@@ -6313,7 +6294,6 @@ static void lfsck_namespace_scan_local_lpf(const struct lu_env *env,
 	struct lu_dirent *ent = (struct lu_dirent *)info->lti_key;
 	struct lu_seq_range *range = &info->lti_range;
 	struct lfsck_instance *lfsck = com->lc_lfsck;
-	struct ptlrpc_thread *thread = &lfsck->li_thread;
 	struct lfsck_bookmark *bk = &lfsck->li_bookmark_ram;
 	struct lfsck_namespace *ns = com->lc_file_ram;
 	struct dt_object *parent;
@@ -6356,9 +6336,9 @@ static void lfsck_namespace_scan_local_lpf(const struct lu_env *env,
 	else if (rc > 0)
 		rc = 0;
 
-	while (rc == 0) {
-		if (CFS_FAIL_TIMEOUT(OBD_FAIL_LFSCK_DELAY3, cfs_fail_val) &&
-		    unlikely(!thread_is_running(thread)))
+	while (rc == 0 && !lfsck_should_stop(lfsck)) {
+		if (LFSCK_FAIL_TIMEOUT(lfsck, OBD_FAIL_LFSCK_DELAY3,
+				       cfs_fail_val))
 			break;
 
 		rc = iops->rec(env, di, (struct dt_rec *)ent,
@@ -6435,11 +6415,6 @@ skip:
 
 next:
 		lfsck_control_speed_by_self(com);
-		if (unlikely(!thread_is_running(thread))) {
-			rc = 0;
-			break;
-		}
-
 		rc = iops->next(env, di);
 	}
 
@@ -6456,7 +6431,11 @@ out:
 }
 
 /**
- * Rescan the striped directory after the master LMV EA reset.
+ * lfsck_namespace_rescan_striped_dir() - Rescan the striped directory after the
+ *                                        master LMV EA reset.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @llu: the lfsck_lmv_unit that contains the striped directory to be rescanned.
  *
  * Sometimes, the master LMV EA of the striped directory maybe lost, so when
  * the namespace LFSCK engine scan the striped directory for the first time,
@@ -6466,14 +6445,10 @@ out:
  * EA, then such remote LFSCK instance will regenerate the master LMV EA and
  * notify the LFSCK instance on this MDT to rescan the striped directory.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] llu	the lfsck_lmv_unit that contains the striped directory
- *			to be rescanned.
- *
- * \retval		positive number for success
- * \retval		0 for LFSCK stopped/paused
- * \retval		negative error number on failure
+ * Return:
+ * * %positive number for success
+ * * %0 for LFSCK stopped/paused
+ * * %negative error number on failure
  */
 static int lfsck_namespace_rescan_striped_dir(const struct lu_env *env,
 					      struct lfsck_component *com,
@@ -6487,12 +6462,11 @@ static int lfsck_namespace_rescan_striped_dir(const struct lu_env *env,
 	struct dt_it *di;
 	struct lu_dirent *ent = (struct lu_dirent *)info->lti_key;
 	struct lfsck_bookmark *bk = &lfsck->li_bookmark_ram;
-	struct ptlrpc_thread *thread = &lfsck->li_thread;
 	struct lfsck_assistant_object *lso = NULL;
 	struct lfsck_namespace_req *lnr;
 	struct lfsck_assistant_req *lar;
-	int rc;
 	__u16 type;
+	int rc;
 
 	ENTRY;
 	LASSERT(list_empty(&lad->lad_req_list));
@@ -6506,7 +6480,7 @@ static int lfsck_namespace_rescan_striped_dir(const struct lu_env *env,
 	dir = lfsck->li_obj_dir;
 	di = lfsck->li_di_dir;
 	iops = &dir->do_index_ops->dio_it;
-	do {
+	while (rc == 0 && !lfsck_should_stop(lfsck)) {
 		rc = iops->rec(env, di, (struct dt_rec *)ent,
 			       lfsck->li_args_dir);
 		if (rc == 0)
@@ -6550,12 +6524,9 @@ static int lfsck_namespace_rescan_striped_dir(const struct lu_env *env,
 		if (rc != 0 && bk->lb_param & LPF_FAILOUT)
 			GOTO(out, rc);
 
-		if (unlikely(!thread_is_running(thread)))
-			GOTO(out, rc = 0);
-
 next:
 		rc = iops->next(env, di);
-	} while (rc == 0);
+	}
 
 out:
 	if (lso != NULL && !IS_ERR(lso))
@@ -6587,7 +6558,6 @@ lfsck_namespace_double_scan_one_trace_file(const struct lu_env *env,
 					   struct dt_object *obj, bool first)
 {
 	struct lfsck_instance *lfsck = com->lc_lfsck;
-	struct ptlrpc_thread *thread = &lfsck->li_thread;
 	struct lfsck_bookmark *bk = &lfsck->li_bookmark_ram;
 	struct lfsck_namespace *ns = com->lc_file_ram;
 	const struct dt_it_ops *iops = &obj->do_index_ops->dio_it;
@@ -6595,8 +6565,8 @@ lfsck_namespace_double_scan_one_trace_file(const struct lu_env *env,
 	struct dt_it *di;
 	struct dt_key *key;
 	struct lu_fid fid;
-	int rc;
 	__u8 flags = 0;
+	int rc;
 
 	ENTRY;
 	di = iops->init(env, obj, 0);
@@ -6620,9 +6590,10 @@ lfsck_namespace_double_scan_one_trace_file(const struct lu_env *env,
 			GOTO(put, rc);
 	}
 
-	do {
-		if (CFS_FAIL_TIMEOUT(OBD_FAIL_LFSCK_DELAY3, cfs_fail_val) &&
-		    unlikely(!thread_is_running(thread)))
+	rc = 0;
+	while (rc == 0 && !lfsck_should_stop(lfsck)) {
+		if (LFSCK_FAIL_TIMEOUT(lfsck, OBD_FAIL_LFSCK_DELAY3,
+				       cfs_fail_val))
 			GOTO(put, rc = 0);
 
 		key = iops->key(env, di);
@@ -6657,7 +6628,6 @@ lfsck_namespace_double_scan_one_trace_file(const struct lu_env *env,
 		}
 
 		lfsck_object_put(env, target);
-
 checkpoint:
 		down_write(&com->lc_sem);
 		com->lc_new_checked++;
@@ -6693,20 +6663,13 @@ checkpoint:
 		}
 
 		lfsck_control_speed_by_self(com);
-		if (unlikely(!thread_is_running(thread)))
-			GOTO(put, rc = 0);
-
 		rc = iops->next(env, di);
-	} while (rc == 0);
-
+	}
 	GOTO(put, rc);
-
 put:
 	iops->put(env, di);
-
 fini:
 	iops->fini(env, di);
-
 	return rc;
 }
 
@@ -6835,7 +6798,11 @@ lfsck_namespace_assistant_sync_failures_interpret(const struct lu_env *env,
 }
 
 /**
- * Notify remote LFSCK instances about former failures.
+ * lfsck_namespace_assistant_sync_failures() - Notify remote LFSCK instances
+ *                                             about former failures.
+ * @env: pointer to the thread context
+ * @com: pointer to the lfsck component
+ * @lr: pointer to the lfsck request
  *
  * The local LFSCK instance has recorded which MDTs have ever failed to respond
  * some LFSCK verification requests (maybe because of network issues or the MDT
@@ -6851,9 +6818,6 @@ lfsck_namespace_assistant_sync_failures_interpret(const struct lu_env *env,
  * have ever missed some name entries verification and should skip the handling
  * for orphan MDT-objects.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] com	pointer to the lfsck component
- * \param[in] lr	pointer to the lfsck request
  */
 static void lfsck_namespace_assistant_sync_failures(const struct lu_env *env,
 						    struct lfsck_component *com,
@@ -6913,7 +6877,7 @@ out:
 	EXIT;
 }
 
-const struct lfsck_assistant_operations lfsck_namespace_assistant_ops = {
+static const struct lfsck_assistant_operations lfsck_namespace_assistant_ops = {
 	.la_handler_p1		= lfsck_namespace_assistant_handler_p1,
 	.la_handler_p2		= lfsck_namespace_assistant_handler_p2,
 	.la_fill_pos		= lfsck_namespace_assistant_fill_pos,
@@ -6923,17 +6887,20 @@ const struct lfsck_assistant_operations lfsck_namespace_assistant_ops = {
 };
 
 /**
+ * lfsck_verify_linkea() - Verify linkEA
+ * @env: pointer to the thread context
+ * @lfsck: lfsck instance
+ * @obj: pointer to the dt_object to be handled
+ * @cname: the name for the child in the parent directory
+ * @pfid: the parent directory's FID for the linkEA
+ *
  * Verify the specified linkEA entry for the given directory object.
  * If the object has no such linkEA entry or it has more other linkEA
  * entries, then re-generate the linkEA with the given information.
  *
- * \param[in] env	pointer to the thread context
- * \param[in] obj	pointer to the dt_object to be handled
- * \param[in] cname	the name for the child in the parent directory
- * \param[in] pfid	the parent directory's FID for the linkEA
- *
- * \retval		0 for success
- * \retval		negative error number on failure
+ * Return:
+ * * %0 for success
+ * * %negative error number on failure
  */
 int lfsck_verify_linkea(const struct lu_env *env, struct lfsck_instance *lfsck,
 			struct dt_object *obj, const struct lu_name *cname,
@@ -6986,7 +6953,7 @@ int lfsck_verify_linkea(const struct lu_env *env, struct lfsck_instance *lfsck,
 	if (IS_ERR(th))
 		RETURN(PTR_ERR(th));
 
-	rc = dt_declare_xattr_set(env, obj, &linkea_buf,
+	rc = dt_declare_xattr_set(env, obj, NULL, &linkea_buf,
 				  XATTR_NAME_LINK, fl, th);
 	if (rc != 0)
 		GOTO(stop, rc);
@@ -7008,17 +6975,17 @@ stop:
 }
 
 /**
- * Get the name and parent directory's FID from the first linkEA entry.
+ * lfsck_links_get_first() - Get the name and parent directory's FID from the
+ *                           first linkEA entry.
+ * @env: pointer to the thread context
+ * @obj: pointer to the object which get linkEA from
+ * @name: pointer to the buffer to hold the name in the first linkEA entry [out]
+ * @pfid: pointer to the buffer to hold the parent directory's FID in the first
+ *        linkEA entry
  *
- * \param[in] env	pointer to the thread context
- * \param[in] obj	pointer to the object which get linkEA from
- * \param[out] name	pointer to the buffer to hold the name
- *			in the first linkEA entry
- * \param[out] pfid	pointer to the buffer to hold the parent
- *			directory's FID in the first linkEA entry
- *
- * \retval		0 for success
- * \retval		negative error number on failure
+ * Return:
+ * * %0 for success
+ * * %negative error number on failure
  */
 int lfsck_links_get_first(const struct lu_env *env, struct dt_object *obj,
 			  char *name, struct lu_fid *pfid)
@@ -7044,18 +7011,17 @@ int lfsck_links_get_first(const struct lu_env *env, struct dt_object *obj,
 }
 
 /**
- * Update the object's name entry with the given FID.
+ * lfsck_update_name_entry() - Update the object's name entry with the given FID
+ * @env: pointer to the thread context
+ * @lfsck: pointer to the lfsck instance
+ * @dir: pointer to the directory that holds the name entry
+ * @name: the name for the entry to be updated
+ * @fid: the new FID for the name entry referenced
+ * @type: the type for the name entry to be updated
  *
- * \param[in] env	pointer to the thread context
- * \param[in] lfsck	pointer to the lfsck instance
- * \param[in] dir	pointer to the directory that holds
- *			the name entry
- * \param[in] name	the name for the entry to be updated
- * \param[in] fid	the new FID for the name entry referenced
- * \param[in] type	the type for the name entry to be updated
- *
- * \retval		0 for success
- * \retval		negative error number on failure
+ * Return:
+ * * %0 for success
+ * * %negative error number on failure
  */
 int lfsck_update_name_entry(const struct lu_env *env,
 			    struct lfsck_instance *lfsck,

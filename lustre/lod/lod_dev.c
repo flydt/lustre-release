@@ -157,7 +157,7 @@ int lod_fld_lookup(const struct lu_env *env, struct lod_device *lod,
 struct kmem_cache *lod_object_kmem;
 
 /* Slab for dt_txn_callback */
-struct kmem_cache *lod_txn_callback_kmem;
+static struct kmem_cache *lod_txn_callback_kmem;
 static struct lu_kmem_descr lod_caches[] = {
 	{
 		.ckd_cache = &lod_object_kmem,
@@ -207,6 +207,7 @@ static struct lu_object *lod_object_alloc(const struct lu_env *env,
 	dt_object_init(&lod_obj->ldo_obj, NULL, dev);
 	lod_obj->ldo_obj.do_ops = &lod_obj_ops;
 	lu_obj->lo_ops = &lod_lu_obj_ops;
+	lod_obj->ldo_dir_layout_version = 1;
 
 	RETURN(lu_obj);
 }
@@ -674,14 +675,14 @@ int lodname2mdt_index(char *lodname, u32 *mdt_index)
 int lod_sub_init_llog(const struct lu_env *env, struct lod_device *lod,
 		      struct dt_device *dt)
 {
-	struct obd_device *obd;
 	struct lod_recovery_data *lrd = NULL;
 	DECLARE_COMPLETION_ONSTACK(started);
+	struct lod_tgt_desc *subtgt = NULL;
 	struct task_struct **taskp;
 	struct task_struct *task;
-	struct lod_tgt_desc *subtgt = NULL;
-	u32 index;
+	struct obd_device *obd;
 	u32 master_index;
+	u32 index = 0;
 	int rc;
 
 	ENTRY;
@@ -1069,7 +1070,7 @@ static int lod_process_config(const struct lu_env *env,
 			*ptr = '.';
 			tmp = strstr(param, "=");
 			tmp++;
-			if (*tmp == '1') {
+			if (*tmp == '1' && sub_tgt->ltd_active == 0) {
 				struct llog_ctxt *ctxt;
 
 				obd = sub_tgt->ltd_tgt->dd_lu_dev.ld_obd;
@@ -1088,7 +1089,7 @@ static int lod_process_config(const struct lu_env *env,
 						       sub_tgt->ltd_tgt,
 						       sub_tgt->ltd_index);
 				sub_tgt->ltd_active = !rc;
-			} else {
+			} else if (*tmp == '0' && sub_tgt->ltd_active != 0) {
 				lod_sub_fini_llog(env, sub_tgt->ltd_tgt,
 						  NULL);
 				sub_tgt->ltd_active = 0;
@@ -1305,6 +1306,10 @@ static int lod_update_log_gc(const struct lu_env *env, struct lod_device *lod,
 	if (rc)
 		GOTO(out_trans, rc);
 
+	rc = dt_declare_ref_del(env, dto, th);
+	if (rc)
+		GOTO(out_trans, rc);
+
 	rc = dt_declare_destroy(env, dto, th);
 	if (rc)
 		GOTO(out_trans, rc);
@@ -1317,7 +1322,11 @@ static int lod_update_log_gc(const struct lu_env *env, struct lod_device *lod,
 	if (rc)
 		GOTO(out_trans, rc);
 
-	rc = dt_destroy(env, dto, th);
+	dt_write_lock(env, dto, DT_TGT_CHILD);
+	rc = dt_ref_del(env, dto, th);
+	if (!rc)
+		rc = dt_destroy(env, dto, th);
+	dt_write_unlock(env, dto);
 	GOTO(out_trans, rc);
 out_trans:
 	dt_trans_stop(env, dt, th);
@@ -1598,7 +1607,8 @@ static int lod_statfs(const struct lu_env *env, struct dt_device *dev,
 	lod_foreach_mdt(lod, tgt) {
 		rc = dt_statfs(env, tgt->ltd_tgt, &ost_sfs);
 		/* ignore errors */
-		if (rc)
+		/* skip uninitialized sub-MDT, prevent divide-by-zero */
+		if (rc || ost_sfs.os_bsize == 0)
 			continue;
 		sfs->os_files += ost_sfs.os_files;
 		sfs->os_ffree += ost_sfs.os_ffree;
@@ -1849,6 +1859,7 @@ static int lod_sync(const struct lu_env *env, struct dt_device *dev)
 	struct lod_device *lod = dt2lod_dev(dev);
 	struct lu_tgt_desc *tgt;
 	int rc = 0;
+	int rc2;
 
 	ENTRY;
 
@@ -1856,41 +1867,52 @@ static int lod_sync(const struct lu_env *env, struct dt_device *dev)
 	lod_foreach_ost(lod, tgt) {
 		if (tgt->ltd_discon)
 			continue;
-		rc = dt_sync(env, tgt->ltd_tgt);
-		if (rc) {
-			if (rc != -ENOTCONN) {
-				CERROR("%s: can't sync ost %u: rc = %d\n",
-				       lod2obd(lod)->obd_name, tgt->ltd_index,
-				       rc);
-				break;
+		rc2 = dt_sync(env, tgt->ltd_tgt);
+		if (rc2) {
+			int level;
+
+			if (rc2 == -ENOTCONN) {
+				rc2 = 0;
+				level = D_INFO;
+			} else {
+				level = D_ERROR;
 			}
-			rc = 0;
+			CDEBUG_LIMIT(level,
+				     "%s: cannot sync OST%04x: rc = %d\n",
+				     lod2obd(lod)->obd_name, tgt->ltd_index,
+				     rc2);
+			if (!rc)
+				rc = rc2;
 		}
 	}
 	lod_putref(lod, &lod->lod_ost_descs);
-
-	if (rc)
-		RETURN(rc);
-
 	lod_getref(&lod->lod_mdt_descs);
 	lod_foreach_mdt(lod, tgt) {
 		if (tgt->ltd_discon)
 			continue;
-		rc = dt_sync(env, tgt->ltd_tgt);
-		if (rc) {
-			if (rc != -ENOTCONN) {
-				CERROR("%s: can't sync mdt %u: rc = %d\n",
-				       lod2obd(lod)->obd_name, tgt->ltd_index,
-				       rc);
-				break;
+		rc2 = dt_sync(env, tgt->ltd_tgt);
+		if (rc2) {
+			int level;
+
+			if (rc2 == -ENOTCONN) {
+				rc2 = 0;
+				level = D_INFO;
+			} else {
+				level = D_ERROR;
 			}
-			rc = 0;
+			CDEBUG_LIMIT(level,
+				     "%s: cannot sync MDT%04x: rc = %d\n",
+				     lod2obd(lod)->obd_name, tgt->ltd_index,
+				     rc2);
+			if (!rc)
+				rc = rc2;
 		}
 	}
 	lod_putref(lod, &lod->lod_mdt_descs);
 
-	if (rc == 0)
-		rc = dt_sync(env, lod->lod_child);
+	rc2 = dt_sync(env, lod->lod_child);
+	if (rc2 && !rc)
+		rc = rc2;
 
 	RETURN(rc);
 }
@@ -2097,6 +2119,7 @@ static int lod_init0(const struct lu_env *env, struct lod_device *lod,
 	dt_conf_get(env, &lod->lod_dt_dev, &ddp);
 	lod->lod_osd_max_easize = ddp.ddp_max_ea_size;
 	lod->lod_dom_stripesize_max_kb = (1ULL << 10); /* 1Mb is default */
+	lod->lod_mirror_count_max = LUSTRE_MIRROR_COUNT_DEF;
 	lod->lod_max_stripecount = 0;
 	lod->lod_max_stripes_per_mdt = LMV_MAX_STRIPES_PER_MDT;
 
@@ -2115,10 +2138,6 @@ static int lod_init0(const struct lu_env *env, struct lod_device *lod,
 	if (rc)
 		GOTO(out_disconnect, rc);
 
-	rc = lod_procfs_init(lod);
-	if (rc)
-		GOTO(out_pools, rc);
-
 	spin_lock_init(&lod->lod_lock);
 	spin_lock_init(&lod->lod_connects_lock);
 	lu_tgt_descs_init(&lod->lod_mdt_descs, true);
@@ -2127,9 +2146,15 @@ static int lod_init0(const struct lu_env *env, struct lod_device *lod,
 	lu_qos_rr_init(&lod->lod_ost_descs.ltd_qos.lq_rr);
 	lod->lod_dist_txn_check_space = 1;
 
+	rc = lod_procfs_init(lod);
+	if (rc)
+		GOTO(out_desc, rc);
+
 	RETURN(0);
 
-out_pools:
+out_desc:
+	lod_fini_tgt(env, lod, &lod->lod_ost_descs);
+	lod_fini_tgt(env, lod, &lod->lod_mdt_descs);
 	lod_pools_fini(lod);
 out_disconnect:
 	obd_disconnect(lod->lod_child_exp);
@@ -2337,11 +2362,7 @@ static void lod_key_fini(const struct lu_context *ctx,
 	 * XXX: this is overload, a tread may have such store but used only
 	 * once. Probably better would be pool of such stores per LOD.
 	 */
-	if (info->lti_ea_store) {
-		OBD_FREE_LARGE(info->lti_ea_store, info->lti_ea_store_size);
-		info->lti_ea_store = NULL;
-		info->lti_ea_store_size = 0;
-	}
+	lu_buf_free(&info->lti_ea_buf);
 	lu_buf_free(&info->lti_linkea_buf);
 
 	if (lds)
@@ -2411,7 +2432,8 @@ static int lod_obd_get_info(const struct lu_env *env, struct obd_export *exp,
 		struct lod_tgt_desc *tgt;
 		int rc = 1;
 
-		if (!test_bit(OBDF_SET_UP, obd->obd_flags) || obd->obd_stopping)
+		if (!test_bit(OBDF_SET_UP, obd->obd_flags) ||
+		    test_bit(OBDF_STOPPING, obd->obd_flags))
 			RETURN(-EAGAIN);
 
 		d = lu2lod_dev(obd->obd_lu_dev);
@@ -2843,5 +2865,5 @@ MODULE_DESCRIPTION("Lustre Logical Object Device ("LUSTRE_LOD_NAME")");
 MODULE_VERSION(LUSTRE_VERSION_STRING);
 MODULE_LICENSE("GPL");
 
-module_init(lod_init);
+late_initcall_sync(lod_init);
 module_exit(lod_exit);

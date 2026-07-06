@@ -14,7 +14,7 @@
 #define DEBUG_SUBSYSTEM S_RPC
 
 #include <linux/delay.h>
-#include <libcfs/linux/linux-hash.h>
+#include <linux/rhashtable.h>
 #include <obd_support.h>
 #include <obd_class.h>
 #include <lustre_net.h>
@@ -35,8 +35,8 @@ static u32 lnet_process_id_hash(const void *data, u32 len, u32 seed)
 {
 	const struct lnet_processid *lpi = data;
 
-	seed = cfs_hash_32(seed ^ lpi->pid, 32);
-	seed = cfs_hash_32(nidhash(&lpi->nid) ^ seed, 32);
+	seed = hash_32(seed ^ lpi->pid, 32);
+	seed = hash_32(nidhash(&lpi->nid) ^ seed, 32);
 	return seed;
 }
 
@@ -70,7 +70,7 @@ static void cpu_latency_work(struct work_struct *work)
 				   delayed_work.work);
 	cpu = (latency_qos - cpus_latency_qos) / sizeof(struct cpu_latency_qos);
 	mutex_lock(&latency_qos->lock);
-	if (time_after64(jiffies_64, latency_qos->deadline)) {
+	if (time_after_eq64(jiffies_64, latency_qos->deadline)) {
 		CDEBUG(D_INFO, "work item of %p (cpu %d) has reached its deadline %llu, at %llu\n",
 		       latency_qos, cpu, latency_qos->deadline, jiffies_64);
 		pm_qos_req_done = latency_qos->pm_qos_req;
@@ -115,10 +115,7 @@ ptlrpc_connection_get(struct lnet_processid *peer_orig, struct lnet_nid *self,
 		RETURN(NULL);
 
 	conn->c_peer = peer;
-	conn->c_self = *self;
 	atomic_set(&conn->c_refcount, 1);
-	if (uuid)
-		obd_str2uuid(&conn->c_remote_uuid, uuid->uuid);
 
 	/*
 	 * Add the newly created conn to the hash, on key collision we

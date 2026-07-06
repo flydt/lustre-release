@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
@@ -228,6 +208,7 @@ out:
 static int getaddrcanonname(const uint32_t addr, char *buf, int buflen)
 {
 	struct sockaddr_in srcaddr;
+	char ipstr[INET_ADDRSTRLEN] = "\0";
 	int err = 0;
 	int rc = -1;
 
@@ -248,13 +229,18 @@ static int getaddrcanonname(const uint32_t addr, char *buf, int buflen)
 	srcaddr.sin_addr.s_addr = (in_addr_t)addr;
 
 	err = getnameinfo((struct sockaddr *)&srcaddr, sizeof(srcaddr),
-			  buf, buflen, NULL, 0, 0);
+			  buf, buflen, NULL, 0, NI_NAMEREQD);
 	if (err != 0) {
-		printerr(LL_ERR,
-			 "failed to get nameinfo for 0x%x: %s\n",
-			 addr, gai_strerror(err));
+		if (inet_ntop(srcaddr.sin_family, &srcaddr.sin_addr, ipstr,
+			      INET_ADDRSTRLEN))
+			printerr(LL_ERR, "failed to get name for %s: %s\n",
+				 ipstr, gai_strerror(err));
+		else
+			printerr(LL_ERR, "failed to get name for 0x%x: %s\n",
+				 addr, gai_strerror(err));
 		goto out;
 	}
+
 	rc = 0;
 
 out:
@@ -383,7 +369,8 @@ static struct convert_struct converter[] = {
 	[O2IBLND] = { .name = "O2IBLND", .nid2name = ipv4_nid2hostname },
 	[LOLND]	  = { .name = "LOLND",	 .nid2name = lolnd_nid2hostname },
 	[PTL4LND] = { .name = "PTL4LND", .nid2name = external_nid2hostname },
-	[KFILND]  = { .name = "KFILND",  .nid2name = ipv4_nid2hostname }
+	[KFILND]  = { .name = "KFILND",  .nid2name = ipv4_nid2hostname },
+	[EFALND]  = { .name = "EFALND",  .nid2name = ipv4_nid2hostname },
 };
 
 #define LND_MAX         (sizeof(converter) / sizeof(converter[0]))

@@ -25,6 +25,42 @@
 /** version recovery epoch */
 #define LR_EPOCH_BITS	32
 
+/**
+ * Update maximum client count tracking
+ *
+ * Update the maximum number of clients ever connected to this target
+ * if it is larger than previously seen.
+ *
+ * \param[in] lut	target to update
+ */
+static void tgt_update_max_clients(struct lu_target *lut)
+{
+	unsigned int current_clients;
+	unsigned int max_clients;
+	int rc;
+
+	if (unlikely(!lut || !lut->lut_obd))
+		return;
+
+	current_clients = atomic_read(&lut->lut_num_clients);
+	max_clients = atomic_read(&lut->lut_max_clients);
+
+	if (current_clients > max_clients) {
+		rc = class_expected_clients_update(current_clients);
+		if (rc != 0) {
+			CDEBUG(D_INFO,
+			       "%s: error setting expected_clients=%u: rc = %d\n",
+			       lut->lut_obd->obd_name, current_clients, rc);
+			return;
+		}
+
+		atomic_set(&lut->lut_max_clients, current_clients);
+		lut->lut_lsd.lsd_max_clients = current_clients;
+		CDEBUG(D_INFO, "%s: new maximum client count %u\n",
+		       lut->lut_obd->obd_name, current_clients);
+	}
+}
+
 /* Allocate a bitmap for a chunk of reply data slots */
 static int tgt_bitmap_chunk_alloc(struct lu_target *lut, int chunk)
 {
@@ -130,7 +166,7 @@ static int tgt_clear_reply_slot(struct lu_target *lut, int idx)
 	int chunk;
 	int b;
 
-	if (lut->lut_obd->obd_stopping)
+	if (test_bit(OBDF_STOPPING, lut->lut_obd->obd_flags))
 		/*
 		 * in case of failover keep the bit set in order to
 		 * avoid overwriting slots in reply_data which might
@@ -181,8 +217,7 @@ static int tgt_reply_header_read(const struct lu_env *env,
 	lrh->lrh_header_size = le32_to_cpu(buf.lrh_header_size);
 	lrh->lrh_reply_size = le32_to_cpu(buf.lrh_reply_size);
 
-	CDEBUG(D_HA, "%s: read %s header. magic=0x%08x "
-	       "header_size=%d reply_size=%d\n",
+	CDEBUG(D_HA, "%s: read %s header. magic=0x%08x header_size=%d reply_size=%d\n",
 		tgt->lut_obd->obd_name, REPLY_DATA,
 		lrh->lrh_magic, lrh->lrh_header_size, lrh->lrh_reply_size);
 
@@ -200,8 +235,7 @@ static int tgt_reply_header_write(const struct lu_env *env,
 	struct thandle		*th;
 	struct dt_object	*dto;
 
-	CDEBUG(D_HA, "%s: write %s header. magic=0x%08x "
-	       "header_size=%d reply_size=%d\n",
+	CDEBUG(D_HA, "%s: write %s header. magic=0x%08x header_size=%d reply_size=%d\n",
 		tgt->lut_obd->obd_name, REPLY_DATA,
 		lrh->lrh_magic, lrh->lrh_header_size, lrh->lrh_reply_size);
 
@@ -312,8 +346,7 @@ static void tgt_free_reply_data(struct lu_target *lut,
 				struct tg_export_data *ted,
 				struct tg_reply_data *trd)
 {
-	CDEBUG(D_TRACE, "%s: free reply data %p: xid %llu, transno %llu, "
-	       "client gen %u, slot idx %d\n",
+	CDEBUG(D_TRACE, "%s: free reply data %p: xid %llu, transno %llu, client gen %u, slot idx %d\n",
 	       lut == NULL ? "" : tgt_name(lut), trd, trd->trd_reply.lrd_xid,
 	       trd->trd_reply.lrd_transno, trd->trd_reply.lrd_client_gen,
 	       trd->trd_index);
@@ -336,8 +369,7 @@ static void tgt_release_reply_data(struct lu_target *lut,
 				   struct tg_export_data *ted,
 				   struct tg_reply_data *trd)
 {
-	CDEBUG(D_TRACE, "%s: release reply data %p: xid %llu, transno %llu, "
-	       "client gen %u, slot idx %d\n",
+	CDEBUG(D_TRACE, "%s: release reply data %p: xid %llu, transno %llu, client gen %u, slot idx %d\n",
 	       lut == NULL ? "" : tgt_name(lut), trd, trd->trd_reply.lrd_xid,
 	       trd->trd_reply.lrd_transno, trd->trd_reply.lrd_client_gen,
 	       trd->trd_index);
@@ -459,7 +491,7 @@ static inline void tgt_check_lcd(const char *obd_name, int index,
 {
 	size_t uuid_size = sizeof(lcd->lcd_uuid);
 
-	if (strnlen((char*)lcd->lcd_uuid, uuid_size) == uuid_size) {
+	if (strnlen((char *)lcd->lcd_uuid, uuid_size) == uuid_size) {
 		lcd->lcd_uuid[uuid_size - 1] = '\0';
 
 		LCONSOLE_ERROR("the client UUID (%s) on %s for exports stored in last_rcvd(index = %d) is bad!\n",
@@ -484,10 +516,9 @@ static int tgt_client_data_read(const struct lu_env *env, struct lu_target *tgt,
 			ptlrpc_status_ntoh(lcd->lcd_last_close_result);
 	}
 
-	CDEBUG(D_INFO, "%s: read lcd @%lld uuid = %s, last_transno = %llu"
-	       ", last_xid = %llu, last_result = %u, last_data = %u, "
-	       "last_close_transno = %llu, last_close_xid = %llu, "
-	       "last_close_result = %u, rc = %d\n", tgt->lut_obd->obd_name,
+	CDEBUG(D_INFO, "%s: read lcd @%lld uuid = %s, last_transno = %llu, last_xid = %llu, last_result = %u, last_data = %u, "
+	       "last_close_transno = %llu, last_close_xid = %llu, last_close_result = %u, rc = %d\n",
+	       tgt->lut_obd->obd_name,
 	       *off, lcd->lcd_uuid, lcd->lcd_last_transno, lcd->lcd_last_xid,
 	       lcd->lcd_last_result, lcd->lcd_last_data,
 	       lcd->lcd_last_close_transno, lcd->lcd_last_close_xid,
@@ -630,8 +661,8 @@ static int tgt_client_data_update(const struct lu_env *env,
 	EXIT;
 out:
 	dt_trans_stop(env, tgt->lut_bottom, th);
-	CDEBUG(D_INFO, "%s: update last_rcvd client data for UUID = %s, "
-	       "last_transno = %llu: rc = %d\n", tgt->lut_obd->obd_name,
+	CDEBUG(D_INFO, "%s: update last_rcvd client data for UUID = %s, last_transno = %llu: rc = %d\n",
+	       tgt->lut_obd->obd_name,
 	       tgt->lut_lsd.lsd_uuid, tgt->lut_lsd.lsd_last_transno, rc);
 
 	return rc;
@@ -649,10 +680,10 @@ static int tgt_server_data_read(const struct lu_env *env, struct lu_target *tgt)
 	if (rc == 0)
 		lsd_le_to_cpu(&tti->tti_lsd, &tgt->lut_lsd);
 
-	CDEBUG(D_INFO, "%s: read last_rcvd server data for UUID = %s, "
-	       "last_transno = %llu: rc = %d\n", tgt->lut_obd->obd_name,
+	CDEBUG(D_INFO, "%s: read last_rcvd server data for UUID = %s, last_transno = %llu: rc = %d\n",
+	       tgt->lut_obd->obd_name,
 	       tgt->lut_lsd.lsd_uuid, tgt->lut_lsd.lsd_last_transno, rc);
-        return rc;
+	return rc;
 }
 
 static int tgt_server_data_write(const struct lu_env *env,
@@ -671,8 +702,8 @@ static int tgt_server_data_write(const struct lu_env *env,
 	dto = dt_object_locate(tgt->lut_last_rcvd, th->th_dev);
 	rc = dt_record_write(env, dto, &tti->tti_buf, &tti->tti_off, th);
 
-	CDEBUG(D_INFO, "%s: write last_rcvd server data for UUID = %s, "
-	       "last_transno = %llu: rc = %d\n", tgt->lut_obd->obd_name,
+	CDEBUG(D_INFO, "%s: write last_rcvd server data for UUID = %s, last_transno = %llu: rc = %d\n",
+	       tgt->lut_obd->obd_name,
 	       tgt->lut_lsd.lsd_uuid, tgt->lut_lsd.lsd_last_transno, rc);
 
 	RETURN(rc);
@@ -684,9 +715,9 @@ static int tgt_server_data_write(const struct lu_env *env,
 int tgt_server_data_update(const struct lu_env *env, struct lu_target *tgt,
 			   int sync)
 {
-	struct tgt_thread_info	*tti = tgt_th_info(env);
-	struct thandle		*th;
-	int			 rc = 0;
+	struct tgt_thread_info *tti = tgt_th_info(env);
+	struct thandle *th;
+	int rc = 0;
 
 	ENTRY;
 
@@ -699,6 +730,8 @@ int tgt_server_data_update(const struct lu_env *env, struct lu_target *tgt,
 	spin_lock(&tgt->lut_translock);
 	tgt->lut_lsd.lsd_last_transno = tgt->lut_last_transno;
 	spin_unlock(&tgt->lut_translock);
+
+	tgt_update_max_clients(tgt);
 
 	if (tgt->lut_bottom->dd_rdonly)
 		RETURN(0);
@@ -723,8 +756,8 @@ int tgt_server_data_update(const struct lu_env *env, struct lu_target *tgt,
 out:
 	dt_trans_stop(env, tgt->lut_bottom, th);
 
-	CDEBUG(D_INFO, "%s: update last_rcvd server data for UUID = %s, "
-	       "last_transno = %llu: rc = %d\n", tgt->lut_obd->obd_name,
+	CDEBUG(D_INFO, "%s: update last_rcvd server data for UUID = %s, last_transno = %llu: rc = %d\n",
+	       tgt->lut_obd->obd_name,
 	       tgt->lut_lsd.lsd_uuid, tgt->lut_lsd.lsd_last_transno, rc);
 	RETURN(rc);
 }
@@ -839,13 +872,13 @@ void tgt_boot_epoch_update(struct lu_target *tgt)
 	LIST_HEAD(client_list);
 	int			 rc;
 
-	if (tgt->lut_obd->obd_stopping)
+	if (test_bit(OBDF_STOPPING, tgt->lut_obd->obd_flags))
 		return;
 
 	rc = lu_env_init(&env, LCT_DT_THREAD);
 	if (rc) {
 		CERROR("%s: can't initialize environment: rc = %d\n",
-		        tgt->lut_obd->obd_name, rc);
+			tgt->lut_obd->obd_name, rc);
 		return;
 	}
 
@@ -1073,8 +1106,7 @@ repeat:
 							OBD_INCOMPAT_MULTI_RPCS;
 			rc = tgt_server_data_update(env, tgt, 1);
 			if (rc < 0) {
-				CERROR("%s: unable to set MULTI RPCS "
-				       "incompatibility flag\n",
+				CERROR("%s: unable to set MULTI RPCS incompatibility flag\n",
 				       exp->exp_obd->obd_name);
 				RETURN(rc);
 			}
@@ -1087,8 +1119,7 @@ repeat:
 		ted->ted_lcd->lcd_generation = 0;
 	}
 
-	CDEBUG(D_INFO, "%s: new client at index %d (%llu) with UUID '%s' "
-	       "generation %d\n",
+	CDEBUG(D_INFO, "%s: new client at index %d (%llu) with UUID '%s' generation %d\n",
 	       tgt->lut_obd->obd_name, ted->ted_lr_idx, ted->ted_lr_off,
 	       ted->ted_lcd->lcd_uuid, ted->ted_lcd->lcd_generation);
 
@@ -1102,8 +1133,10 @@ repeat:
 		RETURN(rc);
 	}
 
-	if (tgt_is_multimodrpcs_client(exp))
+	if (tgt_is_multimodrpcs_client(exp)) {
 		atomic_inc(&tgt->lut_num_clients);
+		tgt_update_max_clients(tgt);
+	}
 
 	RETURN(0);
 }
@@ -1134,8 +1167,7 @@ int tgt_client_add(const struct lu_env *env,  struct obd_export *exp, int idx)
 		 "%s: client %d: bit already set in bitmap!!\n",
 		 tgt->lut_obd->obd_name, idx);
 
-	CDEBUG(D_INFO, "%s: client at idx %d with UUID '%s' added, "
-	       "generation %d\n",
+	CDEBUG(D_INFO, "%s: client at idx %d with UUID '%s' added, generation %d\n",
 	       tgt->lut_obd->obd_name, idx, ted->ted_lcd->lcd_uuid,
 	       ted->ted_lcd->lcd_generation);
 
@@ -1203,8 +1235,8 @@ int tgt_client_del(const struct lu_env *env, struct obd_export *exp)
 	 * be in server data or in client data in case of failure */
 	rc = tgt_server_data_update(env, tgt, 0);
 	if (rc != 0) {
-		CERROR("%s: failed to update server data, skip client %s "
-		       "zeroing, rc %d\n", tgt->lut_obd->obd_name,
+		CERROR("%s: failed to update server data, skip client %s zeroing, rc %d\n",
+		       tgt->lut_obd->obd_name,
 		       ted->ted_lcd->lcd_uuid, rc);
 		RETURN(rc);
 	}
@@ -1216,7 +1248,7 @@ int tgt_client_del(const struct lu_env *env, struct obd_export *exp)
 		RETURN(rc);
 	}
 
-	memset(ted->ted_lcd->lcd_uuid, 0, sizeof ted->ted_lcd->lcd_uuid);
+	memset(ted->ted_lcd->lcd_uuid, 0, sizeof(ted->ted_lcd->lcd_uuid));
 	mutex_unlock(&ted->ted_lcd_lock);
 
 	rc = tgt_client_data_update(env, exp);
@@ -1318,8 +1350,8 @@ add_reply_data:
 
 		if (req->rq_obsolete) {
 			CDEBUG(D_INFO,
-			       "drop reply data update for obsolete req xid=%llu,"
-			       "transno=%llu, tag=%hu\n", req->rq_xid,
+			       "drop reply data update for obsolete req xid=%llu,transno=%llu, tag=%hu\n",
+			       req->rq_xid,
 			       lrd->lrd_transno, trd->trd_tag);
 			mutex_unlock(&ted->ted_lcd_lock);
 			GOTO(free_slot, rc = -EBADR);
@@ -1344,8 +1376,7 @@ add_reply_data:
 	}
 	mutex_unlock(&ted->ted_lcd_lock);
 
-	CDEBUG(D_TRACE, "add reply %p: xid %llu, transno %llu, "
-	       "tag %hu, client gen %u, slot idx %d\n",
+	CDEBUG(D_TRACE, "add reply %p: xid %llu, transno %llu, tag %hu, client gen %u, slot idx %d\n",
 	       trd, lrd->lrd_xid, lrd->lrd_transno,
 	       trd->trd_tag, lrd->lrd_client_gen, trd->trd_index);
 
@@ -1575,8 +1606,7 @@ static int tgt_last_rcvd_update(const struct lu_env *env, struct lu_target *tgt,
 		 * this value should be monotonically increased only. */
 		if (*transno_p > tti->tti_transno) {
 			if (!tgt->lut_no_reconstruct) {
-				CERROR("%s: trying to overwrite bigger transno:"
-				       "on-disk: %llu, new: %llu replay: "
+				CERROR("%s: trying to overwrite bigger transno:on-disk: %llu, new: %llu replay: "
 				       "%d. See LU-617.\n", tgt_name(tgt),
 				       *transno_p, tti->tti_transno,
 				       req_is_replay(req));
@@ -1694,8 +1724,8 @@ static int tgt_clients_data_init(const struct lu_env *env,
 		off = lsd->lsd_client_start + cl_idx * lsd->lsd_client_size;
 		rc = tgt_client_data_read(env, tgt, lcd, &off, cl_idx);
 		if (rc) {
-			CERROR("%s: error reading last_rcvd %s idx %d off "
-			       "%llu: rc = %d\n", tgt_name(tgt), LAST_RCVD,
+			CERROR("%s: error reading last_rcvd %s idx %d off %llu: rc = %d\n",
+			       tgt_name(tgt), LAST_RCVD,
 			       cl_idx, off, rc);
 			rc = 0;
 			break; /* read error shouldn't cause startup to fail */
@@ -1712,8 +1742,8 @@ static int tgt_clients_data_init(const struct lu_env *env,
 		/* These exports are cleaned up by disconnect, so they
 		 * need to be set up like real exports as connect does.
 		 */
-		CDEBUG(D_HA, "RCVRNG CLIENT uuid: %s idx: %d lr: %llu"
-		       " srv lr: %llu lx: %llu gen %u\n", lcd->lcd_uuid,
+		CDEBUG(D_HA, "RCVRNG CLIENT uuid: %s idx: %d lr: %llu srv lr: %llu lx: %llu gen %u\n",
+		       lcd->lcd_uuid,
 		       cl_idx, last_transno, lsd->lsd_last_transno,
 		       lcd_last_xid(lcd), lcd->lcd_generation);
 
@@ -1743,6 +1773,7 @@ static int tgt_clients_data_init(const struct lu_env *env,
 
 		if (tgt_is_multimodrpcs_record(tgt, lcd)) {
 			atomic_inc(&tgt->lut_num_clients);
+			tgt_update_max_clients(tgt);
 
 			/* compute the highest valid client generation */
 			generation = max(generation, lcd->lcd_generation);
@@ -1750,8 +1781,7 @@ static int tgt_clients_data_init(const struct lu_env *env,
 			rc = cfs_hash_add_unique(hash, &lcd->lcd_generation,
 						 &exp->exp_gen_hash);
 			if (rc != 0) {
-				CERROR("%s: duplicate export for client "
-				       "generation %u\n",
+				CERROR("%s: duplicate export for client generation %u\n",
 				       tgt_name(tgt), lcd->lcd_generation);
 				class_export_put(exp);
 				GOTO(err_out, rc);
@@ -1856,6 +1886,7 @@ int tgt_server_data_init(const struct lu_env *env, struct lu_target *tgt)
 		lsd->lsd_client_size = LR_CLIENT_SIZE;
 		lsd->lsd_subdir_count = OBJ_SUBDIR_COUNT;
 		lsd->lsd_osd_index = index;
+		lsd->lsd_max_clients = 0;
 		lsd->lsd_feature_rocompat = tgt_scd[type].rocinit;
 		lsd->lsd_feature_incompat = tgt_scd[type].incinit;
 	} else {
@@ -1910,8 +1941,7 @@ int tgt_server_data_init(const struct lu_env *env, struct lu_target *tgt)
 	if (type == LDD_F_SV_TYPE_MDT &&
 	    !(lsd->lsd_feature_compat & OBD_COMPAT_20)) {
 		if (last_rcvd_size > lsd->lsd_client_start) {
-			LCONSOLE_WARN("%s: mounting at first time on 1.8 FS, "
-				      "remove all clients for interop needs\n",
+			LCONSOLE_WARN("%s: mounting at first time on 1.8 FS, remove all clients for interop needs\n",
 				      tgt_name(tgt));
 			rc = tgt_truncate_object(env, tgt, tgt->lut_last_rcvd,
 						 lsd->lsd_client_start);
@@ -1950,13 +1980,23 @@ int tgt_server_data_init(const struct lu_env *env, struct lu_target *tgt)
 		lsd->lsd_client_size);
 	CDEBUG(D_INODE, "========END DUMPING LAST_RCVD========\n");
 
+	/* Initialize maximum client count */
+	if (lsd->lsd_max_clients > LR_MAX_CLIENTS) {
+		CWARN("%s: stored max_clients %u > max allowed %lu, reset to 0\n",
+		      tgt_name(tgt), lsd->lsd_max_clients, LR_MAX_CLIENTS);
+		lsd->lsd_max_clients = 0;
+	}
+	atomic_set(&tgt->lut_max_clients, (int)lsd->lsd_max_clients);
+	CDEBUG(D_INFO, "%s: restored maximum client count: %u\n",
+	       tgt_name(tgt), lsd->lsd_max_clients);
+
 	if (lsd->lsd_server_size == 0 || lsd->lsd_client_start == 0 ||
 	    lsd->lsd_client_size == 0) {
 		CERROR("%s: bad last_rcvd contents!\n", tgt_name(tgt));
 		RETURN(-EINVAL);
 	}
 
-	if (!tgt->lut_obd->obd_replayable)
+	if (!test_bit(OBDF_REPLAYABLE, tgt->lut_obd->obd_flags))
 		CWARN("%s: recovery support OFF\n", tgt_name(tgt));
 
 	rc = tgt_clients_data_init(env, tgt, last_rcvd_size);
@@ -2006,6 +2046,8 @@ int tgt_txn_start_cb(const struct lu_env *env, struct thandle *th,
 	 * request processing but some local operation */
 	if (env->le_ses == NULL)
 		return 0;
+	if (!(env->le_ses->lc_tags & LCT_CL_INIT))
+		return -EFAULT;
 
 	LASSERT(tgt->lut_last_rcvd);
 	tsi = tgt_ses_info(env);
@@ -2235,8 +2277,7 @@ int tgt_reply_data_init(const struct lu_env *env, struct lu_target *tgt)
 			if (ted->ted_reply_cnt > ted->ted_reply_max)
 				ted->ted_reply_max = ted->ted_reply_cnt;
 
-			CDEBUG(D_HA, "%s: restore reply %p: xid %llu, "
-			       "transno %llu, client gen %u, slot idx %d\n",
+			CDEBUG(D_HA, "%s: restore reply %p: xid %llu, transno %llu, client gen %u, slot idx %d\n",
 			       tgt_name(tgt), trd, lrd->lrd_xid,
 			       lrd->lrd_transno, lrd->lrd_client_gen,
 			       trd->trd_index);

@@ -72,15 +72,15 @@
 #include <linux/aio.h>
 #include <linux/fs.h>
 
-#include <libcfs/libcfs.h>
-#include <lu_object.h>
 #include <linux/atomic.h>
 #include <linux/mutex.h>
 #include <linux/radix-tree.h>
 #include <linux/spinlock.h>
+#include <lustre_compat/linux/string.h>
 #include <linux/wait.h>
 #include <linux/pagevec.h>
-#include <libcfs/linux/linux-misc.h>
+
+#include <lu_object.h>
 #include <lustre_dlm.h>
 #include <lustre_compat.h>
 
@@ -283,12 +283,7 @@ struct cl_layout {
 	bool		cl_is_rdonly;
 };
 
-enum coo_inode_opc {
-	COIO_INODE_LOCK,
-	COIO_INODE_UNLOCK,
-	COIO_SIZE_LOCK,
-	COIO_SIZE_UNLOCK,
-};
+struct cl_dio_pages;
 
 /**
  * Operations implemented for each cl object layer.
@@ -313,6 +308,17 @@ struct cl_object_operations {
 	 */
 	int  (*coo_page_init)(const struct lu_env *env, struct cl_object *obj,
 			      struct cl_page *page, pgoff_t index);
+	/**
+	 * Initialize the dio pages structure with information from this layer
+	 *
+	 * Called top-to-bottom through every object layer to gather the
+	 * per-layer information required for the dio, does the same job as
+	 * coo_page_init but just once for each dio page array
+	 */
+	int  (*coo_dio_pages_init)(const struct lu_env *env,
+				   struct cl_object *obj,
+				   struct cl_dio_pages *cdp,
+				   pgoff_t index);
 	/**
 	 * Initialize lock slice for this layer. Called top-to-bottom through
 	 * every object layer when a new cl_lock is instantiated. Layer
@@ -426,11 +432,6 @@ struct cl_object_operations {
 	int (*coo_object_flush)(const struct lu_env *env,
 				struct cl_object *obj,
 				struct ldlm_lock *lock);
-	/**
-	 * operate upon inode. Used in LOV to lock/unlock inode from vvp layer.
-	 */
-	int (*coo_inode_ops)(const struct lu_env *env, struct cl_object *obj,
-			     enum coo_inode_opc opc, void *data);
 	/**
 	 * Get ProjID for a request.
 	 */
@@ -560,7 +561,7 @@ struct cl_object_header {
  *
  *            - by starting from VM-locked struct page and following some
  *              hosting environment method (e.g., following ->private pointer in
- *              the case of Linux kernel), see cl_vmpage_page();
+ *              the case of Linux kernel), see cl_page_from_folio();
  *
  *        - when the page enters cl_page_state::CPS_FREEING state, all these
  *          ways are severed with the proper synchronization
@@ -901,10 +902,10 @@ struct cl_page_operations {
 		 * are pinned in memory (and, hence, calling cl_page_put() is
 		 * safe).
 		 *
-		 * \see cl_page_completion()
+		 * \see cl_page_complete()
 		 */
-		void (*cpo_completion)(const struct lu_env *env,
-				       const struct cl_page_slice *slice,
+		void (*cpo_complete)(const struct lu_env *env,
+				     const struct cl_page_slice *slice,
 				       int ioret);
 	} io[CRT_NR];
 	/**
@@ -922,15 +923,6 @@ struct cl_page_operations {
 	 */
 	void (*cpo_clip)(const struct lu_env *env,
 			 const struct cl_page_slice *slice, int from, int to);
-	/**
-	 * Write out a page by kernel. This is only called by ll_writepage
-	 * right now.
-	 *
-	 * \see cl_page_flush()
-	 */
-	int (*cpo_flush)(const struct lu_env *env,
-			 const struct cl_page_slice *slice,
-			 struct cl_io *io);
 };
 
 /**
@@ -963,9 +955,26 @@ static inline struct page *cl_page_vmpage(const struct cl_page *page)
 	return page->cp_vmpage;
 }
 
+static inline int cl_folio_pgno(const struct cl_page *cl_page)
+{
+#ifdef HAVE___FILEMAP_GET_FOLIO
+	struct folio *folio = page_folio(cl_page->cp_vmpage);
+	int pgno = folio_page_idx(folio, cl_page->cp_vmpage);
+
+	return pgno;
+#else
+	return 0;
+#endif
+}
+
+static inline void *cl_kmap_local(struct cl_page *pg)
+{
+	return kmap_local_page(pg->cp_vmpage);
+}
+
 static inline pgoff_t cl_page_index(const struct cl_page *cp)
 {
-	return cl_page_vmpage(cp)->index;
+	return folio_index_page(cl_page_vmpage(cp));
 }
 
 /**
@@ -1396,16 +1405,12 @@ struct cl_read_ahead {
 
 	/* Callback data for cra_release routine */
 	void		*cra_dlmlock;
-	void		*cra_oio;
 
 	/*
 	 * Linkage to track all cl_read_aheads for a read-ahead operations,
 	 * used for releasing DLM locks acquired during read-ahead.
 	 */
 	struct list_head cra_linkage;
-
-	/* whether lock is in contention */
-	bool		 cra_contention;
 };
 
 static inline void cl_read_ahead_release(const struct lu_env *env,
@@ -1415,8 +1420,35 @@ static inline void cl_read_ahead_release(const struct lu_env *env,
 		ra->cra_release(env, ra);
 }
 
+enum cl_io_priority {
+	/* Normal I/O, usually just queue the pages in the client side cache. */
+	IO_PRIO_NORMAL	= 0,
+	/* I/O is urgent and should flush queued pages to OSTs ASAP. */
+	IO_PRIO_URGENT,
+	/* The memcg is under high memory pressure and the user write process
+	 * is dirty exceeded and under rate limiting in balance_dirty_pages().
+	 * It needs to flush dirty pages for the corresponding @wb ASAP.
+	 */
+	IO_PRIO_DIRTY_EXCEEDED,
+	/*
+	 * I/O is urgent and flushing pages are marked with OBD_BRW_SOFT_SYNC
+	 * flag and may trigger a soft sync on OSTs. Thus it can free unstable
+	 * pages much quickly.
+	 */
+	IO_PRIO_SOFT_SYNC,
+	/*
+	 * The system or a certain memcg is under high memory pressure. Need to
+	 * flush dirty pages to OSTs immediately and I/O RPC must wait the write
+	 * transcation commit on OSTs synchronously to release unstable pages.
+	 */
+	IO_PRIO_HARD_SYNC,
+	IO_PRIO_MAX,
+};
 
-struct cl_dio_pages;
+static inline bool cl_io_high_prio(enum cl_io_priority prio)
+{
+	return prio >= IO_PRIO_URGENT;
+}
 
 /**
  * Per-layer io operations.
@@ -1530,20 +1562,21 @@ struct cl_io_operations {
 	int  (*cio_commit_async)(const struct lu_env *env,
 				 const struct cl_io_slice *slice,
 				 struct cl_page_list *queue, int from, int to,
-				 cl_commit_cbt cb);
+				 cl_commit_cbt cb, enum cl_io_priority prio);
 	/**
 	 * Release active extent.
 	 */
 	void  (*cio_extent_release)(const struct lu_env *env,
-				    const struct cl_io_slice *slice);
+				    const struct cl_io_slice *slice,
+				    enum cl_io_priority prio);
 	/**
 	 * Decide maximum read ahead extent
 	 *
 	 * \pre io->ci_type == CIT_READ
 	 */
-	int (*cio_read_ahead)(const struct lu_env *env,
-			      const struct cl_io_slice *slice,
-			      pgoff_t start, struct cl_read_ahead *ra);
+	int (*cio_read_ahead_prep)(const struct lu_env *env,
+				   const struct cl_io_slice *slice,
+				   pgoff_t start, struct cl_read_ahead *ra);
 	/**
 	 *
 	 * Reserve LRU slots before IO.
@@ -1779,6 +1812,7 @@ struct cl_io {
 		} ci_rd;
 		struct cl_wr_io {
 			struct cl_io_rw_common wr;
+			loff_t                 wr_append_lockpos;
 			int                    wr_append;
 			int                    wr_sync;
 		} ci_wr;
@@ -1823,13 +1857,14 @@ struct cl_io {
 			struct cl_page *ft_page;
 		} ci_fault;
 		struct cl_fsync_io {
-			loff_t             fi_start;
-			loff_t             fi_end;
+			loff_t			 fi_start;
+			loff_t			 fi_end;
 			/** file system level fid */
-			struct lu_fid     *fi_fid;
-			enum cl_fsync_mode fi_mode;
+			struct lu_fid	 	*fi_fid;
+			enum cl_fsync_mode	 fi_mode;
 			/* how many pages were written/discarded */
-			unsigned int       fi_nr_written;
+			unsigned int		 fi_nr_written;
+			enum cl_io_priority	 fi_prio;
 		} ci_fsync;
 		struct cl_ladvise_io {
 			__u64			 lio_start;
@@ -1961,7 +1996,14 @@ struct cl_io {
 	 */
 			     ci_invalidate_page_cache:1,
 	/* was this IO switched from BIO to DIO for hybrid IO? */
-			     ci_hybrid_switched:1;
+			     ci_hybrid_switched:1,
+	/* this IO is to a parity mirror */
+			     ci_parity_io:1;
+	/**
+	 * EOF for parity components, calculated based on RAID geometry.
+	 * Valid only when ci_parity_io is set.
+	 */
+	loff_t		     ci_parity_eof;
 
 	/**
 	 * How many times the read has retried before this one.
@@ -2046,7 +2088,6 @@ struct cl_site {
 
 int  cl_site_init(struct cl_site *s, struct cl_device *top);
 void cl_site_fini(struct cl_site *s);
-void cl_stack_fini(const struct lu_env *env, struct cl_device *cl);
 
 /**
  * Output client site statistical counters into a buffer. Suitable for
@@ -2086,11 +2127,6 @@ static inline const struct cl_object_conf *
 lu2cl_conf(const struct lu_object_conf *conf)
 {
 	return container_of_safe(conf, struct cl_object_conf, coc_lu);
-}
-
-static inline struct cl_object *cl_object_next(const struct cl_object *obj)
-{
-	return obj ? lu2cl(lu_object_next(&obj->co_lu)) : NULL;
 }
 
 static inline struct cl_object_header *luh2coh(const struct lu_object_header *h)
@@ -2161,8 +2197,6 @@ int cl_object_layout_get(const struct lu_env *env, struct cl_object *obj,
 loff_t cl_object_maxbytes(struct cl_object *obj);
 int cl_object_flush(const struct lu_env *env, struct cl_object *obj,
 		    struct ldlm_lock *lock);
-int cl_object_inode_ops(const struct lu_env *env, struct cl_object *obj,
-			enum coo_inode_opc opc, void *data);
 void cl_req_projid_set(const struct lu_env *env, struct cl_object *obj,
 		       __u32 *projid);
 
@@ -2197,6 +2231,12 @@ static inline int cl_object_refc(struct cl_object *clob)
 	return atomic_read(&header->loh_ref);
 }
 
+
+ssize_t cl_dio_pages_init(const struct lu_env *env, struct cl_object *obj,
+			  struct cl_dio_pages *cdp, struct iov_iter *iter,
+			  int rw, size_t maxsize, loff_t offset,
+			  bool unaligned);
+
 /* cl_page */
 struct cl_page *cl_page_find(const struct lu_env *env,
 			     struct cl_object *obj,
@@ -2216,6 +2256,12 @@ void cl_page_print(const struct lu_env *env, void *cookie,
 void cl_page_header_print(const struct lu_env *env, void *cookie,
 			  lu_printer_t printer, const struct cl_page *pg);
 struct cl_page *cl_vmpage_page(struct page *vmpage, struct cl_object *obj);
+
+static inline struct cl_page *cl_page_from_folio(struct page *vmpage,
+						 pgoff_t index, bool get)
+{
+	return cl_vmpage_page(vmpage, NULL);
+}
 
 /**
  * \name ownership
@@ -2243,14 +2289,14 @@ int cl_page_is_owned(const struct cl_page *pg, const struct cl_io *io);
  */
 int cl_page_prep(const struct lu_env *env, struct cl_io *io,
 		 struct cl_page *pg, enum cl_req_type crt);
-void cl_page_completion(const struct lu_env *env, struct cl_page *pg,
-			 enum cl_req_type crt, int ioret);
+void cl_dio_pages_complete(const struct lu_env *env, struct cl_dio_pages *pg,
+			   int count, int ioret);
+void cl_page_complete(const struct lu_env *env, struct cl_page *pg,
+		      enum cl_req_type crt, int ioret);
 int cl_page_make_ready(const struct lu_env *env, struct cl_page *pg,
 		       enum cl_req_type crt);
-void cl_page_clip(const struct lu_env *env, struct cl_page *pg,
-		  int from, int to);
-int cl_page_flush(const struct lu_env *env, struct cl_io *io,
-		  struct cl_page *pg);
+void cl_page_clip(const struct lu_env *env, struct cl_page *pg, int from,
+		  int to);
 
 /**
  * \name helper routines
@@ -2372,14 +2418,15 @@ int   cl_io_submit_sync(const struct lu_env *env, struct cl_io *io,
 			long timeout);
 int   cl_io_commit_async(const struct lu_env *env, struct cl_io *io,
 			  struct cl_page_list *queue, int from, int to,
-			  cl_commit_cbt cb);
-void  cl_io_extent_release(const struct lu_env *env, struct cl_io *io);
+			  cl_commit_cbt cb, enum cl_io_priority prio);
+void  cl_io_extent_release(const struct lu_env *env, struct cl_io *io,
+			   enum cl_io_priority prio);
 int cl_io_lru_reserve(const struct lu_env *env, struct cl_io *io,
 		      loff_t pos, size_t bytes);
-int   cl_io_read_ahead(const struct lu_env *env, struct cl_io *io,
-		       pgoff_t start, struct cl_read_ahead *ra);
-void  cl_io_rw_advance(const struct lu_env *env, struct cl_io *io,
-		       size_t bytes);
+int cl_io_read_ahead_prep(const struct lu_env *env, struct cl_io *io,
+			  pgoff_t start, struct cl_read_ahead *ra);
+void cl_io_rw_advance(const struct lu_env *env, struct cl_io *io,
+		      size_t bytes);
 
 /**
  * True, iff \a io is an O_APPEND write(2).
@@ -2491,11 +2538,12 @@ void cl_sync_io_init_notify(struct cl_sync_io *anchor, int nr, void *dio_aio,
 
 int cl_sync_io_wait(const struct lu_env *env, struct cl_sync_io *anchor,
 		    long timeout);
+void __cl_sync_io_note(const struct lu_env *env, struct cl_sync_io *anchor,
+		       int count, int ioret);
 void cl_sync_io_note(const struct lu_env *env, struct cl_sync_io *anchor,
 		     int ioret);
 int cl_sync_io_wait_recycle(const struct lu_env *env, struct cl_sync_io *anchor,
 			    long timeout, int ioret);
-void cl_dio_pages_2queue(struct cl_dio_pages *ldp);
 struct cl_dio_aio *cl_dio_aio_alloc(struct kiocb *iocb, struct cl_object *obj,
 				    bool is_aio);
 struct cl_sub_dio *cl_sub_dio_alloc(struct cl_dio_aio *ll_aio,
@@ -2538,11 +2586,13 @@ struct cl_dio_pages {
 	struct page		**cdp_pages;
 
 	struct cl_page		**cdp_cl_pages;
-	struct cl_2queue	cdp_queue;
-	/** # of pages in the array. */
-	size_t			cdp_count;
+	struct cl_sync_io	*cdp_sync_io;
 	/* the file offset of the first page. */
 	loff_t                  cdp_file_offset;
+	unsigned int		cdp_lov_index;
+	loff_t			cdp_osc_off;
+	/** # of pages in the array. */
+	unsigned int		cdp_page_count;
 	/* the first and last page can be incomplete, this records the
 	 * offsets
 	 */
@@ -2577,17 +2627,15 @@ struct cl_sub_dio {
 	struct cl_dio_pages	csd_dio_pages;
 	struct iov_iter		csd_iter;
 	struct cl_iter_dup	csd_dup;
-	spinlock_t		csd_lock;
+	wait_queue_head_t	csd_write_waitq;
+	spinlock_t		csd_write_lock;
+	ssize_t			csd_write_status;
 	unsigned		csd_creator_free:1,
 				csd_write:1,
 				csd_unaligned:1,
+				csd_write_copying:1,
 				csd_write_copied:1;
 };
-
-static inline u64 cl_io_nob_aligned(u64 off, u32 nob, u32 pgsz)
-{
-	return (((nob / pgsz) - 1) * pgsz) + (pgsz - (off & (pgsz - 1)));
-}
 
 void ll_release_user_pages(struct page **pages, int npages);
 int ll_allocate_dio_buffer(struct cl_dio_pages *cdp, size_t io_size);

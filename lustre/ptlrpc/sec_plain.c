@@ -138,10 +138,10 @@ static void corrupt_bulk_data(struct ptlrpc_bulk_desc *desc)
 		if (desc->bd_vec[i].bv_len == 0)
 			continue;
 
-		ptr = kmap(desc->bd_vec[i].bv_page);
+		ptr = kmap_local_page(desc->bd_vec[i].bv_page);
 		off = desc->bd_vec[i].bv_offset & ~PAGE_MASK;
 		ptr[off] ^= 0x1;
-		kunmap(desc->bd_vec[i].bv_page);
+		kunmap_local(ptr);
 		return;
 	}
 }
@@ -574,7 +574,7 @@ void plain_free_reqbuf(struct ptlrpc_sec *sec,
 {
 	ENTRY;
 	if (!req->rq_pool) {
-		OBD_FREE_LARGE(req->rq_reqbuf, req->rq_reqbuf_len);
+		OBD_FREE_LARGE_ATOMIC(req->rq_reqbuf, req->rq_reqbuf_len);
 		req->rq_reqbuf = NULL;
 		req->rq_reqbuf_len = 0;
 	}

@@ -16,7 +16,6 @@
 
 #define OAP_MAGIC 8675309
 
-#include <libcfs/linux/linux-mem.h>
 #include <lustre_osc.h>
 
 extern atomic_t osc_pool_req_count;
@@ -26,10 +25,11 @@ extern struct ptlrpc_request_pool *osc_rq_pool;
 int osc_shrink_grant_to_target(struct client_obd *cli, __u64 target_bytes);
 void osc_schedule_grant_work(void);
 void osc_update_next_shrink(struct client_obd *cli);
-int lru_queue_work(const struct lu_env *env, void *data);
+void lru_queue_work(struct work_struct *work);
 int osc_extent_finish(const struct lu_env *env, struct osc_extent *ext,
 		      int sent, int rc);
-void osc_extent_release(const struct lu_env *env, struct osc_extent *ext);
+void osc_extent_release(const struct lu_env *env, struct osc_extent *ext,
+			enum cl_io_priority prio);
 int osc_lock_discard_pages(const struct lu_env *env, struct osc_object *osc,
 			   pgoff_t start, pgoff_t end, bool discard);
 int osc_ldlm_hp_handle(const struct lu_env *env, struct osc_object *obj,
@@ -108,11 +108,6 @@ static inline int osc_recoverable_error(int rc)
 static inline unsigned long rpcs_in_flight(struct client_obd *cli)
 {
 	return cli->cl_r_in_flight + cli->cl_w_in_flight;
-}
-
-static inline char *cli_name(struct client_obd *cli)
-{
-	return cli->cl_import->imp_obd->obd_name;
 }
 
 static inline char list_empty_marker(struct list_head *list)

@@ -461,7 +461,7 @@ void scrub_stop(struct lustre_scrub *scrub)
 }
 EXPORT_SYMBOL(scrub_stop);
 
-const char *const scrub_status_names[] = {
+static const char *const scrub_status_names[] = {
 	"init",
 	"scanning",
 	"completed",
@@ -472,7 +472,7 @@ const char *const scrub_status_names[] = {
 	NULL
 };
 
-const char *const scrub_flags_names[] = {
+static const char *const scrub_flags_names[] = {
 	"recreated",
 	"inconsistent",
 	"auto",
@@ -480,7 +480,7 @@ const char *const scrub_flags_names[] = {
 	NULL
 };
 
-const char *const scrub_param_names[] = {
+static const char *const scrub_param_names[] = {
 	"failout",
 	"dryrun",
 	NULL
@@ -884,7 +884,8 @@ static int lustre_index_update_lma(const struct lu_env *env,
 	if (IS_ERR(th))
 		RETURN(rc);
 
-	rc = dt_declare_xattr_set(env, obj, &lbuf, XATTR_NAME_LMA, fl, th);
+	rc = dt_declare_xattr_set(env, obj, NULL, &lbuf, XATTR_NAME_LMA, fl,
+				  th);
 	if (rc)
 		GOTO(stop, rc);
 

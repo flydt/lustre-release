@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2007, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
@@ -51,9 +31,9 @@
 #include <sys/wait.h>
 #include <getopt.h>
 
+#include <linux/lustre/lustre_user.h>
 #include <libcfs/util/param.h>
 #include <libcfs/util/string.h>
-#include <uapi/linux/lustre/lgss.h>
 #include "lsupport.h"
 #include "lgss_utils.h"
 #include "lgss_krb5_utils.h"
@@ -117,6 +97,7 @@ struct keyring_upcall_param {
 			kup_is_mdt:1,
 			kup_is_ost:1;
 	uint32_t        kup_pid;
+	char		kup_cluuid[UUID_MAX];
 };
 
 /****************************************
@@ -161,7 +142,7 @@ static int receive_from(int fd, void *buf, size_t size)
 	return 0;
 }
 
-static int gss_do_ioctl(struct lgssd_ioctl_param *param)
+static int gss_do_ioctl(struct lgssd_ioctl_param *param, __s64 *status)
 {
 	int fd, ret;
 	glob_t path;
@@ -188,6 +169,8 @@ static int gss_do_ioctl(struct lgssd_ioctl_param *param)
 
 	logmsg(LL_TRACE, "to down-write\n");
 
+	*status = 0;
+	param->status = status;
 	ret = write(fd, param, sizeof(*param));
 	close(fd);
 	if (ret != sizeof(*param)) {
@@ -215,6 +198,7 @@ static int do_nego_rpc(struct lgss_nego_data *lnd,
 	int res;
 	char outbuf[8192] = { 0 };
 	unsigned int *p;
+	__s64 status;
 	int rc = 0;
 
 	logmsg(LL_TRACE, "start negotiation rpc\n");
@@ -240,7 +224,7 @@ static int do_nego_rpc(struct lgss_nego_data *lnd,
 		param.reply_buf_size = sizeof(outbuf);
 		param.reply_buf = outbuf;
 
-		rc = gss_do_ioctl(&param);
+		rc = gss_do_ioctl(&param, &status);
 		if (rc != 0)
 			return rc;
 	} else {
@@ -258,12 +242,11 @@ static int do_nego_rpc(struct lgss_nego_data *lnd,
 			return rc;
 
 		/* read ioctl status from parent */
-		rc = receive_from(reply_fd[0], &param.status,
-				  sizeof(param.status));
+		rc = receive_from(reply_fd[0], &status, sizeof(status));
 		if (rc != 0)
 			return rc;
 
-		if (param.status == 0) {
+		if (status == 0) {
 			/* read reply buffer from parent */
 			rc = receive_from(reply_fd[0], outbuf, sizeof(outbuf));
 			if (rc != 0)
@@ -272,10 +255,10 @@ static int do_nego_rpc(struct lgss_nego_data *lnd,
 	}
 
 	logmsg(LL_TRACE, "do_nego_rpc: to parse reply\n");
-	if (param.status) {
+	if (status) {
 		logmsg(LL_ERR, "status: %ld (%s)\n",
-		       (long int)param.status, strerror((int)(-param.status)));
-		return param.status;
+		       (long int)status, strerror((int)(-status)));
+		return status;
 	}
 
 	p = (unsigned int *)outbuf;
@@ -575,9 +558,9 @@ static int do_keyctl_update(char *reason, key_serial_t keyid,
 			return -1;
 		}
 
-		logmsg(LL_WARN, "key %08x: %sing too soon, try again\n",
+		logmsg(LL_INFO, "key %08x: %sing too soon, try again\n",
 		       keyid, reason);
-		sleep(2);
+		sleep(1);
 	}
 
 	logmsg(LL_INFO, "key %08x: %sed\n", keyid, reason);
@@ -611,8 +594,9 @@ static int error_kernel_key(key_serial_t keyid, int rpc_error, int gss_error,
 	/* no matter if revoking key was successful or not, always try unlink */
 	rc2 = keyctl_unlink(keyid, inst_keyring);
 	if (rc2) {
-		logmsg(LL_ERR, "unlink key %08x from %d: %s\n",
-		       keyid, inst_keyring, strerror(errno));
+		if (rc2 != ENOENT)
+			logmsg(LL_ERR, "unlink key %08x from %d: %s\n",
+			       keyid, inst_keyring, strerror(errno));
 		if (!rc)
 			rc = rc2;
 	} else {
@@ -843,40 +827,50 @@ static int lgssc_kr_negotiate(key_serial_t keyid, struct lgss_cred *cred,
  *  [8]: target_uuid    (string)
  *  [9]: self_nid        (uint64)
  *  [10]: pid            (uint)
+ *  [11]: client uuid    (string)
  */
 static int parse_callout_info(const char *coinfo,
                               struct keyring_upcall_param *uparam)
 {
-	const int       nargs = 11;
-	char            buf[1024];
-	char           *string = buf;
-	int             length, i;
-	char           *data[nargs];
-	char           *pos;
+	const int nargs = 12;
+	const int nargs_min = 11; /* for compatibility with older kernel code */
+	char buf[1024];
+	char *string = buf;
+	int length, i;
+	char *data[nargs];
+	char *pos;
 
-        length = strlen(coinfo) + 1;
-        if (length > 1024) {
-                logmsg(LL_ERR, "coinfo too long\n");
-                return -1;
-        }
-        memcpy(buf, coinfo, length);
+	length = strlen(coinfo) + 1;
+	if (length > 1024) {
+		logmsg(LL_ERR, "coinfo too long\n");
+		return -1;
+	}
+	memcpy(buf, coinfo, length);
 
-        for (i = 0; i < nargs - 1; i++) {
-                pos = strchr(string, ':');
-                if (pos == NULL) {
-                        logmsg(LL_ERR, "short of components\n");
-                        return -1;
-                }
+	for (i = 0; i < nargs; i++) {
+		data[i] = string;
+		pos = strchr(string, ':');
 
-                *pos = '\0';
-                data[i] = string;
-                string = pos + 1;
-        }
-        data[i] = string;
+		if (!pos) {
+			if (i >= nargs_min - 1) {
+				i++;
+				break;
+			}
+			logmsg(LL_ERR,
+			       "short components, need minimum %d, got %d\n",
+			       nargs_min, i + 1);
+			return -1;
+		}
+		*pos = '\0';
+		string = pos + 1;
+	}
+	for (; i < nargs; i++)
+		data[i] = NULL;
 
-	logmsg(LL_TRACE, "components: %s,%s,%s,%s,%s,%c,%s,%s,%s,%s,%s\n",
+	logmsg(LL_TRACE, "components: %s,%s,%s,%s,%s,%c,%s,%s,%s,%s,%s,%s\n",
 	       data[0], data[1], data[2], data[3], data[4], data[5][0],
-	       data[6], data[7], data[8], data[9], data[10]);
+	       data[6], data[7], data[8], data[9], data[10],
+	       data[11] ?: "<unset>");
 
 	uparam->kup_secid = strtol(data[0], NULL, 0);
 	snprintf(uparam->kup_mech, sizeof(uparam->kup_mech), "%s", data[1]);
@@ -894,15 +888,22 @@ static int parse_callout_info(const char *coinfo,
 	snprintf(uparam->kup_tgt, sizeof(uparam->kup_tgt), "%s", data[8]);
 	uparam->kup_selfnid = strtoll(data[9], NULL, 0);
 	uparam->kup_pid = strtol(data[10], NULL, 0);
+	if (data[11])
+		snprintf(uparam->kup_cluuid, sizeof(uparam->kup_cluuid), "%s",
+			 data[11]);
+	else
+		uparam->kup_cluuid[0] = '\0';
 
 	logmsg(LL_DEBUG, "parse call out info: secid %d, mech %s, ugid %u:%u, "
 	       "is_root %d, is_mdt %d, is_ost %d, svc type %c, svc %d, "
-	       "nid 0x%"PRIx64", tgt %s, self nid 0x%"PRIx64", pid %d\n",
+	       "nid 0x%"PRIx64", tgt %s, self nid 0x%"PRIx64", pid %d, "
+	       "uuid %s\n",
 	       uparam->kup_secid, uparam->kup_mech,
 	       uparam->kup_uid, uparam->kup_gid,
 	       uparam->kup_is_root, uparam->kup_is_mdt, uparam->kup_is_ost,
 	       uparam->kup_svc_type, uparam->kup_svc, uparam->kup_nid,
-	       uparam->kup_tgt, uparam->kup_selfnid, uparam->kup_pid);
+	       uparam->kup_tgt, uparam->kup_selfnid, uparam->kup_pid,
+	       uparam->kup_cluuid[0] != '\0' ? uparam->kup_cluuid : "<unset>");
 	return 0;
 }
 
@@ -1145,6 +1146,8 @@ int main(int argc, char *argv[])
 	cred->lc_tgt_uuid = uparam.kup_tgt;
 	cred->lc_svc_type = uparam.kup_svc_type;
 	cred->lc_self_nid = uparam.kup_selfnid;
+	cred->lc_cluuid =
+		uparam.kup_cluuid[0] != '\0' ? uparam.kup_cluuid : NULL;
 
 	/* Is caller in different namespace? */
 	/* If passed caller's pid is 0, it means we have to stick
@@ -1270,6 +1273,7 @@ int main(int argc, char *argv[])
 				struct lgssd_ioctl_param param;
 				char outbuf[8192] = { 0 };
 				void *gss_token = NULL;
+				__s64 status;
 
 				/* get ioctl buffer from child */
 				rc = receive_from(req_fd[0], &param,
@@ -1295,13 +1299,13 @@ int main(int argc, char *argv[])
 				 * out credentials negotiation: as it runs in
 				 * a container, it might not be able to
 				 * perform ioctl */
-				rc = gss_do_ioctl(&param);
+				rc = gss_do_ioctl(&param, &status);
 				if (rc != 0)
 					goto out_token;
 
 				/* send ioctl status to child */
-				rc = send_to(reply_fd[1], &param.status,
-					     sizeof(param.status));
+				rc = send_to(reply_fd[1], &status,
+					     sizeof(status));
 				if (rc != 0)
 					goto out_token;
 				/* send reply buffer to child */

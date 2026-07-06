@@ -20,7 +20,7 @@
 
 struct kmem_cache *lqe_kmem;
 
-struct lu_kmem_descr lquota_caches[] = {
+static struct lu_kmem_descr lquota_caches[] = {
 	{
 		.ckd_cache = &lqe_kmem,
 		.ckd_name  = "lqe_kmem",
@@ -60,18 +60,20 @@ static inline __u32 qtype2acct_oid(int qtype)
 }
 
 /**
- * Look-up accounting object to collect space usage information for user
- * or group.
+ * acct_obj_lookup() - Look-up accounting object to collect space usage
+ *                     information for user or group.
+ * @env: is the environment passed by the caller
+ * @dev: is the dt_device storing the accounting object
+ * @type: is the quota type, either USRQUOTA or GRPQUOTA
  *
- * \param env  - is the environment passed by the caller
- * \param dev  - is the dt_device storing the accounting object
- * \param type - is the quota type, either USRQUOTA or GRPQUOTA
+ * Return dt_object on success or %-ENOENT if not found
  */
 struct dt_object *acct_obj_lookup(const struct lu_env *env,
 				  struct dt_device *dev, int type)
 {
 	struct lquota_thread_info	*qti = lquota_info(env);
 	struct dt_object		*obj = NULL;
+
 	ENTRY;
 
 	lu_local_obj_fid(&qti->qti_fid, qtype2acct_oid(type));
@@ -92,8 +94,7 @@ struct dt_object *acct_obj_lookup(const struct lu_env *env,
 		/* set up indexing operations */
 		rc = obj->do_ops->do_index_try(env, obj, &dt_acct_features);
 		if (rc) {
-			CERROR("%s: failed to set up indexing operations for %s"
-			       " acct object rc:%d\n",
+			CERROR("%s: failed to set up indexing operations for %s acct object rc:%d\n",
 			       dev->dd_lu_dev.ld_obd->obd_name,
 			       qtype_name(type), rc);
 			dt_object_put(env, obj);
@@ -104,12 +105,14 @@ struct dt_object *acct_obj_lookup(const struct lu_env *env,
 }
 
 /**
- * Initialize slave index object to collect local quota limit for user or group.
+ * quota_obj_lookup() - Initialize slave index object to collect local quota
+ *                      limit for user or group.
+ * @env: is the environment passed by the caller
+ * @dev: is the dt_device storing the slave index object
+ * @pool: is the pool type, either LQUOTA_RES_MD or LQUOTA_RES_DT
+ * @type: is the quota type, either USRQUOTA or GRPQUOTA
  *
- * \param env - is the environment passed by the caller
- * \param dev - is the dt_device storing the slave index object
- * \param pool - is the pool type, either LQUOTA_RES_MD or LQUOTA_RES_DT
- * \param type - is the quota type, either USRQUOTA or GRPQUOTA
+ * Return dt_object on success or %-ENOENT if not found
  */
 static struct dt_object *quota_obj_lookup(const struct lu_env *env,
 					  struct dt_device *dev, int pool,
@@ -118,6 +121,7 @@ static struct dt_object *quota_obj_lookup(const struct lu_env *env,
 	struct lquota_thread_info	*qti = lquota_info(env);
 	struct dt_object		*obj = NULL;
 	int				 is_md;
+
 	ENTRY;
 
 	is_md = lu_device_is_md(dev->dd_lu_dev.ld_site->ls_top_dev);
@@ -147,8 +151,7 @@ static struct dt_object *quota_obj_lookup(const struct lu_env *env,
 		rc = obj->do_ops->do_index_try(env, obj,
 					       &dt_quota_slv_features);
 		if (rc) {
-			CERROR("%s: failed to set up indexing operations for %s"
-			       " slave index object rc:%d\n",
+			CERROR("%s: failed to set up indexing operations for %s slave index object rc:%d\n",
 			       dev->dd_lu_dev.ld_obd->obd_name,
 			       qtype_name(type), rc);
 			dt_object_put(env, obj);
@@ -171,9 +174,9 @@ static struct dt_object *quota_obj_lookup(const struct lu_env *env,
  * \param is_md	  - true to iterate LQUOTA_MD quota settings
  */
 int lquota_obj_iter(const struct lu_env *env, struct dt_device *dev,
-		    struct dt_object *obj, struct lquota_entry *lqe_def,
-		    struct obd_quotactl *oqctl, char *buf, int size,
-		    bool is_glb, bool is_md)
+		    struct dt_object *obj, struct lu_nodemap *nodemap,
+		    struct lquota_entry *lqe_def, struct obd_quotactl *oqctl,
+		    char *buf, int size, bool is_glb, bool is_md)
 {
 	struct lquota_thread_info *qti = lquota_info(env);
 	const struct dt_it_ops *iops;
@@ -221,6 +224,8 @@ int lquota_obj_iter(const struct lu_env *env, struct dt_device *dev,
 		offset = oqctl->qc_iter_dt_offset;
 
 	while ((size - cur) > (sizeof(__u64) + rec_size)) {
+		__u32 orig_id, cli_id, fs_id;
+
 		if (!skip)
 			goto get_setting;
 
@@ -264,11 +269,28 @@ get_setting:
 			GOTO(out_fini, rc);
 		}
 
+		orig_id = *(__u64 *)key;
 		if (oqctl->qc_iter_qid_end != 0 &&
-		    (*((__u64 *)key) < oqctl->qc_iter_qid_start ||
-		     *((__u64 *)key) > oqctl->qc_iter_qid_end))
+		    (orig_id < oqctl->qc_iter_qid_start ||
+		     orig_id > oqctl->qc_iter_qid_end))
 			goto next;
 
+		/* This place could be optimised for a case when trusted=0.
+		 * In a such case we should return only two records for ROOT and
+		 * for the squashed id.
+		 */
+		cli_id = nodemap_map_id(nodemap, oqctl->qc_type,
+					NODEMAP_FS_TO_CLIENT,
+					orig_id);
+		fs_id = nodemap_map_id(nodemap, oqctl->qc_type,
+				       NODEMAP_CLIENT_TO_FS, cli_id);
+		/* If remapped fs id does not match original id, it means the id
+		 * is squashed and does correspond to the squashed value.
+		 */
+		if (fs_id != orig_id)
+			goto next;
+
+		*(__u64 *)key = cli_id;
 		memcpy(buf + cur, key, sizeof(__u64));
 		cur += sizeof(__u64);
 
@@ -340,13 +362,16 @@ out_fini:
  * \param oqctl - is the quotactl request
  */
 int lquotactl_slv(const struct lu_env *env, struct dt_device *dev,
-		  struct obd_quotactl *oqctl, char *buffer, int size)
+		  struct lu_nodemap *nodemap, struct obd_quotactl *oqctl,
+		  char *buffer)
 {
 	struct lquota_thread_info *qti = lquota_info(env);
-	__u64				 key;
-	struct dt_object		*obj, *obj_aux = NULL;
-	struct obd_dqblk		*dqblk = &oqctl->qc_dqblk;
-	int				 rc;
+	struct dt_object *obj, *obj_aux = NULL;
+	struct obd_dqblk *dqblk = &oqctl->qc_dqblk;
+	int size = buffer == NULL ? 0 : LQUOTA_ITER_BUFLEN;
+	__u64 key;
+	int rc;
+
 	ENTRY;
 
 	if (oqctl->qc_cmd != Q_GETOQUOTA &&
@@ -374,11 +399,11 @@ int lquotactl_slv(const struct lu_env *env, struct dt_device *dev,
 
 	if (oqctl->qc_cmd == LUSTRE_Q_ITEROQUOTA) {
 		if (lu_device_is_md(dev->dd_lu_dev.ld_site->ls_top_dev))
-			rc = lquota_obj_iter(env, dev, obj, NULL, oqctl, buffer,
-					     size, false, true);
+			rc = lquota_obj_iter(env, dev, obj, nodemap, NULL,
+					     oqctl, buffer, size, false, true);
 		else
-			rc = lquota_obj_iter(env, dev, obj, NULL, oqctl, buffer,
-					     size, false, false);
+			rc = lquota_obj_iter(env, dev, obj, nodemap, NULL,
+					     oqctl, buffer, size, false, false);
 
 		GOTO(out, rc);
 	}
@@ -480,9 +505,13 @@ static inline int lqtype2qtype(int lqtype)
 }
 
 /**
- * Helper routine returning the FID associated with the global index storing
- * quota settings for default storage pool, resource type \pool_type and
- * the quota type \quota_type.
+ * lquota_generate_fid() - Helper routine returning the FID associated with the
+ *                         global index storing quota settings for default
+ *                         storage pool, resource type @pool_type and the quota
+ *                         type @quota_type.
+ * @fid: FID associated with global index [out]
+ * @pool_type: Quota resource type
+ * @quota_type: Quota types (URS, GRP, PRJ)
  */
 void lquota_generate_fid(struct lu_fid *fid, int pool_type, int quota_type)
 {
@@ -494,14 +523,22 @@ void lquota_generate_fid(struct lu_fid *fid, int pool_type, int quota_type)
 }
 
 /**
- * Helper routine used to extract pool type and quota type from a
- * given FID.
+ * lquota_extract_fid() - Helper routine used to extract pool type and quota
+ *                        type from a given FID.
+ * @fid: FID to extrace quota and pool type
+ * @pool_type: Quota resource type
+ * @quota_type: Quota types (URS, GRP, PRJ)
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 int lquota_extract_fid(const struct lu_fid *fid,
 		       enum lquota_res_type *pool_type,
 		       enum lquota_type *quota_type)
 {
 	unsigned int lqtype;
+
 	ENTRY;
 
 	if (fid->f_seq != FID_SEQ_QUOTA_GLB)
@@ -529,6 +566,7 @@ int lquota_extract_fid(const struct lu_fid *fid,
 static int __init lquota_init(void)
 {
 	int	rc;
+
 	ENTRY;
 
 	rc = libcfs_setup();
@@ -574,5 +612,5 @@ MODULE_DESCRIPTION("Lustre Quota");
 MODULE_VERSION(LUSTRE_VERSION_STRING);
 MODULE_LICENSE("GPL");
 
-module_init(lquota_init);
+late_initcall_sync(lquota_init);
 module_exit(lquota_exit);

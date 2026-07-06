@@ -38,24 +38,19 @@
 #include <linux/uio.h>
 #include <linux/unistd.h>
 #include <linux/hashtable.h>
-#include <net/sock.h>
-#include <net/tcp.h>
+#include <lustre_compat/net/sock.h>
+#include <lustre_compat/net/tcp.h>
 
-#include <lnet/lib-lnet.h>
-#include <lnet/socklnd.h>
+#include <linux/libcfs/libcfs.h>
+#include <linux/lnet/lib-lnet.h>
 
-#include <libcfs/linux/linux-net.h>
-
-#ifndef NETIF_F_CSUM_MASK
-# define NETIF_F_CSUM_MASK NETIF_F_ALL_CSUM
-#endif
+#include "socklnd-idl.h"
 
 /* assume one thread for each connection type */
 #define SOCKNAL_NSCHEDS		3
 #define SOCKNAL_NSCHEDS_HIGH	(SOCKNAL_NSCHEDS << 1)
 
 #define SOCKNAL_PEER_HASH_BITS	7	/* log2 of # peer_ni lists */
-#define SOCKNAL_INSANITY_RECONN	5000	/* connd trying on reconn infinitely */
 #define SOCKNAL_ENOMEM_RETRY	1	/* seconds between retries */
 
 #define SOCKNAL_SINGLE_FRAG_TX      0	/* disable multi-fragment sends */
@@ -281,14 +276,6 @@ struct ksock_tx {			/* transmit packet */
 
 #define KSOCK_NOOP_TX_SIZE  ((int)offsetof(struct ksock_tx, tx_payload[0]))
 
-/* space for the rx frag descriptors; we either read a single contiguous
- * header, or up to LNET_MAX_IOV frags of payload of either type.
- */
-union ksock_rxiovspace {
-	struct kvec	iov[LNET_MAX_IOV];
-	struct bio_vec	kiov[LNET_MAX_IOV];
-};
-
 #define SOCKNAL_RX_KSM_HEADER   1               /* reading ksock message header */
 #define SOCKNAL_RX_LNET_HEADER  2               /* reading lnet message header */
 #define SOCKNAL_RX_PARSE        3               /* Calling lnet_parse() */
@@ -324,28 +311,24 @@ struct ksock_conn {
 	/* where I enq waiting input or a forwarding descriptor */
 	struct list_head	ksnc_rx_list;
 	time64_t		ksnc_rx_deadline; /* when (in seconds) receive times out */
-	__u8			ksnc_rx_started;  /* started receiving a msg */
-	__u8			ksnc_rx_ready;    /* data ready to read */
-	__u8			ksnc_rx_scheduled;/* being progressed */
-	__u8			ksnc_rx_state;    /* what is being read */
-	int			ksnc_rx_nob_left; /* # bytes to next hdr/body */
-	int			ksnc_rx_nob_wanted; /* bytes actually wanted */
-	int			ksnc_rx_niov;     /* # kvec frags */
-	struct			kvec *ksnc_rx_iov; /* the kvec frags */
-	int			ksnc_rx_nkiov;    /* # page frags */
-	struct bio_vec		*ksnc_rx_kiov;     /* the page frags */
-	union ksock_rxiovspace	ksnc_rx_iov_space;/* for frag descriptors */
-	__u32			ksnc_rx_csum;     /* partial checksum for
-						   * incoming data */
-	struct lnet_msg		*ksnc_lnet_msg;    /* rx lnet_finalize arg */
-	struct ksock_msg	ksnc_msg;	/* incoming message buffer:
-						 * V2.x message takes the
-						 * whole struct
-						 * V1.x message is a bare
-						 * struct lnet_hdr_nid4, it's
-						 * stored in
-						 * ksnc_msg.ksm_u.lnetmsg
-						 */
+	u8			ksnc_rx_started;	/* started receiving a msg */
+	u8			ksnc_rx_ready;		/* data ready to read */
+	u8			ksnc_rx_scheduled;	/* being progressed */
+	u8			ksnc_rx_state;		/* what is being read */
+	int			ksnc_rx_nob_left;	/* # bytes to next hdr/body */
+	struct iov_iter		ksnc_rx_to;		/* copy destination */
+	struct kvec		ksnc_rx_iov_space[LNET_MAX_IOV]; /* space for frag descriptors */
+	u32			ksnc_rx_csum;		/* partial checksum for
+							 * incoming data
+							 */
+	struct lnet_msg		*ksnc_lnet_msg;		/* rx lnet_finalize arg */
+	/* incoming message buffer:
+	 * V2.x message takes the whole struct
+	 * V1.x message is a bare struct lnet_hdr_nid4, it's stored in
+	 * ksnc_msg.ksm_u.lnetmsg
+	 */
+	struct ksock_msg	ksnc_msg;
+
 	/* -- WRITER -- */
 	/* where I enq waiting for output space */
 	struct list_head	ksnc_tx_list;
@@ -368,7 +351,7 @@ struct ksock_conn {
 };
 
 #define SOCKNAL_CONN_COUNT_MAX_BITS	8	/* max conn count bits */
-#define SOCKNAL_MAX_BUSY_RETRIES	3
+#define SOCKNAL_MAX_RETRIES		3
 
 struct ksock_conn_cb {
 	struct list_head	ksnr_connd_list;/* chain on ksnr_connd_routes */
@@ -390,9 +373,9 @@ struct ksock_conn_cb {
 	unsigned int		ksnr_max_conns; /* conns_per_peer at peer
 						 * creation
 						 */
-	unsigned int		ksnr_busy_retry_count;/* counts retry attempts
-						       * due to EALREADY rc
-						       */
+	unsigned int		ksnr_retry_count;/* counts retry attempts
+						  * due to EALREADY rc
+						  */
 };
 
 #define SOCKNAL_KEEPALIVE_PING          1       /* cookie for keepalive ping */
@@ -476,15 +459,6 @@ extern const struct ksock_proto ksocknal_protocol_v4x;
 #define KSOCK_PROTO_V1_MAJOR    LNET_PROTO_TCP_VERSION_MAJOR
 #define KSOCK_PROTO_V1_MINOR    LNET_PROTO_TCP_VERSION_MINOR
 #define KSOCK_PROTO_V1          KSOCK_PROTO_V1_MAJOR
-
-#ifndef CPU_MASK_NONE
-#define CPU_MASK_NONE   0UL
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0)
-#undef netdev_notifier_info_to_dev
-#define netdev_notifier_info_to_dev(ndev) ndev
-#endif
 
 static inline __u32 ksocknal_csum(__u32 crc, unsigned char const *p, size_t len)
 {
@@ -601,13 +575,14 @@ static inline int ksocknal_conns_per_peer(void)
 	return *ksocknal_tunables.ksnd_conns_per_peer ?: 1;
 }
 
+int ksocklnd_lookup_conns_per_peer(struct lnet_ni *ni);
+
 int ksocknal_startup(struct lnet_ni *ni);
 void ksocknal_shutdown(struct lnet_ni *ni);
 int ksocknal_ctl(struct lnet_ni *ni, unsigned int cmd, void *arg);
 int ksocknal_send(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg);
 int ksocknal_recv(struct lnet_ni *ni, void *private, struct lnet_msg *lntmsg,
-		  int delayed, unsigned int niov, struct bio_vec *kiov,
-		  unsigned int offset, unsigned int mlen, unsigned int rlen);
+		  int delayed, struct iov_iter *to, unsigned int rlen);
 int ksocknal_accept(struct lnet_ni *ni, struct socket *sock);
 
 unsigned int ksocknal_get_conn_count_by_type(struct ksock_conn_cb *conn_cb,
@@ -674,20 +649,16 @@ extern void ksocknal_lib_reset_callback(struct socket *sock,
 extern void ksocknal_lib_push_conn(struct ksock_conn *conn);
 extern int ksocknal_lib_get_conn_addrs(struct ksock_conn *conn);
 extern int ksocknal_lib_setup_sock(struct socket *sock, struct lnet_ni *ni);
-extern int ksocknal_lib_send_hdr(struct ksock_conn *conn, struct ksock_tx *tx,
-				 struct kvec *scratch_iov);
-extern int ksocknal_lib_send_kiov(struct ksock_conn *conn, struct ksock_tx *tx,
-				  struct kvec *scratch_iov);
-extern void ksocknal_lib_eager_ack(struct ksock_conn *conn);
-extern int ksocknal_lib_recv_iov(struct ksock_conn *conn,
-				 struct kvec *scratchiov);
-extern int ksocknal_lib_recv_kiov(struct ksock_conn *conn, struct page **pages,
-		       struct kvec *scratchiov);
+int ksocknal_lib_send_hdr(struct ksock_conn *conn, struct ksock_tx *tx);
+int ksocknal_lib_send_kiov(struct ksock_conn *conn, struct ksock_tx *tx);
+void ksocknal_lib_eager_ack(struct ksock_conn *conn);
+int ksocknal_lib_recv(struct ksock_conn *conn);
 extern int ksocknal_lib_get_conn_tunables(struct ksock_conn *conn, int *txmem,
 					  int *rxmem, int *nagle);
 
 extern int ksocknal_tunables_init(void);
-extern void ksocknal_tunables_setup(struct lnet_ni *ni);
+void ksocknal_tunables_setup(struct lnet_lnd_tunables *lnd_tunables,
+			     struct lnet_ioctl_config_lnd_cmn_tunables *net_tunables);
 
 extern void ksocknal_lib_csum_tx(struct ksock_tx *tx);
 

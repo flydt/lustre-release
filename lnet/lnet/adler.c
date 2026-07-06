@@ -55,7 +55,11 @@ static int adler32_update(struct shash_desc *desc, const u8 *data,
 static int __adler32_finup(u32 *cksump, const u8 *data, unsigned int len,
 			   u8 *out)
 {
-	*(u32 *)out = zlib_adler32(*cksump, data, len);
+	if (data == NULL)
+		*(u32 *)out = *cksump;
+	else
+		*(u32 *)out = zlib_adler32(*cksump, data, len);
+
 	return 0;
 }
 
@@ -92,9 +96,7 @@ static struct shash_alg alg = {
 		.cra_name		= "adler32",
 		.cra_driver_name	= "adler32-zlib",
 		.cra_priority		= 100,
-#ifdef CRYPTO_ALG_OPTIONAL_KEY
 		.cra_flags		= CRYPTO_ALG_OPTIONAL_KEY,
-#endif
 		.cra_blocksize		= CHKSUM_BLOCK_SIZE,
 		.cra_ctxsize		= sizeof(u32),
 		.cra_module		= NULL,

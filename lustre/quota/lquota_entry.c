@@ -24,12 +24,13 @@ MODULE_PARM_DESC(hash_lqs_cur_bits, "the current bits of lqe hash");
 static unsigned
 lqe64_hash_hash(struct cfs_hash *hs, const void *key, const unsigned int bits)
 {
-	return cfs_hash_64(*((__u64 *)key), bits);
+	return hash_64(*((__u64 *)key), bits);
 }
 
 static void *lqe64_hash_key(struct hlist_node *hnode)
 {
 	struct lquota_entry *lqe;
+
 	lqe = hlist_entry(hnode, struct lquota_entry, lqe_hash);
 	return &lqe->lqe_id.qid_uid;
 }
@@ -37,8 +38,9 @@ static void *lqe64_hash_key(struct hlist_node *hnode)
 static int lqe64_hash_keycmp(const void *key, struct hlist_node *hnode)
 {
 	struct lquota_entry *lqe;
+
 	lqe = hlist_entry(hnode, struct lquota_entry, lqe_hash);
-	return (lqe->lqe_id.qid_uid == *((__u64*)key));
+	return (lqe->lqe_id.qid_uid == *((__u64 *)key));
 }
 
 static void *lqe_hash_object(struct hlist_node *hnode)
@@ -49,6 +51,7 @@ static void *lqe_hash_object(struct hlist_node *hnode)
 static void lqe_hash_get(struct cfs_hash *hs, struct hlist_node *hnode)
 {
 	struct lquota_entry *lqe;
+
 	lqe = hlist_entry(hnode, struct lquota_entry, lqe_hash);
 	lqe_getref(lqe);
 }
@@ -56,6 +59,7 @@ static void lqe_hash_get(struct cfs_hash *hs, struct hlist_node *hnode)
 static void lqe_hash_put_locked(struct cfs_hash *hs, struct hlist_node *hnode)
 {
 	struct lquota_entry *lqe;
+
 	lqe = hlist_entry(hnode, struct lquota_entry, lqe_hash);
 	lqe_putref(lqe);
 }
@@ -66,7 +70,8 @@ static void lqe_hash_exit(struct cfs_hash *hs, struct hlist_node *hnode)
 }
 
 /* lqe hash methods for 64-bit uid/gid, new hash functions would have to be
- * defined for per-directory quota relying on a 128-bit FID */
+ * defined for per-directory quota relying on a 128-bit FID
+ */
 static struct cfs_hash_ops lqe64_hash_ops = {
 	.hs_hash       = lqe64_hash_hash,
 	.hs_key        = lqe64_hash_key,
@@ -132,16 +137,15 @@ static int lqe_iter_cb(struct cfs_hash *hs, struct cfs_hash_bd *bd,
 }
 
 /**
- * Cleanup the entries in the hashtable
- *
- * \param hash     - hash table which stores quota entries
- * \param free_all - free all entries or only free the entries
- *                   without quota enforce ?
+ * lqe_cleanup() - Cleanup the entries in the hashtable
+ * @hash: hash table which stores quota entries
+ * @free_all: free all entries or only free the entries without quota enforce ?
  */
 static void lqe_cleanup(struct cfs_hash *hash, bool free_all)
 {
 	struct lqe_iter_data	d;
 	int			repeat = 0;
+
 	ENTRY;
 retry:
 	memset(&d, 0, sizeof(d));
@@ -155,8 +159,8 @@ retry:
 	 * If the per-fs quota updating thread is still holding
 	 * some entries, we just wait for it's finished. */
 	if (free_all && d.lid_inuse) {
-		CDEBUG(D_QUOTA, "Hash:%p has entries inuse: inuse:%lu, "
-			"freed:%lu, repeat:%u\n", hash,
+		CDEBUG(D_QUOTA, "Hash:%p has entries inuse: inuse:%lu, freed:%lu, repeat:%u\n",
+			hash,
 			d.lid_inuse, d.lid_freed, repeat);
 		repeat++;
 		schedule_timeout_interruptible(cfs_time_seconds(1));
@@ -165,20 +169,19 @@ retry:
 	EXIT;
 }
 
-/*
- * Allocate a new lquota site.
+/**
+ * lquota_site_alloc() - Allocate a new lquota site.
+ * @env: the environment passed by the caller
+ * @parent: is a pointer to the parent structure, either a qmt_pool_info
+ *          structure on the master or a qsd_qtype_info structure on the slave.
+ * @is_master: is set when the site belongs to a QMT.
+ * @qtype: is the quota type managed by this site
+ * @ops: is the quota entry operation vector to be used for quota entry
+ *       belonging to this site.
  *
- * \param env    - the environment passed by the caller
- * \param parent - is a pointer to the parent structure, either a qmt_pool_info
- *                 structure on the master or a qsd_qtype_info structure on the
- *                 slave.
- * \param is_master - is set when the site belongs to a QMT.
- * \param qtype     - is the quota type managed by this site
- * \param ops       - is the quota entry operation vector to be used for quota
- *                    entry belonging to this site.
- *
- * \retval 0     - success
- * \retval -ve   - failure
+ * Return:
+ * * %0 success
+ * * %negative failure
  */
 struct lquota_site *lquota_site_alloc(const struct lu_env *env, void *parent,
 				      bool is_master, short qtype,
@@ -186,6 +189,7 @@ struct lquota_site *lquota_site_alloc(const struct lu_env *env, void *parent,
 {
 	struct lquota_site	*site;
 	char			 hashname[15];
+
 	ENTRY;
 
 	if (qtype >= LL_MAXQUOTAS)
@@ -204,7 +208,7 @@ struct lquota_site *lquota_site_alloc(const struct lu_env *env, void *parent,
 	/* allocate hash table */
 	memset(hashname, 0, sizeof(hashname));
 	snprintf(hashname, sizeof(hashname), "LQUOTA_HASH%hu", qtype);
-	site->lqs_hash= cfs_hash_create(hashname, hash_lqs_cur_bits,
+	site->lqs_hash = cfs_hash_create(hashname, hash_lqs_cur_bits,
 					HASH_LQE_MAX_BITS,
 					min(hash_lqs_cur_bits,
 					    HASH_LQE_BKT_BITS),
@@ -223,14 +227,14 @@ struct lquota_site *lquota_site_alloc(const struct lu_env *env, void *parent,
 	RETURN(site);
 }
 
-/*
- * Destroy a lquota site.
+/**
+ * lquota_site_free() - Destroy a lquota site.
+ * @env:  - the environment passed by the caller
+ * @site: - lquota site to be destroyed
  *
- * \param env  - the environment passed by the caller
- * \param site - lquota site to be destroyed
- *
- * \retval 0     - success
- * \retval -ve   - failure
+ * Return:
+ * * %0 success
+ * * %negative failure
  */
 void lquota_site_free(const struct lu_env *env, struct lquota_site *site)
 {
@@ -244,12 +248,12 @@ void lquota_site_free(const struct lu_env *env, struct lquota_site *site)
 
 /*
  * Initialize qsd/qmt-specific fields of quota entry.
- *
- * \param lqe - is the quota entry to initialize
+ * @lqe: - is the quota entry to initialize
  */
 static void lqe_init(struct lquota_entry *lqe)
 {
 	struct lquota_site *site;
+
 	ENTRY;
 
 	LASSERT(lqe != NULL);
@@ -257,24 +261,28 @@ static void lqe_init(struct lquota_entry *lqe)
 	LASSERT(site != NULL);
 	LASSERT(site->lqs_ops->lqe_init != NULL);
 
-	LQUOTA_DEBUG(lqe, "init");
-
 	site->lqs_ops->lqe_init(lqe, site->lqs_parent);
 }
 
 /*
+ * lqe_read() - Update a lquota entry.
+ * @env: the environment passed by the caller
+ * @lqe: is the quota entry to refresh
+ * @find: don't create entry on disk if true
+ *
  * Update a lquota entry. This is done by reading quota settings from the
  * on-disk index. The lquota entry must be write locked.
  *
- * \param env - the environment passed by the caller
- * \param lqe - is the quota entry to refresh
- * \param find - don't create entry on disk if true
+ * Return:
+ * * %0 success
+ * * %negative failure
  */
 static int lqe_read(const struct lu_env *env,
 		    struct lquota_entry *lqe, bool find)
 {
 	struct lquota_site	*site;
 	int			 rc;
+
 	ENTRY;
 
 	LASSERT(lqe != NULL);
@@ -293,23 +301,23 @@ static int lqe_read(const struct lu_env *env,
 }
 
 /*
- * Find or create a quota entry.
+ * lqe_locate_find() - Find or create a quota entry.
+ * @env: the environment passed by the caller
+ * @site: lquota site which stores quota entries in a hash table
+ * @qid: is the quota ID to be found/created
+ * @find: don't create lqe on disk in case of ENOENT if true
  *
- * \param env  - the environment passed by the caller
- * \param site - lquota site which stores quota entries in a hash table
- * \param qid  - is the quota ID to be found/created
- * \param find - don't create lqe on disk in case of ENOENT if true
- *
- * \retval 0     - success
- * \retval -ve   - failure
+ * Return:
+ * * %0 success
+ * * %negative failure
  */
 struct lquota_entry *lqe_locate_find(const struct lu_env *env,
 				     struct lquota_site *site,
-				     union lquota_id *qid,
-				     bool find)
+				     const union lquota_id *qid, bool find)
 {
 	struct lquota_entry	*lqe, *new = NULL;
 	int			 rc = 0;
+
 	ENTRY;
 
 	lqe = cfs_hash_lookup(site->lqs_hash, (void *)&qid->qid_uid);
@@ -320,8 +328,8 @@ struct lquota_entry *lqe_locate_find(const struct lu_env *env,
 
 	OBD_SLAB_ALLOC_PTR_GFP(new, lqe_kmem, GFP_NOFS);
 	if (new == NULL) {
-		CERROR("Fail to allocate lqe for id:%llu, "
-			"hash:%s\n", qid->qid_uid, site->lqs_hash->hs_name);
+		CERROR("Fail to allocate lqe for id:%llu, hash:%s\n",
+			qid->qid_uid, site->lqs_hash->hs_name);
 		RETURN(ERR_PTR(-ENOMEM));
 	}
 

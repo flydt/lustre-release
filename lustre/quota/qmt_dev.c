@@ -39,7 +39,7 @@
  *
  * The qmt_device_type structure is registered when the lquota module is
  * loaded and all the steps described above are automatically done when the MDT
- * set up the Quota Master Target via calls to class_attach/class_setup, see
+ * set up the Quota Master Target via calls to class_attach_name/class_setup, see
  * mdt_quota_init() for more details.
  *
  * Author: Johann Lombardi <johann.lombardi@intel.com>
@@ -70,6 +70,7 @@ static struct lu_device *qmt_device_fini(const struct lu_env *env,
 					 struct lu_device *ld)
 {
 	struct qmt_device	*qmt = lu2qmt_dev(ld);
+
 	ENTRY;
 
 	LASSERT(qmt != NULL);
@@ -131,6 +132,7 @@ static int qmt_connect_to_osd(const struct lu_env *env, struct qmt_device *qmt,
 	struct obd_device	*obd;
 	struct lu_device	*ld = qmt2lu_dev(qmt);
 	int			 rc;
+
 	ENTRY;
 
 	LASSERT(qmt->qmt_child_exp == NULL);
@@ -194,6 +196,7 @@ static int qmt_device_init0(const struct lu_env *env, struct qmt_device *qmt,
 	struct obd_type		*type;
 	char			*svname = lustre_cfg_string(cfg, 0);
 	int			 rc;
+
 	ENTRY;
 
 	if (svname == NULL)
@@ -204,6 +207,7 @@ static int qmt_device_init0(const struct lu_env *env, struct qmt_device *qmt,
 	if (rc < 0)
 		RETURN(rc);
 
+	atomic_set(&qmt->qmt_lqa_num, 0);
 	/* look-up the obd_device associated with the qmt */
 	obd = class_name2obd(qmt->qmt_svname);
 	if (obd == NULL)
@@ -292,6 +296,7 @@ static struct lu_device *qmt_device_free(const struct lu_env *env,
 					 struct lu_device *ld)
 {
 	struct qmt_device	*qmt = lu2qmt_dev(ld);
+
 	ENTRY;
 
 	LASSERT(qmt != NULL);
@@ -318,6 +323,7 @@ static struct lu_device *qmt_device_alloc(const struct lu_env *env,
 	struct qmt_device	*qmt;
 	struct lu_device	*ld;
 	int			 rc;
+
 	ENTRY;
 
 	/* allocate qmt device */
@@ -383,6 +389,7 @@ static int qmt_device_obd_connect(const struct lu_env *env,
 {
 	struct lustre_handle	conn;
 	int			rc;
+
 	ENTRY;
 
 	rc = class_connect(&conn, obd, cluuid);
@@ -402,6 +409,7 @@ static int qmt_device_obd_disconnect(struct obd_export *exp)
 {
 	struct obd_device	*obd = exp->exp_obd;
 	int			 rc;
+
 	ENTRY;
 
 	rc = class_disconnect(exp);
@@ -423,6 +431,7 @@ static const struct obd_ops qmt_obd_ops = {
 	.o_pool_rem	= qmt_pool_rem,
 	.o_pool_add	= qmt_pool_add,
 	.o_pool_del	= qmt_pool_del,
+	.o_iocontrol	= qmt_iocontrol,
 };
 
 /*
@@ -442,6 +451,7 @@ static int qmt_device_prepare(const struct lu_env *env,
 	struct qmt_device	*qmt = lu2qmt_dev(ld);
 	struct dt_object	*qmt_root;
 	int			 rc;
+
 	ENTRY;
 
 	/* initialize quota master root directory where all index files will be
@@ -457,7 +467,22 @@ static int qmt_device_prepare(const struct lu_env *env,
 
 	qmt->qmt_root = qmt_root;
 	/* initialize on-disk indexes associated with each pool */
-	rc = qmt_pool_prepare(env, qmt, qmt_root, NULL);
+	rc = qmt_pool_prepare_all(env, qmt, qmt_root);
+	if (rc)
+		RETURN(rc);
+
+	/* initialize LQA ranges from disk */
+	rc = qmt_lqa_init_from_disk(qmt);
+	if (rc) {
+		CWARN("%s: Failed to initialize LQA ranges from disk: rc = %d\n",
+		      qmt->qmt_svname, rc);
+		/* LQA failure should not prevent QMT startup */
+		rc = 0;
+	} else {
+		CDEBUG(D_QUOTA, "%s: Successfully initialized LQA ranges from disk\n",
+		       qmt->qmt_svname);
+	}
+
 	RETURN(rc);
 }
 
@@ -474,6 +499,7 @@ static const struct lu_device_operations qmt_lu_ops = {
 int qmt_glb_init(void)
 {
 	int rc;
+
 	ENTRY;
 
 	rc = class_register_type(&qmt_obd_ops, NULL, true,

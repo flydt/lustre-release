@@ -57,6 +57,8 @@
 #include <lustre_quota.h>
 #include <lustre_nodemap.h>
 #include <lustre_log.h>
+#include <llog_swab.h>
+#include <lustre_swab.h>
 #include <linux/falloc.h>
 
 #include "ofd_internal.h"
@@ -75,18 +77,19 @@ static struct lu_kmem_descr ofd_caches[] = {
 };
 
 /**
- * Connect OFD to the next device in the stack.
+ * ofd_connect_to_next() - Connect OFD to the next device in the stack.
+ * @env: execution environment
+ * @m: OFD device
+ * @next: name of next device in the stack
+ * @exp: export to return
  *
  * This function is used for device stack configuration and links OFD
  * device with bottom OSD device.
  *
- * \param[in]  env	execution environment
- * \param[in]  m	OFD device
- * \param[in]  next	name of next device in the stack
- * \param[out] exp	export to return
  *
- * \retval		0 and export in \a exp if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 and export in @exp if successful
+ * * %negative value on error
  */
 static int ofd_connect_to_next(const struct lu_env *env, struct ofd_device *m,
 			       const char *next, struct obd_export **exp)
@@ -94,6 +97,7 @@ static int ofd_connect_to_next(const struct lu_env *env, struct ofd_device *m,
 	struct obd_connect_data *data = NULL;
 	struct obd_device	*obd;
 	int			 rc;
+
 	ENTRY;
 
 	OBD_ALLOC_PTR(data);
@@ -129,16 +133,17 @@ out:
 }
 
 /**
- * Initialize stack of devices.
+ * ofd_stack_init() - Initialize stack of devices.
+ * @env: execution environment
+ * @m: OFD device
+ * @cfg: Lustre config for this server
+ * @lmd_flags: mount flags
  *
  * This function initializes OFD-OSD device stack to serve OST requests
  *
- * \param[in] env	execution environment
- * \param[in] m		OFD device
- * \param[in] cfg	Lustre config for this server
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_stack_init(const struct lu_env *env,
 			  struct ofd_device *m, struct lustre_cfg *cfg,
@@ -193,17 +198,17 @@ static int ofd_stack_init(const struct lu_env *env,
 }
 
 /**
- * Finalize the device stack OFD-OSD.
+ * ofd_stack_fini() - Finalize the device stack OFD-OSD.
+ * @env: execution environment
+ * @m: OFD device
+ * @top: top device of stack
  *
  * This function cleans OFD-OSD device stack and
  * disconnects OFD from the OSD.
  *
- * \param[in] env	execution environment
- * \param[in] m		OFD device
- * \param[in] top	top device of stack
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static void ofd_stack_fini(const struct lu_env *env, struct ofd_device *m,
 			   struct lu_device *top)
@@ -218,9 +223,9 @@ static void ofd_stack_fini(const struct lu_env *env, struct ofd_device *m,
 	lu_site_purge(env, top->ld_site, ~0);
 	/* process cleanup, pass mdt obd name to get obd umount flags */
 	lustre_cfg_bufs_reset(&bufs, obd->obd_name);
-	if (obd->obd_force)
+	if (test_bit(OBDF_FORCE, obd->obd_flags))
 		strcat(flags, "F");
-	if (obd->obd_fail)
+	if (test_bit(OBDF_FAIL, obd->obd_flags))
 		strcat(flags, "A");
 	lustre_cfg_bufs_set_string(&bufs, 1, flags);
 	OBD_ALLOC(lcfg, lustre_cfg_len(bufs.lcfg_bufcount, bufs.lcfg_buflen));
@@ -251,6 +256,7 @@ static void ofd_stack_pre_fini(const struct lu_env *env, struct ofd_device *m,
 {
 	struct lustre_cfg_bufs bufs;
 	struct lustre_cfg *lcfg;
+
 	ENTRY;
 
 	LASSERT(top);
@@ -277,7 +283,8 @@ static struct cfg_interop_param ofd_interop_param[] = {
 };
 
 /**
- * Check if parameters are symlinks to the OSD.
+ * match_symlink_param() - Check if parameters are symlinks to the OSD.
+ * @param: parameters to check
  *
  * Some parameters were moved from ofd to osd and only their
  * symlinks were kept in ofd by LU-3106. They are:
@@ -290,10 +297,7 @@ static struct cfg_interop_param ofd_interop_param[] = {
  * is added for them to avoid "unknown param" errors. If they are matched
  * in this check, they will be passed to the OSD directly.
  *
- * \param[in] param	parameters to check
- *
- * \retval		true if param is symlink to OSD param
- *			false otherwise
+ * Return %true if param is symlink to OSD param %false otherwise
  */
 static bool match_symlink_param(char *param)
 {
@@ -313,17 +317,17 @@ static bool match_symlink_param(char *param)
 }
 
 /**
- * Process various configuration parameters.
+ * ofd_process_config() - Process various configuration parameters.
+ * @env: execution environment
+ * @d: LU device of OFD
+ * @cfg: parameters to process
  *
  * This function is used by MGS to process specific configurations and
  * pass them through to the next device in server stack, i.e. the OSD.
  *
- * \param[in] env	execution environment
- * \param[in] d		LU device of OFD
- * \param[in] cfg	parameters to process
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_process_config(const struct lu_env *env, struct lu_device *d,
 			      struct lustre_cfg *cfg)
@@ -354,8 +358,8 @@ static int ofd_process_config(const struct lu_env *env, struct lu_device *d,
 		if (ptr != NULL) {
 			if (ptr->new_param == NULL) {
 				rc = 0;
-				CWARN("For interoperability, skip this %s."
-				      " It is obsolete.\n", ptr->old_param);
+				CWARN("For interoperability, skip this %s. It is obsolete.\n",
+				      ptr->old_param);
 				break;
 			}
 
@@ -400,16 +404,17 @@ static int ofd_process_config(const struct lu_env *env, struct lu_device *d,
 }
 
 /**
- * Implementation of lu_object_operations::loo_object_init for OFD
+ * ofd_object_init() - Implementation of lu_object_operations::loo_object_init
+ *                     for OFD
+ * @env: execution environment
+ * @o: lu_object of OFD object
+ * @conf: additional configuration parameters, not used here
  *
  * Allocate just the next object (OSD) in stack.
  *
- * \param[in] env	execution environment
- * \param[in] o		lu_object of OFD object
- * \param[in] conf	additional configuration parameters, not used here
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_object_init(const struct lu_env *env, struct lu_object *o,
 			   const struct lu_object_conf *conf)
@@ -443,12 +448,11 @@ static void ofd_object_free_rcu(struct rcu_head *head)
 }
 
 /**
- * Implementation of lu_object_operations::loo_object_free.
+ * ofd_object_free() - Implementation of lu_object_operations::loo_object_free.
+ * @env: execution environment
+ * @o: LU object of OFD object
  *
  * Finish OFD object lifecycle and free its memory.
- *
- * \param[in] env	execution environment
- * \param[in] o		LU object of OFD object
  */
 static void ofd_object_free(const struct lu_env *env, struct lu_object *o)
 {
@@ -469,18 +473,18 @@ static void ofd_object_free(const struct lu_env *env, struct lu_object *o)
 }
 
 /**
- * Implementation of lu_object_operations::loo_object_print.
+ * ofd_object_print() -Implementation of lu_object_operations::loo_object_print.
+ * @env: execution environment
+ * @cookie: opaque data passed to the printer function
+ * @p: printer function to use
+ * @o: LU object of OFD object
  *
  * Print OFD part of compound OFD-OSD object. See lu_object_print() and
  * LU_OBJECT_DEBUG() for more details about the compound object printing.
  *
- * \param[in] env	execution environment
- * \param[in] cookie	opaque data passed to the printer function
- * \param[in] p		printer function to use
- * \param[in] o		LU object of OFD object
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_object_print(const struct lu_env *env, void *cookie,
 			    lu_printer_t p, const struct lu_object *o)
@@ -495,17 +499,17 @@ static const struct lu_object_operations ofd_obj_ops = {
 };
 
 /**
- * Implementation of lu_device_operations::lod_object_alloc.
+ * ofd_object_alloc() - Implementation of lu_device_operations::lod_object_alloc
+ * @env: execution environment
+ * @hdr: object header, NULL for OFD
+ * @d: lu_device
  *
  * This function allocates OFD part of compound OFD-OSD object and
  * initializes its header, because OFD is the top device in stack
  *
- * \param[in] env	execution environment
- * \param[in] hdr	object header, NULL for OFD
- * \param[in] d		lu_device
- *
- * \retval		allocated object if successful
- * \retval		NULL value on failed allocation
+ * Return:
+ * * %allocated object if successful
+ * * %NULL value on failed allocation
  */
 static struct lu_object *ofd_object_alloc(const struct lu_env *env,
 					  const struct lu_object_header *hdr,
@@ -533,17 +537,17 @@ static struct lu_object *ofd_object_alloc(const struct lu_env *env,
 }
 
 /**
- * Return the result of LFSCK run to the OFD.
+ * ofd_lfsck_out_notify() - Return the result of LFSCK run to the OFD.
+ * @env: execution environment
+ * @data: pointer to the OFD device
+ * @event: LFSCK event type
  *
  * Notify OFD about result of LFSCK run. That may block the new object
  * creation until problem is fixed by LFSCK.
  *
- * \param[in] env	execution environment
- * \param[in] data	pointer to the OFD device
- * \param[in] event	LFSCK event type
- *
- * \retval		0 if successful
- * \retval		negative value on unknown event
+ * Return:
+ * * %0 if successful
+ * * %negative value on unknown event
  */
 static int ofd_lfsck_out_notify(const struct lu_env *env, void *data,
 				enum lfsck_events event)
@@ -553,8 +557,7 @@ static int ofd_lfsck_out_notify(const struct lu_env *env, void *data,
 
 	switch (event) {
 	case LE_LASTID_REBUILDING:
-		CWARN("%s: Found crashed LAST_ID, deny creating new OST-object "
-		      "on the device until the LAST_ID rebuilt successfully.\n",
+		CWARN("%s: Found crashed LAST_ID, deny creating new OST-object on the device until the LAST_ID rebuilt successfully.\n",
 		      obd->obd_name);
 		down_write(&ofd->ofd_lastid_rwsem);
 		ofd->ofd_lastid_rebuilding = 1;
@@ -580,18 +583,19 @@ static int ofd_lfsck_out_notify(const struct lu_env *env, void *data,
 }
 
 /**
- * Implementation of lu_device_operations::ldo_prepare.
+ * ofd_prepare() - Called before handling of actual client requests
+ * @env: execution environment
+ * @pdev: higher device in stack, NULL for OFD
+ * @dev: lu_device of OFD device
  *
  * This method is called after layer has been initialized and before it starts
  * serving user requests. In OFD it starts lfsk check routines and initializes
  * recovery.
+ * Implementation of lu_device_operations::ldo_prepare.
  *
- * \param[in] env	execution environment
- * \param[in] pdev	higher device in stack, NULL for OFD
- * \param[in] dev	lu_device of OFD device
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_prepare(const struct lu_env *env, struct lu_device *pdev,
 		       struct lu_device *dev)
@@ -641,17 +645,18 @@ static int ofd_prepare(const struct lu_env *env, struct lu_device *pdev,
 }
 
 /**
- * Implementation of lu_device_operations::ldo_recovery_complete.
+ * ofd_recovery_complete() - Implementation of
+ *                           lu_device_operations::ldo_recovery_complete.
+ * @env: execution environment
+ * @dev: lu_device of OFD device
  *
  * This method notifies all layers about 'recovery complete' event. That means
  * device is in full state and consistent. An OFD calculates available grant
  * space upon this event.
  *
- * \param[in] env	execution environment
- * \param[in] dev	lu_device of OFD device
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_recovery_complete(const struct lu_env *env,
 				 struct lu_device *dev)
@@ -680,7 +685,7 @@ static int ofd_recovery_complete(const struct lu_env *env,
 	RETURN(rc);
 }
 
-/**
+/*
  * lu_device_operations matrix for OFD device.
  */
 static const struct lu_device_operations ofd_lu_ops = {
@@ -691,9 +696,8 @@ static const struct lu_device_operations ofd_lu_ops = {
 };
 
 /**
- * Cleanup all procfs entries in OFD.
- *
- * \param[in] ofd	OFD device
+ * ofd_procfs_fini() - Cleanup all procfs entries in OFD.
+ * @ofd: OFD device
  */
 static void ofd_procfs_fini(struct ofd_device *ofd)
 {
@@ -707,13 +711,13 @@ static void ofd_procfs_fini(struct ofd_device *ofd)
 }
 
 /**
- * Stop SEQ/FID server on OFD.
+ * ofd_fid_fini() - Stop SEQ/FID server on OFD.
+ * @env: execution environment
+ * @ofd: OFD device
  *
- * \param[in] env	execution environment
- * \param[in] ofd	OFD device
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 int ofd_fid_fini(const struct lu_env *env, struct ofd_device *ofd)
 {
@@ -721,7 +725,9 @@ int ofd_fid_fini(const struct lu_env *env, struct ofd_device *ofd)
 }
 
 /**
- * Start SEQ/FID server on OFD.
+ * ofd_fid_init() - Start SEQ/FID server on OFD.
+ * @env: execution environment
+ * @ofd: OFD device
  *
  * The SEQ/FID server on OFD is needed to allocate FIDs for new objects.
  * It also connects to the master server to get own FID sequence (SEQ) range
@@ -731,11 +737,9 @@ int ofd_fid_fini(const struct lu_env *env, struct ofd_device *ofd)
  * The sequence range is allocated out to the MDTs for OST object allocations,
  * and not directly to the clients.
  *
- * \param[in] env	execution environment
- * \param[in] ofd	OFD device
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 int ofd_fid_init(const struct lu_env *env, struct ofd_device *ofd)
 {
@@ -793,14 +797,14 @@ out_name:
 }
 
 /**
- * OFD request handler for OST_SET_INFO RPC.
+ * ofd_set_info_hdl() - OFD request handler for OST_SET_INFO RPC.
+ * @tsi: target session environment for this request
  *
  * This is OFD-specific part of request handling
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_set_info_hdl(struct tgt_session_info *tsi)
 {
@@ -877,18 +881,19 @@ static int ofd_set_info_hdl(struct tgt_session_info *tsi)
 }
 
 /**
- * Get FIEMAP (FIle Extent MAPping) for object with the given FID.
+ * ofd_fiemap_get() - Get FIEMAP (FIle Extent MAPping) for object with the given
+ *                    FID.
+ * @env: execution environment
+ * @ofd: OFD device
+ * @fid: FID of object
+ * @fiemap: fiemap structure to fill with data
  *
  * This function returns a list of extents which describes how a file's
  * blocks are laid out on the disk.
  *
- * \param[in] env	execution environment
- * \param[in] ofd	OFD device
- * \param[in] fid	FID of object
- * \param[in] fiemap	fiemap structure to fill with data
- *
- * \retval		0 if \a fiemap is filled with data successfully
- * \retval		negative value on error
+ * Return:
+ * * %0 if @fiemap is filled with data successfully
+ * * %negative value on error
  */
 int ofd_fiemap_get(const struct lu_env *env, struct ofd_device *ofd,
 		   struct lu_fid *fid, struct fiemap *fiemap)
@@ -937,22 +942,22 @@ static int ofd_lock_unlock_region(const struct lu_env *env,
 }
 
 /**
- * Lock the sparse areas of given resource.
+ * lock_zero_regions() - Lock the sparse areas of given resource.
+ * @env: Lustre environment
+ * @ns: LDLM namespace
+ * @res_id: resource ID
+ * @fiemap: file extents mapping on disk
  *
  * The locking of sparse areas will cause dirty data to be flushed back from
  * clients. This is used when getting the FIEMAP of an object to make sure
  * there is no unaccounted cached data on clients.
  *
- * This function goes through \a fiemap list of extents and locks only sparse
+ * This function goes through @fiemap list of extents and locks only sparse
  * areas between extents.
  *
- * \param[in] ns	LDLM namespace
- * \param[in] res_id	resource ID
- * \param[in] fiemap	file extents mapping on disk
- * \param[in] locked	list head of regions list
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int lock_zero_regions(const struct lu_env *env,
 			     struct ldlm_namespace *ns,
@@ -990,24 +995,101 @@ static int lock_zero_regions(const struct lu_env *env,
 	RETURN(rc);
 }
 
+/**
+ * ofd_fid2path() - load parent FID.
+ * @info: Per-thread common data shared by ost level handlers.
+ * @fp:   User-provided struct for arguments and to store MDT-FID information.
+ *
+ * Part of the OST layer implementation of lfs fid2path.
+ *
+ * Return: 0 Lookup successful,
+ *         negative errno if there was a problem
+ */
+static int ofd_fid2path(struct ofd_thread_info *info,
+			struct getinfo_fid2path *fp)
+{
+	struct ofd_device *ofd = ofd_exp(info->fti_exp);
+	struct ofd_object *fo = NULL;
+	int rc;
+
+	ENTRY;
+
+	if (!fid_is_sane(&fp->gf_fid))
+		RETURN(-EINVAL);
+
+	if (!fid_is_namespace_visible(&fp->gf_fid)) {
+		CDEBUG(D_IOCTL,
+		       "%s: "DFID" is invalid, f_seq should be >= %#llx, or f_oid != 0, or f_ver == 0\n",
+		       ofd_name(ofd), PFID(&fp->gf_fid),
+		       (__u64)FID_SEQ_NORMAL);
+		RETURN(-EINVAL);
+	}
+
+	fo = ofd_object_find(info->fti_env, ofd, &fp->gf_fid);
+	if (IS_ERR_OR_NULL(fo)) {
+		rc = IS_ERR(fo) ? PTR_ERR(fo) : -ENOENT;
+		CDEBUG(D_IOCTL, "%s: cannot find "DFID": rc=%d\n",
+			ofd_name(ofd), PFID(&fp->gf_fid), rc);
+		RETURN(rc);
+	}
+	if (!ofd_object_exists(fo))
+		GOTO(out, rc = -ENOENT);
+
+	rc = ofd_object_ff_load(info->fti_env, fo, false);
+	if (rc) {
+		CDEBUG(D_IOCTL, "%s: ff_load failed for "DFID": rc=%d\n",
+			ofd_name(ofd), PFID(&fp->gf_fid), rc);
+		GOTO(out, rc);
+	}
+
+	fp->gf_fid = fo->ofo_ff.ff_parent;
+	fp->gf_fid.f_ver = 0;
+
+out:
+	if (fo)
+		ofd_object_put(info->fti_env, fo);
+
+	RETURN(rc);
+}
+
+static int ofd_rpc_fid2path(struct tgt_session_info *tsi,
+			    struct ofd_thread_info *info,
+			    void *key, int keylen,
+			    void *val, int vallen)
+{
+	struct getinfo_fid2path *fpout, *fpin;
+	int rc = 0;
+
+	fpin = key + round_up(sizeof(KEY_FID2PATH), 8);
+	fpout = val;
+
+	if (req_capsule_req_need_swab(tsi->tsi_pill))
+		lustre_swab_fid2path(fpin);
+
+	memcpy(fpout, fpin, sizeof(*fpin));
+
+	rc = ofd_fid2path(info, fpout);
+	RETURN(rc);
+}
 
 /**
- * OFD request handler for OST_GET_INFO RPC.
+ * ofd_get_info_hdl() - OFD request handler for OST_GET_INFO RPC.
+ * @tsi: target session environment for this request
  *
  * This is OFD-specific part of request handling. The OFD-specific keys are:
  * - KEY_LAST_ID (obsolete)
  * - KEY_FIEMAP
  * - KEY_LAST_FID
+ * - KEY_FID2PATH
  *
  * This function reads needed data from storage and fills reply with it.
  *
  * Note: the KEY_LAST_ID is obsolete, replaced by KEY_LAST_FID on newer MDTs,
  * and is kept for compatibility.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_get_info_hdl(struct tgt_session_info *tsi)
 {
@@ -1126,6 +1208,35 @@ static int ofd_get_info_hdl(struct tgt_session_info *tsi)
 		       PFID(fid));
 out_put:
 		ofd_seq_put(tsi->tsi_env, oseq);
+	} else if (KEY_IS(KEY_FID2PATH)) {
+		__u32 *vallen;
+		void *valout;
+
+		req_capsule_extend(tsi->tsi_pill, &RQF_MDS_FID2PATH);
+		vallen = req_capsule_client_get(tsi->tsi_pill,
+						&RMF_GETINFO_VALLEN);
+		if (!vallen) {
+			CDEBUG(D_IOCTL,
+			       "%s: cannot get RMF_GETINFO_VALLEN buffer\n",
+			       tgt_name(tsi->tsi_tgt));
+			RETURN(err_serious(-EPROTO));
+		}
+
+		req_capsule_set_size(tsi->tsi_pill, &RMF_GETINFO_VAL,
+				     RCL_SERVER, *vallen);
+		rc = req_capsule_server_pack(tsi->tsi_pill);
+		if (rc)
+			RETURN(err_serious(rc));
+
+		valout = req_capsule_server_get(tsi->tsi_pill,
+						&RMF_GETINFO_VAL);
+		if (!valout) {
+			CDEBUG(D_IOCTL,
+			       "%s: cannot get get-info RPC out buffer\n",
+			       tgt_name(tsi->tsi_tgt));
+			RETURN(-ENOMEM);
+		}
+		rc = ofd_rpc_fid2path(tsi, fti, key, keylen, valout, *vallen);
 	} else {
 		CERROR("%s: not supported key %s\n", tgt_name(tsi->tsi_tgt),
 		       (char *)key);
@@ -1138,28 +1249,29 @@ out_put:
 }
 
 /**
- * OFD request handler for OST_GETATTR RPC.
+ * ofd_getattr_hdl() - OFD request handler for OST_GETATTR RPC.
+ * @tsi: target session environment for this request
  *
  * This is OFD-specific part of request handling. It finds the OFD object
  * by its FID, gets attributes from storage and packs result to the reply.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_getattr_hdl(struct tgt_session_info *tsi)
 {
-	struct ofd_thread_info	*fti = tsi2ofd_info(tsi);
-	struct ofd_device	*ofd = ofd_exp(tsi->tsi_exp);
-	struct ost_body		*repbody;
-	struct lustre_handle	 lh = { 0 };
-	struct ofd_object	*fo;
-	__u64			 flags = 0;
-	enum ldlm_mode		 lock_mode = LCK_PR;
-	ktime_t			 kstart = ktime_get();
-	bool			 srvlock;
-	int			 rc;
+	struct ofd_thread_info *fti = tsi2ofd_info(tsi);
+	struct ofd_device *ofd = ofd_exp(tsi->tsi_exp);
+	struct ost_body *repbody;
+	struct lustre_handle lh = { 0 };
+	struct ofd_object *fo;
+	__u64 flags = 0;
+	enum ldlm_mode lock_mode = LCK_PR;
+	ktime_t kstart = ktime_get();
+	bool srvlock;
+	int rc;
+
 	ENTRY;
 
 	LASSERT(tsi->tsi_ost_body != NULL);
@@ -1192,7 +1304,10 @@ static int ofd_getattr_hdl(struct tgt_session_info *tsi)
 
 	rc = ofd_attr_get(tsi->tsi_env, fo, &fti->fti_attr);
 	if (rc == 0) {
-		__u64	 curr_version;
+		__u64 curr_version;
+
+		/* Queue repair of UID/GID/PROJID if not set */
+		ofd_repair_resource_ids(tsi->tsi_env, fo, &repbody->oa, false);
 
 		obdo_from_la(&repbody->oa, &fti->fti_attr,
 			     OFD_VALID_FLAGS | LA_UID | LA_GID | LA_PROJID);
@@ -1232,15 +1347,15 @@ out:
 }
 
 /**
- * OFD request handler for OST_SETATTR RPC.
+ * ofd_setattr_hdl() - OFD request handler for OST_SETATTR RPC.
+ * @tsi: target session environment for this request
  *
  * This is OFD-specific part of request handling. It finds the OFD object
  * by its FID, sets attributes from request and packs result to the reply.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_setattr_hdl(struct tgt_session_info *tsi)
 {
@@ -1321,18 +1436,18 @@ out:
 }
 
 /**
- * Destroy OST orphans.
+ * ofd_orphans_destroy() - Destroy OST orphans.
+ * @env: execution environment
+ * @exp: OBD export
+ * @ofd: OFD device
+ * @oa: obdo structure for reply
  *
  * This is part of OST_CREATE RPC handling. If there is flag OBD_FL_DELORPHAN
  * set then we must destroy possible orphaned objects.
  *
- * \param[in] env	execution environment
- * \param[in] exp	OBD export
- * \param[in] ofd	OFD device
- * \param[in] oa	obdo structure for reply
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_orphans_destroy(const struct lu_env *env,
 			       struct obd_export *exp,
@@ -1419,15 +1534,15 @@ out_put:
 }
 
 /**
- * OFD request handler for OST_CREATE RPC.
+ * ofd_create_hdl() - OFD request handler for OST_CREATE RPC.
+ * @tsi: target session environment for this request
  *
  * This is OFD-specific part of request handling. Its main purpose is to
  * create new data objects on OST, but it also used to destroy orphans.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_create_hdl(struct tgt_session_info *tsi)
 {
@@ -1487,8 +1602,8 @@ static int ofd_create_hdl(struct tgt_session_info *tsi)
 	    (oa->o_flags & OBD_FL_RECREATE_OBJS)) {
 		if (!test_bit(OBDF_RECOVERING, ofd_obd(ofd)->obd_flags) ||
 		    oid > ofd_seq_last_oid(oseq)) {
-			CERROR("%s: recreate objid "DOSTID" > last id %llu"
-			       "\n", ofd_name(ofd), POSTID(&oa->o_oi),
+			CERROR("%s: recreate objid "DOSTID" > last id %llu\n",
+			       ofd_name(ofd), POSTID(&oa->o_oi),
 			       ofd_seq_last_oid(oseq));
 			GOTO(out_nolock, rc = -EINVAL);
 		}
@@ -1524,8 +1639,8 @@ static int ofd_create_hdl(struct tgt_session_info *tsi)
 		CDEBUG(D_HA, "ofd_last_id() = %llu -> diff = %lld\n",
 		       ofd_seq_last_oid(oseq), diff);
 		if (-diff > OST_MAX_PRECREATE) {
-			LCONSOLE(D_INFO, "%s: too large difference between MDS "
-				 "LAST_ID "DFID" (%llu) and OST LAST_ID "DFID" "
+			LCONSOLE(D_INFO, "%s: too large difference between MDS LAST_ID "
+				 DFID" (%llu) and OST LAST_ID "DFID" "
 				 "(%llu), trust the OST\n",
 				 ofd_name(ofd), PFID(&oa->o_oi.oi_fid), oid,
 				 PFID(&oseq->os_oi.oi_fid),
@@ -1616,8 +1731,7 @@ static int ofd_create_hdl(struct tgt_session_info *tsi)
 			if (granted < 0) {
 				rc = granted;
 				granted = 0;
-				CDEBUG(D_HA, "%s: failed to acquire grant "
-				       "space for precreate (%lld): rc = %d\n",
+				CDEBUG(D_HA, "%s: failed to acquire grant space for precreate (%lld): rc = %d\n",
 				       ofd_name(ofd), diff, rc);
 				diff = 0;
 			}
@@ -1628,14 +1742,13 @@ static int ofd_create_hdl(struct tgt_session_info *tsi)
 			next_id = ofd_seq_last_oid(oseq) + 1;
 			count = ofd_precreate_batch(ofd, (int)diff);
 
-			CDEBUG(D_HA, "%s: reserve %d objects in group %#llx"
-			       " at %llu\n", ofd_name(ofd),
+			CDEBUG(D_HA, "%s: reserve %d objects in group %#llx at %llu\n",
+			       ofd_name(ofd),
 			       count, seq, next_id);
 
 			if (!(lustre_msg_get_flags(req->rq_reqmsg) & MSG_REPLAY)
 			    && ktime_get_seconds() > enough_time) {
-				CDEBUG(D_HA, "%s: Slow creates, %d/%lld objects"
-				      " created at a rate of %d/s\n",
+				CDEBUG(D_HA, "%s: Slow creates, %d/%lld objects created at a rate of %d/s\n",
 				      ofd_name(ofd), created, diff + created,
 				      created / DISK_TIMEOUT);
 				break;
@@ -1654,8 +1767,7 @@ static int ofd_create_hdl(struct tgt_session_info *tsi)
 
 		if (diff > 0 &&
 		    lustre_msg_get_flags(req->rq_reqmsg) & MSG_REPLAY)
-			LCONSOLE_WARN("%s: can't create the same count of"
-				      " objects when replaying the request"
+			LCONSOLE_WARN("%s: can't create the same count of objects when replaying the request"
 				      " (diff is %lld). see LU-4621\n",
 				      ofd_name(ofd), diff);
 
@@ -1695,15 +1807,15 @@ out_sem:
 }
 
 /**
- * OFD request handler for OST_DESTROY RPC.
+ * ofd_destroy_hdl() - OFD request handler for OST_DESTROY RPC.
+ * @tsi: target session environment for this request
  *
  * This is OFD-specific part of request handling. It destroys data objects
  * related to destroyed object on MDT.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_destroy_hdl(struct tgt_session_info *tsi)
 {
@@ -1784,15 +1896,15 @@ out:
 }
 
 /**
- * OFD request handler for OST_STATFS RPC.
+ * ofd_statfs_hdl() - OFD request handler for OST_STATFS RPC.
+ * @tsi: target session environment for this request
  *
  * This function gets statfs data from storage as part of request
  * processing.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_statfs_hdl(struct tgt_session_info *tsi)
 {
@@ -1822,15 +1934,15 @@ static int ofd_statfs_hdl(struct tgt_session_info *tsi)
 }
 
 /**
- * OFD request handler for OST_SYNC RPC.
+ * ofd_sync_hdl() - OFD request handler for OST_SYNC RPC.
+ * @tsi: target session environment for this request
  *
  * Sync object data or all filesystem data to the disk and pack the
  * result in reply.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_sync_hdl(struct tgt_session_info *tsi)
 {
@@ -1882,15 +1994,15 @@ put:
 }
 
 /**
- * OFD request handler for OST_FALLOCATE RPC.
+ * ofd_fallocate_hdl() - OFD request handler for OST_FALLOCATE RPC.
+ * @tsi: target session environment for this request
  *
  * This is part of request processing. Validate request fields,
  * preallocate the given OFD object and pack reply.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_fallocate_hdl(struct tgt_session_info *tsi)
 {
@@ -1952,7 +2064,7 @@ static int ofd_fallocate_hdl(struct tgt_session_info *tsi)
 
 	mode = oa->o_falloc_mode;
 	/*
-	 * mode == 0 (which is standard prealloc) and PUNCH is supported
+	 * mode == 0 (which is standard prealloc) and PUNCH/ZERO are supported
 	 * Rest of mode options are not supported yet.
 	 */
 	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE |
@@ -1964,7 +2076,7 @@ static int ofd_fallocate_hdl(struct tgt_session_info *tsi)
 	 * warning.
 	 */
 	if (mode & FALLOC_FL_PUNCH_HOLE && !(mode & FALLOC_FL_KEEP_SIZE)) {
-		CWARN("%s: PUNCH mode misses KEEP_SIZE flag, setting it\n",
+		CDEBUG(D_INFO, "%s: PUNCH mode misses KEEP_SIZE flag, setting it\n",
 		      tsi->tsi_tgt->lut_obd->obd_name);
 		mode |= FALLOC_FL_KEEP_SIZE;
 	}
@@ -2033,15 +2145,15 @@ out:
 }
 
 /**
- * OFD request handler for OST_PUNCH RPC.
+ * ofd_punch_hdl() - OFD request handler for OST_PUNCH RPC.
+ * @tsi: target session environment for this request
  *
  * This is part of request processing. Validate request fields,
  * punch (truncate) the given OFD object and pack reply.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_punch_hdl(struct tgt_session_info *tsi)
 {
@@ -2095,8 +2207,8 @@ static int ofd_punch_hdl(struct tgt_session_info *tsi)
 			RETURN(rc);
 	}
 
-	CDEBUG(D_INODE, "calling punch for object "DFID", valid = %#llx"
-	       ", start = %lld, end = %lld\n", PFID(&tsi->tsi_fid),
+	CDEBUG(D_INODE, "calling punch for object "DFID", valid = %#llx, start = %lld, end = %lld\n",
+	       PFID(&tsi->tsi_fid),
 	       oa->o_valid, start, end);
 
 	fo = ofd_object_find_exists(tsi->tsi_env, ofd_exp(tsi->tsi_exp),
@@ -2199,14 +2311,14 @@ out_unlock:
 }
 
 /**
- * OFD request handler for OST_LADVISE RPC.
+ * ofd_ladvise_hdl() - OFD request handler for OST_LADVISE RPC.
+ * @tsi: target session environment for this request
  *
  * Tune cache or perfetch policies according to advices.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative errno on error
+ * Return:
+ * * %0 if successful
+ * * %negative errno on error
  */
 static int ofd_ladvise_hdl(struct tgt_session_info *tsi)
 {
@@ -2231,6 +2343,7 @@ static int ofd_ladvise_hdl(struct tgt_session_info *tsi)
 	__u64 start;
 	__u64 end;
 	int rc = 0;
+
 	ENTRY;
 
 	CFS_FAIL_TIMEOUT(OBD_FAIL_OST_LADVISE_PAUSE, cfs_fail_val);
@@ -2279,7 +2392,8 @@ static int ofd_ladvise_hdl(struct tgt_session_info *tsi)
 	LASSERT(fo != NULL);
 	dob = ofd_object_child(fo);
 
-	if (ptlrpc_connection_is_local(exp->exp_connection))
+	if (exp->exp_connection &&
+	    LNetIsPeerLocal(&exp->exp_connection->c_peer.nid))
 		dbt |= DT_BUFS_TYPE_LOCAL;
 
 	for (i = 0; i < num_advise; i++, ladvise++) {
@@ -2293,7 +2407,7 @@ static int ofd_ladvise_hdl(struct tgt_session_info *tsi)
 		/* Handle different advice types */
 		switch (ladvise->lla_advice) {
 		default:
-			rc = -ENOTSUPP;
+			rc = -EOPNOTSUPP;
 			break;
 		case LU_LADVISE_WILLREAD:
 			if (tbc == NULL)
@@ -2327,15 +2441,15 @@ static int ofd_ladvise_hdl(struct tgt_session_info *tsi)
 }
 
 /**
- * OFD request handler for OST_QUOTACTL RPC.
+ * ofd_quotactl() - OFD request handler for OST_QUOTACTL RPC.
+ * @tsi: target session environment for this request
  *
  * This is part of request processing to validate incoming request fields,
  * get the requested data from OSD and pack reply.
  *
- * \param[in] tsi	target session environment for this request
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_quotactl(struct tgt_session_info *tsi)
 {
@@ -2345,6 +2459,7 @@ static int ofd_quotactl(struct tgt_session_info *tsi)
 	char *buffer = NULL;
 	int id;
 	int rc;
+
 	ENTRY;
 
 	oqctl = req_capsule_client_get(tsi->tsi_pill, &RMF_OBD_QUOTACTL);
@@ -2365,7 +2480,6 @@ static int ofd_quotactl(struct tgt_session_info *tsi)
 	repoqc = req_capsule_server_get(tsi->tsi_pill, &RMF_OBD_QUOTACTL);
 	if (repoqc == NULL)
 		RETURN(err_serious(-ENOMEM));
-	*repoqc = *oqctl;
 
 	if (oqctl->qc_cmd == LUSTRE_Q_ITEROQUOTA) {
 		buffer = req_capsule_server_get(tsi->tsi_pill,
@@ -2378,39 +2492,44 @@ static int ofd_quotactl(struct tgt_session_info *tsi)
 	if (IS_ERR(nodemap))
 		RETURN(PTR_ERR(nodemap));
 
-	id = repoqc->qc_id;
+	id = oqctl->qc_id;
 	if (oqctl->qc_type == USRQUOTA)
 		id = nodemap_map_id(nodemap, NODEMAP_UID,
-				    NODEMAP_CLIENT_TO_FS,
-				    repoqc->qc_id);
+				    NODEMAP_CLIENT_TO_FS, id);
 	else if (oqctl->qc_type == GRPQUOTA)
 		id = nodemap_map_id(nodemap, NODEMAP_GID,
-				    NODEMAP_CLIENT_TO_FS,
-				    repoqc->qc_id);
+				    NODEMAP_CLIENT_TO_FS, id);
 	else if (oqctl->qc_type == PRJQUOTA)
 		id = nodemap_map_id(nodemap, NODEMAP_PROJID,
-				    NODEMAP_CLIENT_TO_FS,
-				    repoqc->qc_id);
+				    NODEMAP_CLIENT_TO_FS, id);
 
+	if (oqctl->qc_cmd == LUSTRE_Q_ITEROQUOTA)
+		rc = lquota_iter_change_qid(nodemap, oqctl);
 	nodemap_putref(nodemap);
+	if (rc)
+		RETURN(rc);
 
-	if (repoqc->qc_id != id)
-		swap(repoqc->qc_id, id);
+	if (oqctl->qc_id != id)
+		swap(oqctl->qc_id, id);
 
-	rc = lquotactl_slv(tsi->tsi_env, tsi->tsi_tgt->lut_bottom, repoqc,
-			   buffer, buffer == NULL ? 0 : LQUOTA_ITER_BUFLEN);
+	rc = lquotactl_slv(tsi->tsi_env, tsi->tsi_tgt->lut_bottom, nodemap,
+			   oqctl, buffer);
 
 	ofd_counter_incr(tsi->tsi_exp, LPROC_OFD_STATS_QUOTACTL,
 			 tsi->tsi_jobid, ktime_us_delta(ktime_get(), kstart));
 
-	if (repoqc->qc_id != id)
-		swap(repoqc->qc_id, id);
+	if (oqctl->qc_id != id)
+		swap(oqctl->qc_id, id);
+
+	QCTL_COPY_NO_PNAME(repoqc, oqctl);
 
 	RETURN(rc);
 }
 
 /**
- * Prolong lock timeout for the given extent.
+ * ofd_prolong_extent_locks() - Prolong lock timeout for the given extent.
+ * @tsi: target session environment for this request
+ * @data: struct of data to prolong locks
  *
  * This function finds all locks related with incoming request and
  * prolongs their timeout.
@@ -2427,10 +2546,6 @@ static int ofd_quotactl(struct tgt_session_info *tsi)
  * contain a lock handle for the lock it is using, but this
  * isn't handled correctly by all client versions, and the
  * request may cover multiple locks.
- *
- * \param[in] tsi	target session environment for this request
- * \param[in] data	struct of data to prolong locks
- *
  */
 static void ofd_prolong_extent_locks(struct tgt_session_info *tsi,
 				    struct ldlm_prolong_args *data)
@@ -2444,8 +2559,8 @@ static void ofd_prolong_extent_locks(struct tgt_session_info *tsi,
 	data->lpa_export = tsi->tsi_exp;
 	data->lpa_resid = tsi->tsi_resid;
 
-	CDEBUG(D_RPCTRACE, "Prolong locks for req %p with x%llu"
-	       " ext(%llu->%llu)\n", tgt_ses_req(tsi),
+	CDEBUG(D_RPCTRACE, "Prolong locks for req %p with x%llu ext(%llu->%llu)\n",
+	       tgt_ses_req(tsi),
 	       tgt_ses_req(tsi)->rq_xid, data->lpa_extent.start,
 	       data->lpa_extent.end);
 
@@ -2478,9 +2593,13 @@ static void ofd_prolong_extent_locks(struct tgt_session_info *tsi,
 }
 
 /**
- * Implementation of ptlrpc_hpreq_ops::hpreq_lock_match for OFD RW requests.
+ * ofd_rw_hpreq_lock_match() - Implementation of
+ *                             ptlrpc_hpreq_ops::hpreq_lock_match for OFD RW
+ *                             requests.
+ * @req: ptlrpc_request being processed
+ * @lock: contended lock to match
  *
- * Determine if \a lock and the lock from request \a req are equivalent
+ * Determine if @lock and the lock from request @req are equivalent
  * by comparing their resource names, modes, and extents.
  *
  * It is used to give priority to read and write RPCs being done
@@ -2490,11 +2609,9 @@ static void ofd_prolong_extent_locks(struct tgt_session_info *tsi,
  * very large lock extent that prevents other clients from
  * submitting their writes.
  *
- * \param[in] req	ptlrpc_request being processed
- * \param[in] lock	contended lock to match
- *
- * \retval		1 if lock is matched
- * \retval		0 otherwise
+ * Return:
+ * * %1 if lock is matched
+ * * %0 otherwise
  */
 static int ofd_rw_hpreq_lock_match(struct ptlrpc_request *req,
 				   struct ldlm_lock *lock)
@@ -2537,17 +2654,18 @@ static int ofd_rw_hpreq_lock_match(struct ptlrpc_request *req,
 }
 
 /**
- * Implementation of ptlrpc_hpreq_ops::hpreq_lock_check for OFD RW requests.
+ * ofd_rw_hpreq_check() - Implementation of ptlrpc_hpreq_ops::hpreq_lock_check
+ *                        for OFD RW requests.
+ * @req: the incoming request
  *
- * Check for whether the given PTLRPC request (\a req) is blocking
+ * Check for whether the given PTLRPC request (@req) is blocking
  * an LDLM lock cancel. Also checks whether the request is covered by an LDLM
  * lock.
  *
- * \param[in] req	the incoming request
- *
- * \retval		1 if \a req is blocking an LDLM lock cancel
- * \retval		0 if it is not
- * \retval		-ESTALE if lock is not found
+ * Return:
+ * * %1 if \a req is blocking an LDLM lock cancel
+ * * %0 if it is not
+ * * %-ESTALE if lock is not found
  */
 static int ofd_rw_hpreq_check(struct ptlrpc_request *req)
 {
@@ -2602,12 +2720,12 @@ static int ofd_rw_hpreq_check(struct ptlrpc_request *req)
 }
 
 /**
- * Implementation of ptlrpc_hpreq_ops::hpreq_lock_fini for OFD RW requests.
+ * ofd_rw_hpreq_fini() - Implementation of ptlrpc_hpreq_ops::hpreq_lock_fini
+ *                       for OFD RW requests.
+ * @req: request which is being processed.
  *
  * Called after the request has been handled. It refreshes lock timeout again
  * so that client has more time to send lock cancel RPC.
- *
- * \param[in] req	request which is being processed.
  */
 static void ofd_rw_hpreq_fini(struct ptlrpc_request *req)
 {
@@ -2615,18 +2733,20 @@ static void ofd_rw_hpreq_fini(struct ptlrpc_request *req)
 }
 
 /**
- * Implementation of ptlrpc_hpreq_ops::hpreq_lock_match for OST_PUNCH request.
+ * ofd_punch_hpreq_lock_match() - check if the given lock is the same by its
+ *                                resname
+ * @req: ptlrpc_request being processed
+ * @lock: contended lock to match
  *
  * This function checks if the given lock is the same by its resname, mode
  * and extent as one taken from the request.
  * It is used to give priority to punch/truncate RPCs that might lead to
  * the fastest release of that lock when a lock is contended.
+ * Implementation of ptlrpc_hpreq_ops::hpreq_lock_match for OST_PUNCH request.
  *
- * \param[in] req	ptlrpc_request being processed
- * \param[in] lock	contended lock to match
- *
- * \retval		1 if lock is matched
- * \retval		0 otherwise
+ * Return:
+ * * %1 if lock is matched
+ * * %0 otherwise
  */
 static int ofd_punch_hpreq_lock_match(struct ptlrpc_request *req,
 				      struct ldlm_lock *lock)
@@ -2665,19 +2785,18 @@ static int ofd_punch_hpreq_lock_match(struct ptlrpc_request *req,
 }
 
 /**
- * Implementation of ptlrpc_hpreq_ops::hpreq_lock_check for OST_PUNCH request.
+ * ofd_punch_hpreq_check() - Implementation of hpreq_lock_check for OST_PUNCH
+ *                           request
+ * @req: the incoming request
  *
  * High-priority queue request check for whether the given punch request
- * (\a req) is blocking an LDLM lock cancel. Also checks whether the request is
+ * (@req) is blocking an LDLM lock cancel. Also checks whether the request is
  * covered by an LDLM lock.
  *
-
- *
- * \param[in] req	the incoming request
- *
- * \retval		1 if \a req is blocking an LDLM lock cancel
- * \retval		0 if it is not
- * \retval		-ESTALE if lock is not found
+ * Return:
+ * * %1 if @req is blocking an LDLM lock cancel
+ * * %0 if it is not
+ * * %-ESTALE if lock is not found
  */
 static int ofd_punch_hpreq_check(struct ptlrpc_request *req)
 {
@@ -2717,12 +2836,12 @@ static int ofd_punch_hpreq_check(struct ptlrpc_request *req)
 }
 
 /**
- * Implementation of ptlrpc_hpreq_ops::hpreq_lock_fini for OST_PUNCH request.
+ * ofd_punch_hpreq_fini() - Called after the request has been handled.
+ * @req: request which is being processed.
  *
  * Called after the request has been handled. It refreshes lock timeout again
  * so that client has more time to send lock cancel RPC.
- *
- * \param[in] req	request which is being processed.
+ * Implementation of ptlrpc_hpreq_ops::hpreq_lock_fini for OST_PUNCH request.
  */
 static void ofd_punch_hpreq_fini(struct ptlrpc_request *req)
 {
@@ -2742,13 +2861,12 @@ static struct ptlrpc_hpreq_ops ofd_hpreq_punch = {
 };
 
 /**
- * Assign high priority operations to an IO request.
+ * ofd_hp_brw() - Assign high priority operations to an IO request.
+ * @tsi: target session environment for this request
  *
  * Check if the incoming request is a candidate for
  * high-priority processing. If it is, assign it a high
  * priority operations table.
- *
- * \param[in] tsi	target session environment for this request
  */
 static void ofd_hp_brw(struct tgt_session_info *tsi)
 {
@@ -2773,13 +2891,12 @@ static void ofd_hp_brw(struct tgt_session_info *tsi)
 }
 
 /**
- * Assign high priority operations to an punch request.
+ * ofd_hp_punch() - Assign high priority operations to an punch request.
+ * @tsi: target session environment for this request
  *
  * Check if the incoming request is a candidate for
  * high-priority processing. If it is, assign it a high
  * priority operations table.
- *
- * \param[in] tsi	target session environment for this request
  */
 static void ofd_hp_punch(struct tgt_session_info *tsi)
 {
@@ -2798,7 +2915,7 @@ static void ofd_hp_punch(struct tgt_session_info *tsi)
 #define OST_BRW_READ	OST_READ
 #define OST_BRW_WRITE	OST_WRITE
 
-/**
+/*
  * Table of OFD-specific request handlers
  *
  * This table contains all opcodes accepted by OFD and
@@ -2885,16 +3002,15 @@ static struct tgt_opc_slice ofd_common_slice[] = {
 LU_KEY_INIT_FINI(ofd, struct ofd_thread_info);
 
 /**
- * Implementation of lu_context_key::lct_key_exit.
+ * ofd_key_exit() - Optional method called on lu_context_exit()
+ * @ctx: execution context
+ * @key: context key
+ * @data: ofd_thread_info
  *
  * Optional method called on lu_context_exit() for all allocated
- * keys.
- * It is used in OFD to sanitize context values which may be re-used
+ * keys. It is used in OFD to sanitize context values which may be re-used
  * during another request processing by the same thread.
- *
- * \param[in] ctx	execution context
- * \param[in] key	context key
- * \param[in] data	ofd_thread_info
+ * Implementation of lu_context_key::lct_key_exit.
  */
 static void ofd_key_exit(const struct lu_context *ctx,
 			 struct lu_context_key *key, void *data)
@@ -2907,7 +3023,7 @@ static void ofd_key_exit(const struct lu_context *ctx,
 	info->fti_xid = 0;
 	info->fti_pre_version = 0;
 
-	memset(&info->fti_attr, 0, sizeof info->fti_attr);
+	memset(&info->fti_attr, 0, sizeof(info->fti_attr));
 }
 
 struct lu_context_key ofd_thread_key = {
@@ -2918,19 +3034,20 @@ struct lu_context_key ofd_thread_key = {
 };
 
 /**
- * Initialize OFD device according to parameters in the config log \a cfg.
+ * ofd_init0() - main starting point of OFD initialization.
+ * @env: execution environment
+ * @m: OFD device
+ * @ldt: LU device type of OFD
+ * @cfg: configuration log
  *
  * This is the main starting point of OFD initialization. It fills all OFD
  * parameters with their initial values and calls other initializing functions
  * to set up all OFD subsystems.
+ * Initialize OFD device according to parameters in the config log \a cfg.
  *
- * \param[in] env	execution environment
- * \param[in] m		OFD device
- * \param[in] ldt	LU device type of OFD
- * \param[in] cfg	configuration log
- *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int ofd_init0(const struct lu_env *env, struct ofd_device *m,
 		     struct lu_device_type *ldt, struct lustre_cfg *cfg)
@@ -2948,13 +3065,13 @@ static int ofd_init0(const struct lu_env *env, struct ofd_device *m,
 	ENTRY;
 
 	obd = class_name2obd(dev);
-	if (obd == NULL) {
+	if (!obd) {
 		CERROR("Cannot find obd with name %s\n", dev);
 		RETURN(-ENODEV);
 	}
 
 	rc = lu_env_refill((struct lu_env *)env);
-	if (rc != 0)
+	if (rc)
 		RETURN(rc);
 
 	obt = obd_obt_init(obd);
@@ -2979,22 +3096,31 @@ static int ofd_init0(const struct lu_env *env, struct ofd_device *m,
 	/* set this lu_device to obd, because error handling need it */
 	obd->obd_lu_dev = &m->ofd_dt_dev.dd_lu_dev;
 
+	m->ofd_enable_resource_id_repair = 1;
+	m->ofd_id_repair_queue_count =
+		OFD_ID_REPAIR_QUEUE_COUNT_DEFAULT;
+
+	INIT_LIST_HEAD(&m->ofd_id_repair_list);
+	spin_lock_init(&m->ofd_id_repair_lock);
+	init_waitqueue_head(&m->ofd_id_repair_waitq);
+	atomic_set(&m->ofd_id_repair_queued, 0);
+
 	/* No connection accepted until configurations will finish */
 	spin_lock(&obd->obd_dev_lock);
 	obd->obd_no_conn = 1;
 	spin_unlock(&obd->obd_dev_lock);
-	obd->obd_replayable = 1;
+	set_bit(OBDF_REPLAYABLE, obd->obd_flags);
 	if (cfg->lcfg_bufcount > 4 && LUSTRE_CFG_BUFLEN(cfg, 4) > 0) {
 		char *str = lustre_cfg_string(cfg, 4);
 
 		if (strchr(str, 'n')) {
 			CWARN("%s: recovery disabled\n", obd->obd_name);
-			obd->obd_replayable = 0;
+			clear_bit(OBDF_REPLAYABLE, obd->obd_flags);
 		}
 	}
 
 	info = ofd_info_init(env, NULL);
-	if (info == NULL)
+	if (!info)
 		RETURN(-EFAULT);
 
 	rc = ofd_stack_init(env, m, cfg, lmd_flags);
@@ -3037,10 +3163,6 @@ static int ofd_init0(const struct lu_env *env, struct ofd_device *m,
 	if (test_bit(LMD_FLG_LOCAL_RECOV, lmd_flags))
 		m->ofd_lut.lut_local_recovery = 1;
 
-	rc = ofd_tunables_init(m);
-	if (rc)
-		GOTO(err_fini_lut, rc);
-
 	tgd->tgd_reserved_pcnt = 0;
 
 	m->ofd_brw_size = m->ofd_lut.lut_dt_conf.ddp_brw_size;
@@ -3052,14 +3174,14 @@ static int ofd_init0(const struct lu_env *env, struct ofd_device *m,
 
 	rc = ofd_fs_setup(env, m, obd);
 	if (rc)
-		GOTO(err_fini_proc, rc);
+		GOTO(err_fini_lut, rc);
 
 	fid.f_seq = FID_SEQ_LOCAL_NAME;
 	fid.f_oid = 1;
 	fid.f_ver = 0;
 	rc = local_oid_storage_init(env, m->ofd_osd, &fid,
 				    &m->ofd_los);
-	if (rc != 0)
+	if (rc)
 		GOTO(err_fini_fs, rc);
 
 	nodemap_config = nm_config_file_register_tgt(env, m->ofd_osd,
@@ -3073,13 +3195,25 @@ static int ofd_init0(const struct lu_env *env, struct ofd_device *m,
 	}
 
 	rc = ofd_start_inconsistency_verification_thread(m);
-	if (rc != 0)
+	if (rc)
 		GOTO(err_fini_nm, rc);
+
+	rc = ofd_id_repair_start_thread(m);
+	if (rc)
+		GOTO(err_stop_inconsistency, rc);
+
+	rc = ofd_tunables_init(m);
+	if (rc)
+		GOTO(err_stop_repair, rc);
 
 	tgt_adapt_sptlrpc_conf(&m->ofd_lut);
 
 	RETURN(0);
 
+err_stop_repair:
+	ofd_id_repair_stop_thread(m);
+err_stop_inconsistency:
+	ofd_stop_inconsistency_verification_thread(m);
 err_fini_nm:
 	nm_config_file_deregister_tgt(env, obt->obt_nodemap_config_file);
 	obt->obt_nodemap_config_file = NULL;
@@ -3088,12 +3222,11 @@ err_fini_los:
 	m->ofd_los = NULL;
 err_fini_fs:
 	ofd_fs_cleanup(env, m);
-err_fini_proc:
-	ofd_procfs_fini(m);
 err_fini_lut:
 	tgt_fini(env, &m->ofd_lut);
 err_free_ns:
-	ldlm_namespace_free(m->ofd_namespace, NULL, obd->obd_force);
+	ldlm_namespace_free(m->ofd_namespace, NULL,
+			    test_bit(OBDF_FORCE, obd->obd_flags));
 	obd->obd_namespace = m->ofd_namespace = NULL;
 err_fini_stack:
 	ofd_stack_fini(env, m, &m->ofd_osd->dd_lu_dev);
@@ -3101,13 +3234,12 @@ err_fini_stack:
 }
 
 /**
- * Stop the OFD device
+ * ofd_fini() - Stop the OFD device
+ * @env: execution environment
+ * @m: OFD device
  *
  * This function stops the OFD device and all its subsystems.
  * This is the end of OFD lifecycle.
- *
- * \param[in] env	execution environment
- * \param[in] m		OFD device
  */
 static void ofd_fini(const struct lu_env *env, struct ofd_device *m)
 {
@@ -3122,13 +3254,14 @@ static void ofd_fini(const struct lu_env *env, struct ofd_device *m)
 	target_recovery_fini(obd);
 	if (m->ofd_namespace != NULL)
 		ldlm_namespace_free_prior(m->ofd_namespace, NULL,
-					  d->ld_obd->obd_force);
+			test_bit(OBDF_FORCE, d->ld_obd->obd_flags));
 
 	obd_exports_barrier(obd);
 	obd_zombie_barrier();
 
 	ofd_procfs_fini(m);
 	tgt_fini(env, &m->ofd_lut);
+	ofd_id_repair_stop_thread(m);
 	ofd_stop_inconsistency_verification_thread(m);
 	lfsck_degister(env, m->ofd_osd);
 	ofd_fs_cleanup(env, m);
@@ -3152,33 +3285,34 @@ static void ofd_fini(const struct lu_env *env, struct ofd_device *m)
 }
 
 /**
- * Implementation of lu_device_type_operations::ldto_device_fini.
+ * ofd_device_fini() - Finalize device
+ * @env: execution environment
+ * @d: LU device of OFD
  *
  * Finalize device. Dual to ofd_device_init(). It is called from
  * obd_precleanup() and stops the current device.
+ * Implementation of lu_device_type_operations::ldto_device_fini.
  *
- * \param[in] env	execution environment
- * \param[in] d		LU device of OFD
- *
- * \retval		NULL
+ * Returns always %NULL
  */
 static struct lu_device *ofd_device_fini(const struct lu_env *env,
 					 struct lu_device *d)
 {
 	ENTRY;
 	ofd_fini(env, ofd_dev(d));
+	target_cleanup_recovery(d->ld_obd);
 	RETURN(NULL);
 }
 
 /**
- * Implementation of lu_device_type_operations::ldto_device_free.
+ * ofd_device_free() - Free OFD device
+ * @env: execution environment
+ * @d: LU device of OFD
  *
  * Free OFD device. Dual to ofd_device_alloc().
+ * Implementation of lu_device_type_operations::ldto_device_free.
  *
- * \param[in] env	execution environment
- * \param[in] d		LU device of OFD
- *
- * \retval		NULL
+ * Returns always %NULL
  */
 static struct lu_device *ofd_device_free(const struct lu_env *env,
 					 struct lu_device *d)
@@ -3191,17 +3325,18 @@ static struct lu_device *ofd_device_free(const struct lu_env *env,
 }
 
 /**
- * Implementation of lu_device_type_operations::ldto_device_alloc.
+ * ofd_device_alloc() - allocates the new OFD device.
+ * @env: execution environment
+ * @t: lu_device_type of OFD device
+ * @cfg: configuration log
  *
  * This function allocates the new OFD device. It is called from
  * obd_setup() if OBD device had lu_device_type defined.
+ * Implementation of lu_device_type_operations::ldto_device_alloc.
  *
- * \param[in] env	execution environment
- * \param[in] t		lu_device_type of OFD device
- * \param[in] cfg	configuration log
- *
- * \retval		pointer to the lu_device of just allocated OFD
- * \retval		ERR_PTR of return value on error
+ * Return:
+ * * %pointer to the lu_device of just allocated OFD
+ * * %ERR_PTR of return value on error
  */
 static struct lu_device *ofd_device_alloc(const struct lu_env *env,
 					  struct lu_device_type *t,
@@ -3249,13 +3384,14 @@ static struct lu_device_type ofd_device_type = {
 };
 
 /**
- * Initialize OFD module.
+ * ofd_init() - Initialize OFD module.
  *
  * This function is called upon module loading. It registers OFD device type
  * and prepares all in-memory structures used by all OFD devices.
  *
- * \retval		0 if successful
- * \retval		negative value on error
+ * Return:
+ * * %0 if successful
+ * * %negative value on error
  */
 static int __init ofd_init(void)
 {
@@ -3294,7 +3430,7 @@ out_caches:
 	return rc;
 }
 
-/**
+/*
  * Stop OFD module.
  *
  * This function is called upon OFD module unloading.
@@ -3313,5 +3449,5 @@ MODULE_DESCRIPTION("Lustre Object Filtering Device");
 MODULE_VERSION(LUSTRE_VERSION_STRING);
 MODULE_LICENSE("GPL");
 
-module_init(ofd_init);
+late_initcall_sync(ofd_init);
 module_exit(ofd_exit);

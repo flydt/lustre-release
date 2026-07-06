@@ -34,18 +34,19 @@
 #include "local_storage.h"
 
 /**
- * Implementation of the llog_operations::lop_declare_create
+ * llog_osd_declare_new_object() - Implementation of the lop_declare_create
+ * @env: execution environment
+ * @los: local_storage for bottom storage device
+ * @o: dt_object to create
+ * @th: current transaction handle
  *
+ * Implementation of the llog_operations::lop_declare_create
  * This function is a wrapper over local_storage API function
  * local_object_declare_create().
  *
- * \param[in] env	execution environment
- * \param[in] los	local_storage for bottom storage device
- * \param[in] o		dt_object to create
- * \param[in] th	current transaction handle
- *
- * \retval		0 on successful declaration of the new object
- * \retval		negative error if declaration was failed
+ * Return:
+ * * %0 on successful declaration of the new object
+ * * %negative error if declaration was failed
  */
 static int llog_osd_declare_new_object(const struct lu_env *env,
 				       struct local_oid_storage *los,
@@ -63,18 +64,19 @@ static int llog_osd_declare_new_object(const struct lu_env *env,
 }
 
 /**
- * Implementation of the llog_operations::lop_create
+ * llog_osd_create_new_object() - Implementation of the lop_create
+ * @env: execution environment
+ * @los: local_storage for bottom storage device
+ * @o: dt_object to create
+ * @th: current transaction handle
  *
+ * Implementation of the llog_operations::lop_create
  * This function is a wrapper over local_storage API function
  * local_object_create().
  *
- * \param[in] env	execution environment
- * \param[in] los	local_storage for bottom storage device
- * \param[in] o		dt_object to create
- * \param[in] th	current transaction handle
- *
- * \retval		0 on successful creation of the new object
- * \retval		negative error if creation was failed
+ * Return:
+ * * %0 on successful creation of the new object
+ * * %negative error if creation was failed
  */
 static int llog_osd_create_new_object(const struct lu_env *env,
 				      struct local_oid_storage *los,
@@ -94,14 +96,14 @@ static int llog_osd_create_new_object(const struct lu_env *env,
 }
 
 /**
- * Implementation of the llog_operations::lop_exist
+ * llog_osd_exist() - Implementation of the llog_operations::lop_exist
+ * @handle: llog handle of the current llog
  *
  * This function checks that llog exists on storage.
  *
- * \param[in] handle	llog handle of the current llog
- *
- * \retval		true if llog object exists and is not just destroyed
- * \retval		false if llog doesn't exist or just destroyed
+ * Return:
+ * * %true if llog object exists and is not just destroyed
+ * * %false if llog doesn't exist or just destroyed
  */
 static int llog_osd_exist(struct llog_handle *handle)
 {
@@ -109,14 +111,14 @@ static int llog_osd_exist(struct llog_handle *handle)
 	return dt_object_exists(handle->lgh_obj) && !handle->lgh_destroyed;
 }
 
-static void *rec_tail(struct llog_rec_hdr *rec)
-{
-	return (void *)((char *)rec + rec->lrh_len -
-			sizeof(struct llog_rec_tail));
-}
-
 /**
- * Write a padding record to the llog
+ * llog_osd_pad() - Write a padding record to the llog
+ * @env: execution environment
+ * @o: dt_object to create
+ * @off: pointer to the padding start offset [in,out]
+ * @len: padding length
+ * @index: index of the padding record in a llog
+ * @th: current transaction handle
  *
  * This function writes a padding record to the end of llog. That may
  * be needed if llog contains records of variable size, e.g. config logs
@@ -127,15 +129,9 @@ static void *rec_tail(struct llog_rec_hdr *rec)
  * It allocates full length to avoid two separate writes for header and tail.
  * Such 2-steps scheme needs extra protection and complex error handling.
  *
- * \param[in]     env	execution environment
- * \param[in]     o	dt_object to create
- * \param[in,out] off	pointer to the padding start offset
- * \param[in]     len	padding length
- * \param[in]     index	index of the padding record in a llog
- * \param[in]     th	current transaction handle
- *
- * \retval		0 on successful padding write
- * \retval		negative error if write failed
+ * Return:
+ * * %0 on successful padding write
+ * * %negative error if write failed
  */
 static int llog_osd_pad(const struct lu_env *env, struct dt_object *o,
 			loff_t *off, int len, int index, struct thandle *th)
@@ -159,7 +155,7 @@ static int llog_osd_pad(const struct lu_env *env, struct dt_object *o,
 	rec->lrh_index = index;
 	rec->lrh_type = LLOG_PAD_MAGIC;
 
-	tail = rec_tail(rec);
+	tail = llog_get_rec_tail(rec);
 	tail->lrt_len = len;
 	tail->lrt_index = index;
 
@@ -175,16 +171,17 @@ static int llog_osd_pad(const struct lu_env *env, struct dt_object *o,
 }
 
 /**
- * Implementation of the llog_operations::lop_read_header
+ * llog_osd_read_header() - Implementation of the lop_read_header
+ * @env: execution environment
+ * @handle: llog handle of the current llog
  *
+ * Implementation of the llog_operations::lop_read_header
  * This function reads the current llog header from the bottom storage
  * device.
  *
- * \param[in] env	execution environment
- * \param[in] handle	llog handle of the current llog
- *
- * \retval		0 on successful header read
- * \retval		negative error if read failed
+ * Return:
+ * * %0 on successful header read
+ * * %negative error if read failed
  */
 static int llog_osd_read_header(const struct lu_env *env,
 				struct llog_handle *handle)
@@ -281,23 +278,22 @@ unlock:
 }
 
 /**
- * Implementation of the llog_operations::lop_declare_write
+ * llog_osd_declare_write_rec() - Implementation of the lop_declare_write
+ * @env: execution environment
+ * @loghandle: llog handle of the current llog
+ * @rec: llog record header. This is a real header of the full
+ *	llog record to write. This is the beginning of buffer to write,
+ *	the length of buffer is stored in @rec::lrh_len
+ * @idx: index of the llog record. If @idx == -1 then this is append case,
+ * otherwise @idx is the index of record to modify
+ * @th: current transaction handle
  *
  * This function declares the new record write.
+ * Implementation of the llog_operations::lop_declare_write
  *
- * \param[in] env	execution environment
- * \param[in] loghandle	llog handle of the current llog
- * \param[in] rec	llog record header. This is a real header of the full
- *			llog record to write. This is the beginning of buffer
- *			to write, the length of buffer is stored in
- *			\a rec::lrh_len
- * \param[in] idx	index of the llog record. If \a idx == -1 then this is
- *			append case, otherwise \a idx is the index of record
- *			to modify
- * \param[in] th	current transaction handle
- *
- * \retval		0 on successful declaration
- * \retval		negative error if declaration failed
+ * Return:
+ * * %0 on successful declaration
+ * * %negative error if declaration failed
  */
 static int llog_osd_declare_write_rec(const struct lu_env *env,
 				      struct llog_handle *loghandle,
@@ -341,27 +337,24 @@ static int llog_osd_declare_write_rec(const struct lu_env *env,
 }
 
 /**
- * Implementation of the llog_operations::lop_write
+ * llog_osd_write_rec() - Implementation of the llog_operations::lop_write
+ * @env: execution environment
+ * @loghandle: llog handle of the current llog
+ * @rec: llog record header. This is a real header of the full llog record to
+ * write. This is the bginning of buffer to write, the length of buffer is
+ * stored in @rec::lrh_len
+ * @reccookie: pointer to the cookie to return back if needed. It is used for
+ * further cancel of this llog record. [in,out]
+ * @idx: index of the llog record. If @idx == -1 then this is append case,
+ * otherwise @idx is the index of record to modify
+ * @th: current transaction handle
  *
  * This function writes the new record in the llog or modify the existed one.
  *
- * \param[in]  env		execution environment
- * \param[in]  loghandle	llog handle of the current llog
- * \param[in]  rec		llog record header. This is a real header of
- *				the full llog record to write. This is
- *				the beginning of buffer to write, the length
- *				of buffer is stored in \a rec::lrh_len
- * \param[in,out] reccookie	pointer to the cookie to return back if needed.
- *				It is used for further cancel of this llog
- *				record.
- * \param[in]  idx		index of the llog record. If \a idx == -1 then
- *				this is append case, otherwise \a idx is
- *				the index of record to modify
- * \param[in]  th		current transaction handle
- *
- * \retval			0 on successful write && \a reccookie == NULL
- *				1 on successful write && \a reccookie != NULL
- * \retval			negative error if write failed
+ * Return:
+ * * %0 on successful write && @reccookie == NULL
+ * * %1 on successful write && @reccookie != NULL
+ * * %negative error if write failed
  */
 static int llog_osd_write_rec(const struct lu_env *env,
 			      struct llog_handle *loghandle,
@@ -560,7 +553,7 @@ static int llog_osd_write_rec(const struct lu_env *env,
 		       loghandle->lgh_max_size, (int)loghandle->lgh_last_idx,
 		       PLOGID(&loghandle->lgh_id));
 		/* this is to signal that this llog is full */
-		loghandle->lgh_last_idx = llog_max_idx(llh);
+		loghandle->lgh_last_idx = llog_max_idx(loghandle);
 		RETURN(-ENOSPC);
 	}
 
@@ -600,20 +593,18 @@ static int llog_osd_write_rec(const struct lu_env *env,
 	 */
 	LASSERT(index < LLOG_HDR_BITMAP_SIZE(llh));
 	rec->lrh_index = index;
-	lrt = rec_tail(rec);
+	lrt = llog_get_rec_tail(rec);
 	lrt->lrt_len = rec->lrh_len;
 	lrt->lrt_index = rec->lrh_index;
 
-	/* the lgh_hdr_mutex protects llog header data from concurrent
+	/* the lgh_hdr_lock protects llog header data from concurrent
 	 * update/cancel, the llh_count and llh_bitmap are protected */
-	mutex_lock(&loghandle->lgh_hdr_mutex);
-	if (__test_and_set_bit_le(index, LLOG_HDR_BITMAP(llh))) {
-		CERROR("%s: index %u already set in llog bitmap "DFID"\n",
-		       o->do_lu.lo_dev->ld_obd->obd_name, index,
-		       PFID(lu_object_fid(&o->do_lu)));
-		mutex_unlock(&loghandle->lgh_hdr_mutex);
-		LBUG(); /* should never happen */
-	}
+	spin_lock(&loghandle->lgh_hdr_lock);
+	rc = __test_and_set_bit_le(index, LLOG_HDR_BITMAP(llh));
+	LASSERTF(!rc,
+		 "%s: index %u already set in llog bitmap "DFID"\n",
+		 o->do_lu.lo_dev->ld_obd->obd_name, index,
+		 PFID(lu_object_fid(&o->do_lu)));
 	llh->llh_count++;
 
 	if (!(llh->llh_flags & LLOG_F_IS_FIXSIZE)) {
@@ -623,6 +614,7 @@ static int llog_osd_write_rec(const struct lu_env *env,
 		else if (reclen < llh->llh_size)
 			llh->llh_size = reclen;
 	}
+	spin_unlock(&loghandle->lgh_hdr_lock);
 
 	/*
 	 * readers (e.g. llog_osd_read_header()) must not find
@@ -681,7 +673,6 @@ static int llog_osd_write_rec(const struct lu_env *env,
 
 out_unlock:
 	/* unlock here for remote object */
-	mutex_unlock(&loghandle->lgh_hdr_mutex);
 	if (rc) {
 		dt_write_unlock(env, o);
 		GOTO(out, rc);
@@ -724,7 +715,7 @@ out_unlock:
 		       loghandle->lgh_max_size, (int)loghandle->lgh_last_idx,
 		       PLOGID(&loghandle->lgh_id));
 		/* this is to signal that this llog is full */
-		loghandle->lgh_last_idx = llog_max_idx(llh);
+		loghandle->lgh_last_idx = llog_max_idx(loghandle);
 	}
 
 	up_write(&loghandle->lgh_last_sem);
@@ -747,10 +738,10 @@ out_unlock:
 	RETURN(rc);
 out:
 	/* cleanup llog for error case */
-	mutex_lock(&loghandle->lgh_hdr_mutex);
+	spin_lock(&loghandle->lgh_hdr_lock);
 	clear_bit_le(index, LLOG_HDR_BITMAP(llh));
 	llh->llh_count--;
-	mutex_unlock(&loghandle->lgh_hdr_mutex);
+	spin_unlock(&loghandle->lgh_hdr_lock);
 
 	/* restore llog last_idx */
 	if (dt_object_remote(o)) {
@@ -758,7 +749,7 @@ out:
 	} else if (--loghandle->lgh_last_idx == 0 &&
 	    (llh->llh_flags & LLOG_F_IS_CAT) && llh->llh_cat_idx != 0) {
 		/* catalog had just wrap-around case */
-		loghandle->lgh_last_idx = llog_max_idx(llh);
+		loghandle->lgh_last_idx = llog_max_idx(loghandle);
 	}
 
 	LLOG_HDR_TAIL(llh)->lrt_index = loghandle->lgh_last_idx;
@@ -767,7 +758,7 @@ out:
 	RETURN(rc);
 }
 
-/**
+/*
  * We can skip reading at least as many log blocks as the number of
  * minimum sized log records we are skipping.  If it turns out
  * that we are not far enough along the log (because the
@@ -812,6 +803,11 @@ static inline void llog_skip_over(struct llog_handle *lgh, __u64 *off,
 }
 
 /**
+ * changelog_remap_rec() - Remap record to desired format
+ * @rec: The record to remap.
+ * @crf_wanted: Flags describing the desired extensions.
+ * @cref_want: Flags describing the desired extra extensions.
+ *
  * Remap a record to the desired format as specified by the crf flags.
  * The record must be big enough to contain the final remapped version.
  * Superfluous extension fields are removed and missing ones are added
@@ -830,10 +826,6 @@ static inline void llog_skip_over(struct llog_handle *lgh, __u64 *off,
  *   - CLF_RENAME will not be removed
  *   - CLF_JOBID will not be added without CLF_RENAME being added too
  *   - CLF_EXTRA_FLAGS will not be added without CLF_JOBID being added too
- *
- * @rec:	The record to remap.
- * @crf_wanted:	Flags describing the desired extensions.
- * @cref_want:	Flags describing the desired extra extensions.
  */
 static void changelog_remap_rec(struct changelog_rec *rec,
 				enum changelog_rec_flags crf_wanted,
@@ -1007,16 +999,18 @@ static void changelog_remap_rec(struct changelog_rec *rec,
 }
 
 /**
- * Remove optional fields that the client doesn't expect.
+ * changelog_block_trim_ext() - Remove optional fields client doesn't expect.
+ * @hdr: Header of the block of records to remap.[in,out]
+ * @last_hdr: Last header, don't read past this point.[in,out]
+ * @loghandle: llog handle of the current llog
+ *
+ * flags: Flags describing the fields to keep.
+ * extra_flags: Flags describing the extra fields to keep.
+ *
  * This is typically in order to ensure compatibility with older clients.
  * It is assumed that since we exclusively remove fields, the block will be
  * big enough to handle the remapped records. It is also assumed that records
  * of a block have the same format (i.e.: the same features enabled).
- *
- * \param[in,out]    hdr	   Header of the block of records to remap.
- * \param[in,out]    last_hdr      Last header, don't read past this point.
- * \param[in]        flags	   Flags describing the fields to keep.
- * \param[in]        extra_flags   Flags describing the extra fields to keep.
  */
 static void changelog_block_trim_ext(struct llog_rec_hdr *hdr,
 				     struct llog_rec_hdr *last_hdr,
@@ -1054,12 +1048,6 @@ static void changelog_block_trim_ext(struct llog_rec_hdr *hdr,
 		struct changelog_rec *rec = (struct changelog_rec *)(hdr + 1);
 		enum changelog_rec_extra_flags xflag = CLFE_INVALID;
 
-		if (flags & CLF_EXTRA_FLAGS &&
-		    rec->cr_flags & CLF_EXTRA_FLAGS) {
-			xflag = changelog_rec_extra_flags(rec)->cr_extra_flags &
-				extra_flags;
-		}
-
 		if (unlikely(hdr->lrh_len == 0)) {
 			/* It is corruption case, we cannot know the next rec,
 			 * jump to the last one directly to avoid dead loop. */
@@ -1075,6 +1063,13 @@ static void changelog_block_trim_ext(struct llog_rec_hdr *hdr,
 			break;
 		}
 
+
+		if (flags & CLF_EXTRA_FLAGS &&
+		    rec->cr_flags & CLF_EXTRA_FLAGS) {
+			xflag = changelog_rec_extra_flags(rec)->cr_extra_flags &
+				extra_flags;
+		}
+
 		/* Fill up the changelog record with everything the kernel
 		 * version supports.
 		 */
@@ -1087,22 +1082,21 @@ static void changelog_block_trim_ext(struct llog_rec_hdr *hdr,
 }
 
 /**
- * Implementation of the llog_operations::lop_next_block
+ * llog_osd_next_block() - Implementation of the llog_operations::lop_next_block
+ * @env: execution environment
+ * @loghandle: llog handle of the current llog
+ * @cur_idx: index preceeding cur_offset [in,out]
+ * @next_idx: target index to find
+ * @cur_offset: furtherst point read in the file [in,out]
+ * @buf: pointer to data buffer to fill
+ * @len: required len to read, it is usually llog chunk_size.
  *
  * This function finds the the next llog block to return which contains
  * record with required index. It is main part of llog processing.
  *
- * \param[in]     env		execution environment
- * \param[in]     loghandle	llog handle of the current llog
- * \param[in,out] cur_idx	index preceeding cur_offset
- * \param[in]     next_idx	target index to find
- * \param[in,out] cur_offset	furtherst point read in the file
- * \param[in]     buf		pointer to data buffer to fill
- * \param[in]     len		required len to read, it is
- *				usually llog chunk_size.
- *
- * \retval			0 on successful buffer read
- * \retval			negative value on error
+ * Return:
+ * * %0 on successful buffer read
+ * * %negative value on error
  */
 static int llog_osd_next_block(const struct lu_env *env,
 			       struct llog_handle *loghandle, int *cur_idx,
@@ -1209,8 +1203,21 @@ static int llog_osd_next_block(const struct lu_env *env,
 		rec = buf;
 		if (LLOG_REC_HDR_NEEDS_SWABBING(rec))
 			lustre_swab_llog_rec(rec);
+
+		/* caller handles bad records if any */
+		if (llog_verify_record(loghandle, rec))
+			GOTO(out, rc = 0);
+
 		tail = (struct llog_rec_tail *)((char *)buf + rc -
 						sizeof(struct llog_rec_tail));
+
+		while ((tail->lrt_index == 0 || tail->lrt_len == 0) &&
+		       (void *) tail > buf) {
+			/* looks like zeroes at the end of block */
+			/* searching real record, assume 4bytes align */
+			tail = (struct llog_rec_tail *)(((char *)tail) - 4);
+		};
+
 		tail_len = tail->lrt_len;
 		/* base on tail_len do swab */
 		if (tail_len > chunk_size) {
@@ -1228,10 +1235,6 @@ static int llog_osd_next_block(const struct lu_env *env,
 		/* get the last record in block */
 		last_rec = (struct llog_rec_hdr *)((char *)tail - tail_len +
 				sizeof(struct llog_rec_tail));
-
-		/* caller handles bad records if any */
-		if (llog_verify_record(loghandle, rec))
-			GOTO(out, rc = 0);
 
 		if (LLOG_REC_HDR_NEEDS_SWABBING(last_rec))
 			lustre_swab_llog_rec(last_rec);
@@ -1297,21 +1300,21 @@ out:
 }
 
 /**
- * Implementation of the llog_operations::lop_prev_block
+ * llog_osd_prev_block() - Implementation of the llog_operations::lop_prev_block
+ * @env: execution environment
+ * @loghandle: llog handle of the current llog
+ * @prev_idx: target index to find
+ * @buf: pointer to data buffer to fill
+ * @len: required len to read, it is llog_chunk_size usually.
  *
  * This function finds the llog block to return which contains
  * record with required index but in reverse order - from end of llog
  * to the beginning.
  * It is main part of reverse llog processing.
  *
- * \param[in] env	execution environment
- * \param[in] loghandle	llog handle of the current llog
- * \param[in] prev_idx	target index to find
- * \param[in] buf	pointer to data buffer to fill
- * \param[in] len	required len to read, it is llog_chunk_size usually.
- *
- * \retval		0 on successful buffer read
- * \retval		negative value on error
+ * Return:
+ * * %0 on successful buffer read
+ * * %negative value on error
  */
 static int llog_osd_prev_block(const struct lu_env *env,
 			       struct llog_handle *loghandle,
@@ -1328,14 +1331,17 @@ static int llog_osd_prev_block(const struct lu_env *env,
 }
 
 /**
- * This is helper function to get llog directory object. It is used by named
- * llog operations to find/insert/delete llog entry from llog directory.
+ * llog_osd_dir_get() - Get llog directory object.
+ * @env: execution environment
+ * @ctxt: llog context
  *
- * \param[in] env	execution environment
- * \param[in] ctxt	llog context
+ * This is helper function to get llog directory object.
+ * It is used by named llog operations to find/insert/delete llog entry from
+ * llog directory.
  *
- * \retval		dt_object of llog directory
- * \retval		ERR_PTR of negative value on error
+ * Return:
+ * * %dt_object of llog directory
+ * * %ERR_PTR of negative value on error
  */
 static struct dt_object *llog_osd_dir_get(const struct lu_env *env,
 					  struct llog_ctxt *ctxt)
@@ -1365,7 +1371,13 @@ static struct dt_object *llog_osd_dir_get(const struct lu_env *env,
 }
 
 /**
- * Implementation of the llog_operations::lop_open
+ * llog_osd_open() - Implementation of the llog_operations::lop_open
+ * @env: execution environment
+ * @handle: llog handle of the current llog
+ * @logid: logid of llog to open (nameless llog)
+ * @name: name of llog to open (named llog)
+ * @open_param: LLOG_OPEN_NEW - new llog, may not exist
+ *              LLOG_OPEN_EXIST - old llog, must exist
  *
  * This function opens the llog by its logid or by name, it may open also
  * non existent llog and assing then new id to it.
@@ -1373,17 +1385,9 @@ static struct dt_object *llog_osd_dir_get(const struct lu_env *env,
  * the object may not exist prior open. The result of open is just dt_object
  * in the llog header.
  *
- * \param[in] env		execution environment
- * \param[in] handle		llog handle of the current llog
- * \param[in] logid		logid of llog to open (nameless llog)
- * \param[in] name		name of llog to open (named llog)
- * \param[in] open_param
- *				LLOG_OPEN_NEW - new llog, may not exist
- *				LLOG_OPEN_EXIST - old llog, must exist
- *
- * \retval			0 on successful open, llog_handle::lgh_obj
- *				contains the dt_object of the llog.
- * \retval			negative value on error
+ * Return:
+ * * %0 on successful open, llog_handle::lgh_obj contains dt_object of the llog.
+ * * %negative value on error
  */
 static int llog_osd_open(const struct lu_env *env, struct llog_handle *handle,
 			 struct llog_logid *logid, char *name,
@@ -1527,17 +1531,17 @@ out:
 }
 
 /**
- * Get dir for regular fid log object
+ * llog_osd_get_regular_fid_dir() - Get dir for regular fid log object
+ * @env: execution environment
+ * @dto: llog object
  *
  * Get directory for regular fid log object, and these regular fid log
  * object will be inserted under this directory, to satisfy the FS
  * consistency check, e2fsck etc.
  *
- * \param [in] env	execution environment
- * \param [in] dto	llog object
- *
- * \retval		pointer to the directory if it is found.
- * \retval		ERR_PTR(negative errno) if it fails.
+ * Return:
+ * * %pointer to the directory if it is found.
+ * * %ERR_PTR(negative errno) if it fails.
  */
 static struct dt_object *llog_osd_get_regular_fid_dir(const struct lu_env *env,
 						      struct dt_object *dto)
@@ -1571,19 +1575,20 @@ static struct dt_object *llog_osd_get_regular_fid_dir(const struct lu_env *env,
 }
 
 /**
- * Add llog object with regular FID to name entry
+ * llog_osd_regular_fid_add_name_entry() - Add llog object with regular FID to
+ * name entry
+ * @env: execution environment
+ * @dto: llog object
+ * @th: current transaction handle
+ * @declare: if it is declare or execution
  *
  * Add llog object with regular FID to name space, and each llog
  * object on each MDT will be /update_log_dir/[seq:oid:ver],
  * so to satisfy the namespace consistency check, e2fsck etc.
  *
- * \param [in] env	execution environment
- * \param [in] dto	llog object
- * \param [in] th	thandle
- * \param [in] declare	if it is declare or execution
- *
- * \retval		0 if insertion succeeds.
- * \retval		negative errno if insertion fails.
+ * Return:
+ * * %0 if insertion succeeds.
+ * * %negative errno if insertion fails.
  */
 static int
 llog_osd_regular_fid_add_name_entry(const struct lu_env *env,
@@ -1624,17 +1629,18 @@ llog_osd_regular_fid_add_name_entry(const struct lu_env *env,
 
 
 /**
- * Implementation of the llog_operations::lop_declare_create
+ * llog_osd_declare_create() - Implementation of the lop_declare_create
+ * @env: execution environment
+ * @res: llog handle of the current llog
+ * @th: current transaction handle
  *
+ * Implementation of the llog_operations::lop_declare_create
  * This function declares the llog create. It declares also name insert
  * into llog directory in case of named llog.
  *
- * \param[in] env	execution environment
- * \param[in] res	llog handle of the current llog
- * \param[in] th	current transaction handle
- *
- * \retval		0 on successful create declaration
- * \retval		negative value on error
+ * Return:
+ * * %0 on successful create declaration
+ * * %negative value on error
  */
 static int llog_osd_declare_create(const struct lu_env *env,
 				   struct llog_handle *res, struct thandle *th)
@@ -1705,17 +1711,17 @@ static int llog_osd_declare_create(const struct lu_env *env,
 }
 
 /**
- * Implementation of the llog_operations::lop_create
+ * llog_osd_create() - Implementation of the llog_operations::lop_create
+ * @env: execution environment
+ * @res: llog handle of the current llog
+ * @th: current transaction handle
  *
  * This function creates the llog according with llog_handle::lgh_obj
  * and llog_handle::lgh_name.
  *
- * \param[in] env	execution environment
- * \param[in] res	llog handle of the current llog
- * \param[in] th	current transaction handle
- *
- * \retval		0 on successful create
- * \retval		negative value on error
+ * Return:
+ * * %0 on successful create
+ * * %negative value on error
  */
 static int llog_osd_create(const struct lu_env *env, struct llog_handle *res,
 			   struct thandle *th)
@@ -1796,16 +1802,16 @@ static int llog_osd_create(const struct lu_env *env, struct llog_handle *res,
 }
 
 /**
- * Implementation of the llog_operations::lop_close
+ * llog_osd_close() - Implementation of the llog_operations::lop_close
+ * @env: execution environment
+ * @handle: llog handle of the current llog
  *
  * This function closes the llog. It just put llog object and referenced
  * local storage.
  *
- * \param[in] env	execution environment
- * \param[in] handle	llog handle of the current llog
- *
- * \retval		0 on successful llog close
- * \retval		negative value on error
+ * Return:
+ * * %0 on successful llog close
+ * * %negative value on error
  */
 static int llog_osd_close(const struct lu_env *env, struct llog_handle *handle)
 {
@@ -1835,18 +1841,18 @@ static int llog_osd_close(const struct lu_env *env, struct llog_handle *handle)
 }
 
 /**
- * delete llog object name entry
+ * llog_osd_regular_fid_del_name_entry() - delete llog object name entry
+ * @env: execution environment
+ * @dto: llog object
+ * @th: current transaction handle
+ * @declare: if it is declare or execution
  *
  * Delete llog object (with regular FID) from name space (under
  * update_log_dir).
  *
- * \param [in] env	execution environment
- * \param [in] dto	llog object
- * \param [in] th	thandle
- * \param [in] declare	if it is declare or execution
- *
- * \retval		0 if deletion succeeds.
- * \retval		negative errno if deletion fails.
+ * Return:
+ * * %0 if deletion succeeds.
+ * * %negative errno if deletion fails.
  */
 static int
 llog_osd_regular_fid_del_name_entry(const struct lu_env *env,
@@ -1882,16 +1888,18 @@ llog_osd_regular_fid_del_name_entry(const struct lu_env *env,
 }
 
 /**
- * Implementation of the llog_operations::lop_declare_destroy
+ * llog_osd_declare_destroy() - Implementation of the lop_declare_destroy
+ * @env: execution environment
+ * @loghandle: llog handle of the current llog
+ * @th: current transaction handle
  *
+ * Implementation of the llog_operations::lop_declare_destroy
  * This function declare destroys the llog and deletes also entry in the
  * llog directory in case of named llog. Llog should be opened prior that.
  *
- * \param[in] env		execution environment
- * \param[in] loghandle	llog handle of the current llog
- *
- * \retval		0 on successful destroy
- * \retval		negative value on error
+ * Return:
+ * * %0 on successful destroy
+ * * %negative value on error
  */
 static int llog_osd_declare_destroy(const struct lu_env *env,
 				    struct llog_handle *loghandle,
@@ -1944,18 +1952,19 @@ out_put:
 
 
 /**
- * Implementation of the llog_operations::lop_destroy
+ * llog_osd_destroy() - Implementation of the llog_operations::lop_destroy
+ * @env: execution environment
+ * @loghandle: llog handle of the current llog
+ * @th: current transaction handle
  *
  * This function destroys the llog and deletes also entry in the
  * llog directory in case of named llog. Llog should be opened prior that.
  * Destroy method is not part of external transaction and does everything
  * inside.
  *
- * \param[in] env		execution environment
- * \param[in] loghandle	llog handle of the current llog
- *
- * \retval		0 on successful destroy
- * \retval		negative value on error
+ * Return:
+ * * %0 on successful destroy
+ * * %negative value on error
  */
 static int llog_osd_destroy(const struct lu_env *env,
 			    struct llog_handle *loghandle, struct thandle *th)
@@ -2014,19 +2023,19 @@ out_unlock:
 }
 
 /**
- * Implementation of the llog_operations::lop_setup
+ * llog_osd_setup() - Implementation of the llog_operations::lop_setup
+ * @env: execution environment
+ * @obd: obd device the llog belongs to
+ * @olg: the llog group, it is always zero group now.
+ * @ctxt_idx: the llog index, it defines the purpose of this llog.
+ *			Every new llog type have to use own index.
+ * @disk_obd: the storage obd, where llog is stored.
  *
  * This function setup the llog on local storage.
  *
- * \param[in] env	execution environment
- * \param[in] obd	obd device the llog belongs to
- * \param[in] olg	the llog group, it is always zero group now.
- * \param[in] ctxt_idx	the llog index, it defines the purpose of this llog.
- *			Every new llog type have to use own index.
- * \param[in] disk_obd	the storage obd, where llog is stored.
- *
- * \retval		0 on successful llog setup
- * \retval		negative value on error
+ * Return:
+ * * %0 on successful llog setup
+ * * %negative value on error
  */
 static int llog_osd_setup(const struct lu_env *env, struct obd_device *obd,
 			  struct obd_llog_group *olg, int ctxt_idx,
@@ -2076,14 +2085,13 @@ out:
 }
 
 /**
- * Implementation of the llog_operations::lop_cleanup
+ * llog_osd_cleanup() - Implementation of the llog_operations::lop_cleanup
+ * @env: execution environment
+ * @ctxt: the llog context
  *
  * This function cleanups the llog on local storage.
  *
- * \param[in] env	execution environment
- * \param[in] ctxt	the llog context
- *
- * \retval		0
+ * Return 0 always
  */
 static int llog_osd_cleanup(const struct lu_env *env, struct llog_ctxt *ctxt)
 {
@@ -2139,25 +2147,24 @@ const struct llog_operations llog_common_cat_ops = {
 EXPORT_SYMBOL(llog_common_cat_ops);
 
 /**
- * Read the special file which contains the list of llog catalogs IDs
+ * llog_osd_get_cat_list() - Read the special file which contains the list of
+ * llog catalogs IDs
+ * @env: execution environment
+ * @d: corresponding storage device
+ * @idx: position to start from, usually OST/MDT index
+ * @count: how many catalog IDs to read
+ * @idarray: the buffer for the data. If it is NULL then function returns just
+ * number of catalog IDs in the file. [out]
+ * @fid: LLOG_CATALOGS_OID for CATALOG object
  *
  * This function reads the CATALOGS file which contains the array of llog
  * catalogs IDs. The main purpose of this file is to store OSP llogs indexed
  * by OST/MDT number.
  *
- * \param[in]  env		execution environment
- * \param[in]  d		corresponding storage device
- * \param[in]  idx		position to start from, usually OST/MDT index
- * \param[in]  count		how many catalog IDs to read
- * \param[out] idarray		the buffer for the data. If it is NULL then
- *				function returns just number of catalog IDs
- *				in the file.
- * \param[in]  fid		LLOG_CATALOGS_OID for CATALOG object
- *
- * \retval			0 on successful read of catalog IDs
- * \retval			negative value on error
- * \retval			positive value which is number of records in
- *				the file if \a idarray is NULL
+ * Return:
+ * * %0 on successful read of catalog IDs
+ * * %negative value on error
+ * * %positive value which is number of records in the file if @idarray is NULL
  */
 int llog_osd_get_cat_list(const struct lu_env *env, struct dt_device *d,
 			  int idx, int count, struct llog_catid *idarray,
@@ -2261,21 +2268,22 @@ out:
 EXPORT_SYMBOL(llog_osd_get_cat_list);
 
 /**
- * Write the special file which contains the list of llog catalogs IDs
+ * llog_osd_put_cat_list() - Write the special file which contains the list of
+ * llog catalogs IDs
+ * @env: execution environment
+ * @d: corresponding storage device
+ * @idx: position to start from, usually OST/MDT index
+ * @count: how many catalog IDs to write
+ * @idarray: the buffer with the data to write.[out]
+ * @fid: LLOG_CATALOGS_OID for CATALOG object
  *
  * This function writes the CATALOG file which contains the array of llog
  * catalogs IDs. It is used mostly to store OSP llogs indexed by OST/MDT
  * number.
  *
- * \param[in]  env	execution environment
- * \param[in]  d	corresponding storage device
- * \param[in]  idx	position to start from, usually OST/MDT index
- * \param[in]  count	how many catalog IDs to write
- * \param[out] idarray	the buffer with the data to write.
- * \param[in]  fid	LLOG_CATALOGS_OID for CATALOG object
- *
- * \retval		0 on successful write of catalog IDs
- * \retval		negative value on error
+ * Return:
+ * * %0 on successful write of catalog IDs
+ * * %negative value on error
  */
 int llog_osd_put_cat_list(const struct lu_env *env, struct dt_device *d,
 			  int idx, int count, struct llog_catid *idarray,
@@ -2328,7 +2336,8 @@ int llog_osd_put_cat_list(const struct lu_env *env, struct dt_device *d,
 	 * file ID is written to catlist file(committed) before
 	 * cross-MDT operation write update records to catlog FILE,
 	 * otherwise, during failover these update records might
-	 * missing */
+	 * missing
+	 */
 	if (fid_is_update_log(fid))
 		th->th_sync = 1;
 

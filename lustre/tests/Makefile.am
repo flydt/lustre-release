@@ -3,7 +3,7 @@ AM_CFLAGS := -fPIC -D_GNU_SOURCE \
 	     -D_LARGEFILE64_SOURCE=1 -D_FILE_OFFSET_BITS=64
 
 DIST_SUBDIRS = mpi
-DIST_SUBDIRS += lutf iabf
+DIST_SUBDIRS += iabf
 
 noinst_DATA =
 noinst_DATA += disk2_7-ldiskfs.tar.bz2 disk2_7-zfs.tar.bz2
@@ -16,7 +16,7 @@ noinst_DATA += zfs_mdt1_2_11.tar.bz2 zfs_mdt2_2_11.tar.bz2
 noinst_DATA += zfs_ost1_2_11.tar.bz2 zfs_ost2_2_11.tar.bz2
 noinst_SCRIPTS = leak_finder.pl llmount.sh llmountcleanup.sh functions.sh
 noinst_SCRIPTS += test-framework.sh runvmstat runiozone runtests sanity.sh
-noinst_SCRIPTS += rundbench acceptance-small.sh conf-sanity.sh
+noinst_SCRIPTS += acceptance-small.sh conf-sanity.sh conf-sanity-framework.sh
 noinst_SCRIPTS += insanity.sh oos.sh oos2.sh dne_sanity.sh sanity-compr.sh
 noinst_SCRIPTS += recovery-small.sh replay-dual.sh sanity-quota.sh
 noinst_SCRIPTS += replay-ost-single.sh replay-single.sh run-llog.sh sanityn.sh
@@ -30,24 +30,25 @@ noinst_SCRIPTS += run_dd.sh run_tar.sh run_iozone.sh
 noinst_SCRIPTS += run_dbench.sh run_IOR.sh recovery-double-scale.sh
 noinst_SCRIPTS += recovery-random-scale.sh parallel-scale.sh
 noinst_SCRIPTS += lustre-rsync-test.sh ost-pools.sh rpc.sh yaml.sh
-noinst_SCRIPTS += lutf.sh
-noinst_SCRIPTS += lnet-selftest.sh obdfilter-survey.sh mmp.sh mmp_mark.sh
+noinst_SCRIPTS += lcov-merge.sh
+noinst_SCRIPTS += lnet-selftest.sh obdfilter-survey.sh mmp.sh
 noinst_SCRIPTS += sgpdd-survey.sh maloo_upload.sh auster setup-nfs.sh
 noinst_SCRIPTS += mds-survey.sh parallel-scale-nfs.sh large-lun.sh
-noinst_SCRIPTS += parallel-scale-nfsv3.sh parallel-scale-nfsv4.sh
+noinst_SCRIPTS += parallel-scale-nfsv3.sh parallel-scale-nfsv4.sh rundbench
 noinst_SCRIPTS += setup-cifs.sh parallel-scale-cifs.sh
-noinst_SCRIPTS += posix.sh sanity-scrub.sh scrub-performance.sh ha.sh pjdfstest.sh
+noinst_SCRIPTS += sanity-scrub.sh scrub-performance.sh ha.sh pjdfstest.sh
 noinst_SCRIPTS += sanity-lfsck.sh lfsck-performance.sh
 noinst_SCRIPTS += sanity-hsm.sh sanity-lsnapshot.sh sanity-pfl.sh sanity-flr.sh
 noinst_SCRIPTS += sanity-dom.sh sanity-pcc.sh dom-performance.sh sanity-lnet.sh
+noinst_SCRIPTS += sanity-ec.sh
 nobase_noinst_SCRIPTS = cfg/local.sh
 nobase_noinst_SCRIPTS += test-groups/regression test-groups/regression-mpi
 nobase_noinst_SCRIPTS += acl/make-tree acl/run cfg/ncli.sh
 nobase_noinst_SCRIPTS += racer/*.sh
-nobase_noinst_SCRIPTS += posix/posix.cfg
 nobase_noinst_DATA = acl/*.test
 nobase_noinst_DATA += clientapi/simple_test.c
 nobase_noinst_DATA += except/*.ex
+nobase_noinst_DATA += lcov-merge.sh.in
 
 EXTRA_DIST = $(noinst_SCRIPTS) $(noinst_DATA) \
              $(nobase_noinst_SCRIPTS) $(nobase_noinst_DATA)
@@ -71,8 +72,8 @@ THETESTS += create_foreign_file parse_foreign_file
 THETESTS += create_foreign_dir parse_foreign_dir
 THETESTS += check_fallocate splice-test lseek_test expand_truncate_test
 THETESTS += foreign_symlink_striping lov_getstripe_old io_uring_probe
-THETESTS += fadvise_dontneed_helper llapi_root_test aheadmany
-THETESTS += monitor_lustrefs
+THETESTS += fadvise_dontneed_helper llapi_root_test llapi_pool_test aheadmany
+THETESTS += monitor_lustrefs test_parity_read
 
 if LIBAIO
 THETESTS += aiocp
@@ -86,11 +87,6 @@ SUBDIRS = iabf
 if MPITESTS
 SUBDIRS += mpi
 endif
-
-# Build LUTF only if the packages are available
-if BUILD_LUTF
-SUBDIRS += lutf
-endif # BUILD_LUTF
 
 bin_PROGRAMS = mcreate statx
 testdir = $(libdir)/lustre/tests
@@ -108,8 +104,12 @@ endif # NO_STRINGOP_OVERFLOW
 
 mmap_sanity_LDADD = $(LIBLUSTREAPI) $(PTHREAD_LIBS)
 multiop_LDADD = $(LIBLUSTREAPI) $(PTHREAD_LIBS)
+llapi_layout_test_SOURCES = llapi_layout_test.c llapi_test_utils.c llapi_test_utils.h
 llapi_layout_test_LDADD = $(LIBLUSTREAPI)
+llapi_hsm_test_SOURCES = llapi_hsm_test.c llapi_test_utils.c llapi_test_utils.h
 llapi_hsm_test_LDADD = $(LIBLUSTREAPI)
+llapi_pool_test_SOURCES = llapi_pool_test.c llapi_test_utils.c llapi_test_utils.h
+llapi_pool_test_LDADD = $(LIBLUSTREAPI)
 group_lock_test_LDADD = $(LIBLUSTREAPI)
 llapi_fid_test_LDADD = $(LIBLUSTREAPI)
 llapi_root_test_LDADD = $(LIBLUSTREAPI) -lpthread
@@ -128,9 +128,14 @@ createmany_LDADD=$(LIBLUSTREAPI)
 create_foreign_dir_LDADD = $(LIBLUSTREAPI)
 check_fallocate_LDADD = $(LIBLUSTREAPI)
 fsx_LDADD = $(LIBLUSTREAPI)
+test_parity_read_LDADD = $(LIBLUSTREAPI)
 checkfiemap_LDADD = -lpthread
 if LIBAIO
 aiocp_LDADD= -laio
 endif
 statx_LDADD = $(SELINUX)
 endif # TESTS
+
+lcov-merge.sh: lcov-merge.sh.in
+	sed "s:@BUILD_SRC@:$$(realpath $$(pwd)/../..):g" $< > $@
+	chmod a+x $@

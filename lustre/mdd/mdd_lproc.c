@@ -199,11 +199,15 @@ static int lprocfs_changelog_users_cb(const struct lu_env *env,
 
 static int mdd_changelog_users_seq_show(struct seq_file *m, void *data)
 {
-	struct lu_env		 env;
-	struct mdd_device	*mdd = m->private;
-	struct llog_ctxt	*ctxt;
-	__u64			 cur;
-	int			 rc;
+	struct mdd_device *mdd = m->private;
+	struct llog_ctxt *ctxt;
+	struct lu_env env;
+	__u64 cur;
+	int rc;
+
+	smp_rmb();
+	if ((mdd->mdd_cl.mc_flags & CLM_INIT_DONE) == 0)
+		return -ENXIO;
 
         ctxt = llog_get_context(mdd2obd_dev(mdd),
 				LLOG_CHANGELOG_USER_ORIG_CTXT);
@@ -237,7 +241,11 @@ static int mdd_changelog_size_ctxt(const struct lu_env *env,
 				   struct mdd_device *mdd,
 				   int index, __u64 *val)
 {
-	struct llog_ctxt	*ctxt;
+	struct llog_ctxt *ctxt;
+
+	smp_rmb();
+	if ((mdd->mdd_cl.mc_flags & CLM_INIT_DONE) == 0)
+		return -ENXIO;
 
 	ctxt = llog_get_context(mdd2obd_dev(mdd),
 				index);
@@ -643,13 +651,15 @@ static int mdd_lfsck_layout_seq_show(struct seq_file *m, void *data)
 LDEBUGFS_SEQ_FOPS_RO(mdd_lfsck_layout);
 
 /**
- * Show default number of stripes for O_APPEND files.
+ * append_stripe_count_show() - Show default number of stripes for O_APPEND
+ *                              files.
+ * @kobj: Kernel object (OFD)
+ * @attr: Pointer to struct attribute
+ * @buf: buffer where the output string will be written [out]
  *
- * \param[in] m		seq file
- * \param[in] v		unused for single entry
- *
- * \retval 0		on success,
- * \retval negative	error code if failed
+ * Return:
+ * * %0 on success,
+ * * %negative error code if failed
  */
 static ssize_t append_stripe_count_show(struct kobject *kobj,
 					struct attribute *attr, char *buf)
@@ -661,16 +671,16 @@ static ssize_t append_stripe_count_show(struct kobject *kobj,
 }
 
 /**
- * Set default number of stripes for O_APPEND files.
+ * append_stripe_count_store() - Set default number of stripes for O_APPEND
+ *                               files.
+ * @kobj: Kernel object (OFD)
+ * @attr: Pointer to struct attribute
+ * @buffer: string containing the default number of stripes for new files
+ * @count: @buffer length
  *
- * \param[in] file	proc file
- * \param[in] buffer	string containing the default number of stripes
- *			for new files
- * \param[in] count	@buffer length
- * \param[in] off	unused for single entry
- *
- * \retval @count	on success
- * \retval negative	error code otherwise
+ * Return:
+ * * %0 on success,
+ * * %negative error code otherwise
  */
 static ssize_t append_stripe_count_store(struct kobject *kobj,
 					 struct attribute *attr,
@@ -695,14 +705,14 @@ static ssize_t append_stripe_count_store(struct kobject *kobj,
 LUSTRE_RW_ATTR(append_stripe_count);
 
 /**
- * Show default OST pool for O_APPEND files.
+ * append_pool_show() - Show default OST pool for O_APPEND files.
+ * @kobj: Kernel object (OFD, proc object)
+ * @attr: Pointer to struct attribute (attribute proc attribute)
+ * @buf: buffer where the output string will be written [out]
  *
- * \param[in] kobject	proc object
- * \param[in] attribute proc attribute
- * \param[in] buf	output buffer
- *
- * \retval 0		on success,
- * \retval negative	error code if failed
+ * Return:
+ * * %0 on success,
+ * * %negative error code if failed
  */
 static ssize_t append_pool_show(struct kobject *kobj,
 				struct attribute *attr, char *buf)
@@ -714,15 +724,15 @@ static ssize_t append_pool_show(struct kobject *kobj,
 }
 
 /**
- * Set default OST pool for O_APPEND files.
+ * append_pool_store() - Set default OST pool for O_APPEND files.
+ * @kobj: proc object
+ * @attr: proc attribute
+ * @buffer: user inputted pool name
+ * @count: @buffer length
  *
- * \param[in] kobject	proc object
- * \param[in] attribute proc attribute
- * \param[in] buffer	user inputted pool name
- * \param[in] count	@buffer length
- *
- * \retval @count	on success
- * \retval negative	error code otherwise
+ * Return:
+ * * @count on success
+ * * %negative error code otherwise
  */
 static ssize_t append_pool_store(struct kobject *kobj, struct attribute *attr,
 				 const char *buffer, size_t count)
@@ -779,7 +789,7 @@ static struct attribute *mdd_attrs[] = {
 	NULL,
 };
 
-KOBJ_ATTRIBUTE_GROUPS(mdd); /* creates mdd_groups */
+ATTRIBUTE_GROUPS(mdd); /* creates mdd_groups */
 
 static void mdd_sysfs_release(struct kobject *kobj)
 {
@@ -812,7 +822,7 @@ int mdd_procfs_init(struct mdd_device *mdd, const char *name)
 	/* put reference taken by class_search_type */
 	kobject_put(&type->typ_kobj);
 
-	mdd->mdd_ktype.default_groups = KOBJ_ATTR_GROUPS(mdd);
+	mdd->mdd_ktype.default_groups = mdd_groups;
 	mdd->mdd_ktype.release = mdd_sysfs_release;
 	mdd->mdd_ktype.sysfs_ops = &lustre_sysfs_ops;
 

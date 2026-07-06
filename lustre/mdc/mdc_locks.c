@@ -41,7 +41,7 @@ struct mdc_enqueue_args {
 	obd_enqueue_update_f		mea_upcall;
 };
 
-int it_open_error(int phase, struct lookup_intent *it)
+int it_open_error(enum lustre_disposition phase, struct lookup_intent *it)
 {
 	if (it_disposition(it, DISP_OPEN_LEASE)) {
 		if (phase >= DISP_OPEN_LEASE)
@@ -77,8 +77,8 @@ int it_open_error(int phase, struct lookup_intent *it)
 			return 0;
 	}
 
-	CERROR("it disp: %X, status: %d\n", it->it_disposition, it->it_status);
-	LBUG();
+	LASSERTF(false, "it disp: %X, status: %d\n",
+		 it_disposition(it, DISP_ALL), it->it_status);
 
 	return 0;
 }
@@ -106,10 +106,10 @@ int mdc_set_lock_data(struct obd_export *exp, const struct lustre_handle *lockh,
 	    lock->l_resource->lr_lvb_inode != data) {
 		struct inode *old_inode = lock->l_resource->lr_lvb_inode;
 
-		LASSERTF(old_inode->i_state & I_FREEING,
+		LASSERTF(inode_state_read(old_inode) & I_FREEING,
 			 "Found existing inode %px/%lu/%u state %lu in lock: setting data to %px/%lu/%u\n",
 			 old_inode, old_inode->i_ino, old_inode->i_generation,
-			 (unsigned long)old_inode->i_state,
+			 (unsigned long)inode_state_read(old_inode),
 			 new_inode, new_inode->i_ino, new_inode->i_generation);
 	}
 	lock->l_resource->lr_lvb_inode = new_inode;
@@ -188,14 +188,14 @@ static inline void mdc_clear_replay_flag(struct ptlrpc_request *req, int rc)
 		req->rq_replay = 0;
 		spin_unlock(&req->rq_lock);
 	}
-	if (rc && req->rq_transno != 0) {
+	if (rc && req->rq_err == 0 && req->rq_transno != 0) {
 		DEBUG_REQ(D_ERROR, req, "transno returned on error: rc = %d",
 			  rc);
 		LBUG();
 	}
 }
 
-/**
+/*
  * Save a large LOV/LMV EA into the request buffer so that it is available
  * for replay.  We don't do this in the initial request because the
  * original request doesn't need this buffer (at most it sends just the
@@ -333,7 +333,7 @@ mdc_intent_open_pack(struct obd_export *exp, struct lookup_intent *it,
 		GOTO(err_put_sepol, rc);
 
 	spin_lock(&req->rq_lock);
-	req->rq_replay = req->rq_import->imp_replayable;
+	req->rq_replay = test_bit(IMPF_REPLAYABLE, req->rq_import->imp_flags);
 	spin_unlock(&req->rq_lock);
 
 	/* pack the intent */
@@ -805,7 +805,7 @@ int mdc_finish_enqueue(struct obd_export *exp,
 	lockrep = req_capsule_server_get(pill, &RMF_DLM_REP);
 	LASSERT(lockrep != NULL); /* checked by ldlm_cli_enqueue() */
 
-	it->it_disposition = (int)lockrep->lock_policy_res1;
+	it->it_disposition = (enum lustre_disposition)lockrep->lock_policy_res1;
 	it->it_status = (int)lockrep->lock_policy_res2;
 	it->it_lock_mode = einfo->ei_mode;
 	it->it_lock_handle = lockh->cookie;
@@ -830,7 +830,7 @@ int mdc_finish_enqueue(struct obd_export *exp,
 		mdc_clear_replay_flag(req, it->it_status);
 
 	DEBUG_REQ(D_RPCTRACE, req, "op=%x disposition=%x, status=%d",
-		  it->it_op, it->it_disposition, it->it_status);
+		  it->it_op, it_disposition(it, DISP_ALL), it->it_status);
 
 	/* We know what to expect, so we do any byte flipping required here */
 	if (it_has_reply_body(it)) {
@@ -1385,7 +1385,7 @@ out:
 	CDEBUG(D_DENTRY,
 	       "D_IT dentry="DNAME" intent=%s status=%d disp=%x: rc = %d\n",
 	       encode_fn_opdata(op_data), ldlm_it2str(it->it_op),
-	       it->it_status, it->it_disposition, rc);
+	       it->it_status, it_disposition(it, DISP_ALL), rc);
 
 	return rc;
 }

@@ -370,7 +370,7 @@ struct ofd_seq *ofd_seq_load(const struct lu_env *env, struct ofd_device *ofd,
 	lu_last_id_fid(&info->fti_fid, seq, ofd->ofd_lut.lut_lsd.lsd_osd_index);
 	memset(&info->fti_attr, 0, sizeof(info->fti_attr));
 	info->fti_attr.la_valid = LA_MODE;
-	info->fti_attr.la_mode = S_IFREG |  S_IRUGO | S_IWUSR;
+	info->fti_attr.la_mode = S_IFREG |  0644;
 	info->fti_dof.dof_type = dt_mode_to_dft(S_IFREG);
 
 	/* create object tracking per-seq last created
@@ -606,11 +606,80 @@ out:
 	return rc;
 }
 
+int ofd_failure_domain_write(const struct lu_env *env, struct ofd_device *ofd)
+{
+	struct ofd_thread_info	*info = ofd_info(env);
+	struct dt_object *fd;
+	struct thandle *th;
+	int rc;
+
+	memset(&info->fti_attr, 0, sizeof(info->fti_attr));
+	info->fti_buf.lb_buf = &ofd->ofd_failure_domain;
+	info->fti_buf.lb_len = sizeof(ofd->ofd_failure_domain);
+	info->fti_dof.dof_type = dt_mode_to_dft(S_IFREG);
+	info->fti_off = 0;
+
+	lu_local_obj_fid(&info->fti_fid, OFD_FAILURE_DOMAIN_OID);
+	fd = dt_find_or_create(env, ofd->ofd_osd, &info->fti_fid,
+			       &info->fti_dof, &info->fti_attr);
+	if (IS_ERR(fd))
+		GOTO(out, rc = PTR_ERR(fd));
+
+	th = dt_trans_create(env, ofd->ofd_osd);
+	if (IS_ERR(th))
+		GOTO(out_put, rc = PTR_ERR(th));
+
+	rc = dt_declare_record_write(env, fd, &info->fti_buf, info->fti_off,
+				     th);
+	if (rc)
+		goto out_stop;
+
+	rc = dt_trans_start_local(env, ofd->ofd_osd, th);
+
+	if (rc)
+		goto out_stop;
+
+	rc = dt_record_write(env, fd, &info->fti_buf, &info->fti_off, th);
+
+ out_stop:
+	dt_trans_stop(env, ofd->ofd_osd, th);
+ out_put:
+	dt_object_put(env, fd);
+ out:
+	return rc;
+}
+
+static int ofd_failure_domain_read(const struct lu_env *env,
+				   struct ofd_device *ofd)
+{
+	struct ofd_thread_info *info = ofd_info(env);
+	struct dt_object *fd;
+	int rc;
+
+	memset(&info->fti_attr, 0, sizeof(info->fti_attr));
+	info->fti_buf.lb_buf = &ofd->ofd_failure_domain;
+	info->fti_buf.lb_len = sizeof(ofd->ofd_failure_domain);
+	info->fti_dof.dof_type = dt_mode_to_dft(S_IFREG);
+	info->fti_off = 0;
+
+	lu_local_obj_fid(&info->fti_fid, OFD_FAILURE_DOMAIN_OID);
+	fd = dt_find_or_create(env, ofd->ofd_osd, &info->fti_fid,
+			       &info->fti_dof, &info->fti_attr);
+	if (IS_ERR(fd))
+		GOTO(out, rc = PTR_ERR(fd));
+
+	rc = dt_record_read(env, fd, &info->fti_buf, &info->fti_off);
+	dt_object_put(env, fd);
+
+ out:
+	return rc;
+}
+
 /**
  * Initialize storage for the OFD.
  *
  * This function sets up service files for OFD. Currently, the only
- * service file is "health_check".
+ * service files are "health_check" and "failure_domain".
  *
  * \param[in] env	execution environment
  * \param[in] ofd	OFD device
@@ -623,8 +692,8 @@ int ofd_fs_setup(const struct lu_env *env, struct ofd_device *ofd,
 		 struct obd_device *obd)
 {
 	struct ofd_thread_info	*info = ofd_info(env);
-	struct dt_object	*fo;
-	int			 rc = 0;
+	struct dt_object *fo, *fd;
+	int rc = 0;
 
 	ENTRY;
 
@@ -638,7 +707,7 @@ int ofd_fs_setup(const struct lu_env *env, struct ofd_device *ofd,
 	lu_local_obj_fid(&info->fti_fid, OFD_HEALTH_CHECK_OID);
 	memset(&info->fti_attr, 0, sizeof(info->fti_attr));
 	info->fti_attr.la_valid = LA_MODE;
-	info->fti_attr.la_mode = S_IFREG | S_IRUGO | S_IWUSR;
+	info->fti_attr.la_mode = S_IFREG | 0644;
 	info->fti_dof.dof_type = dt_mode_to_dft(S_IFREG);
 
 	fo = dt_find_or_create(env, ofd->ofd_osd, &info->fti_fid,
@@ -647,6 +716,15 @@ int ofd_fs_setup(const struct lu_env *env, struct ofd_device *ofd,
 		GOTO(out_seqs, rc = PTR_ERR(fo));
 
 	ofd->ofd_health_check_file = fo;
+
+	lu_local_obj_fid(&info->fti_fid, OFD_FAILURE_DOMAIN_OID);
+	fd = dt_find_or_create(env, ofd->ofd_osd, &info->fti_fid,
+			       &info->fti_dof, &info->fti_attr);
+	if (IS_ERR(fd))
+		GOTO(out_seqs, rc = PTR_ERR(fd));
+	dt_object_put(env, fd);
+
+	ofd_failure_domain_read(env, ofd);
 
 	RETURN(0);
 
@@ -659,7 +737,7 @@ out:
 /**
  * Cleanup service files on OFD.
  *
- * This function syncs whole OFD device and close "health check" file.
+ * This function syncs whole OFD device.
  *
  * \param[in] env	execution environment
  * \param[in] ofd	OFD device

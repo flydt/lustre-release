@@ -16,18 +16,17 @@
 #include <net/addrconf.h>
 #include <net/ipv6.h>
 #include <linux/file.h>
+#include <linux/if_vlan.h>
 #include <linux/pagemap.h>
 /* For sys_open & sys_close */
 #include <linux/syscalls.h>
 #include <net/net_namespace.h>
-#include <net/sock.h>
-#include <linux/inetdevice.h>
+#include <lustre_compat/net/sock.h>
+#include <lustre_compat/net/tcp.h>
+#include <lustre_compat/linux/inetdevice.h>
 
-#include <libcfs/linux/linux-time.h>
-#include <libcfs/linux/linux-net.h>
-#include <libcfs/libcfs.h>
-#include <lnet/lib-lnet.h>
-#include <lnet/lnet_compat.h>
+#include <linux/libcfs/libcfs.h>
+#include <linux/lnet/lib-lnet.h>
 
 int
 lnet_sock_write(struct socket *sock, void *buffer, int nob, int timeout)
@@ -35,20 +34,18 @@ lnet_sock_write(struct socket *sock, void *buffer, int nob, int timeout)
 	int rc;
 	long jiffies_left = cfs_time_seconds(timeout);
 	unsigned long then;
+	struct kvec iov = {
+		.iov_base = buffer,
+		.iov_len = nob
+	};
+	struct msghdr msg = { NULL, };
 
 	LASSERT(nob > 0);
 	/* Caller may pass a zero timeout if she thinks the socket buffer is
-	 * empty enough to take the whole message immediately */
-
+	 * empty enough to take the whole message immediately
+	 */
 	for (;;) {
-		struct kvec  iov = {
-			.iov_base = buffer,
-			.iov_len  = nob
-		};
-		struct msghdr msg = {
-			.msg_flags	= (timeout == 0) ? MSG_DONTWAIT : 0
-		};
-
+		msg.msg_flags = !timeout ? MSG_DONTWAIT : 0;
 		if (timeout != 0) {
 			struct sock *sk = sock->sk;
 
@@ -62,9 +59,6 @@ lnet_sock_write(struct socket *sock, void *buffer, int nob, int timeout)
 		rc = kernel_sendmsg(sock, &msg, &iov, 1, nob);
 		jiffies_left -= jiffies - then;
 
-		if (rc == nob)
-			return 0;
-
 		if (rc < 0)
 			return rc;
 
@@ -73,11 +67,11 @@ lnet_sock_write(struct socket *sock, void *buffer, int nob, int timeout)
 			return -ECONNABORTED;
 		}
 
+		if (!msg_data_left(&msg))
+			break;
+
 		if (jiffies_left <= 0)
 			return -EAGAIN;
-
-		buffer = ((char *)buffer) + rc;
-		nob -= rc;
 	}
 	return 0;
 }
@@ -165,8 +159,8 @@ out:
 EXPORT_SYMBOL(choose_ipv4_src);
 
 static struct socket *
-lnet_sock_create(int interface, struct sockaddr *remaddr,
-		 int local_port, struct net *ns)
+lnet_sock_create(int interface, struct sockaddr_unsized *remaddr,
+		 int local_port, struct net *ns, struct sockaddr *addr)
 {
 	struct socket *sock;
 	int rc;
@@ -175,12 +169,11 @@ lnet_sock_create(int interface, struct sockaddr *remaddr,
 	family = AF_INET6;
 	if (remaddr)
 		family = remaddr->sa_family;
+	else if (addr)
+		family = addr->sa_family;
+
 retry:
-#ifdef HAVE_SOCK_CREATE_KERN_USE_NET
 	rc = sock_create_kern(ns, family, SOCK_STREAM, 0, &sock);
-#else
-	rc = sock_create_kern(family, SOCK_STREAM, 0, &sock);
-#endif
 	if (rc == -EAFNOSUPPORT && family == AF_INET6 && !remaddr) {
 		family = AF_INET;
 		goto retry;
@@ -208,7 +201,8 @@ retry:
 
 			sin->sin_family = AF_INET;
 			sin->sin_addr.s_addr = INADDR_ANY;
-			if (interface >= 0 && remaddr) {
+
+			if (interface >= 0 && remaddr && !addr) {
 				struct sockaddr_in *rem = (void *)remaddr;
 				__u32 ip;
 
@@ -219,6 +213,11 @@ retry:
 				if (rc)
 					goto failed;
 				sin->sin_addr.s_addr = htonl(ip);
+			} else if (addr) {
+				struct sockaddr_in *src;
+
+				src = (struct sockaddr_in *)addr;
+				sin->sin_addr.s_addr = src->sin_addr.s_addr;
 			}
 			sin->sin_port = htons(local_port);
 			break;
@@ -270,7 +269,7 @@ retry:
 			}
 #endif /* HAVE_KERNEL_SETSOCKOPT */
 
-			if (interface >= 0 && remaddr) {
+			if (interface >= 0 && remaddr && !addr) {
 				struct sockaddr_in6 *rem = (void *)remaddr;
 				struct net_device *dev;
 
@@ -280,18 +279,25 @@ retry:
 					CERROR("No net device for interface %d\n",
 					       interface);
 					rcu_read_unlock();
+					rc = -ENODEV;
 					goto failed;
 				}
 				ipv6_dev_get_saddr(ns, dev, &rem->sin6_addr, 0,
 						   &sin6->sin6_addr);
 				rcu_read_unlock();
+			} else if (addr) {
+				const struct sockaddr_in6 *src6;
+
+				src6 = (const struct sockaddr_in6 *)addr;
+				sin6->sin6_addr = src6->sin6_addr;
 			}
+
 			sin6->sin6_port = htons(local_port);
 			break;
 		}
 #endif /* IS_ENABLED(CONFIG_IPV6) */
 		}
-		rc = kernel_bind(sock, (struct sockaddr *)&locaddr,
+		rc = kernel_bind(sock, (struct sockaddr_unsized *)&locaddr,
 				 sizeof(locaddr));
 		if (rc == -EADDRINUSE) {
 			CDEBUG(D_NET, "Port %d already in use\n", local_port);
@@ -323,7 +329,7 @@ lnet_sock_setbuf(struct socket *sock, int txbufsize, int rxbufsize)
 
 	if (rxbufsize != 0) {
 		sk->sk_userlocks |= SOCK_RCVBUF_LOCK;
-		sk->sk_sndbuf = rxbufsize;
+		sk->sk_rcvbuf = rxbufsize;
 	}
 }
 EXPORT_SYMBOL(lnet_sock_setbuf);
@@ -333,16 +339,11 @@ lnet_sock_getaddr(struct socket *sock, bool remote,
 		  struct sockaddr_storage *peer)
 {
 	int rc;
-#ifndef HAVE_KERN_SOCK_GETNAME_2ARGS
-	int len = sizeof(*peer);
-#endif
 
 	if (remote)
-		rc = lnet_kernel_getpeername(sock,
-					     (struct sockaddr *)peer, &len);
+		rc = kernel_getpeername(sock, (struct sockaddr *)peer);
 	else
-		rc = lnet_kernel_getsockname(sock,
-					     (struct sockaddr *)peer, &len);
+		rc = kernel_getsockname(sock, (struct sockaddr *)peer);
 	if (rc < 0) {
 		CERROR("Error %d getting sock %s IP/port\n",
 			rc, remote ? "peer" : "local");
@@ -376,12 +377,13 @@ void lnet_sock_getbuf(struct socket *sock, int *txbufsize, int *rxbufsize)
 EXPORT_SYMBOL(lnet_sock_getbuf);
 
 struct socket *
-lnet_sock_listen(int local_port, int backlog, struct net *ns)
+lnet_sock_listen(int local_port, int backlog, struct net *ns,
+		 struct sockaddr *addr, int ifindex)
 {
 	struct socket *sock;
 	int rc;
 
-	sock = lnet_sock_create(-1, NULL, local_port, ns);
+	sock = lnet_sock_create(ifindex, NULL, local_port, ns, addr);
 	if (IS_ERR(sock)) {
 		rc = PTR_ERR(sock);
 		if (rc == -EADDRINUSE)
@@ -401,13 +403,13 @@ lnet_sock_listen(int local_port, int backlog, struct net *ns)
 
 struct socket *
 lnet_sock_connect(int interface, int local_port,
-		  struct sockaddr *peeraddr,
+		  struct sockaddr_unsized *peeraddr,
 		  struct net *ns)
 {
 	struct socket *sock;
 	int rc;
 
-	sock = lnet_sock_create(interface, peeraddr, local_port, ns);
+	sock = lnet_sock_create(interface, peeraddr, local_port, ns, 0);
 	if (IS_ERR(sock))
 		return sock;
 
@@ -469,7 +471,6 @@ static int lnet_inet4_enumerate(struct net_device *dev, int flags,
 			}
 			ifaces = tmp;
 		}
-
 		ifaces[nip].li_cpt = cpt;
 		ifaces[nip].li_iff_master = !!(flags & IFF_MASTER);
 		ifaces[nip].li_size = sizeof(ifa->ifa_local);
@@ -551,12 +552,13 @@ int lnet_inet_enumerate(struct lnet_inetdev **dev_list, struct net *ns,
 {
 	struct lnet_inetdev *ifaces = NULL;
 	struct net_device *dev;
+	struct net_device *cpt_dev;
 	int nalloc = 0;
 	int nip = 0;
 
 	rtnl_lock();
 	for_each_netdev(ns, dev) {
-		int flags = dev_get_flags(dev);
+		int flags = netif_get_flags(dev);
 		int node_id, cpt;
 		int count;
 
@@ -564,12 +566,17 @@ int lnet_inet_enumerate(struct lnet_inetdev **dev_list, struct net *ns,
 			continue;
 
 		if (!(flags & IFF_UP)) {
-			CWARN("lnet: Ignoring interface %s: it's down\n",
-			      dev->name);
+			CDEBUG(D_NET, "Ignoring interface %s: it's down\n",
+			       dev->name);
 			continue;
 		}
 
-		node_id = dev_to_node(&dev->dev);
+		cpt_dev = dev;
+#if IS_ENABLED(CONFIG_VLAN_8021Q)
+		if (is_vlan_dev(dev) && vlan_dev_real_dev(dev))
+			cpt_dev = vlan_dev_real_dev(dev);
+#endif
+		node_id = dev_to_node(&cpt_dev->dev);
 		cpt = cfs_cpt_of_node(lnet_cpt_table(), node_id);
 
 		if (v6_first) {

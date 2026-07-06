@@ -124,7 +124,7 @@ struct mgs_export_data {
  */
 struct nid_stat {
 	struct lnet_nid		 nid;
-	struct hlist_node	 nid_hash;
+	struct rhlist_head	 nid_hash;
 	struct list_head	 nid_list;
 	struct obd_device       *nid_obd;
 	struct dentry		*nid_debugfs;
@@ -261,7 +261,8 @@ struct obd_export {
 				 */
 				exp_old_falloc:1,
 				exp_hashed:1,
-				exp_timed:1;
+				exp_timed:1,
+				exp_banned:1;
 	/* also protected by exp_lock */
 	enum lustre_sec_part	exp_sp_peer;
 	struct sptlrpc_flavor	exp_flvr;		/* current */
@@ -313,7 +314,7 @@ static inline int lprocfs_nid_ldlm_stats_init(struct nid_stat *tmp)
 	lprocfs_init_ldlm_stats(tmp->nid_ldlm_stats);
 
 	debugfs_create_file("ldlm_stats", 0644, tmp->nid_debugfs,
-			    tmp->nid_stats, &ldebugfs_stats_seq_fops);
+			    tmp->nid_ldlm_stats, &ldebugfs_stats_seq_fops);
 
 	return 0;
 }
@@ -441,6 +442,11 @@ static inline int exp_connect_large_acl(struct obd_export *exp)
 	return !!(exp_connect_flags(exp) & OBD_CONNECT_LARGE_ACL);
 }
 
+static inline int exp_connect_hpreq_check1(struct obd_export *exp)
+{
+       return !!(exp_connect_flags(exp) & OBD_CONNECT_HPREQ_CHECK1);
+}
+
 static inline int exp_connect_lockahead(struct obd_export *exp)
 {
 	return !!(exp_connect_flags2(exp) & OBD_CONNECT2_LOCKAHEAD);
@@ -454,6 +460,11 @@ static inline int exp_connect_overstriping(struct obd_export *exp)
 static inline int exp_connect_flr(struct obd_export *exp)
 {
 	return !!(exp_connect_flags2(exp) & OBD_CONNECT2_FLR);
+}
+
+static inline int exp_connect_parity(struct obd_export *exp)
+{
+	return !!(exp_connect_flags2(exp) & OBD_CONNECT2_FLR_EC);
 }
 
 static inline int exp_connect_lock_convert(struct obd_export *exp)
@@ -521,13 +532,6 @@ static inline bool imp_connect_replay_create(struct obd_import *imp)
 #define imp_connect_replay_create(exp) true
 #endif
 
-static inline bool imp_connect_unaligned_dio(struct obd_import *imp)
-{
-	struct obd_connect_data *ocd = &imp->imp_connect_data;
-
-	return (ocd->ocd_connect_flags2 & OBD_CONNECT2_UNALIGNED_DIO);
-}
-
 static inline bool exp_connect_unaligned_dio(struct obd_export *exp)
 {
 	return (exp_connect_flags2(exp) & OBD_CONNECT2_UNALIGNED_DIO);
@@ -541,6 +545,11 @@ static inline bool exp_connect_batch_rpc(struct obd_export *exp)
 static inline int exp_connect_open_readdir(struct obd_export *exp)
 {
 	return !!(exp_connect_flags2(exp) & OBD_CONNECT2_READDIR_OPEN);
+}
+
+static inline int exp_connect_lock_contention(struct obd_export *exp)
+{
+	return !!(exp_connect_flags2(exp) & OBD_CONNECT2_LOCK_CONTENTION);
 }
 
 enum {

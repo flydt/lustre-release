@@ -36,8 +36,8 @@ static const char * const sync_lock_cancel_states[] = {
  * \retval		0 and buffer filled with data on success
  * \retval		negative value on error
  */
-ssize_t sync_lock_cancel_show(struct kobject *kobj,
-			      struct attribute *attr, char *buf)
+static ssize_t sync_lock_cancel_show(struct kobject *kobj,
+				     struct attribute *attr, char *buf)
 {
 	struct obd_device *obd = container_of(kobj, struct obd_device,
 					      obd_kset.kobj);
@@ -46,7 +46,6 @@ ssize_t sync_lock_cancel_show(struct kobject *kobj,
 	return sprintf(buf, "%s\n",
 		       sync_lock_cancel_states[tgt->lut_sync_lock_cancel]);
 }
-EXPORT_SYMBOL(sync_lock_cancel_show);
 
 /**
  * Change policy for handling dirty data under a lock being cancelled.
@@ -69,8 +68,9 @@ EXPORT_SYMBOL(sync_lock_cancel_show);
  * \retval		\a count on success
  * \retval		negative value on error
  */
-ssize_t sync_lock_cancel_store(struct kobject *kobj, struct attribute *attr,
-			       const char *buffer, size_t count)
+static ssize_t sync_lock_cancel_store(struct kobject *kobj,
+				      struct attribute *attr,
+				      const char *buffer, size_t count)
 {
 	struct obd_device *obd = container_of(kobj, struct obd_device,
 					      obd_kset.kobj);
@@ -91,6 +91,7 @@ ssize_t sync_lock_cancel_store(struct kobject *kobj, struct attribute *attr,
 	/* Legacy numeric codes */
 	if (val == -1) {
 		int rc = kstrtoint(buffer, 0, &val);
+
 		if (rc)
 			return rc;
 	}
@@ -103,7 +104,6 @@ ssize_t sync_lock_cancel_store(struct kobject *kobj, struct attribute *attr,
 	spin_unlock(&tgt->lut_flags_lock);
 	return count;
 }
-EXPORT_SYMBOL(sync_lock_cancel_store);
 LUSTRE_RW_ATTR(sync_lock_cancel);
 
 /**
@@ -472,6 +472,7 @@ int tgt_init(const struct lu_env *env, struct lu_target *lut,
 	lut->lut_last_rcvd = NULL;
 	lut->lut_client_bitmap = NULL;
 	atomic_set(&lut->lut_num_clients, 0);
+	atomic_set(&lut->lut_max_clients, 0);
 	atomic_set(&lut->lut_client_generation, 0);
 	lut->lut_reply_data = NULL;
 	lut->lut_reply_bitmap = NULL;
@@ -493,12 +494,13 @@ int tgt_init(const struct lu_env *env, struct lu_target *lut,
 	lut->lut_cksum_t10pi_enforce = 0;
 	lut->lut_cksum_types_supported =
 		obd_cksum_types_supported_server(obd->obd_name);
+	lut->lut_enable_resource_id_check = 0;
 
 	spin_lock_init(&lut->lut_slc_locks_guard);
 	INIT_LIST_HEAD(&lut->lut_slc_locks);
 
 	/* last_rcvd initialization is needed by replayable targets only */
-	if (!obd->obd_replayable)
+	if (!test_bit(OBDF_REPLAYABLE, obd->obd_flags))
 		RETURN(0);
 
 	/* initialize grant and statfs data in target */
@@ -542,7 +544,7 @@ int tgt_init(const struct lu_env *env, struct lu_target *lut,
 
 	memset(&attr, 0, sizeof(attr));
 	attr.la_valid = LA_MODE;
-	attr.la_mode = S_IFREG | S_IRUGO | S_IWUSR;
+	attr.la_mode = S_IFREG | 0644;
 	dof.dof_type = dt_mode_to_dft(S_IFREG);
 
 	lu_local_obj_fid(&fid, LAST_RECV_OID);
@@ -586,7 +588,7 @@ int tgt_init(const struct lu_env *env, struct lu_target *lut,
 
 	memset(&attr, 0, sizeof(attr));
 	attr.la_valid = LA_MODE;
-	attr.la_mode = S_IFREG | S_IRUGO | S_IWUSR;
+	attr.la_mode = S_IFREG | 0644;
 	dof.dof_type = dt_mode_to_dft(S_IFREG);
 
 	lu_local_obj_fid(&fid, REPLY_DATA_OID);
@@ -640,6 +642,7 @@ void tgt_fini(const struct lu_env *env, struct lu_target *lut)
 {
 	int i;
 	int rc;
+
 	ENTRY;
 
 	if (lut->lut_lsd.lsd_feature_incompat & OBD_INCOMPAT_MULTI_RPCS &&
@@ -649,8 +652,7 @@ void tgt_fini(const struct lu_env *env, struct lu_target *lut)
 		lut->lut_lsd.lsd_feature_incompat &= ~OBD_INCOMPAT_MULTI_RPCS;
 		rc = tgt_server_data_update(env, lut, 1);
 		if (rc < 0)
-			CERROR("%s: unable to clear MULTI RPCS "
-			       "incompatibility flag\n",
+			CERROR("%s: unable to clear MULTI RPCS incompatibility flag\n",
 			       lut->lut_obd->obd_name);
 	}
 
@@ -805,11 +807,12 @@ LU_KEY_INIT_GENERIC(tgt_ses);
  * can be remain in the internal cache, we do not want to modify
  * them.
  */
-struct page *tgt_page_to_corrupt;
+struct folio *tgt_page_to_corrupt;
 
 int tgt_mod_init(void)
 {
 	int	result;
+
 	ENTRY;
 
 	result = lu_kmem_init(tgt_caches);
@@ -822,7 +825,9 @@ int tgt_mod_init(void)
 		RETURN(result);
 	}
 
-	tgt_page_to_corrupt = alloc_page(GFP_KERNEL);
+	tgt_page_to_corrupt = folio_alloc(GFP_KERNEL, 0);
+	if (IS_ERR_OR_NULL(tgt_page_to_corrupt))
+		tgt_page_to_corrupt = NULL;
 
 	tgt_key_init_generic(&tgt_thread_key, NULL);
 	lu_context_key_register_many(&tgt_thread_key, NULL);
@@ -840,7 +845,7 @@ void tgt_mod_exit(void)
 {
 	barrier_fini();
 	if (tgt_page_to_corrupt != NULL)
-		put_page(tgt_page_to_corrupt);
+		folio_put(tgt_page_to_corrupt);
 
 	lu_context_key_degister(&tgt_thread_key);
 	lu_context_key_degister(&tgt_session_key);

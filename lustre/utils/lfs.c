@@ -1,24 +1,4 @@
-/*
- * GPL HEADER START
- *
- * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 only,
- * as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License version 2 for more details (a copy is included
- * in the LICENSE file that accompanied this code).
- *
- * You should have received a copy of the GNU General Public License
- * version 2 along with this program; If not, see
- * http://www.gnu.org/licenses/gpl-2.0.html
- *
- * GPL HEADER END
- */
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Use is subject to license terms.
@@ -40,51 +20,49 @@
 #define _GNU_SOURCE
 #endif
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <inttypes.h>
-#include <getopt.h>
-#include <string.h>
-#include <mntent.h>
-#include <unistd.h>
-#include <errno.h>
+#include <asm/byteorder.h>
+#include <ctype.h>
+#include <dirent.h>
 #include <err.h>
-#include <pwd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <getopt.h>
 #include <grp.h>
+#include <inttypes.h>
+#include <libgen.h>
+#include <math.h>
+#include <mntent.h>
+#include <pwd.h>
 #include <regex.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/param.h>
 #include <sys/quota.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/param.h>
 #include <sys/xattr.h>
-#include <fcntl.h>
-#include <dirent.h>
 #include <time.h>
-#include <ctype.h>
+#include <unistd.h>
 #include <zlib.h>
-#include <libgen.h>
-#include <asm/byteorder.h>
-#include "lfs_project.h"
 
-#include <libcfs/util/string.h>
 #include <libcfs/util/ioctl.h>
+#include <libcfs/util/param.h>
 #include <libcfs/util/parser.h>
 #include <libcfs/util/string.h>
-#include <lustre/lustreapi.h>
-#include <linux/lustre/lustre_ver.h>
-#include <linux/lustre/lustre_param.h>
 #include <linux/lnet/nidstr.h>
+#include <linux/lustre/lustre_idl.h>
+#include <linux/lustre/lustre_param.h>
+#include <linux/lustre/lustre_ver.h>
 #include <lnetconfig/cyaml.h>
-#include "lstddef.h"
-#include <uapi/linux/lustre/lustre_idl.h>
+#include <lustre/lustreapi.h>
 #include "callvpe.h"
-
-#ifndef NSEC_PER_SEC
-# define NSEC_PER_SEC 1000000000UL
-#endif
-#define ONE_MB 0x100000
+#include "lfs_project.h"
+#include "lstddef.h"
+#include "lustreapi_internal.h"
 
 /* all functions */
 static int lfs_find(int argc, char **argv);
@@ -109,6 +87,8 @@ struct quota_param {
 	unsigned int	 qp_show_pools:1;
 	unsigned int	 qp_show_qid:1;
 	unsigned int	 qp_show_title:1;
+	unsigned int	 qp_show_qid_num:1;
+	unsigned int	 qp_show_root:1;
 	__u32		 qp_detail;
 };
 
@@ -147,6 +127,8 @@ static inline int lfs_mirror_verify(int argc, char **argv);
 static inline int lfs_mirror_read(int argc, char **argv);
 static inline int lfs_mirror_write(int argc, char **argv);
 static inline int lfs_mirror_copy(int argc, char **argv);
+static inline int lfs_mirror_verify_file(const char *fname, __u16 *mirror_ids,
+					 int ids_nr, int verbose, int stale);
 static int lfs_pcc_attach(int argc, char **argv);
 static int lfs_pcc_attach_fid(int argc, char **argv);
 static int lfs_pcc_detach(int argc, char **argv);
@@ -158,7 +140,7 @@ static int lfs_pcc_delete(int argc, char **argv);
 static int lfs_pcc(int argc, char **argv);
 
 static int lfs_migrate_to_dom(int fd_src, int fd_dst, char *name,
-			      __u64 migration_flags,
+			      enum llapi_migration_flags migration_flags,
 			      unsigned long long bandwidth_bytes_sec,
 			      long stats_interval_sec);
 
@@ -218,6 +200,8 @@ static inline int lfs_mirror_delete(int argc, char **argv)
 	"\t\t[--comp-set --comp-id|-I COMP_ID|--comp-flags=COMP_FLAGS]\n"     \
 	"\t\t[--component-end|-E END_OFFSET]\n"			\
 	"\t\t[--copy=SOURCE_LAYOUT_FILE]|--yaml|-y YAML_TEMPLATE_FILE]\n"     \
+	"\t\t[--ec|--ec-stripe-count DATA+PARITY]\n"		\
+	"\t\t[--ec-expert DATA+PARITY]\n"			\
 	"\t\t[--extension-size|--ext-size|-z EXT_SIZE]\n"	\
 	"\t\t[--help|-h]\n"					\
 	"\t\t[--foreign=FOREIGN_TYPE --xattr|-x LAYOUT]\n"	\
@@ -241,19 +225,22 @@ static inline int lfs_mirror_delete(int argc, char **argv)
 
 #define MIGRATE_USAGE							\
 	SSM_CMD_COMMON("migrate  ")					\
+	"\t\t[--bandwidth|-W BANDWIDTH_MB[MG]]\n"			\
+	"\t\t[--auto|--auto-stripe|-A]\n"				\
 	"\t\t[--block|-b] [--non-block|-n]\n"				\
+	"\t\t[--lustre-dir=LUSTRE_MOUNT_POINT --fid]\n"			\
 	"\t\t[--non-direct|-D] [--verbose|-v] FILENAME\n"		\
-	"\t\t[--non-direct|-D] [--verbose|-v]\n"			\
+	"\t\t[--restripe] [--stats-interval SECONDS]\n"			\
 	"\t\t-0|--null|--files-from=LIST_FILE|FILENAME ...\n"
 
 #define SETDIRSTRIPE_USAGE						\
-	"		[--mdt-count|-c stripe_count>\n"		\
-	"		[--help|-h] [--mdt-hash|-H mdt_hash]\n"		\
-	"		[--mdt-index|-i mdt_index[,mdt_index,...]\n"	\
-	"		[--mdt-overcount|-C stripe_count>\n"		\
-	"		[--default|-D] [--mode|-o mode]\n"		\
-	"		[--max-inherit|-X max_inherit]\n"		\
-	"		[--max-inherit-rr max_inherit_rr] <dir>\n"	\
+	"\t\t[--mdt-count|-c stripe_count>\n"				\
+	"\t\t[--help|-h] [--mdt-hash|-H mdt_hash]\n"			\
+	"\t\t[--mdt-index|-i mdt_index[,mdt_index,...]\n"		\
+	"\t\t[--mdt-overcount|-C stripe_count>\n"			\
+	"\t\t[--default|-D] [--mode|-o mode]\n"				\
+	"\t\t[--max-inherit|-X max_inherit]\n"				\
+	"\t\t[--max-inherit-rr max_inherit_rr] <dir>\n"			\
 	"To create dir with a foreign (free format) layout :\n"		\
 	"setdirstripe|mkdir --foreign[=FOREIGN_TYPE] -x|-xattr STRING " \
 	"		[--mode|-o MODE] [--flags HEX] DIRECTORY\n"
@@ -302,9 +289,10 @@ command_t mirror_cmdlist[] = {
 	  .pc_help = "Extend a mirrored file.\n"
 "Usage: lfs mirror extend [--mirror-count|-N[MIRROR_COUNT]]\n"
 		"\t\t[--no-verify] [--stats|--stats-interval=STATS_INTERVAL]\n"
-		"\t\t[--bandwidth-limit|--W BANDWIDTH]\n"
-		"\t\t[-f VICTIM_FILE]\n"
+		"\t\t[--bandwidth|-W BANDWIDTH_MB[MG]]\n"
+		"\t\t[--file|-f VICTIM_FILE]\n"
 		"\t\t" SSM_SETSTRIPE_OPT "]\n"
+		"\t\t[--fid [--lustre-dir=LUSTRE_MOUNT_POINT]]\n"
 		"\t\t-0|--null|--files-from=LIST_FILE|FILENAME ...\n" },
 	{ .pc_name = "split", .pc_func = lfs_mirror_split,
 	  .pc_help = "Split a mirrored file.\n"
@@ -327,12 +315,14 @@ command_t mirror_cmdlist[] = {
 	  .pc_help = "Resynchronizes out-of-sync mirrored file(s).\n"
 		"usage: lfs mirror resync [--only MIRROR_ID[,...]]|\n"
 		"\t\t[--stats|--stats-interval=SECONDS]\n"
-		"\t\t[--W |--bandwidth-limit=BANDWIDTH_MB]\n"
+		"\t\t[--bandwidth|-W BANDWIDTH_MB[MG]]\n"
+		"\t\t[--force-resync|-f]\n"
 		"\t\tMIRRORED_FILE [MIRRORED_FILE2...]\n" },
 	{ .pc_name = "verify", .pc_func = lfs_mirror_verify,
 	  .pc_help = "Verify mirrored file(s).\n"
 		"usage: lfs mirror verify [--only MIRROR_ID[,...]]\n"
-		"\t\t[--verbose|-v] MIRRORED_FILE [MIRRORED_FILE2 ...]\n" },
+		"\t\t[--stale|-s] [--verbose|-v]\n"
+		"\t\tMIRRORED_FILE [MIRRORED_FILE2 ...]\n" },
 	{ .pc_help = NULL }
 };
 LFS_SUBCMD(mirror);
@@ -506,7 +496,8 @@ command_t cmdlist[] = {
 	 "     [[!] --projid <projid>] [[!] --size|-s [+-]N[bkMGTPE]]\n"
 	 "     [--skip|-k PERCENT] [[!] --stripe-count|-c [+-]<stripes>]\n"
 	 "     [[!] --stripe-index|-i <index,...>]\n"
-	 "     [[!] --stripe-size|-S [+-]N[kMGT]] [[!] --type|-t <filetype>]\n"
+	 "     [[!] --stripe-size|-S [+-]N[kMGT]] [--threads N]\n"
+	 "     [[!] --type|-t <filetype>]\n"
 	 "     [[!] --uid|-u|--user|-U <uid>|<uname>]\n"
 	 "\t !: used before an option indicates 'NOT' requested attribute\n"
 	 "\t -: used before a value indicates less than requested value\n"
@@ -524,8 +515,8 @@ command_t cmdlist[] = {
 	 "report filesystem disk space usage or inodes usage "
 	 "of each MDS and all OSDs or a batch belonging to a specific pool.\n"
 	 "Usage: df [--inodes|-i] [--human-readable|-h] [--lazy|-l]\n"
-	 "[--mdt|-m] [--ost|-o]\n"
-	 "[--pool|-p FSNAME[.POOL]] [PATH]"},
+	 "[--mdt|-m[INDEX]] [--ost|-o[INDEX]] [--output|-u FIELD_LIST] [--no-header|-N]\n"
+	 "[--only-summary|-s] [--pool|-p FSNAME[.POOL]] [PATH]"},
 	{"getname", lfs_getname, 0,
 	 "list instances and specified mount points [for specified path only]\n"
 	 "Usage: getname [--help|-h] [--instance|-i] [--fsname|-n] [--uuid|-u]\n"
@@ -533,7 +524,7 @@ command_t cmdlist[] = {
 #ifdef HAVE_SYS_QUOTA_H
 	{"setquota", lfs_setquota, 0, "Set filesystem quotas.\n"
 	 "usage: setquota [-t] {-u|-U|-g|-G|-p|-P ID} {-b|-B|-i|-I LIMIT}\n"
-	 "                [--pool POOL] MOUNT_POINT\n"
+	 "                [--lqa LQA_NAME] [--pool POOL] MOUNT_POINT\n"
 	 "       setquota {-u|-g|-p ID} {--default|--delete} MOUNT_POINT\n"},
 	{"quota", lfs_quota, 0, "Display disk usage and limits.\n"
 	 "usage: quota [-q] [-v] [-h] [-o OBD_UUID|-o OST_IDX|-m MDT_IDX]\n"
@@ -548,20 +539,26 @@ command_t cmdlist[] = {
 	 "             [--inode-softlimit|--isoftlimit]\n"
 	 "             [--inode-hardlimit|--ihardlimit]\n"
 	 "             [--inode-grace|--igrace|--itime]\n"
+	 "             [--lqa LQA_NAME]\n"
 	 "             [--pool OST_POOL_NAME]\n"
 	 "             [MOUNT_POINT ...]\n"
 	 "       quota -t {-u|-g|-p} [--pool OST_POOL_NAME] [MOUNT_POINT ...]\n"
 	 "       quota [-hqv] {-U|-G|-P} [--pool OST_POOL_NAME] [MOUNT_POINT ...]\n"
-	 "       quota -a {-u|-g|-p} [-s START_QID] [-e END_QID] [MOUNT_POINT ...]\n"},
+	 "       quota -a {-u|-g|-p} [-n] [-s START_QID] [-e END_QID]\n"
+	 "             [--show-root] [MOUNT_POINT ...]\n"},
 	{"project", lfs_project, 0,
 	 "Change or list project attribute for specified file or directory.\n"
-	 "usage: project [-d|-r] <file|directory...>\n"
+	 "usage: project [-d|--directory] [-r|--recursive] FILE|DIRECTORY...\n"
 	 "         list project ID and flags on file(s) or directories\n"
-	 "       project [-p id] [-s] [-r] <file|directory...>\n"
+	 "       project [-p|--proj-inherit|--inherit ID] [-s|--set-inherit]\n"
+ "                       [-d|--directory] [-r|--recursive] FILE|DIRECTORY...\n"
 	 "         set project ID and/or inherit flag for specified file(s) or directories\n"
-	 "       project -c [-d|-r [-p id] [-0]] <file|directory...>\n"
+	 "       project -c|--check [-p|--proj-inherit|--inherit ID]\n"
+	 "               [-0|--print0] [-d|--directory] [-r|--recursive]\n"
+	 "               FILE|DIRECTORY...\n"
 	 "         check project ID and flags on file(s) or directories, print outliers\n"
-	 "       project -C [-d|-r] [-k] <file|directory...>\n"
+	 "       project -C|--clear [-k|--keep] [-d|--directory]\n"
+	 "               [-r|--recursive] FILE|DIRECTORY...\n"
 	 "         clear the project inherit flag and ID on the file or directory\n"
 	},
 #endif
@@ -569,8 +566,9 @@ command_t cmdlist[] = {
 	 "Flush security context for current user.\n"
 	 "usage: flushctx [-k] [-r] [mountpoint...]"},
 	{"changelog", lfs_changelog, 0,
-	 "Show the metadata changes on an MDT."
-	 "\nusage: changelog <mdtname> [startrec [endrec]]"},
+	 "Show the metadata changes on an MDT.\n"
+	 "usage: changelog [--follow] [--user USERNAME] [--mask MASK] "
+	 "<mdtname> [startrec [endrec]]"},
 	{"changelog_clear", lfs_changelog_clear, 0,
 	 "Indicate that old changelog records up to <endrec> are no longer of "
 	 "interest to consumer <id>, allowing the system to free up space.\n"
@@ -585,10 +583,9 @@ command_t cmdlist[] = {
 	 "usage: path2fid [--parents] <path> ..."},
 	{"rmfid", lfs_rmfid, 0, "Remove file(s) by FID(s)\n"
 	 "usage: rmfid <fsname|rootpath> <fid> ..."},
-	{"data_version", lfs_data_version, 0, "Display file data version or "
-	 "set the data version in the HSM xattr for a given path.\n"
-	"usage: data_version [-n|-r|-w|-s] <path>"},
-
+	{"data_version", lfs_data_version, 0, "Display file data version, "
+	 "and optionally set the data version in the HSM xattr for FILENAME.\n"
+	"usage: data_version {--nosync|--read|--write} [--set-hsm] FILENAME"},
 	{"hsm_state", lfs_hsm_state, 0,
 	 "Display the HSM information for given files.\n"
 	 "usage: hsm_state FILE"},
@@ -692,20 +689,30 @@ command_t cmdlist[] = {
 	{ 0, 0, 0, NULL }
 };
 
-static int check_hashtype(const char *hashtype)
+/*
+ * Convert input string (dir hash) to its number value
+ *
+ * Return 0 on unrecognized hash (failure) or positive value on success
+ */
+static enum lmv_hash_type check_hashtype(const char *hashtype)
 {
-	int type_num = atoi(hashtype);
+	int type_num;
 	int i;
 
+	if (!hashtype)
+		goto out;
+
+	type_num = atoi(hashtype);
+
 	/* numeric hash type */
-	if (hashtype && lmv_is_known_hash_type(type_num))
+	if (lmv_is_known_hash_type(type_num))
 		return type_num;
 	/* string hash type */
 	for (i = LMV_HASH_TYPE_ALL_CHARS; i < ARRAY_SIZE(mdt_hash_name); i++)
 		if (strcmp(hashtype, mdt_hash_name[i]) == 0)
 			return i;
-
-	return 0;
+out:
+	return LMV_HASH_TYPE_UNKNOWN;
 }
 
 static uint32_t check_foreign_type_name(const char *foreign_type_name)
@@ -724,7 +731,7 @@ static uint32_t check_foreign_type_name(const char *foreign_type_name)
 }
 
 static int
-migrate_open_files(const char *name, __u64 migration_flags,
+migrate_open_files(const char *name, enum llapi_migration_flags migration_flags,
 		   const struct llapi_stripe_param *param,
 		   struct llapi_layout *layout, int *fd_src_ptr,
 		   int *fd_dst_ptr, char **err_str)
@@ -741,8 +748,12 @@ migrate_open_files(const char *name, __u64 migration_flags,
 	struct stat		 st;
 	struct stat		 stv;
 
-	if (!param && !layout) {
-		*err_str = "layout information";
+	/*
+	 * Ensure param and layout are mutually exclusive.
+	 * If both are set, it indicates a programming error in the caller.
+	 */
+	if (param && layout) {
+		*err_str = "both param and layout specified";
 		return -EINVAL;
 	}
 
@@ -816,15 +827,22 @@ source_open:
 		if (layout) {
 			/* Returns -1 and sets errno on error: */
 			fd_dst = llapi_layout_file_open(volatile_file,
-							 open_flags, open_mode,
-							 layout);
+							open_flags, open_mode,
+							layout);
 			if (fd_dst < 0)
 				fd_dst = -errno;
-		} else {
+		} else if (param) {
 			/* Does the right thing on error: */
 			fd_dst = llapi_file_open_param(volatile_file,
 							open_flags,
 							open_mode, param);
+		} else {
+			/* Neither layout nor param specified - use default
+			 * striping from parent directory
+			 */
+			fd_dst = open(volatile_file, open_flags, open_mode);
+			if (fd_dst < 0)
+				fd_dst = -errno;
 		}
 	} while (fd_dst < 0 && (rc = fd_dst) == -EEXIST);
 
@@ -832,12 +850,6 @@ source_open:
 		*err_str = "cannot create volatile file";
 		goto out;
 	}
-
-	/*
-	 * In case the MDT does not support creation of volatile files
-	 * we should try to unlink it.
-	 */
-	(void)unlink(volatile_file);
 
 	/*
 	 * Not-owner (root?) special case.
@@ -880,50 +892,12 @@ out:
 	return rc;
 }
 
-static struct timespec timespec_sub(struct timespec *before,
-				    struct timespec *after)
-{
-	struct timespec ret;
-
-	ret.tv_sec = after->tv_sec - before->tv_sec;
-	if (after->tv_nsec < before->tv_nsec) {
-		ret.tv_sec--;
-		ret.tv_nsec = NSEC_PER_SEC + after->tv_nsec - before->tv_nsec;
-	} else {
-		ret.tv_nsec = after->tv_nsec - before->tv_nsec;
-	}
-
-	return ret;
-}
-
-static void stats_log(struct timespec *now, struct timespec *start_time,
-		      ssize_t read_bytes, size_t write_bytes,
-		      off_t file_size_bytes)
-{
-	struct timespec diff = timespec_sub(start_time, now);
-
-	if (file_size_bytes == 0)
-		return;
-
-	if (diff.tv_sec == 0 && diff.tv_nsec == 0)
-		return;
-
-	printf("- { seconds: %li, rmbps: %5.2g, wmbps: %5.2g, copied: %lu, size: %lu, pct: %lu%% }\n",
-		diff.tv_sec,
-		(double) read_bytes/((ONE_MB * diff.tv_sec) +
-			((ONE_MB * diff.tv_nsec)/NSEC_PER_SEC)),
-		(double) write_bytes/((ONE_MB * diff.tv_sec) +
-			((ONE_MB * diff.tv_nsec)/NSEC_PER_SEC)),
-		write_bytes/ONE_MB, file_size_bytes/ONE_MB,
-		((write_bytes*100)/file_size_bytes));
-}
-
 static int migrate_copy_data(int fd_src, int fd_dst, int (*check_file)(int),
 			     unsigned long long bandwidth_bytes_sec,
 			     long stats_interval_sec, off_t file_size_bytes)
 {
 	struct llapi_layout *layout;
-	size_t buf_size = 64 * ONE_MB;
+	size_t buf_size = DEFAULT_IO_BUFLEN;
 	uint64_t stripe_size = ONE_MB;
 	void *buf = NULL;
 	off_t pos = 0;
@@ -967,6 +941,7 @@ static int migrate_copy_data(int fd_src, int fd_dst, int (*check_file)(int),
 	rc = posix_memalign(&buf, page_size, buf_size);
 	if (rc != 0)
 		return -rc;
+	(void)mlock(buf, buf_size);
 
 	sparse = llapi_file_is_sparse(fd_src);
 	if (sparse) {
@@ -975,8 +950,7 @@ static int migrate_copy_data(int fd_src, int fd_dst, int (*check_file)(int),
 			rc = -errno;
 			llapi_error(LLAPI_MSG_ERROR, rc,
 				    "fail to ftruncate dst file to %ld", pos);
-			free(buf);
-			return rc;
+			goto out_free;
 		}
 	}
 
@@ -1039,9 +1013,7 @@ static int migrate_copy_data(int fd_src, int fd_dst, int (*check_file)(int),
 
 		to_write = rsize;
 		while (to_write > 0) {
-			unsigned long long write_target;
 			ssize_t written;
-			struct timespec diff;
 
 			written = pwrite(fd_dst, buf, to_write, pos);
 			if (written < 0) {
@@ -1059,46 +1031,16 @@ static int migrate_copy_data(int fd_src, int fd_dst, int (*check_file)(int),
 				continue;
 
 			clock_gettime(CLOCK_MONOTONIC, &now);
-			diff = timespec_sub(&start_time, &now);
-			write_target = ((bandwidth_bytes_sec * diff.tv_sec) +
-				((bandwidth_bytes_sec *
-				diff.tv_nsec)/NSEC_PER_SEC));
-
-			if (write_target < write_bytes) {
-				unsigned long long excess;
-				struct timespec delay = { 0, 0 };
-
-				excess = write_bytes - write_target;
-
-				if (excess == 0)
-					continue;
-
-				delay.tv_sec = excess / bandwidth_bytes_sec;
-				delay.tv_nsec = (excess % bandwidth_bytes_sec) *
-					NSEC_PER_SEC / bandwidth_bytes_sec;
-
-				do {
-					rc = clock_nanosleep(CLOCK_MONOTONIC, 0,
-							     &delay, &delay);
-				} while (rc < 0 && errno == EINTR);
-
-				if (rc < 0) {
-					if (stats_interval_sec)
-						llapi_error(LLAPI_MSG_WARN, rc,
-							    "delay for bandwidth control failed");
-					rc = 0;
-				}
-			}
+			llapi_bandwidth_throttle(&now, &start_time,
+						 bandwidth_bytes_sec,
+						 write_bytes);
 		}
 
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		if (stats_interval_sec && (write_bytes != file_size_bytes) &&
-			(now.tv_sec >= last_bw_print.tv_sec +
-			stats_interval_sec)) {
-			stats_log(&now, &start_time,
-				  read_bytes, write_bytes,
-				  file_size_bytes);
-			last_bw_print = now;
+		if (stats_interval_sec && write_bytes != file_size_bytes) {
+			clock_gettime(CLOCK_MONOTONIC, &now);
+			llapi_stats_log(&now, &start_time, &last_bw_print,
+					stats_interval_sec, read_bytes,
+					write_bytes, pos, file_size_bytes);
 		}
 
 		if (rc || rsize < to_read)
@@ -1108,8 +1050,9 @@ static int migrate_copy_data(int fd_src, int fd_dst, int (*check_file)(int),
 	/* Output at least one log, regardless of stats_interval */
 	if (stats_interval_sec) {
 		clock_gettime(CLOCK_MONOTONIC, &now);
-		stats_log(&now, &start_time, read_bytes, write_bytes,
-			  file_size_bytes);
+		llapi_stats_log(&now, &start_time, &last_bw_print,
+				stats_interval_sec, read_bytes, write_bytes,
+				file_size_bytes, file_size_bytes);
 	}
 
 	rc = fsync(fd_dst);
@@ -1122,8 +1065,10 @@ out:
 	/* Try to avoid page cache pollution after migration. */
 	(void)posix_fadvise(fd_src, 0, 0, POSIX_FADV_DONTNEED);
 	(void)posix_fadvise(fd_dst, 0, 0, POSIX_FADV_DONTNEED);
-
+out_free:
+	(void)munlock(buf, buf_size);
 	free(buf);
+
 	return rc;
 }
 
@@ -1142,10 +1087,11 @@ static int migrate_block(int fd_src, int fd_dst,
 			 long stats_interval_sec, char **err_str)
 {
 	struct stat st;
-	__u64	dv1;
-	int	gid;
-	int	rc;
-	int	rc2;
+	__u64 dv1;
+	__u64 dv2;
+	int gid;
+	int rc;
+	int rc2;
 
 	do
 		gid = random();
@@ -1173,7 +1119,7 @@ static int migrate_block(int fd_src, int fd_dst,
 	 */
 	rc = llapi_get_data_version(fd_src, &dv1, 0);
 	if (rc < 0) {
-		*err_str = "cannot get dataversion";
+		*err_str = "cannot get initial dataversion";
 		goto out_unlock;
 	}
 
@@ -1191,6 +1137,11 @@ static int migrate_block(int fd_src, int fd_dst,
 		goto out_unlock;
 	}
 
+	rc = llapi_get_data_version(fd_dst, &dv2, LL_DV_RD_FLUSH);
+	if (rc < 0) {
+		*err_str = "cannot get dataversion after copy";
+		goto out_unlock;
+	}
 	/*
 	 * swap layouts
 	 * for a migration we need to check data version on file did
@@ -1198,7 +1149,7 @@ static int migrate_block(int fd_src, int fd_dst,
 	 *
 	 * Pass in gid=0 since we already own grouplock.
 	 */
-	rc = llapi_fswap_layouts_grouplock(fd_src, fd_dst, dv1, 0, 0,
+	rc = llapi_fswap_layouts_grouplock(fd_src, fd_dst, dv1, dv2, 0,
 					   SWAP_LAYOUTS_CHECK_DV1);
 	if (rc == -EAGAIN) {
 		*err_str = "file changed";
@@ -1346,6 +1297,54 @@ static int lfs_component_set(char *fname, int comp_id, const char *pool,
 	}
 
 	if (flags) {
+		/* Check if trying to set prefer flags on parity components */
+		if (flags & LCME_FL_PREF_RW) {
+			struct llapi_layout *layout;
+			__u32 comp_flags = 0;
+			__u32 id;
+			bool is_parity_comp = false;
+
+			layout = llapi_layout_get_by_path(fname, 0);
+			if (!layout) {
+				fprintf(stderr,
+					"error %s: file '%s' couldn't get layout: rc=%d\n",
+					progname, fname, errno);
+				return -errno;
+			}
+
+			/* Find the component and check its flags */
+			rc = llapi_layout_comp_use(layout,
+						   LLAPI_LAYOUT_COMP_USE_FIRST);
+			while (rc == 0) {
+				rc = llapi_layout_comp_id_get(layout, &id);
+				if (rc < 0)
+					break;
+
+				if (id == comp_id) {
+					rc = llapi_layout_comp_flags_get(layout,
+								&comp_flags);
+					if (rc < 0)
+						break;
+
+					is_parity_comp = !!(comp_flags &
+							    LCME_FL_PARITY);
+					break;
+				}
+
+				rc = llapi_layout_comp_use(layout,
+						LLAPI_LAYOUT_COMP_USE_NEXT);
+			}
+
+			llapi_layout_free(layout);
+
+			if (is_parity_comp) {
+				fprintf(stderr,
+					"%s: cannot set prefer flags on parity component '%#x' of file '%s'\n",
+					progname, comp_id, fname);
+				return -EINVAL;
+			}
+		}
+
 		ids[count] = comp_id;
 		flags_array[count] = flags;
 		++count;
@@ -1378,6 +1377,75 @@ static int lfs_component_set(char *fname, int comp_id, const char *pool,
 		}
 	}
 
+	return rc;
+}
+
+static int lfs_component_set_by_mirror(char *fname, __u16 mirror_id,
+				       __u32 flags, __u32 neg_flags)
+{
+	struct llapi_layout *layout = NULL;
+	int rc = 0;
+	int comp_count = 0;
+
+	layout = llapi_layout_get_by_path(fname, 0);
+	if (!layout) {
+		fprintf(stderr, "%s: cannot get layout of '%s': %s\n",
+			progname, fname, strerror(errno));
+		return -errno;
+	}
+
+	rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_FIRST);
+	if (rc < 0) {
+		fprintf(stderr, "%s: cannot move to first component of '%s': %s\n",
+			progname, fname, strerror(-rc));
+		goto free_layout;
+	}
+
+	/* Count components and find matching mirror components */
+	while (rc == 0) {
+		uint32_t comp_mirror_id;
+		uint32_t comp_id;
+
+		rc = llapi_layout_mirror_id_get(layout, &comp_mirror_id);
+		if (rc < 0)
+			break;
+
+		if (comp_mirror_id == mirror_id) {
+			rc = llapi_layout_comp_id_get(layout, &comp_id);
+			if (rc < 0)
+				break;
+
+			/* Set flags on this component */
+			rc = lfs_component_set(fname, comp_id, NULL, flags,
+					       neg_flags);
+			if (rc < 0) {
+				fprintf(stderr, "%s: cannot set flags on component %u of mirror %u in '%s': %s\n",
+					progname, comp_id, mirror_id, fname,
+					strerror(-rc));
+				goto free_layout;
+			}
+			comp_count++;
+		}
+
+		rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_NEXT);
+		if (rc < 0) {
+			rc = 0; /* End of components */
+			break;
+		}
+	}
+
+	if (comp_count == 0) {
+		fprintf(stderr, "%s: no components found for mirror %u in '%s'\n",
+			progname, mirror_id, fname);
+		rc = -EINVAL;
+	} else {
+		printf("Set flags on %d component(s) of mirror %u in '%s'\n",
+		       comp_count, mirror_id, fname);
+		rc = 0;
+	}
+
+free_layout:
+	llapi_layout_free(layout);
 	return rc;
 }
 
@@ -1460,15 +1528,14 @@ static int lfs_component_create(char *fname, int open_flags, mode_t open_mode,
 
 	fd = llapi_layout_file_open(fname, open_flags, open_mode, layout);
 	if (fd < 0)
-		fprintf(stderr, "%s: %s '%s': %s\n", progname,
-			S_ISDIR(st.st_mode) ?
+		llapi_error(LLAPI_MSG_ERROR, errno, "%s: %s '%s'\n",
+			    progname, S_ISDIR(st.st_mode) ?
 				"cannot set default composite layout for" :
-				"cannot create composite file",
-			fname, strerror(errno));
+				"cannot create composite file", fname);
 	return fd;
 }
 
-static int lfs_migrate(char *name, __u64 migration_flags,
+static int lfs_migrate(char *name, enum llapi_migration_flags migration_flags,
 			struct llapi_stripe_param *param,
 			struct llapi_layout *layout,
 			unsigned long long bandwidth_bytes_sec,
@@ -1732,26 +1799,31 @@ static int mirror_str2state(char *string, __u16 *state, __u16 *neg_state)
  * @m_layout: Mirror layout.
  * @m_file:   A victim file. Its layout will be split and used as a mirror.
  * @m_next:   Point to the next node of the list.
+ * @m_inherit: Whether to inherit unspecified attributes from previous mirror.
+ * @m_has_ec: True if this layout already contains EC parity components.
  *
  * Command-line arguments for mirror(s) will be parsed and stored in
  * a linked list that consists of this structure.
  */
 struct mirror_args {
-	__u32			m_count;
-	__u32			m_flags;
-	struct llapi_layout	*m_layout;
-	const char		*m_file;
-	struct mirror_args	*m_next;
-	bool			m_inherit;
+	__u32				m_count;
+	enum lov_comp_md_entry_flags	m_flags;
+	struct llapi_layout		*m_layout;
+	const char			*m_file;
+	struct mirror_args		*m_next;
+	bool				m_inherit;
+	bool				m_has_ec;
 };
 
 /**
  * enum mirror_flags - Flags for extending a mirrored file.
- * @MF_NO_VERIFY: Indicates not to verify the mirror(s) from victim file(s)
- *	       in case the victim file(s) contains the same data as the
- *	       original mirrored file.
- * @MF_DESTROY: Indicates to delete the mirror from the mirrored file.
- * @MF_COMP_ID: specified component id instead of mirror id
+ * @MF_NO_VERIFY: indicates to not verify the mirror(s) from victim file(s)
+ *	          and the user asserts the victim file(s) contains the same
+ *	          data as the original mirrored file.
+ * @MF_DESTROY:   indicates to delete the mirror from the mirrored file.
+ * @MF_COMP_ID:   specified component id instead of mirror id
+ * @MF_COMP_POOL: specified component pool instead of mirror id
+ * @MF_FOREIGN:   specified foreign component instead of mirror id
  *
  * Flags for extending a mirrored file.
  */
@@ -1814,11 +1886,17 @@ static int mirror_create_sanity_check(const char *fname,
 				return -EINVAL;
 			}
 		}
-		rc = llapi_layout_v2_sanity(list->m_layout, false, true,
-					    fsname);
-		if (rc) {
-			llapi_layout_sanity_perror(rc);
-			return rc;
+
+		/* Skip validation for layouts with EC parity - they will
+		 * be validated after merging in mirror_create().
+		 */
+		if (!list->m_has_ec) {
+			rc = llapi_layout_v2_sanity(list->m_layout, false, true,
+						    fsname);
+			if (rc) {
+				llapi_layout_sanity_perror(rc);
+				return rc;
+			}
 		}
 
 		list = list->m_next;
@@ -1887,6 +1965,12 @@ static int mirror_create(char *fname, struct mirror_args *mirror_list)
 			goto error;
 		}
 
+		/* If this layout already contains EC parity components,
+		 * the layout contains multiple mirrors (data + parity).
+		 * We need to merge it m_count times, and each merge adds
+		 * 2 mirrors (data + parity), so the total mirror count
+		 * is m_count * 2.
+		 */
 		for (i = 0; i < cur_mirror->m_count; i++) {
 			rc = llapi_layout_merge(&layout, cur_mirror->m_layout);
 			if (rc) {
@@ -1897,7 +1981,16 @@ static int mirror_create(char *fname, struct mirror_args *mirror_list)
 				goto error;
 			}
 		}
-		mirror_count += cur_mirror->m_count;
+
+		if (cur_mirror->m_has_ec) {
+			/* Layout contains 2 mirrors (data + parity), so
+			 * each merge adds 2 mirrors.
+			 */
+			mirror_count += cur_mirror->m_count * 2;
+		} else {
+			mirror_count += cur_mirror->m_count;
+		}
+
 		cur_mirror = cur_mirror->m_next;
 	}
 
@@ -1911,6 +2004,14 @@ static int mirror_create(char *fname, struct mirror_args *mirror_list)
 		rc = -errno;
 		fprintf(stderr, "error: %s: set mirror count failed: %s\n",
 			progname, strerror(errno));
+		goto error;
+	}
+
+	/* Validate the merged layout */
+	rc = llapi_layout_sanity(layout, false, true);
+	if (rc) {
+		llapi_layout_sanity_perror(rc);
+		rc = -EINVAL;
 		goto error;
 	}
 
@@ -1933,16 +2034,23 @@ error:
  */
 static ssize_t mirror_file_compare(int fd_src, int fd_dst)
 {
-	const size_t buflen = 4 * 1024 * 1024; /* 4M */
+	const size_t buflen = DEFAULT_IO_BUFLEN;
 	void *buf;
 	ssize_t bytes_done = 0;
-	ssize_t bytes_read = 0;
+	int rc;
 
-	buf = malloc(buflen * 2);
-	if (!buf)
-		return -ENOMEM;
+	/* first half of buffer used for read, the other half for compare */
+	rc = posix_memalign(&buf, sysconf(_SC_PAGESIZE), buflen * 2);
+	if (rc) {
+		fprintf(stderr, "%s: posix_memalign() failed: %s\n",
+			progname, strerror(rc));
+		return -rc;
+	}
+	(void)mlock(buf, buflen * 2);
 
 	while (1) {
+		ssize_t bytes_read;
+
 		if (!llapi_lease_check(fd_src)) {
 			bytes_done = -EBUSY;
 			break;
@@ -1965,6 +2073,7 @@ static ssize_t mirror_file_compare(int fd_src, int fd_dst)
 		bytes_done += bytes_read;
 	}
 
+	(void)munlock(buf, buflen * 2);
 	free(buf);
 
 	return bytes_done;
@@ -1997,6 +2106,12 @@ open_by_fid_str(const char *fid_str, const char *path, int *fdp, int flags)
 	return rc;
 }
 
+/*
+ * if @param name_or_fid matches the pattern of fid, @param path is any path in
+ * the lustre fs.
+ * if @param name_or_fid does not match the pattern of fid, it should be the
+ * path to file, @param path and @param flags are ignored.
+ */
 static struct llapi_layout*
 layout_get_by_name_or_fid(const char *name_or_fid, const char *path,
 			  enum llapi_layout_get_flags layout_flags, int flags)
@@ -2023,7 +2138,8 @@ layout_get_by_name_or_fid(const char *name_or_fid, const char *path,
 }
 
 static int mirror_extend_file(const char *fname, const char *victim_file,
-			      enum mirror_flags mirror_flags)
+			      enum mirror_flags mirror_flags,
+			      enum llapi_migration_flags migration_flags)
 {
 	int fd = -1;
 	int fdv = -1;
@@ -2031,16 +2147,19 @@ static int mirror_extend_file(const char *fname, const char *victim_file,
 	struct stat stbuf_v;
 	struct ll_ioc_lease *data = NULL;
 	char *err_str = "syserror";
+	int open_flags = O_RDWR;
 	int rc;
 
-	fd = open(fname, O_RDWR);
+	if (!(migration_flags & LLAPI_MIGRATION_NONDIRECT))
+		open_flags |= O_DIRECT;
+	fd = open(fname, open_flags);
 	if (fd < 0) {
 		err_str = "open source file";
 		rc = -errno;
 		goto out;
 	}
 
-	fdv = open(victim_file, O_RDWR);
+	fdv = open(victim_file, open_flags);
 	if (fdv < 0) {
 		err_str = "open target file";
 		rc = -errno;
@@ -2139,7 +2258,8 @@ out:
 }
 
 static int mirror_extend_layout(char *name, struct llapi_layout *m_layout,
-				bool inherit, uint32_t flags,
+				bool inherit, uint32_t comp_flags,
+				enum llapi_migration_flags migration_flags,
 				unsigned long long bandwidth_bytes_sec,
 				long stats_interval_sec)
 {
@@ -2170,11 +2290,10 @@ static int mirror_extend_layout(char *name, struct llapi_layout *m_layout,
 		}
 	}
 
-	llapi_layout_comp_flags_set(m_layout, flags);
+	llapi_layout_comp_flags_set(m_layout, comp_flags);
 
-	rc = migrate_open_files(name,
-			     LLAPI_MIGRATION_NONDIRECT | LLAPI_MIGRATION_MIRROR,
-			     NULL, m_layout, &fd_src, &fd_dst, &err_str);
+	rc = migrate_open_files(name, migration_flags | LLAPI_MIGRATION_MIRROR,
+				NULL, m_layout, &fd_src, &fd_dst, &err_str);
 	if (rc < 0)
 		goto out;
 
@@ -2242,6 +2361,7 @@ out:
 
 static int mirror_extend(char *fname, struct mirror_args *mirror_list,
 			 enum mirror_flags mirror_flags,
+			 enum llapi_migration_flags migration_flags,
 			 unsigned long long bandwidth_bytes_sec,
 			 long stats_interval_sec)
 {
@@ -2250,7 +2370,7 @@ static int mirror_extend(char *fname, struct mirror_args *mirror_list,
 	while (mirror_list) {
 		if (mirror_list->m_file) {
 			rc = mirror_extend_file(fname, mirror_list->m_file,
-						mirror_flags);
+						mirror_flags, migration_flags);
 		} else {
 			__u32 mirror_count = mirror_list->m_count;
 
@@ -2259,6 +2379,7 @@ static int mirror_extend(char *fname, struct mirror_args *mirror_list,
 							mirror_list->m_layout,
 							mirror_list->m_inherit,
 							mirror_list->m_flags,
+							migration_flags,
 							bandwidth_bytes_sec,
 							stats_interval_sec);
 				if (rc)
@@ -2347,6 +2468,54 @@ static int find_mirror_id_by_pool(struct llapi_layout *layout, void *cbdata)
 	d->id = id;
 
 	return LLAPI_LAYOUT_ITER_STOP;
+}
+
+struct parity_check_cbdata {
+	uint32_t	mirror_id;
+	bool		is_parity;
+};
+
+static int check_parity_mirror(struct llapi_layout *layout, void *cbdata)
+{
+	struct parity_check_cbdata *d = cbdata;
+	uint32_t mirror_id;
+	uint32_t flags;
+	int rc;
+
+	rc = llapi_layout_mirror_id_get(layout, &mirror_id);
+	if (rc < 0)
+		return rc;
+	if (mirror_id != d->mirror_id)
+		return LLAPI_LAYOUT_ITER_CONT;
+
+	rc = llapi_layout_comp_flags_get(layout, &flags);
+	if (rc < 0)
+		return rc;
+
+	d->is_parity = !!(flags & LCME_FL_PARITY);
+	return LLAPI_LAYOUT_ITER_STOP;
+}
+
+/**
+ * is_parity_mirror() - Check if a mirror is a parity mirror.
+ * @layout:    Layout to check.
+ * @mirror_id: Mirror ID to check.
+ *
+ * A parity mirror has the LCME_FL_PARITY flag set on all its components.
+ * We only need to check the first component since either all components
+ * in a mirror are parity or none are (mixed parity mirrors are invalid).
+ *
+ * Return: true if mirror is a parity mirror, false otherwise.
+ */
+static bool is_parity_mirror(struct llapi_layout *layout, uint32_t mirror_id)
+{
+	struct parity_check_cbdata d = {
+		.mirror_id = mirror_id,
+		.is_parity = false,
+	};
+
+	llapi_layout_comp_iterate(layout, check_parity_mirror, &d);
+	return d.is_parity;
 }
 
 static int find_comp_id_by_pool(struct llapi_layout *layout, void *cbdata)
@@ -2533,6 +2702,18 @@ static int mirror_split(const char *fname, __u32 id, const char *pool,
 		}
 	}
 
+	/* Check if this is a parity mirror */
+	if (is_parity_mirror(layout, mirror_id)) {
+		/* Parity mirrors can only be split with -d (destroy) */
+		if (!(mflags & MF_DESTROY)) {
+			fprintf(stderr,
+				"error %s: mirror %u is a parity mirror and can only be destroyed with -d flag\n",
+				progname, mirror_id);
+			rc = -EINVAL;
+			goto free_layout;
+		}
+	}
+
 	if (!victim_file && mflags & MF_DESTROY)
 		/* Allow mirror split even without the key on encrypted files,
 		 * and in this case of a 'split -d', open file with O_DIRECT
@@ -2710,13 +2891,135 @@ free_layout:
 }
 
 static inline
+int calc_stripe(const char *filename, off_t *size, off_t *obj_max_kb,
+		int cap, int min_free, int max_free, const char *pool)
+{
+	off_t filekb = *size / 1024;
+	off_t filegb = filekb / 1048576;
+	off_t stripe_count = 1;
+	off_t ost_max_count = 0;
+
+	/* Files up to 1GB will have 1 stripe */
+	if (filegb < 1)
+		return 1;
+
+	/* Calculate stripe count using sqrt(size_in_GB) + 1 */
+	stripe_count = (off_t)(sqrt((double)filegb) + 1);
+
+	if (*obj_max_kb == 0) {
+		char mntdir[PATH_MAX] = {'\0'}, fsname[PATH_MAX] = "";
+		const char *poolname = NULL;
+		struct obd_statfs stat_buf;
+		struct obd_uuid uuid_buf;
+		off_t ost_min_kb = LLONG_MAX;
+		__u32 index;
+		int fd, rc;
+		off_t avail;
+
+		/* Calculate cap on object size at 1% of smallest OST
+		 * but only include OSTs that have 256MB+ available space
+		 */
+		rc = llapi_search_mounts(filename, 0, mntdir, fsname);
+		if (rc < 0) {
+			fprintf(stderr,
+				"warning: unable to find mount point for '%s'\n",
+				filename);
+			return stripe_count;
+		}
+
+		fd = open(mntdir, O_RDONLY);
+		if (fd < 0) {
+			fprintf(stderr,
+				"warning: unable to open mount point '%s': %s\n",
+				mntdir, strerror(errno));
+			return stripe_count;
+		}
+
+		if (pool) {
+			poolname = strchr(pool, '.');
+			if (poolname) {
+				if (strncmp(fsname, pool,
+					    strlen(fsname)) != 0) {
+					fprintf(stderr,
+						"warning: filesystem name mismatch in pool '%s'\n",
+						pool);
+					close(fd);
+					return stripe_count;
+				}
+				poolname++;
+			} else {
+				poolname = pool;
+			}
+		}
+
+		for (index = 0; index < LOV_ALL_STRIPES; index++) {
+			memset(&stat_buf, 0, sizeof(struct obd_statfs));
+			memset(&uuid_buf, 0, sizeof(struct obd_uuid));
+
+			rc = llapi_obd_fstatfs(fd, LL_STATFS_LOV, index,
+					       &stat_buf, &uuid_buf);
+			if (rc == -ENODEV)
+				break;
+			if (rc == -EAGAIN || rc == -ENODATA)
+				continue;
+			if (rc < 0)
+				continue;
+
+			if (poolname && llapi_search_ost(fsname, poolname,
+							 obd_uuid2str(&uuid_buf)) != 1)
+				continue;
+
+			avail = (stat_buf.os_bavail * stat_buf.os_bsize) >> 10;
+			if (max_free && avail > max_free)
+				avail = max_free;
+			if (avail >= min_free) {
+				ost_max_count++;
+				if (avail < ost_min_kb)
+					ost_min_kb = avail;
+			}
+		}
+
+		close(fd);
+		if (ost_max_count == 0)
+			return -1;
+
+		if (ost_min_kb == LLONG_MAX) {
+			fprintf(stderr,
+				"warning: unable to determine minimum OST size, object size not capped\n");
+				*obj_max_kb = 0;
+		} else {
+			*obj_max_kb = ost_min_kb / cap;
+		}
+	}
+
+	/* Check if obj_max_kb is 0 after calculation attempt */
+	if (*obj_max_kb == 0) {
+		fprintf(stderr,
+			"warning: unable to determine minimum OST size, object size not capped\n");
+		return stripe_count;
+	}
+
+	/* If disk usage would exceed the cap, increase the number of stripes.
+	 * Round up to the nearest MB to ensure file will fit.
+	 */
+	if (*obj_max_kb > 0 && filekb > stripe_count * (*obj_max_kb))
+		stripe_count = (filekb + (*obj_max_kb) - 1024) / (*obj_max_kb);
+
+	/* Limit the count to the number of eligible OSTs */
+	if (ost_max_count > 0 && stripe_count > ost_max_count)
+		return ost_max_count;
+
+	return stripe_count >= 1 ? stripe_count : 1;
+}
+
+static inline
 int lfs_mirror_resync_file(const char *fname, struct ll_ioc_lease *ioc,
 			   __u16 *mirror_ids, int ids_nr,
-			   long stats_interval_sec, long bandwidth_bytes_sec);
-
+			   long stats_interval_sec, long bandwidth_bytes_sec,
+			   bool force_resync);
 
 static int lfs_migrate_to_dom(int fd_src, int fd_dst, char *name,
-			      __u64 migration_flags,
+			      enum llapi_migration_flags migration_flags,
 			      unsigned long long bandwidth_bytes_sec,
 			      long stats_interval_sec)
 {
@@ -2762,7 +3065,7 @@ static int lfs_migrate_to_dom(int fd_src, int fd_dst, char *name,
 
 	rc = lfs_mirror_resync_file(name, data, NULL, 0,
 				    stats_interval_sec,
-				    bandwidth_bytes_sec);
+				    bandwidth_bytes_sec, false);
 	if (rc) {
 		err_str = "cannot resync file";
 		goto out;
@@ -2881,6 +3184,13 @@ static int parse_targets(__u32 *tgts, int size, int offset, char *arg,
 	return rc < 0 ? rc : nr;
 }
 
+/* EC specification for a component */
+struct ec_spec {
+	int comp_index;        /* Which component this applies to (-1 = not set) */
+	uint8_t data_count;    /* k in k+m */
+	uint8_t parity_count;  /* m in k+m */
+};
+
 struct lfs_setstripe_args {
 	unsigned long long	 lsa_comp_end;
 	unsigned long long	 lsa_stripe_size;
@@ -2890,18 +3200,26 @@ struct lfs_setstripe_args {
 	__u32			 lsa_comp_flags;
 	__u32			 lsa_comp_neg_flags;
 	unsigned long long	 lsa_pattern;
+	enum lmv_hash_type	 lsa_hash;
 	unsigned int		 lsa_mirror_count;
 	int			 lsa_nr_tgts;
 	bool			 lsa_first_comp;
 	bool			 lsa_extension_comp;
 	__u32			*lsa_tgts;
 	char			*lsa_pool_name;
+	/* EC support */
+	struct ec_spec		*lsa_ec_specs;  /* Array of EC specifications */
+	int			 lsa_ec_spec_count; /* Number of EC specs */
+	int			 lsa_comp_count;    /* Total components added */
+	bool			 lsa_has_ec;        /* Whether --ec was specified */
 };
 
 static inline void setstripe_args_init(struct lfs_setstripe_args *lsa)
 {
-	unsigned int mirror_count = lsa->lsa_mirror_count;
-	bool first_comp = lsa->lsa_first_comp;
+	struct ec_spec *ec_specs = lsa->lsa_ec_specs;
+	int ec_spec_count = lsa->lsa_ec_spec_count;
+	int comp_count = lsa->lsa_comp_count;
+	bool has_ec = lsa->lsa_has_ec;
 
 	memset(lsa, 0, sizeof(*lsa));
 
@@ -2909,10 +3227,13 @@ static inline void setstripe_args_init(struct lfs_setstripe_args *lsa)
 	lsa->lsa_stripe_count = LLAPI_LAYOUT_DEFAULT;
 	lsa->lsa_stripe_off = LLAPI_LAYOUT_DEFAULT;
 	lsa->lsa_pattern = LLAPI_LAYOUT_RAID0;
+	lsa->lsa_hash = LMV_HASH_TYPE_UNKNOWN;
 	lsa->lsa_pool_name = NULL;
 
-	lsa->lsa_mirror_count = mirror_count;
-	lsa->lsa_first_comp = first_comp;
+	lsa->lsa_ec_specs = ec_specs;
+	lsa->lsa_ec_spec_count = ec_spec_count;
+	lsa->lsa_comp_count = comp_count;
+	lsa->lsa_has_ec = has_ec;
 }
 
 /**
@@ -2929,6 +3250,8 @@ static inline void setstripe_args_init_inherit(struct lfs_setstripe_args *lsa)
 	unsigned long long stripe_size;
 	long long stripe_count;
 	char *pool_name = NULL;
+	unsigned int mirror_count = lsa->lsa_mirror_count;
+	bool first_comp = lsa->lsa_first_comp;
 
 	if (lsa->lsa_pattern == LLAPI_LAYOUT_MDT)
 		stripe_size = LLAPI_LAYOUT_DEFAULT;
@@ -2942,6 +3265,8 @@ static inline void setstripe_args_init_inherit(struct lfs_setstripe_args *lsa)
 	lsa->lsa_stripe_size = stripe_size;
 	lsa->lsa_stripe_count = stripe_count;
 	lsa->lsa_pool_name = pool_name;
+	lsa->lsa_mirror_count = mirror_count;
+	lsa->lsa_first_comp = first_comp;
 }
 
 static inline bool setstripe_args_specified(struct lfs_setstripe_args *lsa)
@@ -2950,6 +3275,7 @@ static inline bool setstripe_args_specified(struct lfs_setstripe_args *lsa)
 		lsa->lsa_stripe_count != LLAPI_LAYOUT_DEFAULT ||
 		lsa->lsa_stripe_off != LLAPI_LAYOUT_DEFAULT ||
 		lsa->lsa_pattern != LLAPI_LAYOUT_RAID0 ||
+		lsa->lsa_hash != LMV_HASH_TYPE_UNKNOWN ||
 		lsa->lsa_comp_end != 0);
 }
 
@@ -3272,11 +3598,6 @@ static int build_prev_component(struct llapi_layout **layout,
 
 	return 0;
 }
-
-#ifndef LCME_TEMPLATE_FLAGS
-#define LCME_TEMPLATE_FLAGS	(LCME_FL_PREF_RW | LCME_FL_NOSYNC | \
-				 LCME_FL_EXTENSION)
-#endif
 
 static int build_layout_from_yaml_node(struct cYAML *node,
 				       struct llapi_layout **layout,
@@ -3630,6 +3951,10 @@ static inline bool arg_is_eof(char *arg)
 	       !strncmp(arg, "eof", strlen("eof"));
 }
 
+/* Forward declaration */
+static int apply_ec_specs(struct ec_spec *ec_specs, int ec_spec_count,
+			  int comp_count, int **ec_map);
+
 /**
  * lfs_mirror_alloc() - Allocate a mirror argument structure.
  *
@@ -3699,6 +4024,8 @@ enum {
 	LFS_COMP_SET_OPT,
 	LFS_COMP_ADD_OPT,
 	LFS_COMP_NO_VERIFY_OPT,
+	LFS_EC_STRIPE_COUNT_OPT,
+	LFS_EC_EXPERT_OPT,
 	LFS_PROJID_OPT,
 	LFS_LAYOUT_FLAGS_OPT, /* used for mirror and foreign flags */
 	LFS_MIRROR_ID_OPT,
@@ -3714,6 +4041,7 @@ enum {
 	LFS_PRINTF_LS,
 	LFS_NO_FOLLOW_OPT,
 	LFS_HEX_IDX_OPT,
+	LFS_RESTRIPE_OPT,
 	LFS_STATS_OPT,
 	LFS_STATS_INTERVAL_OPT,
 	LFS_LINKS_OPT,
@@ -3727,8 +4055,14 @@ enum {
 	LFS_QUOTA_ISOFTLIMIT_OPT,
 	LFS_QUOTA_IHARDLIMIT_OPT,
 	LFS_QUOTA_IGRACE_OPT,
+	LFS_QUOTA_SHOW_ROOT_OPT,
 	LFS_FILES_FROM,
 	LFS_THREAD_OPT,
+	LFS_LUSTRE_DIR,
+	LFS_MIN_FREE_OPT,
+	LFS_MAX_FREE_OPT,
+	LFS_LQA_OPT,
+	LFS_QUOTA_DEFAULT_OPT,
 };
 
 #ifndef LCME_USER_MIRROR_FLAGS
@@ -3737,6 +4071,412 @@ enum {
 #endif
 
 /* functions */
+
+/**
+ * apply_ec_specs() - Apply EC specifications to all components.
+ * @ec_specs:      Array of EC specifications.
+ * @ec_spec_count: Number of EC specifications.
+ * @comp_count:    Total number of components.
+ * @ec_map:        Output array mapping component index to EC spec index.
+ *
+ * Apply EC specifications to components: each --ec value applies to its
+ * component and inherits to subsequent components until replaced by another
+ * --ec. The first --ec also applies to any earlier components.
+ *
+ * Return: 0 on success, -ENOMEM on failure.
+ */
+static int apply_ec_specs(struct ec_spec *ec_specs, int ec_spec_count,
+			  int comp_count, int **ec_map)
+{
+	int *map;
+	int i, j;
+
+	if (ec_spec_count == 0 || comp_count == 0)
+		return -EINVAL;
+
+	/* Allocate map: component index -> EC spec index (-1 = none) */
+	map = malloc(comp_count * sizeof(int));
+	if (!map)
+		return -ENOMEM;
+
+	/* Initialize all to -1 (no EC) */
+	for (i = 0; i < comp_count; i++)
+		map[i] = -1;
+
+	/* Single EC spec: applies to all components */
+	if (ec_spec_count == 1) {
+		for (i = 0; i < comp_count; i++)
+			map[i] = 0;
+		*ec_map = map;
+		return 0;
+	}
+
+	/*
+	 * Multiple EC specs: each inherits to subsequent components.
+	 * Each --ec value applies to its component and all following
+	 * components until replaced by the next --ec (or end of components).
+	 */
+	for (i = 0; i < ec_spec_count; i++) {
+		int comp_idx = ec_specs[i].comp_index;
+		int next_boundary = comp_count;
+
+		/* Find next EC boundary */
+		for (j = i + 1; j < ec_spec_count; j++) {
+			if (ec_specs[j].comp_index > comp_idx) {
+				next_boundary = ec_specs[j].comp_index;
+				break;
+			}
+		}
+
+		/* Apply from comp_idx to next_boundary */
+		for (j = comp_idx; j < next_boundary; j++)
+			map[j] = i;
+	}
+
+	/*
+	 * Apply first --ec to any earlier components.
+	 * Fill in any remaining gaps (map[i] == -1) with the first
+	 * EC spec found to the right.
+	 */
+	for (i = 0; i < comp_count; i++) {
+		if (map[i] == -1) {
+			/* Find first EC spec to the right */
+			for (j = i + 1; j < comp_count; j++) {
+				if (map[j] != -1) {
+					map[i] = map[j];
+					break;
+				}
+			}
+		}
+	}
+
+	*ec_map = map;
+	return 0;
+}
+
+/**
+ * create_ec_parity_mirror() - Create parity mirror from data mirror.
+ * @layout:          Layout containing the data mirror.
+ * @ec_specs:        Array of EC specifications.
+ * @ec_spec_count:   Number of EC specifications.
+ *
+ * Create a parity mirror by iterating through the data mirror components,
+ * extracting their properties (extent, stripe_size, pool), and creating
+ * matching EC parity components with the appropriate EC parameters.
+ *
+ * The caller is responsible for setting the mirror count on the layout.
+ * In mirror mode, mirror_create() sets the mirror count. In non-mirror mode,
+ * the caller should set the mirror count to 2 (data + parity) after calling
+ * this function.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+static int create_ec_parity_mirror(struct llapi_layout *layout,
+				   struct ec_spec *ec_specs,
+				   int ec_spec_count)
+{
+	struct {
+		uint64_t start;
+		uint64_t end;
+		uint64_t stripe_count;
+		uint32_t mirror_id;
+		int ec_idx;
+	} *comp_info = NULL;
+	int *ec_map = NULL;
+	int rc, i, comp_count;
+
+	if (!layout || !ec_specs || ec_spec_count == 0)
+		return -EINVAL;
+
+	/* Move to first component of data mirror */
+	rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_FIRST);
+	if (rc) {
+		fprintf(stderr, "error: cannot move to first component: %s\n",
+			strerror(errno));
+		return rc;
+	}
+
+	/* Count components by iterating through them */
+	comp_count = 1;
+	while (llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_NEXT) == 0)
+		comp_count++;
+
+	/*
+	 * Normalize EC spec comp_index values to be relative to this mirror.
+	 * The comp_index values are global (across all mirrors), but we need
+	 * them to be local (starting from 0) for propagation to work correctly.
+	 */
+	int min_comp_index = INT_MAX;
+
+	for (i = 0; i < ec_spec_count; i++) {
+		if (ec_specs[i].comp_index < min_comp_index)
+			min_comp_index = ec_specs[i].comp_index;
+	}
+
+	/* Create a temporary copy of EC specs with normalized comp_index */
+	struct ec_spec *normalized_specs = calloc(ec_spec_count,
+						  sizeof(struct ec_spec));
+	if (!normalized_specs) {
+		fprintf(stderr, "error: cannot allocate normalized EC specs\n");
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < ec_spec_count; i++) {
+		normalized_specs[i] = ec_specs[i];
+		normalized_specs[i].comp_index -= min_comp_index;
+	}
+
+	/* Apply EC specs to get mapping for each component */
+	rc = apply_ec_specs(normalized_specs, ec_spec_count, comp_count,
+			    &ec_map);
+	free(normalized_specs);
+	if (rc) {
+		fprintf(stderr, "error: failed to apply EC specs: %s\n",
+			strerror(-rc));
+		return rc;
+	}
+
+	rc = llapi_layout_mirror_count_sync(layout);
+	if (rc) {
+		fprintf(stderr, "error: cannot sync mirror count: %s\n",
+			strerror(errno));
+		goto out_free;
+	}
+
+	/* Allocate array to store component info */
+	comp_info = calloc(comp_count, sizeof(*comp_info));
+	if (!comp_info) {
+		rc = -ENOMEM;
+		goto out_free;
+	}
+
+	/* Move back to first component */
+	rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_FIRST);
+	if (rc) {
+		fprintf(stderr, "error: cannot move to first component: %s\n",
+			strerror(errno));
+		goto out_free;
+	}
+
+	/* Collect extent information from all data mirror components */
+	for (i = 0; i < comp_count; i++) {
+		int ec_idx = ec_map[i];
+
+		if (ec_idx < 0 || ec_idx >= ec_spec_count) {
+			fprintf(stderr,
+				"error: invalid EC mapping for component %d\n",
+				i);
+			rc = -EINVAL;
+			goto out_free;
+		}
+
+		/* Get component extent */
+		rc = llapi_layout_comp_extent_get(layout,
+						  &comp_info[i].start,
+						  &comp_info[i].end);
+		if (rc) {
+			fprintf(stderr,
+				"error: cannot get component %d extent: %s\n",
+				i, strerror(errno));
+			goto out_free;
+		}
+
+		/* Get component stripe count */
+		rc = llapi_layout_stripe_count_get(layout,
+						   &comp_info[i].stripe_count);
+		if (rc) {
+			fprintf(stderr,
+				"error: cannot get component %d stripe count: %s\n",
+				i, strerror(errno));
+			goto out_free;
+		}
+
+		/* Get component mirror ID */
+		rc = llapi_layout_mirror_id_get(layout,
+						&comp_info[i].mirror_id);
+		if (rc) {
+			fprintf(stderr,
+				"error: cannot get component %d mirror ID: %s\n",
+				i, strerror(errno));
+			goto out_free;
+		}
+
+		comp_info[i].ec_idx = ec_idx;
+
+		/* Move to next component for next iteration */
+		if (i < comp_count - 1) {
+			rc = llapi_layout_comp_use(layout,
+						   LLAPI_LAYOUT_COMP_USE_NEXT);
+			if (rc) {
+				fprintf(stderr,
+					"error: cannot move to next component: %s\n",
+					strerror(errno));
+				goto out_free;
+			}
+		}
+	}
+
+	/* Now create EC components for each data component */
+	for (i = 0; i < comp_count; i++) {
+		uint8_t data_count, parity_count;
+
+		/* Get EC parameters for this component */
+		data_count = ec_specs[comp_info[i].ec_idx].data_count;
+		parity_count = ec_specs[comp_info[i].ec_idx].parity_count;
+
+		/*
+		 * Reduce EC data count if the actual stripe count is less
+		 * than k. E.g.: -E 128M -c 4 -E -1 -c 16 --ec 8+2
+		 * creates EC 4+2 for first component and EC 8+2 for second.
+		 */
+		if (comp_info[i].stripe_count < data_count)
+			data_count = comp_info[i].stripe_count;
+
+		/* Create EC parity component */
+		rc = llapi_layout_comp_add_ec(layout, comp_info[i].mirror_id,
+					      comp_info[i].start,
+					      comp_info[i].end,
+					      data_count, parity_count);
+		if (rc) {
+			fprintf(stderr,
+				"error: cannot add EC component [%llu, %llu] to protect mirror id %u with EC(%u+%u): %s\n",
+				(unsigned long long)comp_info[i].start,
+				(unsigned long long)comp_info[i].end,
+				comp_info[i].mirror_id, data_count,
+				parity_count, strerror(errno));
+			goto out_free;
+		}
+	}
+
+	/* Validate the layout */
+	rc = llapi_layout_sanity(layout, false, false);
+	if (rc)
+		goto out_free;
+
+	rc = 0;
+
+out_free:
+	free(comp_info);
+	free(ec_map);
+	return rc;
+}
+
+/* EC stripe count limits for non-expert mode */
+#define LOV_EC_DATA_STRIPES_RECOMMENDED   32
+#define LOV_EC_CODING_STRIPES_RECOMMENDED 4
+
+/**
+ * parse_ec_stripe_count() - Parse EC stripe count in k+m or k:m format.
+ * @optarg:      String containing EC stripe count (e.g., "4+2" or "4:2").
+ * @data_count:  Pointer to store data stripe count (k).
+ * @parity_count: Pointer to store parity stripe count (m).
+ * @ec_expert:   Whether --ec-expert flag was specified.
+ *
+ * Parse the EC stripe count string in "k+m" or "k:m" format where k is the
+ * number of data stripes and m is the number of parity stripes.
+ *
+ * Return: 0 on success, -EINVAL on failure.
+ */
+static int parse_ec_stripe_count(const char *optarg, uint8_t *data_count,
+				  uint8_t *parity_count, bool ec_expert)
+{
+	char *end;
+	unsigned long data, parity;
+	const char *sep;
+
+	/* Find the '+' or ':' separator */
+	sep = strchr(optarg, '+');
+	if (!sep)
+		sep = strchr(optarg, ':');
+	if (!sep) {
+		fprintf(stderr,
+			"error: invalid EC stripe count '%s', expected format: DATA+PARITY or DATA:PARITY\n",
+			optarg);
+		return -EINVAL;
+	}
+
+	/* Parse data count */
+	errno = 0;
+	data = strtoul(optarg, &end, 0);
+	if (errno != 0 || end != sep || data == 0 || data < 2 ||
+	    data > UINT8_MAX) {
+		fprintf(stderr,
+			"error: invalid data stripe count in '%s'\n", optarg);
+		return -EINVAL;
+	}
+
+	/* Parse parity count */
+	errno = 0;
+	parity = strtoul(sep + 1, &end, 0);
+	if (errno != 0 || *end != '\0' || parity == 0 || parity > UINT8_MAX) {
+		fprintf(stderr,
+			"error: invalid parity stripe count in '%s'\n",
+			optarg);
+		return -EINVAL;
+	}
+
+	/* Validate EC parameters */
+	if (parity > data) {
+		fprintf(stderr,
+			"error: parity count (%lu) must be less than or equal to data count (%lu)\n",
+			parity, data);
+		return -EINVAL;
+	}
+
+	if (data + parity > LOV_EC_MAX_TOTAL_STRIPES) {
+		fprintf(stderr,
+			"error: data+parity (%lu+%lu=%lu) exceeds %u (Cauchy-matrix-over-GF(2^8) limit)\n",
+			data, parity, data + parity,
+			LOV_EC_MAX_TOTAL_STRIPES);
+		return -EINVAL;
+	}
+
+	/* Check supported limits unless --ec-expert is specified */
+	if (!ec_expert) {
+		if (data > LOV_EC_DATA_STRIPES_RECOMMENDED) {
+			fprintf(stderr,
+				"error: data stripe count (%lu) exceeds supported limit (%u). Use --ec-expert to override.\n",
+				data, LOV_EC_DATA_STRIPES_RECOMMENDED);
+			return -EINVAL;
+		}
+
+		if (parity > LOV_EC_CODING_STRIPES_RECOMMENDED) {
+			fprintf(stderr,
+				"error: parity stripe count (%lu) exceeds supported limit (%u). Use --ec-expert to override.\n",
+				parity, LOV_EC_CODING_STRIPES_RECOMMENDED);
+			return -EINVAL;
+		}
+	}
+
+	*data_count = (uint8_t)data;
+	*parity_count = (uint8_t)parity;
+
+	return 0;
+}
+
+static int guess_only_lustre_mount_root(char *mntdir)
+{
+	int rc;
+	char buf[PATH_MAX] = {0};
+
+	mntdir[0] = '\0';
+	rc = llapi_search_mounts(NULL, 0, mntdir, NULL);
+	if (rc != 0) {
+		llapi_error(LLAPI_MSG_DEBUG, rc,
+			    "no lustre mount point");
+		return rc;
+	}
+
+	rc = llapi_search_mounts(NULL, 1, buf, NULL);
+	if (rc == 0) {
+		llapi_error(LLAPI_MSG_DEBUG, EEXIST,
+			    "multiple lustre mount points: %s %s", mntdir, buf);
+		return -EEXIST;
+	}
+
+	return 0;
+}
+
 static int lfs_setstripe_internal(int argc, char **argv,
 				  enum setstripe_origin opc)
 {
@@ -3757,7 +4497,7 @@ static int lfs_setstripe_internal(int argc, char **argv,
 	bool migrate_mdt_mode = false;
 	bool setstripe_mode = false;
 	bool migration_block = false;
-	__u64 migration_flags = 0;
+	enum llapi_migration_flags migration_flags = 0;
 	__u32 tgts[LOV_MAX_STRIPE_COUNT] = { 0 };
 	int comp_del = 0, comp_set = 0;
 	int comp_add = 0;
@@ -3789,11 +4529,27 @@ static int lfs_setstripe_internal(int argc, char **argv,
 	unsigned long long bandwidth_unit = ONE_MB;
 	long stats_interval_sec = 0;
 	bool null_mode = false;
+	bool stripe_count_set = false;
+	bool min_free_set = false;
+	bool cap_set = false;
+	bool comp_end_set = false;
+	bool auto_stripe = false;
+	off_t obj_max_kb = 0;
+	int cap = 100;
+	int long_idx;
+	bool restripe = false;
+	int min_free = 256 * 1024;
+	int max_free = 0;
 	const char *files_from = NULL;
 	FILE *files_from_fp = NULL;
 	int delim = '\n';
 	char *buf = NULL;
 	size_t bufsize = 0;
+	char *lustre_dir = NULL;
+	char mntdir[PATH_MAX];
+	int lustre_dir_fd = -1;
+	bool fid_mode = false;
+	struct lu_fid fid;
 
 	struct option long_opts[] = {
 	{ .val = LFS_COMP_ADD_OPT,
@@ -3826,6 +4582,8 @@ static int lfs_setstripe_internal(int argc, char **argv,
 			.name = "mode",		.has_arg = required_argument},
 	{ .val = LFS_LAYOUT_COPY,
 			.name = "copy",		.has_arg = required_argument},
+	{ .val = LFS_RESTRIPE_OPT,
+			.name = "restripe",	.has_arg = no_argument},
 	{ .val = LFS_STATS_OPT,
 			.name = "stats",	.has_arg = no_argument},
 	{ .val = LFS_STATS_INTERVAL_OPT,
@@ -3833,7 +4591,10 @@ static int lfs_setstripe_internal(int argc, char **argv,
 						.has_arg = required_argument},
 	{ .val = LFS_FILES_FROM,
 		.name = "files-from",		.has_arg = required_argument},
+	{ .val = LFS_LUSTRE_DIR,
+		.name = "lustre-dir",		.has_arg = required_argument},
 	{ .val = '0',	.name = "null",		.has_arg = no_argument },
+	{ .val = 'A',	.name = "auto-stripe",	.has_arg = no_argument },
 	/* find { .val = 'A',	.name = "atime",	.has_arg = required_argument }*/
 		/* --block is only valid in migrate mode */
 	{ .val = 'b',	.name = "block",	.has_arg = no_argument },
@@ -3849,13 +4610,19 @@ static int lfs_setstripe_internal(int argc, char **argv,
 	{ .val = 'd',	.name = "destroy",	.has_arg = no_argument},
 	/* used with "lfs migrate -m" */
 	{ .val = 'd',	.name = "directory",	.has_arg = no_argument},
-	/* --non-direct is only valid in migrate mode */
+	/* --non-direct is only valid in migrate and mirror mode */
 	{ .val = 'D',	.name = "non-direct",	.has_arg = no_argument },
 	{ .val = 'E',	.name = "comp-end",	.has_arg = required_argument},
 	{ .val = 'E',	.name = "component-end",
 						.has_arg = required_argument},
+	{ .val = LFS_EC_STRIPE_COUNT_OPT,
+			.name = "ec",		.has_arg = required_argument},
+	{ .val = LFS_EC_STRIPE_COUNT_OPT,
+			.name = "ec-stripe-count", .has_arg = required_argument},
+	{ .val = LFS_EC_EXPERT_OPT,
+			.name = "ec-expert",	.has_arg = required_argument},
 	{ .val = 'f',	.name = "file",		.has_arg = required_argument },
-/* find	{ .val = 'F',	.name = "fid",		.has_arg = no_argument }, */
+	{ .val = 'F',	.name = "fid",		.has_arg = no_argument },
 /* find	{ .val = 'g',	.name = "gid",		.has_arg = no_argument }, */
 /* find	{ .val = 'G',	.name = "group",	.has_arg = required_argument }*/
 	{ .val = 'h',	.name = "help",		.has_arg = no_argument },
@@ -3864,11 +4631,13 @@ static int lfs_setstripe_internal(int argc, char **argv,
 	{ .val = 'i',	.name = "stripe_index",	.has_arg = required_argument},
 	{ .val = 'I',	.name = "comp-id",	.has_arg = required_argument},
 	{ .val = 'I',	.name = "component-id",	.has_arg = required_argument},
+	{ .val = 'K',	.name = "auto-cap",	.has_arg = required_argument},
 /* find { .val = 'l',	.name = "lazy",		.has_arg = no_argument }, */
-	{ .val = 'L',	.name = "layout",	.has_arg = required_argument },
+	{ .val = 'L',	.name = "layout",	.has_arg = required_argument},
 	{ .val = 'm',	.name = "mdt",		.has_arg = required_argument},
 	{ .val = 'm',	.name = "mdt-index",	.has_arg = required_argument},
 	{ .val = 'm',	.name = "mdt_index",	.has_arg = required_argument},
+	{ .val = 'M',	.name = "min-free",	.has_arg = required_argument},
 	/* --non-block is only valid in migrate mode */
 	{ .val = 'n',	.name = "non-block",	.has_arg = no_argument },
 	{ .val = 'N',	.name = "mirror-count",	.has_arg = optional_argument},
@@ -3889,12 +4658,13 @@ static int lfs_setstripe_internal(int argc, char **argv,
 /* find	{ .val = 'U',	.name = "user",		.has_arg = required_argument }*/
 	/* --verbose is only valid in migrate mode */
 	{ .val = 'v',	.name = "verbose",	.has_arg = no_argument},
-	{ .val = 'W',	.name = "bandwidth",	.has_arg = required_argument },
+	{ .val = 'W',  .name = "bandwidth-limit", .has_arg = required_argument},
 	{ .val = 'x',	.name = "xattr",	.has_arg = required_argument },
+	{ .val = 'X',	.name = "max-free",	.has_arg = required_argument},
 /* dirstripe { .val = 'X',.name = "max-inherit",.has_arg = required_argument }*/
-	{ .val = 'y',	.name = "yaml",		.has_arg = required_argument },
-	{ .val = 'z',   .name = "ext-size",	.has_arg = required_argument},
-	{ .val = 'z',   .name = "extension-size", .has_arg = required_argument},
+	{ .val = 'y',	.name = "yaml",		.has_arg = required_argument},
+	{ .val = 'z',	.name = "ext-size",	.has_arg = required_argument},
+	{ .val = 'z',	.name = "extension-size", .has_arg = required_argument},
 	{ .val = LFS_MIGRATE_NOFIX, .name = "clear-fixed", .has_arg = no_argument},
 	{ .name = NULL } };
 
@@ -3910,9 +4680,20 @@ static int lfs_setstripe_internal(int argc, char **argv,
 
 	snprintf(cmd, sizeof(cmd), "%s %s", progname, argv[0]);
 	progname = cmd;
+
+	/* pre-allocate buf */
+	bufsize = PATH_MAX;
+	buf = malloc(bufsize);
+	if (buf == NULL) {
+		result = -errno;
+		fprintf(stderr, "%s %s: failed to allocate memory\n",
+			progname, argv[0]);
+		goto error;
+	}
+
 	while ((c = getopt_long(argc, argv,
-				"0bc:C:dDE:f:hH:i:I:m:N::no:p:L:s:S:vx:W:y:z:",
-				long_opts, NULL)) >= 0) {
+				"0Abc:C:dDE:f:FhH:i:I:K:m:M:N::no:p:L:s:S:vx:X:W:y:z:",
+				long_opts, &long_idx)) >= 0) {
 		size_units = 1;
 		switch (c) {
 		case 0:
@@ -4009,7 +4790,14 @@ static int lfs_setstripe_internal(int argc, char **argv,
 			}
 			break;
 		}
+		case LFS_RESTRIPE_OPT:
+			if (auto_stripe)
+				goto restripe_error;
+			restripe = true;
+			break;
 		case LFS_LAYOUT_FOREIGN_OPT:
+			if (restripe)
+				goto restripe_error;
 			if (optarg) {
 				/* check pure numeric */
 				type = strtoul(optarg, &end, 0);
@@ -4046,6 +4834,8 @@ static int lfs_setstripe_internal(int argc, char **argv,
 			}
 			break;
 		case LFS_LAYOUT_COPY:
+			if (restripe)
+				goto restripe_error;
 			from_copy = true;
 			template = optarg;
 			break;
@@ -4073,8 +4863,16 @@ static int lfs_setstripe_internal(int argc, char **argv,
 		case LFS_FILES_FROM:
 			files_from = optarg;
 			break;
+		case LFS_LUSTRE_DIR:
+			lustre_dir = optarg;
+			break;
 		case '0':
 			null_mode = true;
+			break;
+		case 'A':
+			if (restripe)
+				goto restripe_error;
+			auto_stripe = true;
 			break;
 		case 'b':
 			if (!migrate_mode) {
@@ -4093,14 +4891,19 @@ static int lfs_setstripe_internal(int argc, char **argv,
 				goto usage_error;
 			}
 			overstriped = true;
-			if (!migrate_mode)
-				lsa.lsa_pattern = LLAPI_LAYOUT_OVERSTRIPING;
+			lsa.lsa_pattern = LLAPI_LAYOUT_OVERSTRIPING;
 			fallthrough;
 		case 'c':
+			if (auto_stripe || restripe) {
+				fprintf(stderr,
+					"%s %s: -c|--stripe-count incompatible with -A|auto-stripe or --restripe\n",
+					progname, argv[0]);
+				goto usage_error;
+			}
 			errno = 0;
 			lsa.lsa_stripe_count = strtoul(optarg, &end, 0);
 			/* only allow count -2..-32 for overstriped files */
-			if (errno != 0 || *end != '\0'|| optarg == end ||
+			if (errno != 0 || *end != '\0' || optarg == end ||
 			    lsa.lsa_stripe_count <
 				(overstriped ? LLAPI_OVERSTRIPE_COUNT_MAX :
 					       LLAPI_OVERSTRIPE_COUNT_MIN) ||
@@ -4118,6 +4921,7 @@ static int lfs_setstripe_internal(int argc, char **argv,
 				lsa.lsa_stripe_count = LLAPI_LAYOUT_WIDE_MIN -
 					(lsa.lsa_stripe_count + 1);
 			}
+			stripe_count_set = true;
 			break;
 		case 'd':
 			if (migrate_mode) {
@@ -4137,15 +4941,21 @@ static int lfs_setstripe_internal(int argc, char **argv,
 			}
 			break;
 		case 'D':
-			if (!migrate_mode) {
+			if (!migrate_mode && !mirror_mode) {
 				fprintf(stderr,
-					"%s %s: -D|--non-direct is valid only for migrate command\n",
+					"%s %s: -D|--non-direct is valid only for migrate or mirror command\n",
 					progname, argv[0]);
 				goto usage_error;
 			}
 			migration_flags |= LLAPI_MIGRATION_NONDIRECT;
 			break;
 		case 'E':
+			if (auto_stripe || restripe) {
+				fprintf(stderr,
+					"%s %s: -E|--component-end incompatible with -A|--auto-stripe or --restripe\n",
+					progname, argv[0]);
+				goto usage_error;
+			}
 			if (lsa.lsa_comp_end != 0) {
 				result = comp_args_to_layout(lpp, &lsa, true);
 				if (result) {
@@ -4154,6 +4964,7 @@ static int lfs_setstripe_internal(int argc, char **argv,
 					goto usage_error;
 				}
 
+				lsa.lsa_comp_count++;
 				setstripe_args_init_inherit(&lsa);
 			}
 
@@ -4174,6 +4985,47 @@ static int lfs_setstripe_internal(int argc, char **argv,
 					goto usage_error;
 				}
 			}
+			comp_end_set = true;
+			break;
+		case LFS_EC_STRIPE_COUNT_OPT:
+		case LFS_EC_EXPERT_OPT: {
+			uint8_t data_count, parity_count;
+			struct ec_spec *new_specs;
+			bool ec_expert = (c == LFS_EC_EXPERT_OPT);
+
+			/* Parse EC stripe count */
+			result = parse_ec_stripe_count(optarg, &data_count,
+						       &parity_count,
+						       ec_expert);
+			if (result)
+				goto usage_error;
+
+			/* Allocate or expand EC specs array */
+			new_specs = realloc(lsa.lsa_ec_specs,
+					    (lsa.lsa_ec_spec_count + 1) *
+					    sizeof(struct ec_spec));
+			if (!new_specs) {
+				fprintf(stderr,
+					"%s %s: cannot allocate EC spec array: %s\n",
+					progname, argv[0],
+					strerror(ENOMEM));
+				result = -ENOMEM;
+				goto error;
+			}
+
+			lsa.lsa_ec_specs = new_specs;
+			lsa.lsa_ec_specs[lsa.lsa_ec_spec_count].comp_index =
+				lsa.lsa_comp_count;
+			lsa.lsa_ec_specs[lsa.lsa_ec_spec_count].data_count =
+				data_count;
+			lsa.lsa_ec_specs[lsa.lsa_ec_spec_count].parity_count =
+				parity_count;
+			lsa.lsa_ec_spec_count++;
+			lsa.lsa_has_ec = true;
+			break;
+		}
+		case 'F':
+			fid_mode = true;
 			break;
 		case 'H':
 			if (!migrate_mode) {
@@ -4182,8 +5034,8 @@ static int lfs_setstripe_internal(int argc, char **argv,
 				return CMD_HELP;
 			}
 
-			lsa.lsa_pattern = check_hashtype(optarg);
-			if (lsa.lsa_pattern == 0) {
+			lsa.lsa_hash = check_hashtype(optarg);
+			if (lsa.lsa_hash == LMV_HASH_TYPE_UNKNOWN) {
 				fprintf(stderr,
 					"%s %s: bad stripe hash type '%s'\n",
 					progname, argv[0], optarg);
@@ -4238,7 +5090,19 @@ static int lfs_setstripe_internal(int argc, char **argv,
 			}
 			has_m_file = true;
 			break;
+		case 'K':
+			cap = atoi(optarg);
+			cap_set = true;
+			if (cap <= 0) {
+				fprintf(stderr,
+					"%s %s: invalid -K|--auto-cap value '%s'\n",
+					progname, argv[0], optarg);
+				goto usage_error;
+			}
+			break;
 		case 'L':
+			if (restripe)
+				goto restripe_error;
 			if (strcmp(argv[optind - 1], "mdt") == 0) {
 				/* Can be only the first component */
 				if (layout) {
@@ -4286,6 +5150,16 @@ static int lfs_setstripe_internal(int argc, char **argv,
 			if (lsa.lsa_stripe_off == LLAPI_LAYOUT_DEFAULT)
 				lsa.lsa_stripe_off = tgts[0];
 			break;
+		case 'M':
+			min_free = atoi(optarg);
+			min_free_set = true;
+			if (min_free < 0) {
+				fprintf(stderr,
+					"%s %s: invalid min-free value '%s'\n",
+					progname, argv[0], optarg);
+				goto usage_error;
+			}
+			break;
 		case 'n':
 			if (!migrate_mode) {
 				fprintf(stderr,
@@ -4296,13 +5170,14 @@ static int lfs_setstripe_internal(int argc, char **argv,
 			migration_flags |= LLAPI_MIGRATION_NONBLOCK;
 			break;
 		case 'N':
+			if (restripe)
+				goto restripe_error;
 create_mirror:
 			if (opc == SO_SETSTRIPE) {
 				opc = SO_MIRROR_CREATE;
 				mirror_mode = true;
 			}
 			mirror_total_mode = false;
-			mirror_count = 1;
 			if (optarg) {
 				if (optarg[0] == '=') {
 					mirror_total_mode = true;
@@ -4319,23 +5194,42 @@ create_mirror:
 					result = -EINVAL;
 					goto error;
 				}
+			} else if (optind < argc && (*argv[optind] >= '0') &&
+				   (*argv[optind] <= '9')) {
+
+				errno = 0;
+				mirror_count = strtoul(argv[optind], &end, 0);
+				if (errno != 0 || *end != '\0' ||
+				    mirror_count == 0 ||
+				    mirror_count > LUSTRE_MIRROR_COUNT_MAX) {
+					fprintf(stderr,
+						"error: %s: bad mirror count: %s\n",
+						progname, argv[optind]);
+					result = -EINVAL;
+					goto error;
+				}
+				optind++;
+			} else {
+				mirror_count = 1;
 			}
 
 			if (mirror_total_mode) {
 				char *path = argv[argc - 1];
-				struct lov_comp_md_v1 *comp_v1;
-				int have_mirrors;
+				struct llapi_layout *f_layout;
+				uint16_t have_mirrors;
 
-				result = llapi_get_lmm_from_path(path,
-					(struct lov_user_md_v1 **)&comp_v1);
-				if (result) {
+				f_layout = llapi_layout_get_by_path(path, 0);
+				if (!f_layout) {
+					result = -errno;
 					fprintf(stderr,
 						"error: %s: cannot get layout from %s: %s\n",
-						progname, path, strerror(-result));
+						progname, path,
+						strerror(errno));
 					goto error;
 				}
-				have_mirrors = comp_v1->lcm_mirror_count;
-				free(comp_v1);
+				llapi_layout_mirror_count_get(f_layout,
+							      &have_mirrors);
+				llapi_layout_free(f_layout);
 
 				if (have_mirrors >= mirror_count)
 					mirror_count = 0;
@@ -4369,9 +5263,43 @@ create_mirror:
 					goto error;
 				}
 
-				setstripe_args_init_inherit(&lsa);
+				lsa.lsa_comp_count++;
+
+				/* Create EC parity mirror if this mirror has EC */
+				if (lsa.lsa_has_ec &&
+				    lsa.lsa_ec_spec_count > 0) {
+					result = create_ec_parity_mirror(
+							last_mirror->m_layout,
+							lsa.lsa_ec_specs,
+							lsa.lsa_ec_spec_count);
+					if (result) {
+						fprintf(stderr,
+							"error: %s: failed to create EC parity mirror\n",
+							progname);
+						lfs_mirror_free(new_mirror);
+						goto error;
+					}
+
+					/* Mark that this layout already contains
+					 * EC parity components. The layout now
+					 * contains 2 mirrors (data + parity).
+					 * We keep m_count at its original value
+					 * (e.g., 1 for -N, 2 for -N2, etc.), and
+					 * set m_has_ec=true so that mirror_create()
+					 * knows to multiply the mirror count by 2.
+					 */
+					last_mirror->m_has_ec = true;
+
+					/* Clear EC specs for next mirror */
+					free(lsa.lsa_ec_specs);
+					lsa.lsa_ec_specs = NULL;
+					lsa.lsa_ec_spec_count = 0;
+					lsa.lsa_has_ec = false;
+				}
 
 				last_mirror->m_next = new_mirror;
+
+				setstripe_args_init_inherit(&lsa);
 			}
 
 			last_mirror = new_mirror;
@@ -4383,6 +5311,8 @@ create_mirror:
 				fprintf(stderr,
 					"warning: '--ost-list' is deprecated, use '--ost' instead\n");
 #endif
+			if (restripe)
+				goto restripe_error;
 			if (lsa.lsa_pattern == LLAPI_LAYOUT_MDT) {
 				fprintf(stderr,
 					"%s %s: -o|--ost incompatible with DoM layout\n",
@@ -4413,6 +5343,8 @@ create_mirror:
 				lsa.lsa_stripe_off = tgts[0];
 			break;
 		case 'p':
+			if (restripe)
+				goto restripe_error;
 			if (!optarg)
 				goto usage_error;
 
@@ -4422,6 +5354,8 @@ create_mirror:
 				lsa.lsa_pool_name = optarg;
 			break;
 		case 'S':
+			if (restripe)
+				goto restripe_error;
 			result = llapi_parse_size(optarg, &lsa.lsa_stripe_size,
 						  &size_units, 0);
 			/* assume units of KB if too small to be valid */
@@ -4443,7 +5377,7 @@ create_mirror:
 				goto usage_error;
 			}
 			migrate_mdt_param.fp_verbose = VERBOSE_DETAIL;
-			migration_flags = LLAPI_MIGRATION_VERBOSE;
+			migration_flags |= LLAPI_MIGRATION_VERBOSE;
 			break;
 		case 'x':
 			xattr = optarg;
@@ -4462,7 +5396,18 @@ create_mirror:
 				goto error;
 			}
 			break;
+		case 'X':
+			max_free = atoi(optarg);
+			if (max_free < 0) {
+				fprintf(stderr,
+					"%s %s: invalid max-free value '%s'\n",
+					progname, argv[0], optarg);
+				goto usage_error;
+			}
+			break;
 		case 'y':
+			if (restripe)
+				goto restripe_error;
 			from_yaml = true;
 			template = optarg;
 			break;
@@ -4489,10 +5434,49 @@ create_mirror:
 
 	fname = argv[optind];
 
+	if (cap_set && (!migrate_mode || !auto_stripe)) {
+		fprintf(stderr,
+			"%s %s: -K|--auto-cap valid only for migrate command with --auto-stripe\n",
+			progname, argv[0]);
+		goto usage_error;
+	}
+
+	if (max_free > 0 && (!migrate_mode || !auto_stripe)) {
+		fprintf(stderr,
+			"%s %s: --max-free valid only for migrate command with --auto-stripe\n",
+			progname, argv[0]);
+		goto usage_error;
+	}
+
+	if (min_free_set && (!migrate_mode || !auto_stripe)) {
+		fprintf(stderr,
+			"%s %s: --min-free valid only for migrate command with --auto-stripe\n",
+			progname, argv[0]);
+		goto usage_error;
+	}
+
+	if (stripe_count_set && auto_stripe) {
+		fprintf(stderr,
+			"%s %s: -c|--stripe-count incompatible with -A|--auto-stripe\n",
+			progname, argv[0]);
+			goto usage_error;
+	}
+
+	if (comp_end_set && auto_stripe) {
+		fprintf(stderr,
+			"%s %s: -E|--component-end incompatible with -A|--auto-stripe\n",
+			progname, argv[0]);
+		goto usage_error;
+	}
+
 	/* for 'lfs migrate' and 'lfs mirror extend' command,
+	 *
 	 * at least one of FILE/--null/--files-from=LIST_FILE must be specified.
 	 * If both --null and --files-from=LIST_FILE are specified, read
 	 * filenames from LIST_FILE and use '\0' as delimiter.
+	 *
+	 * --lustre-dir= and --fid may be specified at the same time, so that
+	 * FID is provided on command line or file/stdin instead of file path.
 	 */
 	if (opc == SO_MIGRATE || opc == SO_MIRROR_EXTEND) {
 		int num = 0;
@@ -4523,6 +5507,41 @@ create_mirror:
 				progname, argv[0]);
 			goto usage_error;
 		}
+
+		/* check fid mode is set correctly */
+		if (fid_mode) {
+			int rc;
+			struct lu_fid fid;
+
+			if (lustre_dir == NULL) {
+				rc = guess_only_lustre_mount_root(mntdir);
+				if (rc != 0) {
+					fprintf(stderr,
+						"%s %s: not able to guess lustre mount point, please specify --lustre-dir option\n",
+						progname, argv[0]);
+					goto usage_error;
+				}
+				lustre_dir = mntdir;
+			}
+
+			lustre_dir_fd = open(lustre_dir, O_RDONLY);
+			if (lustre_dir_fd < 0) {
+				result = -errno;
+				fprintf(stderr,
+					"%s %s: failed to open lustre dir: %s\n",
+					progname, argv[0], lustre_dir);
+				goto error;
+			}
+
+			rc = llapi_fd2fid(lustre_dir_fd, &fid);
+			if (rc < 0) {
+				result = rc;
+				fprintf(stderr,
+					"%s %s: path is not in a lustre file system: %s\n",
+					progname, argv[0], lustre_dir);
+				goto error;
+			}
+		}
 	} else if (optind == argc) {
 		fprintf(stderr, "%s %s: FILE must be specified\n",
 			progname, argv[0]);
@@ -4530,8 +5549,9 @@ create_mirror:
 	}
 
 	/* lfs migrate $filename should keep the file's layout by default */
-	if (migrate_mode && !layout && !from_yaml &&
-	    !setstripe_args_specified(&lsa) && !lsa.lsa_pool_name)
+	if (migrate_mode && !layout && !from_yaml && !restripe &&
+	    !auto_stripe && !setstripe_args_specified(&lsa) &&
+	    !lsa.lsa_pool_name)
 		from_copy = true;
 
 	if (xattr && !foreign_mode) {
@@ -4558,6 +5578,45 @@ create_mirror:
 		return CMD_HELP;
 	}
 
+	/* Validate EC options */
+#if LUSTRE_VERSION_CODE > OBD_OCD_VERSION(2, 17, 90, 0)
+#error "Remove LFS_EC_OK check for 2.18 release"
+#endif
+	if (lsa.lsa_has_ec) {
+		static bool ec_warning_printed;
+
+		if (!ec_warning_printed &&
+		    getenv("LFS_EC_OK") == NULL) {
+			fprintf(stderr,
+				"WARNING: Erasure coding implementation is incomplete and not yet intended for production use. This message will be removed once erasure coding is complete. To turn on erasure coding support, set LFS_EC_OK=yes to acknowledge this limitation.\n");
+			ec_warning_printed = true;
+			result = -EOPNOTSUPP;
+			goto error;
+		}
+
+		if (foreign_mode) {
+			fprintf(stderr,
+				"error: %s: --ec cannot be used with --foreign\n",
+				progname);
+			goto usage_error;
+		}
+
+		if (comp_add || comp_del || comp_set) {
+			fprintf(stderr,
+				"error: %s: --ec cannot be used with --component-add/del/set\n",
+				progname);
+			goto usage_error;
+		}
+
+		/*
+		 * Automatically create a [0,EOF] component if --ec was
+		 * specified without -E, similar to how compression and
+		 * mirror addition work.
+		 */
+		if (lsa.lsa_comp_end == 0 && !mirror_mode)
+			lsa.lsa_comp_end = LUSTRE_EOF;
+	}
+
 	if (mirror_mode && (!mirror_total_mode || mirror_count)) {
 		if (mirror_count == 0)
 			goto create_mirror;
@@ -4574,6 +5633,70 @@ create_mirror:
 				progname);
 			result = -EINVAL;
 			goto error;
+		}
+		lsa.lsa_comp_count++;
+	}
+
+	/* Create EC parity mirror if --ec without -N was specified */
+	if (lsa.lsa_has_ec && lsa.lsa_ec_spec_count > 0) {
+		if (mirror_mode && last_mirror) {
+			result = create_ec_parity_mirror(
+					last_mirror->m_layout,
+					lsa.lsa_ec_specs,
+					lsa.lsa_ec_spec_count);
+			if (result) {
+				fprintf(stderr,
+					"error: %s: failed to create EC parity mirror\n",
+					progname);
+				goto error;
+			}
+
+			/* Mark that this layout already contains EC parity
+			 * components
+			 */
+			last_mirror->m_has_ec = true;
+		} else if (layout) {
+			/* In non-mirror mode, add parity mirror to layout */
+			uint16_t mirror_count = 0;
+
+			/* Verify layout doesn't already have multiple mirrors.
+			 * A freshly created layout has mirror_count = 1.
+			 */
+			result = llapi_layout_mirror_count_get(layout,
+							       &mirror_count);
+			if (result) {
+				fprintf(stderr,
+					"error: %s: failed to get mirror count: %s\n",
+					progname, strerror(errno));
+				goto error;
+			}
+
+			if (mirror_count > 1) {
+				fprintf(stderr,
+					"error: %s: layout already has %u mirrors, cannot add EC\n",
+					progname, mirror_count);
+				result = -EINVAL;
+				goto error;
+			}
+
+			result = create_ec_parity_mirror(layout,
+							 lsa.lsa_ec_specs,
+							 lsa.lsa_ec_spec_count);
+			if (result) {
+				fprintf(stderr,
+					"error: %s: failed to create EC parity mirror\n",
+					progname);
+				goto error;
+			}
+
+			/* Set mirror count to 2 (data + parity) */
+			result = llapi_layout_mirror_count_set(layout, 2);
+			if (result) {
+				fprintf(stderr,
+					"error: %s: failed to set mirror count: %s\n",
+					progname, strerror(errno));
+				goto error;
+			}
 		}
 	}
 
@@ -4593,9 +5716,9 @@ create_mirror:
 		}
 	}
 
-	if (comp_set && !comp_id && !lsa.lsa_pool_name) {
+	if (comp_set && !comp_id && !lsa.lsa_pool_name && !mirror_id) {
 		fprintf(stderr,
-			"%s %s: --component-set doesn't have component-id set\n",
+			"%s %s: --component-set doesn't have component-id or mirror-id set\n",
 			progname, argv[0]);
 		goto usage_error;
 	}
@@ -4712,10 +5835,7 @@ create_mirror:
 		}
 		lmu->lum_stripe_offset = lsa.lsa_stripe_off;
 
-		if (lsa.lsa_pattern != LLAPI_LAYOUT_RAID0)
-			lmu->lum_hash_type = lsa.lsa_pattern;
-		else
-			lmu->lum_hash_type = LMV_HASH_TYPE_UNKNOWN;
+		lmu->lum_hash_type = lsa.lsa_hash;
 
 		if (overstriped)
 			lmu->lum_hash_type |= LMV_HASH_FLAG_OVERSTRIPED;
@@ -4750,7 +5870,7 @@ create_mirror:
 
 		migrate_mdt_param.fp_lmv_md = lmu;
 		migrate_mdt_param.fp_migrate = 1;
-	} else if (!layout) {
+	} else if (!layout && !from_yaml && !from_copy) {
 		if (lsa_args_stripe_count_check(&lsa))
 			goto usage_error;
 
@@ -4851,10 +5971,67 @@ create_mirror:
 			/* remove possible trailing '\n' */
 			if (buf[len - 1] == '\n')
 				buf[len - 1] = '\0';
+			/* skip empty line or comment line starting with # */
+			if (strlen(buf) == 0 || buf[0] == '#')
+				continue;
 			fname = buf;
 		}
 
-		if (from_copy) {
+		/* if fid_mode is true, fname is actually fid string,
+		 * parse the fid and fill real fname
+		 */
+		if (fid_mode) {
+			int len;
+			char *endptr = NULL;
+
+			result = llapi_fid_parse(fname, &fid, &endptr);
+			if (result) {
+				fprintf(stderr,
+					"%s %s: invalid FID: %s\n",
+					progname, argv[0], fname);
+				if (result2 == 0)
+					result2 = result;
+				continue;
+			}
+
+			strncpy(buf, lustre_dir, PATH_MAX);
+			buf[PATH_MAX - 2] = '\0';
+			len = strlen(buf);
+			if (lustre_dir[len - 1] != '/') {
+				buf[len] = '/';
+				buf[len + 1] = '\0';
+				len++;
+			}
+			result = llapi_fid2path_at(lustre_dir_fd, &fid,
+						   buf + len, bufsize - len,
+						   NULL, NULL);
+			if (result < 0) {
+				fprintf(stderr,
+					"%s %s: failed to lookup path for FID:" DFID_NOBRACE "\n",
+					progname, argv[0], PFID(&fid));
+				/* record the errno and continue for next FID */
+				if (result2 == 0)
+					result2 = result;
+				continue;
+			}
+
+			llapi_printf(migration_flags & LLAPI_MIGRATION_VERBOSE ?
+				     LLAPI_MSG_NORMAL : LLAPI_MSG_DEBUG,
+				     DFID_NOBRACE " => %s\n",
+				     PFID(&fid), buf);
+
+			fname = buf;
+		}
+
+		/* Handle restripe */
+		if (restripe) {
+			llapi_layout_free(layout);
+			layout = NULL;
+			free(param);
+			param = NULL;
+
+			setstripe_args_init(&lsa);
+		} else if (from_copy) {
 			layout = layout_get_by_name_or_fid(template ?: fname,
 							   fname, 0, O_RDONLY);
 			if (!layout) {
@@ -4883,16 +6060,67 @@ create_mirror:
 					result = -errno;
 					goto error;
 				}
+			} else if (auto_stripe) {
+				struct stat st;
+				int calc_stripe_count;
+
+				result = stat(fname, &st);
+				if (result) {
+					fprintf(stderr,
+						"%s: cannot stat file '%s': %s\n",
+						progname, fname,
+						strerror(errno));
+					result = -errno;
+					goto error;
+				}
+
+				/*
+				 * obj_max_kb is passed by reference to allow
+				 * calc_stripe() to calculate and return the
+				 * maximum object size per OST for subsequent
+				 * calls to this function.
+				 */
+				calc_stripe_count =
+					calc_stripe(fname, &st.st_size,
+						    &obj_max_kb, cap, min_free,
+						    max_free,
+						    lsa.lsa_pool_name);
+
+				if (calc_stripe_count < 0) {
+					fprintf(stderr,
+						"%s: auto-striping failed for '%s'\n",
+						progname, fname);
+					result = -EINVAL;
+					goto error;
+				}
+
+				/* Update stripe count in param */
+				param->lsp_stripe_count = calc_stripe_count;
+
+				if (layout) {
+					llapi_layout_free(layout);
+					layout = NULL;
+				}
+
+				if (migration_flags & LLAPI_MIGRATION_VERBOSE)
+					printf("%s: auto-striping set stripe count to %d\n",
+					       fname, calc_stripe_count);
 			}
 
 			result = lfs_migrate(fname, migration_flags, param,
 					     layout, bandwidth_bytes_sec,
 					     stats_interval_sec);
 		} else if (comp_set != 0) {
-			result = lfs_component_set(fname, comp_id,
-						   lsa.lsa_pool_name,
-						   lsa.lsa_comp_flags,
-						   lsa.lsa_comp_neg_flags);
+			if (mirror_id != 0)
+				result = lfs_component_set_by_mirror(fname,
+								     mirror_id,
+								     lsa.lsa_comp_flags,
+								     lsa.lsa_comp_neg_flags);
+			else
+				result = lfs_component_set(fname, comp_id,
+							lsa.lsa_pool_name,
+							lsa.lsa_comp_flags,
+							lsa.lsa_comp_neg_flags);
 		} else if (comp_del != 0) {
 			result = lfs_component_del(fname, comp_id,
 						   lsa.lsa_comp_flags,
@@ -4904,6 +6132,7 @@ create_mirror:
 		} else if (opc == SO_MIRROR_EXTEND) {
 			result = mirror_extend(fname, mirror_list,
 					       mirror_flags,
+					       migration_flags,
 					       bandwidth_bytes_sec,
 					       stats_interval_sec);
 		} else if (opc == SO_MIRROR_SPLIT || opc == SO_MIRROR_DELETE) {
@@ -4942,7 +6171,8 @@ create_mirror:
 					result = lfs_mirror_resync_file(fname,
 							ioc, NULL, 0,
 							stats_interval_sec,
-							bandwidth_bytes_sec);
+							bandwidth_bytes_sec,
+							false);
 					if (result)
 						fprintf(stderr,
 							"Cannot resync file\n");
@@ -4993,14 +6223,48 @@ create_mirror:
 	llapi_layout_free(layout);
 	lfs_mirror_list_free(mirror_list);
 	return result2;
+restripe_error:
+	{
+		int idx = -1;
+		char optbuf[128];
+
+		if (c < 256) {
+			for (int i = 0; long_opts[i].name != NULL; i++) {
+				if (long_opts[i].val == c) {
+					idx = i;
+					break;
+				}
+			}
+		} else {
+			idx = long_idx;
+		}
+
+		if (idx >= 0) {
+			if (c < 256)
+				snprintf(optbuf, sizeof(optbuf),
+					 "-%c|--%s", c, long_opts[idx].name);
+			else
+				snprintf(optbuf, sizeof(optbuf),
+					 "--%s", long_opts[idx].name);
+
+			fprintf(stderr,
+				"%s %s: %s incompatible with --restripe\n",
+				progname, argv[0], optbuf);
+		}
+		goto usage_error;
+	}
 usage_error:
 	result = CMD_HELP;
 error:
+	free(param);
 	llapi_layout_free(layout);
 	lfs_mirror_list_free(mirror_list);
 	if (files_from_fp != NULL && files_from_fp != stdin)
 		fclose(files_from_fp);
+	if (lustre_dir_fd >= 0)
+		close(lustre_dir_fd);
 	free(buf);
+	free(lsa.lsa_ec_specs);
 	return result;
 }
 
@@ -5102,21 +6366,21 @@ static int set_time(struct find_param *param, time_t *time, time_t *set_t,
 
 static int str2quotaid(__u32 *id, const char *arg)
 {
-	unsigned long int projid_tmp = 0;
+	unsigned long id_tmp = 0;
 	char *endptr = NULL;
 
-	projid_tmp = strtoul(arg, &endptr, 10);
+	id_tmp = strtoul(arg, &endptr, 10);
 	if (*endptr != '\0')
 		return -EINVAL;
 	/* UINT32_MAX is not allowed - see projid_valid()/INVALID_PROJID */
-	if (projid_tmp >= MDT_INVALID_PROJID)
+	if (id_tmp >= MDT_INVALID_PROJID)
 		return -ERANGE;
 
-	*id = projid_tmp;
+	*id = id_tmp;
 	return 0;
 }
 
-static int name2uid(unsigned int *id, const char *name)
+static int name2uid(__u32 *id, const char *name)
 {
 	struct passwd *passwd;
 
@@ -5128,7 +6392,7 @@ static int name2uid(unsigned int *id, const char *name)
 	return 0;
 }
 
-static int name2gid(unsigned int *id, const char *name)
+static int name2gid(__u32 *id, const char *name)
 {
 	struct group *group;
 
@@ -5140,58 +6404,95 @@ static int name2gid(unsigned int *id, const char *name)
 	return 0;
 }
 
-static inline int name2projid(unsigned int *id, const char *name)
+static inline int name2projid(__u32 *id, const char *name)
 {
-	return -ENOTSUP;
-}
+	struct ll_project prj = { .lprj_valid = LPRJ_VALID_SIZE,
+				  .lprj_size = sizeof(prj) };
+	int rc;
+	const char *name2;
 
-static int uid2name(char **name, unsigned int id)
-{
-	struct passwd *passwd;
-
-	passwd = getpwuid(id);
-	if (!passwd)
-		return -ENOENT;
-	*name = passwd->pw_name;
-
-	return 0;
-}
-
-static inline int gid2name(char **name, unsigned int id)
-{
-	struct group *group;
-
-	group = getgrgid(id);
-	if (!group)
-		return -ENOENT;
-	*name = group->gr_name;
-
-	return 0;
-}
-
-static int name2layout(__u32 *layout, char *name)
-{
-	char *ptr, *layout_name;
-
-	*layout = 0;
-	for (ptr = name; ; ptr = NULL) {
-		layout_name = strtok(ptr, ",");
-		if (!layout_name)
-			break;
-		if (strcmp(layout_name, "released") == 0)
-			*layout |= LOV_PATTERN_F_RELEASED;
-		else if (strcmp(layout_name, "raid0") == 0)
-			*layout |= LOV_PATTERN_RAID0;
-		else if (strcmp(layout_name, "mdt") == 0)
-			*layout |= LOV_PATTERN_MDT;
-		else if (strcmp(layout_name, "overstriping") == 0)
-			*layout |= LOV_PATTERN_OVERSTRIPING;
-		else if (strcmp(layout_name, "foreign") == 0)
-			*layout |= LOV_PATTERN_FOREIGN;
-		else
-			return -1;
+	name2 = strchr(name, ':');
+	if (name2) {
+		name2++;
+		rc = str2quotaid(id, name2);
+		if (!rc)
+			return 0;
+		if (strncmp(name, "u:", 2) == 0 ||
+		    strncmp(name, "user:", 5) == 0)
+			return name2uid(id, name2);
+		if (strncmp(name, "g:", 2) == 0 ||
+		    strncmp(name, "group:", 5) == 0)
+			return name2gid(id, name2);
+		return -EINVAL;
 	}
+
+	rc = llapi_project_getnam(&prj, name);
+	if (rc)
+		return rc;
+
+	if (prj.lprj_valid & LPRJ_VALID_ID)
+		*id = prj.lprj_projid;
+	else
+		rc = -ENOENT;
+
+	return rc;
+}
+
+
+#define DEF_PW_SIZE_MAX 4096	/* minimum size to avoid malloc() handling */
+static size_t getpw_size_max(void)
+{
+	static size_t pw_size_max;
+
+	if (!pw_size_max) {
+		pw_size_max = sysconf(_SC_GETPW_R_SIZE_MAX);
+		if (pw_size_max <= 0)
+			pw_size_max = DEF_PW_SIZE_MAX;
+	}
+	return pw_size_max;
+}
+
+static int uid2name(char *name, size_t name_max, __u32 id)
+{
+	struct passwd pwdbuf;
+	struct passwd *passwd;
+	int rc;
+
+	rc = getpwuid_r(id, &pwdbuf, name, name_max, &passwd);
+	if (passwd == NULL || rc)
+		return -ENOENT;
+
 	return 0;
+}
+
+static inline int gid2name(char *name, size_t name_max, __u32 id)
+{
+	struct group grpbuf;
+	struct group *group;
+	int rc;
+
+	rc = getgrgid_r(id, &grpbuf, name, name_max, &group);
+	if (group == NULL || rc)
+		return -ENOENT;
+
+	return 0;
+}
+
+static inline int prjid2name(char *name, size_t name_max, __u32 id)
+{
+	struct ll_project prj = { .lprj_valid = LPRJ_VALID_SIZE,
+				  .lprj_size = sizeof(prj) };
+	int rc;
+
+	rc = llapi_project_getprjid(&prj, id);
+	if (rc)
+		return rc;
+	if (prj.lprj_valid & LPRJ_VALID_ID)
+		strncpy(name, prj.lprj_projname, name_max);
+	else
+		rc = -ENOENT;
+
+	return rc;
 }
 
 static int name2attrs(char *name, __u64 *attrs, __u64 *neg_attrs)
@@ -5674,6 +6975,113 @@ static int str2mode_t(const char *input, mode_t *outmode)
 	return ret;
 }
 
+/*
+ * Get the number of CPUs configured for Lustre CPTs
+ * by reading cpu_partition_table parameter.
+ */
+static int get_lustre_cpu_count(void)
+{
+	glob_t paths;
+	FILE *fp;
+	char line[256];
+	int cpu_count = 0;
+	int rc;
+
+	/* Try to get cpu_partition_table parameter */
+	rc = cfs_get_param_paths(&paths, "cpu_partition_table");
+	if (rc != 0)
+		return 0;
+
+	if (paths.gl_pathc == 0) {
+		cfs_free_param_data(&paths);
+		return 0;
+	}
+
+	fp = fopen(paths.gl_pathv[0], "r");
+	if (fp == NULL) {
+		cfs_free_param_data(&paths);
+		return 0;
+	}
+
+	/* Count CPUs in cpu_partition_table
+	 * Format: "cpu_partition_table=0   : 0 1 2 3..."
+	 *         "1   : 16 17 18..."
+	 * Parse each line and count the CPU numbers listed
+	 */
+	while (fgets(line, sizeof(line), fp) != NULL) {
+		char *ptr = line;
+		char *colon_ptr;
+
+		/* Skip whitespace */
+		while (*ptr == ' ' || *ptr == '\t')
+			ptr++;
+
+		/* Look for lines with CPU partition info */
+		if (strncmp(ptr, "cpu_partition_table=", 20) == 0 ||
+		    isdigit(*ptr)) {
+			/* Find the colon separator */
+			colon_ptr = strchr(ptr, ':');
+			if (colon_ptr) {
+				colon_ptr++;
+				while ((colon_ptr = strchr(colon_ptr,
+							   ' ')) != NULL) {
+					cpu_count++;
+					colon_ptr++;
+				}
+			}
+		}
+	}
+
+	fclose(fp);
+	cfs_free_param_data(&paths);
+
+	return cpu_count;
+}
+
+/*
+ * Calculate default thread count for lfs find based on MDT count
+ * and CPU count. Uses the formula:
+ * threads = min(MDT_COUNT * 4, CPU_COUNT / 2)
+ * Falls back to 4 if unable to determine parameters.
+ */
+static int calculate_default_thread_count(const char *path)
+{
+	char mntdir[PATH_MAX] = "";
+	char fsname[PATH_MAX] = "";
+	int default_threads = 4;
+	int mdt_count = 0;
+	int cpu_count = 0;
+	int rc;
+
+	/* Get mount point and filesystem name */
+	rc = llapi_search_mounts(path, 0, mntdir, fsname);
+	if (rc < 0) {
+		/* Fallback to conservative default */
+		return default_threads;
+	}
+
+	/* Get MDT count */
+	rc = llapi_get_obd_count(mntdir, &mdt_count, 1);
+	if (rc < 0 || mdt_count <= 0)
+		mdt_count = 1; /* assume single MDT */
+
+	/* Get CPU count */
+	cpu_count = get_lustre_cpu_count();
+	if (cpu_count <= 0)
+		cpu_count = 1; /* fallback */
+
+	/* Calculate: min(MDT_COUNT * 4, CPU_COUNT / 2) */
+	default_threads = mdt_count * 4;
+	if (default_threads > cpu_count / 2)
+		default_threads = cpu_count / 2;
+
+	/* Ensure minimum of 4 */
+	if (default_threads < 4)
+		default_threads = 4;
+
+	return default_threads;
+}
+
 static int lfs_find(int argc, char **argv)
 {
 	int c, rc;
@@ -5804,7 +7212,7 @@ static int lfs_find(int argc, char **argv)
 			.name = "pool",		.has_arg = required_argument },
 	{ .val = '0',	.name = "print0",	.has_arg = no_argument },
 	{ .val = LFS_THREAD_OPT,
-		.name = "thread",		.has_arg = required_argument },
+			.name = "threads",	.has_arg = required_argument },
 	{ .val = 'P',	.name = "print",	.has_arg = no_argument },
 	{ .val = LFS_PRINTF_OPT,
 			.name = "printf",       .has_arg = required_argument },
@@ -5821,7 +7229,7 @@ static int lfs_find(int argc, char **argv)
 	{ .val = 'u',	.name = "uid",		.has_arg = required_argument },
 	{ .val = 'U',	.name = "user",		.has_arg = required_argument },
 /* getstripe { .val = 'v', .name = "verbose",	.has_arg = no_argument }, */
-/* setstripe { .val = 'W', .name = "bandwidth",	.has_arg = required_argument }, */
+/*migrate{.val = 'W', .name = "bandwidth-limit",.has_arg = required_argument},*/
 	{ .val = LFS_XATTRS_MATCH_OPT,
 			.name = "xattr",	.has_arg = required_argument },
 	{ .val = 'z',	.name = "extension-size",
@@ -6275,14 +7683,11 @@ static int lfs_find(int argc, char **argv)
 		case 'g':
 		case 'G':
 			rc = name2gid(&param.fp_gid, optarg);
-			if (rc) {
-				if (str2quotaid(&param.fp_gid, optarg)) {
-					fprintf(stderr,
-						"Group/GID: %s cannot be found.\n",
-						optarg);
-					ret = -1;
-					goto err;
-				}
+			if (rc && str2quotaid(&param.fp_gid, optarg)) {
+				fprintf(stderr, "invalid group/GID '%s'\n",
+					optarg);
+				ret = -1;
+				goto err;
 			}
 			param.fp_exclude_gid = !!neg_opt;
 			param.fp_check_gid = 1;
@@ -6299,10 +7704,10 @@ static int lfs_find(int argc, char **argv)
 				param.fp_check_hash_flag = 1;
 			param.fp_exclude_hash_type = !!neg_opt;
 			break;
-		case 'k':
-			param.fp_skip_percent = strtoul(optarg, &endptr, 10);
-			if (param.fp_skip_percent < 0 ||
-			    param.fp_skip_percent >= 100 ||
+		case 'k': {
+			unsigned long pct = strtoul(optarg, &endptr, 10);
+
+			if (pct < 0 || pct >= 100 ||
 			    (*endptr != '\0' && *endptr != '%')) {
 				ret = -1;
 				fprintf(stderr,
@@ -6310,12 +7715,14 @@ static int lfs_find(int argc, char **argv)
 					optarg);
 				goto err;
 			}
+			param.fp_skip_percent = pct;
 			break;
+		}
 		case 'l':
 			param.fp_lazy = 1;
 			break;
 		case 'L':
-			ret = name2layout(&param.fp_layout, optarg);
+			ret = llapi_lov_string_pattern(optarg, &param.fp_layout);
 			if (ret)
 				goto err;
 			param.fp_exclude_layout = !!neg_opt;
@@ -6342,14 +7749,11 @@ static int lfs_find(int argc, char **argv)
 		case 'u':
 		case 'U':
 			rc = name2uid(&param.fp_uid, optarg);
-			if (rc) {
-				if (str2quotaid(&param.fp_uid, optarg)) {
-					fprintf(stderr,
-						"User/UID: %s cannot be found.\n",
-						optarg);
-					ret = -1;
-					goto err;
-				}
+			if (rc && str2quotaid(&param.fp_uid, optarg)) {
+				fprintf(stderr, "invalid username/UID '%s'\n",
+					optarg);
+				ret = -1;
+				goto err;
 			}
 			param.fp_exclude_uid = !!neg_opt;
 			param.fp_check_uid = 1;
@@ -6499,6 +7903,13 @@ static int lfs_find(int argc, char **argv)
 			break;
 		case LFS_THREAD_OPT:
 			param.fp_thread_count = strtol(optarg, &endptr, 0);
+			if (*endptr != '\0' || param.fp_thread_count < 1) {
+				fprintf(stderr,
+					"error: bad thread count '%s'\n",
+					optarg);
+				ret = -1;
+				goto err;
+			}
 			break;
 		case 'P': /* we always print, this option is a no-op */
 			break;
@@ -6511,14 +7922,11 @@ static int lfs_find(int argc, char **argv)
 			break;
 		case LFS_PROJID_OPT:
 			rc = name2projid(&param.fp_projid, optarg);
-			if (rc) {
-				if (str2quotaid(&param.fp_projid, optarg)) {
-					fprintf(stderr,
-						"Invalid project ID: %s\n",
-						optarg);
-					ret = -1;
-					goto err;
-				}
+			if (rc && str2quotaid(&param.fp_projid, optarg)) {
+				fprintf(stderr, "invalid project id: '%s'\n",
+					optarg);
+				ret = -1;
+				goto err;
 			}
 			param.fp_exclude_projid = !!neg_opt;
 			param.fp_check_projid = 1;
@@ -6690,6 +8098,12 @@ static int lfs_find(int argc, char **argv)
 		goto err;
 	}
 
+	/* Set default thread count if not specified */
+	if (param.fp_thread_count == 0) {
+		param.fp_thread_count =
+			calculate_default_thread_count(argv[pathstart]);
+	}
+
 	do {
 		rc = llapi_find(argv[pathstart], &param);
 		if (rc) {
@@ -6787,7 +8201,7 @@ static int lfs_getstripe_internal(int argc, char **argv,
 /* find	{ .val = 'U',	.name = "user",		.has_arg = required_argument }*/
 	{ .val = 'v',	.name = "verbose",	.has_arg = no_argument },
 /* dirstripe { .val = 'X',.name = "max-inherit",.has_arg = required_argument }*/
-/* setstripe { .val = 'W', .name = "bandwidth",	.has_arg = required_argument }*/
+/* migrate{.val = 'W', .name = "bandwidth-limit",.has_arg = required_argument}*/
 	{ .val = 'y',	.name = "yaml",		.has_arg = no_argument },
 	{ .val = 'z',	.name = "extension-size", .has_arg = no_argument },
 	{ .val = 'z',	.name = "ext-size",	.has_arg = no_argument },
@@ -6799,7 +8213,7 @@ static int lfs_getstripe_internal(int argc, char **argv,
 	char *end, *tmp;
 
 	while ((c = getopt_long(argc, argv,
-			"-cdDE::FghiI::LmMNoO:pqrRsSvyz",
+			"-cdDE::FghiI::LmMNO:pqrRSvyz",
 			long_opts, NULL)) != -1) {
 		if (neg_opt)
 			--neg_opt;
@@ -6825,7 +8239,7 @@ static int lfs_getstripe_internal(int argc, char **argv,
 			break;
 		case 'c':
 			if (!(param->fp_verbose & VERBOSE_DETAIL)) {
-				param->fp_verbose |= VERBOSE_COUNT;
+				param->fp_verbose |= VERBOSE_STRIPE_COUNT;
 				param->fp_max_depth = 0;
 			}
 			break;
@@ -7213,7 +8627,7 @@ static int lfs_getdirstripe(int argc, char **argv)
 		switch (c) {
 		case 'c':
 		case 'T':
-			param.fp_verbose |= VERBOSE_COUNT;
+			param.fp_verbose |= VERBOSE_STRIPE_COUNT;
 			break;
 		case 'D':
 			param.fp_get_default_lmv = 1;
@@ -7306,7 +8720,85 @@ enum mntdf_flags {
 	MNTDF_VERBOSE	= 0x0008,
 	MNTDF_SHOW	= 0x0010,
 	MNTDF_DECIMAL	= 0x0020,
+	MNTDF_NO_HEADER	= 0x0040,
+	MNTDF_ONLY_SUMMARY = 0x0080,
 };
+
+enum showdf_fields {
+	SHOWDF_UUID   = 0x0001,
+	SHOWDF_BTOTAL = 0x0002,
+	SHOWDF_BUSED  = 0x0004,
+	SHOWDF_BFREE  = 0x0008,
+	SHOWDF_BAVAIL = 0x0010,
+	SHOWDF_BPCT   = 0x0020,
+	SHOWDF_BLOCKS = (SHOWDF_BTOTAL|SHOWDF_BUSED|SHOWDF_BFREE|SHOWDF_BAVAIL|
+			 SHOWDF_BPCT),
+	SHOWDF_ITOTAL = 0x0040,
+	SHOWDF_IUSED  = 0x0080,
+	SHOWDF_IFREE  = 0x0100,
+	SHOWDF_IPCT   = 0x0200,
+	SHOWDF_INODES = (SHOWDF_ITOTAL|SHOWDF_IUSED|SHOWDF_IFREE|SHOWDF_IPCT),
+	SHOWDF_MNTDIR = 0x0400,
+	SHOWDF_DEVICE = 0x0800,
+	SHOWDF_STATE  = 0x1000,
+};
+
+struct showdf_field_name {
+	const char *sdfn_name;
+	enum showdf_fields sdfn_field;
+};
+
+static const struct showdf_field_name showdf_field_names[] = {
+	{ .sdfn_name = "uuid",		.sdfn_field = SHOWDF_UUID },
+	{ .sdfn_name = "source",	.sdfn_field = SHOWDF_UUID },
+	{ .sdfn_name = "device",	.sdfn_field = SHOWDF_UUID },
+	{ .sdfn_name = "btotal",	.sdfn_field = SHOWDF_BTOTAL },
+	{ .sdfn_name = "size",		.sdfn_field = SHOWDF_BTOTAL },
+	{ .sdfn_name = "total",		.sdfn_field = SHOWDF_BTOTAL },
+	{ .sdfn_name = "bused",		.sdfn_field = SHOWDF_BUSED },
+	{ .sdfn_name = "used",		.sdfn_field = SHOWDF_BUSED },
+	{ .sdfn_name = "bfree",		.sdfn_field = SHOWDF_BFREE },
+	{ .sdfn_name = "free",		.sdfn_field = SHOWDF_BFREE },
+	{ .sdfn_name = "bavail",	.sdfn_field = SHOWDF_BAVAIL },
+	{ .sdfn_name = "avail",		.sdfn_field = SHOWDF_BAVAIL },
+	{ .sdfn_name = "bpct",		.sdfn_field = SHOWDF_BPCT },
+	{ .sdfn_name = "pcent",		.sdfn_field = SHOWDF_BPCT },
+	{ .sdfn_name = "usepct",	.sdfn_field = SHOWDF_BPCT },
+	{ .sdfn_name = "pct",		.sdfn_field = SHOWDF_BPCT },
+	{ .sdfn_name = "itotal",	.sdfn_field = SHOWDF_ITOTAL },
+	{ .sdfn_name = "inodes",	.sdfn_field = SHOWDF_ITOTAL },
+	{ .sdfn_name = "iused",		.sdfn_field = SHOWDF_IUSED },
+	{ .sdfn_name = "ifree",		.sdfn_field = SHOWDF_IFREE },
+	{ .sdfn_name = "iavail",	.sdfn_field = SHOWDF_IFREE },
+	{ .sdfn_name = "ipct",		.sdfn_field = SHOWDF_IPCT },
+	{ .sdfn_name = "ipcent",	.sdfn_field = SHOWDF_IPCT },
+	{ .sdfn_name = "iusepct",	.sdfn_field = SHOWDF_IPCT },
+	{ .sdfn_name = "target",	.sdfn_field = SHOWDF_MNTDIR },
+	{ .sdfn_name = "state",		.sdfn_field = SHOWDF_STATE },
+};
+
+static enum showdf_fields showdf_str2field(const char *name)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(showdf_field_names); i++) {
+		if (strcmp(name, showdf_field_names[i].sdfn_name) == 0)
+			return showdf_field_names[i].sdfn_field;
+	}
+
+	return 0;
+}
+
+static void showdf_print_available_fields(void)
+{
+	int i;
+
+	fprintf(stderr, "Available fields:");
+	for (i = 0; i < ARRAY_SIZE(showdf_field_names); i++)
+		fprintf(stderr, " %s", showdf_field_names[i].sdfn_name);
+
+	fprintf(stderr, "\n");
+}
 
 #define COOK(value, base)					\
 ({								\
@@ -7342,99 +8834,138 @@ static inline int obd_statfs_ratio(const struct obd_statfs *st, bool inodes)
 	return (ratio - (int)ratio) > 0 ? (int)(ratio + 1) : (int)ratio;
 }
 
-static int showdf(char *mntdir, struct obd_statfs *stat,
-		  char *uuid, enum mntdf_flags flags,
-		  char *type, int index, int rc)
+/* Helper function to format and print a value with optional cooking */
+static void print_field_value(long long value, enum mntdf_flags flags, int base,
+			      char *suffix)
 {
-	long long avail, used, total;
-	int ratio = 0;
+	if (flags & MNTDF_COOKED) {
+		double cook_val = (double)value;
+		int i = COOK(cook_val, base);
+
+		if (i > 0)
+			printf(HDF, cook_val, suffix[i - 1]);
+		else
+			printf(CDF, value);
+	} else {
+		printf(CDF, value);
+	}
+}
+
+static void print_os_state(struct obd_statfs *stat, enum mntdf_flags flags)
+{
+	if (stat->os_state) {
+		__u32 state = stat->os_state;
+
+		while (state != 0) {
+			const struct obd_statfs_state_name *osn;
+
+			osn = obd_statfs_state_name_find(state);
+			if (!osn) {
+				/* Unknown flag(s) for remainder.
+				 * Print in octal to avoid confusion
+				 * with existing 'a' and 'f' flags
+				 * if printed in hex.
+				 */
+				printf("(%#o)", state);
+				break;
+			}
+			if (osn->osn_err || flags & MNTDF_VERBOSE)
+				printf("%c", osn->osn_name);
+			state ^= osn->osn_state;
+		}
+	}
+}
+
+static int showdf(char *mntdir, struct obd_statfs *stat,
+		  const char *uuid, enum mntdf_flags flags,
+		  char *type, int index, int rc, enum showdf_fields fields,
+		  enum showdf_fields *field_order, int field_count)
+{
+	int base = flags & MNTDF_DECIMAL ? 1000 : 1024;
 	char *suffix = flags & MNTDF_DECIMAL ? "kMGTPEZY" : "KMGTPEZY";
-	/* Note if we have >2^64 bytes/fs these buffers will need to be grown */
-	char tbuf[3 * sizeof(__u64)];
-	char ubuf[3 * sizeof(__u64)];
-	char abuf[3 * sizeof(__u64)];
-	char rbuf[3 * sizeof(__u64)];
+	int shift = flags & MNTDF_COOKED ? 0 : 10;
+	long long btotal, bused, bfree, bavail;
+	long long itotal, iused, ifree;
+	int ratio, iratio;
+	int i;
 
 	if (!uuid || !stat)
 		return -EINVAL;
 
 	switch (rc) {
 	case 0:
-		if (flags & MNTDF_INODES) {
-			avail = stat->os_ffree;
-			used = stat->os_files - stat->os_ffree;
-			total = stat->os_files;
-		} else {
-			int shift = flags & MNTDF_COOKED ? 0 : 10;
+		/* Print fields in specified order */
+		for (i = 0; i < field_count; i++) {
+			enum showdf_fields field = field_order[i];
 
-			avail = (stat->os_bavail * stat->os_bsize) >> shift;
-			used  = ((stat->os_blocks - stat->os_bfree) *
-				 stat->os_bsize) >> shift;
-			total = (stat->os_blocks * stat->os_bsize) >> shift;
-		}
+			fields |= field;
 
-		ratio = obd_statfs_ratio(stat, flags & MNTDF_INODES);
-
-		if (flags & MNTDF_COOKED) {
-			int base = flags & MNTDF_DECIMAL ? 1000 : 1024;
-			double cook_val;
-			int i;
-
-			cook_val = (double)total;
-			i = COOK(cook_val, base);
 			if (i > 0)
-				snprintf(tbuf, sizeof(tbuf), HDF, cook_val,
-					 suffix[i - 1]);
-			else
-				snprintf(tbuf, sizeof(tbuf), CDF, total);
+				printf(" ");
 
-			cook_val = (double)used;
-			i = COOK(cook_val, base);
-			if (i > 0)
-				snprintf(ubuf, sizeof(ubuf), HDF, cook_val,
-					 suffix[i - 1]);
-			else
-				snprintf(ubuf, sizeof(ubuf), CDF, used);
+			switch (field) {
+			case SHOWDF_UUID:
+				printf(UUF, uuid);
+				break;
+			case SHOWDF_BTOTAL:
+				btotal = (stat->os_blocks *
+					  stat->os_bsize) >> shift;
 
-			cook_val = (double)avail;
-			i = COOK(cook_val, base);
-			if (i > 0)
-				snprintf(abuf, sizeof(abuf), HDF, cook_val,
-					 suffix[i - 1]);
-			else
-				snprintf(abuf, sizeof(abuf), CDF, avail);
-		} else {
-			snprintf(tbuf, sizeof(tbuf), CDF, total);
-			snprintf(ubuf, sizeof(tbuf), CDF, used);
-			snprintf(abuf, sizeof(tbuf), CDF, avail);
-		}
+				print_field_value(btotal, flags, base, suffix);
+				break;
+			case SHOWDF_BUSED:
+				bused = ((stat->os_blocks - stat->os_bfree) *
+					 stat->os_bsize) >> shift;
 
-		sprintf(rbuf, RDF, ratio);
-		printf(UUF" "CSF" "CSF" "CSF" "RSF" %-s",
-		       uuid, tbuf, ubuf, abuf, rbuf, mntdir);
-		if (type)
-			printf("[%s:%d]", type, index);
+				print_field_value(bused, flags, base, suffix);
+				break;
+			case SHOWDF_BFREE:
+				bfree = (stat->os_bfree *
+					 stat->os_bsize) >> shift;
 
-		if (stat->os_state) {
-			__u32 state = stat->os_state;
+				print_field_value(bfree, flags, base, suffix);
+				break;
+			case SHOWDF_BAVAIL:
+				bavail = (stat->os_bavail *
+					  stat->os_bsize) >> shift;
 
-			printf(" ");
-			while (state != 0) {
-				const struct obd_statfs_state_name *osn;
+				print_field_value(bavail, flags, base, suffix);
+				break;
+			case SHOWDF_BPCT:
+				ratio = obd_statfs_ratio(stat, false);
 
-				osn = obd_statfs_state_name_find(state);
-				if (!osn) {
-					/* Unknown flag(s) for remainder.
-					 * Print in octal to avoid confusion
-					 * with existing 'a' and 'f' flags
-					 * if printed in hex.
-					 */
-					printf("(%#o)", state);
-					break;
-				}
-				if (osn->osn_err || flags & MNTDF_VERBOSE)
-					printf("%c", osn->osn_name);
-				state ^= osn->osn_state;
+				printf(RDF, ratio);
+				break;
+			case SHOWDF_ITOTAL:
+				itotal = stat->os_files;
+
+				print_field_value(itotal, flags, base, suffix);
+				break;
+			case SHOWDF_IUSED:
+				iused = stat->os_files - stat->os_ffree;
+
+				print_field_value(iused, flags, base, suffix);
+				break;
+			case SHOWDF_IFREE:
+				ifree = stat->os_ffree;
+
+				print_field_value(ifree, flags, base, suffix);
+				break;
+			case SHOWDF_IPCT:
+				iratio = obd_statfs_ratio(stat, true);
+
+				printf(RDF, iratio);
+				break;
+			case SHOWDF_MNTDIR:
+				printf(" %-s", mntdir);
+				if (type && fields)
+					printf("[%s:%d]", type, index);
+				break;
+			case SHOWDF_STATE:
+				print_os_state(stat, flags);
+				break;
+			default:
+				break;
 			}
 		}
 
@@ -7469,7 +9000,9 @@ struct ll_statfs_buf {
 };
 
 static int mntdf(char *mntdir, char *fsname, char *pool, enum mntdf_flags flags,
-		 int ops, struct ll_statfs_buf *lsb)
+		 int ops, struct ll_statfs_buf *lsb, int mdt_idx, int ost_idx,
+		 enum showdf_fields fields, enum showdf_fields *field_order,
+		 int field_count)
 {
 	struct obd_statfs stat_buf, sum = { .os_bsize = 1 };
 	struct obd_uuid uuid_buf;
@@ -7486,6 +9019,10 @@ static int mntdf(char *mntdir, char *fsname, char *pool, enum mntdf_flags flags,
 	int fd;
 	int rc = 0;
 	int rc2;
+	int total_field_count = 0;
+	enum showdf_fields temp_fields;
+	bool show_headers;
+	bool only_summary;
 
 	if (pool) {
 		poolname = strchr(pool, '.');
@@ -7495,8 +9032,9 @@ static int mntdf(char *mntdir, char *fsname, char *pool, enum mntdf_flags flags,
 				return -ENODEV;
 			}
 			poolname++;
-		} else
+		} else {
 			poolname = pool;
+		}
 	}
 
 	fd = open(mntdir, O_RDONLY);
@@ -7507,26 +9045,125 @@ static int mntdf(char *mntdir, char *fsname, char *pool, enum mntdf_flags flags,
 		return rc;
 	}
 
-	if (flags & MNTDF_SHOW) {
-		if (flags & MNTDF_INODES)
-			printf(UUF" "CSF" "CSF" "CSF" "RSF" %-s\n",
-			       "UUID", "Inodes", "IUsed", "IFree",
-			       "IUse%", "Mounted on");
-		else
-			printf(UUF" "CSF" "CSF" "CSF" "RSF" %-s\n",
-			       "UUID",
-			       flags & MNTDF_COOKED ? "bytes" : "1K-blocks",
-			       "Used", "Available", "Use%", "Mounted on");
+	/* Set default fields and field order if none specified */
+	if (fields == 0) {
+		if (flags & MNTDF_INODES) {
+			field_count = 0;
+			field_order[field_count++] = SHOWDF_UUID;
+			field_order[field_count++] = SHOWDF_ITOTAL;
+			field_order[field_count++] = SHOWDF_IUSED;
+			field_order[field_count++] = SHOWDF_IFREE;
+			field_order[field_count++] = SHOWDF_IPCT;
+			field_order[field_count++] = SHOWDF_MNTDIR;
+			field_order[field_count++] = SHOWDF_STATE;
+		} else {
+			field_count = 0;
+			field_order[field_count++] = SHOWDF_UUID;
+			field_order[field_count++] = SHOWDF_BTOTAL;
+			field_order[field_count++] = SHOWDF_BUSED;
+			field_order[field_count++] = SHOWDF_BAVAIL;
+			field_order[field_count++] = SHOWDF_BPCT;
+			field_order[field_count++] = SHOWDF_MNTDIR;
+			field_order[field_count++] = SHOWDF_STATE;
+		}
+	}
+
+	/* Count number of fields for header decision */
+	total_field_count = 0;
+	temp_fields = fields;
+
+	while (temp_fields) {
+		if (temp_fields & 1)
+			total_field_count++;
+		temp_fields >>= 1;
+	}
+
+	/* Print headers based on --output usage:
+	 * - For --output: show headers when no specific OST or MDT index is
+	 * specified
+	 * - For --only-summary: never show headers
+	 * - For default: always show headers
+	 * - Never show headers if --no-header is specified
+	 */
+	show_headers = (ost_idx == -1 && mdt_idx == -1 &&
+			!(flags & MNTDF_NO_HEADER) &&
+			!(flags & MNTDF_ONLY_SUMMARY));
+
+	only_summary = (ost_idx == -1 && mdt_idx == -1 &&
+			(flags & MNTDF_ONLY_SUMMARY));
+
+	if (show_headers) {
+		/* Print headers in specified order */
+		int i;
+
+		for (i = 0; i < field_count; i++) {
+			enum showdf_fields field = field_order[i];
+
+			switch (field) {
+			case SHOWDF_UUID:
+				printf(UUF" ", "UUID");
+				break;
+			case SHOWDF_BTOTAL:
+				printf(CSF" ",
+				       flags & MNTDF_COOKED ?
+				       "bytes" : "1K-blocks");
+				break;
+			case SHOWDF_BUSED:
+				printf(CSF" ", "Used");
+				break;
+			case SHOWDF_BFREE:
+				printf(CSF" ", "Free");
+				break;
+			case SHOWDF_BAVAIL:
+				printf(CSF" ", "Available");
+				break;
+			case SHOWDF_BPCT:
+				printf(RSF" ", "Use%");
+				break;
+			case SHOWDF_ITOTAL:
+				printf(CSF" ", "Inodes");
+				break;
+			case SHOWDF_IUSED:
+				printf(CSF" ", "IUsed");
+				break;
+			case SHOWDF_IFREE:
+				printf(CSF" ", "IFree");
+				break;
+			case SHOWDF_IPCT:
+				printf(RSF" ", "IUse%");
+				break;
+			case SHOWDF_MNTDIR:
+				printf(" %-s", "Mounted on");
+				break;
+			default:
+				break;
+			}
+		}
+		printf("\n");
 	}
 
 	for (tp = types; tp->st_name != NULL; tp++) {
 		bool have_ost = false;
+		int index_max = LOV_ALL_STRIPES;
 
 		if (!(tp->st_op & ops))
 			continue;
 
-		for (index = 0; index < LOV_ALL_STRIPES &&
+		for (index = 0; index < index_max &&
 		     (!lsb || lsb->sb_count < LL_STATFS_MAX); index++) {
+			/* Skip indices that don't match the requested one */
+			if (tp->st_op == LL_STATFS_LMV && mdt_idx >= 0) {
+				if (index != mdt_idx)
+					continue;
+				index_max = 0; /* force last loop */
+			}
+
+			if (tp->st_op == LL_STATFS_LOV && ost_idx >= 0) {
+				if (index != ost_idx)
+					continue;
+				index_max = 0; /* force last loop */
+			}
+
 			memset(&stat_buf, 0, sizeof(struct obd_statfs));
 			memset(&uuid_buf, 0, sizeof(struct obd_uuid));
 			type = flags & MNTDF_LAZY ?
@@ -7579,10 +9216,11 @@ static int mntdf(char *mntdir, char *fsname, char *pool, enum mntdf_flags flags,
 				lsb->sb_buf[lsb->sb_count].sd_st = stat_buf;
 				lsb->sb_count++;
 			}
-			if (flags & MNTDF_SHOW)
+			if (flags & MNTDF_SHOW && !only_summary)
 				showdf(mntdir, &stat_buf,
 				       obd_uuid2str(&uuid_buf), flags,
-				       tp->st_name, index, rc2);
+				       tp->st_name, index, rc2, fields,
+				       field_order, field_count);
 
 			if (rc2)
 				continue;
@@ -7615,10 +9253,13 @@ static int mntdf(char *mntdir, char *fsname, char *pool, enum mntdf_flags flags,
 		sum.os_files = (sum.os_files - sum.os_ffree) + ost_ffree;
 		sum.os_ffree = ost_ffree;
 	}
-	if (flags & MNTDF_SHOW) {
-		printf("\n");
-		showdf(mntdir, &sum, "filesystem_summary:", flags, NULL, 0, 0);
-		printf("\n");
+	if (((flags & MNTDF_SHOW) && show_headers) || only_summary) {
+		if (!only_summary)
+			printf("\n");
+		showdf(mntdir, &sum, "filesystem_summary:", flags, NULL, 0, 0,
+		       fields, field_order, field_count);
+		if (!only_summary)
+			printf("\n");
 	}
 
 	return rc;
@@ -7770,8 +9411,8 @@ static int lfs_setdirstripe(int argc, char **argv)
 			fallthrough;
 #endif
 		case 'H':
-			lsa.lsa_pattern = check_hashtype(optarg);
-			if (lsa.lsa_pattern == 0) {
+			lsa.lsa_hash = check_hashtype(optarg);
+			if (lsa.lsa_hash == LMV_HASH_TYPE_UNKNOWN) {
 				fprintf(stderr,
 					"%s %s: bad directory hash type '%s'\n",
 					progname, argv[0], optarg);
@@ -8005,10 +9646,7 @@ static int lfs_setdirstripe(int argc, char **argv)
 	else
 		param->lsp_stripe_offset = lsa.lsa_stripe_off;
 
-	if (lsa.lsa_pattern != LLAPI_LAYOUT_RAID0)
-		param->lsp_stripe_pattern = lsa.lsa_pattern;
-	else
-		param->lsp_stripe_pattern = LMV_HASH_TYPE_UNKNOWN;
+	param->lsp_stripe_pattern = lsa.lsa_hash;
 
 	if (overstriped) {
 		param->lsp_stripe_pattern |= LMV_HASH_FLAG_OVERSTRIPED;
@@ -8052,20 +9690,26 @@ static int lfs_setdirstripe(int argc, char **argv)
 
 	dname = argv[optind];
 	do {
+		int rc;
+
 		if (default_stripe) {
-			result = llapi_dir_set_default_lmv(dname, param);
-			if (result)
+			rc = llapi_dir_set_default_lmv(dname, param);
+			if (rc)
 				fprintf(stderr,
 					"%s setdirstripe: cannot set default stripe on dir '%s': %s\n",
-					progname, dname, strerror(-result));
+					progname, dname, strerror(-rc));
+			if (!result)
+				result = rc; /* save first error for return */
 			continue;
 		}
 
-		result = llapi_dir_create(dname, mode, param);
-		if (result)
+		rc = llapi_dir_create(dname, mode, param);
+		if (rc)
 			fprintf(stderr,
 				"%s setdirstripe: cannot create dir '%s': %s\n",
-				progname, dname, strerror(-result));
+				progname, dname, strerror(-rc));
+		if (!result)
+			result = rc;	     /* save first error for return */
 	} while ((dname = argv[++optind]));
 
 	if (mode_opt)
@@ -8215,19 +9859,27 @@ static int lfs_df(int argc, char **argv)
 	enum mntdf_flags flags = MNTDF_SHOW;
 	int ops = 0;
 	int c, rc = 0, rc1 = 0, index = 0, arg_idx = 0;
+	enum showdf_fields fields = 0;
+	enum showdf_fields field_order[16];  /* Store field order */
+	int field_count = 0;
 	char fsname[PATH_MAX] = "", *pool_name = NULL;
+	int mdt_idx = -1;
+	int ost_idx = -1;
 	struct option long_opts[] = {
 	{ .val = 'h',	.name = "human-readable", .has_arg = no_argument },
 	{ .val = 'H',	.name = "si",		.has_arg = no_argument },
 	{ .val = 'i',	.name = "inodes",	.has_arg = no_argument },
 	{ .val = 'l',	.name = "lazy",		.has_arg = no_argument },
+	{ .val = 'm',	.name = "mdt",		.has_arg = optional_argument },
+	{ .val = 'N',	.name = "no-header",	.has_arg = no_argument },
+	{ .val = 's',	.name = "only-summary",	.has_arg = no_argument },
+	{ .val = 'o',	.name = "ost",		.has_arg = optional_argument },
+	{ .val = 'u',	.name = "output",	.has_arg = required_argument},
 	{ .val = 'p',	.name = "pool",		.has_arg = required_argument },
 	{ .val = 'v',	.name = "verbose",	.has_arg = no_argument },
-	{ .val = 'm',	.name = "mdt",		.has_arg = no_argument },
-	{ .val = 'o',	.name = "ost",		.has_arg = no_argument },
 	{ .name = NULL} };
 
-	while ((c = getopt_long(argc, argv, "hHilmop:v",
+	while ((c = getopt_long(argc, argv, "hHilm::Nso::p:u:v",
 				long_opts, NULL)) != -1) {
 		switch (c) {
 		case 'h':
@@ -8244,12 +9896,67 @@ static int lfs_df(int argc, char **argv)
 			break;
 		case 'm':
 			ops |= LL_STATFS_LMV;
+			if (optarg) {
+				char *end;
+				errno = 0;
+
+				mdt_idx = strtol(optarg, &end, 0);
+				if (errno != 0 || *end != '\0' || mdt_idx < 0 ||
+				    mdt_idx > LOV_V1_INSANE_STRIPE_INDEX) {
+					fprintf(stderr,
+						"%s: invalid MDT index '%s'\n",
+						progname, optarg);
+					return CMD_HELP;
+				}
+			}
+			break;
+		case 'N':
+			flags |= MNTDF_NO_HEADER;
+			break;
+		case 's':
+			flags |= MNTDF_ONLY_SUMMARY;
 			break;
 		case 'o':
 			ops |= LL_STATFS_LOV;
+			if (optarg) {
+				char *end;
+				errno = 0;
+
+				ost_idx = strtol(optarg, &end, 0);
+				if (errno != 0 || *end != '\0' || ost_idx < 0 ||
+				    ost_idx > LOV_V1_INSANE_STRIPE_INDEX) {
+					fprintf(stderr,
+						"%s: invalid OST index '%s'\n",
+						progname, optarg);
+					return CMD_HELP;
+				}
+			}
 			break;
 		case 'p':
 			pool_name = optarg;
+			break;
+		case 'u':
+			if (optarg) {
+				char *opt;
+				char *saveptr;
+
+				opt = strtok_r(optarg, ",", &saveptr);
+				while (opt != NULL) {
+					enum showdf_fields field;
+
+					field = showdf_str2field(opt);
+					if (field == 0) {
+						fprintf(stderr,
+						       "%s: unknown field '%s' for --output option\n",
+						       progname, opt);
+						showdf_print_available_fields();
+						return CMD_HELP;
+					}
+					fields |= field;
+					field_order[field_count++] = field;
+					opt = strtok_r(NULL, ",", &saveptr);
+				}
+			}
 			break;
 		case 'v':
 			flags |= MNTDF_VERBOSE;
@@ -8272,7 +9979,9 @@ static int lfs_df(int argc, char **argv)
 			if (mntdir[0] == '\0')
 				continue;
 
-			rc = mntdf(mntdir, fsname, pool_name, flags, ops, NULL);
+			rc = mntdf(mntdir, fsname, pool_name, flags, ops, NULL,
+				   mdt_idx, ost_idx, fields, field_order,
+				   field_count);
 			if (rc || path[0] != '\0')
 				break;
 
@@ -8311,7 +10020,9 @@ static int lfs_df(int argc, char **argv)
 			if (mntdir[0] == '\0')
 				continue;
 
-			rc = mntdf(mntdir, fsname, pool_name, flags, ops, NULL);
+			rc = mntdf(mntdir, fsname, pool_name, flags, ops, NULL,
+				   mdt_idx, ost_idx, fields, field_order,
+				   field_count);
 			if (rc || path[0] != '\0') {
 				valid = true;
 
@@ -8530,7 +10241,7 @@ static unsigned long str2sec(const char *timestr)
 	while (*timestr) {
 		unsigned long v;
 		int ind;
-		char *ptr;
+		const char *ptr;
 
 		v = strtoul(timestr, &tail, 10);
 		if (v == ULONG_MAX || *tail == '\0')
@@ -8589,31 +10300,46 @@ static inline int has_times_option(int argc, char **argv)
 	return 0;
 }
 
-static inline int lfs_verify_poolarg(char *pool)
+static inline int has_lqa_option(int argc, char **argv)
 {
-	if (strnlen(optarg, LOV_MAXPOOLNAME + 1) > LOV_MAXPOOLNAME) {
-		fprintf(stderr,
-			"Pool name '%.*s' is longer than %d\n",
-			LOV_MAXPOOLNAME, pool, LOV_MAXPOOLNAME);
-		return 1;
-	}
+	int i;
+
+	for (i = 1; i < argc; i++)
+		if (!strcmp(argv[i], "--lqa"))
+			return 1;
+
 	return 0;
 }
+
+/* return true if arg is insane */
+static inline bool lfs_arg_insane(const char *arg, int len, const char *name)
+{
+	const char *c;
+
+	if (strnlen(arg, len + 1) > len) {
+		fprintf(stderr, "%s name '%.*s' is longer than %d\n", name, len,
+			arg, len);
+		return true;
+	}
+
+	for (c = arg; *c != '\0'; c++) {
+		if (isalnum(*c) || *c == '_')
+			continue;
+		fprintf(stderr, "%s name '%.*s' has illegal character '%c'(0x%02x)\n",
+			name, len, arg, isprint(*c) ? *c : ' ', *c);
+		return true;
+	}
+
+	return false;
+}
+#define lfs_poolarg_insane(pool) lfs_arg_insane(pool, LOV_MAXPOOLNAME, "Pool")
+#define lfs_lqaarg_insane(lqa) lfs_arg_insane(lqa, LQA_NAME_MAX, "LQA")
 
 /* special grace time, only notify the user when its quota is over soft limit
  * but doesn't block new writes until the hard limit is reached.
  */
 #define NOTIFY_GRACE		"notify"
 #define NOTIFY_GRACE_TIME	LQUOTA_GRACE_MASK
-
-#ifndef toqb
-static inline __u64 lustre_stoqb(size_t space)
-{
-	return (space + QIF_DQBLKSIZE - 1) >> QIF_DQBLKSIZE_BITS;
-}
-#else
-#define lustre_stoqb   toqb
-#endif
 
 static int lfs_setquota_times(int argc, char **argv, struct if_quotactl *qctl)
 {
@@ -8626,6 +10352,7 @@ static int lfs_setquota_times(int argc, char **argv, struct if_quotactl *qctl)
 	{ .val = 'g',	.name = "group",	.has_arg = no_argument },
 	{ .val = 'h',	.name = "help",		.has_arg = no_argument },
 	{ .val = 'i',	.name = "inode-grace",	.has_arg = required_argument },
+	{ .val = LFS_LQA_OPT, .name = "lqa",	.has_arg = required_argument },
 	{ .val = LFS_POOL_OPT, .name = "pool",	.has_arg = required_argument },
 	{ .val = 'p',	.name = "projid",	.has_arg = no_argument },
 	{ .val = 't',	.name = "times",	.has_arg = no_argument },
@@ -8675,8 +10402,15 @@ static int lfs_setquota_times(int argc, char **argv, struct if_quotactl *qctl)
 		case 'p':
 			qtype = PRJQUOTA;
 			goto quota_type;
+		case LFS_LQA_OPT:
+			if (lfs_lqaarg_insane(optarg))
+				return -1;
+			snprintf(qctl->qc_lqaname, LQA_NAME_MAX + 1, "%s",
+				 optarg);
+			qctl->qc_cmd  = LUSTRE_Q_SETINFOLQA;
+			break;
 		case LFS_POOL_OPT:
-			if (lfs_verify_poolarg(optarg))
+			if (lfs_poolarg_insane(optarg))
 				return -1;
 			snprintf(qctl->qc_poolname, LOV_MAXPOOLNAME + 1, "%s",
 				 optarg);
@@ -8893,7 +10627,7 @@ int lfs_setquota(int argc, char **argv)
 						.has_arg = required_argument },
 	{ .val = 'B',	.name = "block-hardlimit",
 						.has_arg = required_argument },
-	{ .val = 'd',	.name = "default",	.has_arg = no_argument },
+	{ .val = 'D',	.name = "default",	.has_arg = no_argument },
 	{ .val = LFS_SETQUOTA_DELETE,
 			.name = "delete",	.has_arg = no_argument },
 	{ .val = 'g',	.name = "group",	.has_arg = required_argument },
@@ -8908,6 +10642,8 @@ int lfs_setquota(int argc, char **argv)
 	{ .val = 'r',	.name = "reset",	.has_arg = no_argument },
 	{ .val = 'u',	.name = "user",		.has_arg = required_argument },
 	{ .val = 'U',	.name = "default-usr",	.has_arg = no_argument },
+	{ .val = LFS_LQA_OPT,
+			.name = "lqa",		.has_arg = required_argument },
 	{ .val = LFS_POOL_OPT,
 			.name = "pool",		.has_arg = required_argument },
 	{ .name = NULL } };
@@ -8915,7 +10651,10 @@ int lfs_setquota(int argc, char **argv)
 	bool use_default = false;
 	int qtype, qctl_len;
 
-	qctl_len = sizeof(*qctl) + LOV_MAXPOOLNAME + 1;
+	/* By default LOV_MAXPOOLNAME and LQA_NAME_MAX should be equal. Handle a
+	 * case if it would be changed in future.
+	 */
+	qctl_len = sizeof(*qctl) + max(LOV_MAXPOOLNAME + 1, LQA_NAME_MAX + 1);
 	qctl = malloc(qctl_len);
 	if (!qctl)
 		return -ENOMEM;
@@ -8964,14 +10703,16 @@ int lfs_setquota(int argc, char **argv)
 			qtype = PRJQUOTA;
 			rc = name2projid(&qctl->qc_id, optarg);
 quota_type:
-			if (rc) {
-				if (str2quotaid(&qctl->qc_id, optarg)) {
-					fprintf(stderr,
-						"%s setquota: invalid id '%s'\n",
-						progname, optarg);
-					rc = -1;
-					goto out;
-				}
+			if (rc && str2quotaid(&qctl->qc_id, optarg)) {
+				fprintf(stderr,
+					"%s setquota: invalid %s '%s'\n",
+					progname,
+					qtype == USRQUOTA ? "user id" :
+					qtype == GRPQUOTA ? "group id" :
+					"project id",
+					optarg);
+				rc = -1;
+				goto out;
 			}
 
 			if (qctl->qc_id == 0) {
@@ -9053,8 +10794,23 @@ quota_type_def:
 					(unsigned long long)dqb->dqb_ihardlimit,
 					progname);
 			break;
+		case LFS_LQA_OPT:
+			if (qctl->qc_type == ALLQUOTA || qctl->qc_id != 0) {
+				fprintf(stderr, "Specify LQA quota type with -U,-G, or -P\n");
+				rc = CMD_HELP;
+				goto out;
+			}
+			if (lfs_lqaarg_insane(optarg)) {
+				rc = -1;
+				goto out;
+			}
+			snprintf(qctl->qc_lqaname, LQA_NAME_MAX + 1, "%s",
+				 optarg);
+			qctl->qc_cmd = LUSTRE_Q_SETQUOTALQA;
+			qctl->qc_id = 1;
+			break;
 		case LFS_POOL_OPT:
-			if (lfs_verify_poolarg(optarg)) {
+			if (lfs_poolarg_insane(optarg)) {
 				rc = -1;
 				goto out;
 			}
@@ -9156,7 +10912,7 @@ quota_type_def:
 		/* sigh, we can't just set blimits/ilimits */
 		struct if_quotactl *tmp_qctl;
 
-		tmp_qctl = calloc(1, sizeof(*qctl) + LOV_MAXPOOLNAME + 1);
+		tmp_qctl = calloc(1, qctl_len);
 		if (!tmp_qctl)
 			goto out;
 
@@ -9164,8 +10920,12 @@ quota_type_def:
 			tmp_qctl->qc_cmd = LUSTRE_Q_GETQUOTAPOOL;
 			snprintf(tmp_qctl->qc_poolname, LOV_MAXPOOLNAME + 1,
 				 "%s", qctl->qc_poolname);
+		} else if (qctl->qc_cmd == LUSTRE_Q_SETQUOTALQA) {
+			tmp_qctl->qc_cmd = LUSTRE_Q_GETQUOTALQA;
+			snprintf(tmp_qctl->qc_lqaname, LQA_NAME_MAX + 1,
+				 "%s", qctl->qc_lqaname);
 		} else {
-			tmp_qctl->qc_cmd  = LUSTRE_Q_GETQUOTA;
+			tmp_qctl->qc_cmd = LUSTRE_Q_GETQUOTA;
 		}
 		tmp_qctl->qc_type = qctl->qc_type;
 		tmp_qctl->qc_id = qctl->qc_id;
@@ -9280,10 +11040,11 @@ static void diff2str(time_t seconds, char *buf, time_t now)
 	__sec2str(seconds - now, buf);
 }
 
-static void print_quota_val(char *val, int cols, bool print_over,
+static void print_quota_val(const char *val, int cols, bool print_over,
 			    struct quota_param *param)
 {
-	if ((param->qp_detail & (param->qp_detail - 1)) == 0) /* single value */
+	if ((param->qp_detail & (param->qp_detail - 1)) == 0 &&
+	     !param->qp_show_qid) /* single value */
 		printf("%s", val);
 	else if (param->qp_delim[0])
 		printf("%*s%s", cols, val, param->qp_delim);
@@ -9377,7 +11138,6 @@ static void kbytes2str(__u64 num, char *buf, int buflen, bool h)
 static void print_quota(char *mnt, struct if_quotactl *qctl, int type,
 			int rc, struct quota_param *param)
 {
-	char *name, *tmp;
 	time_t now;
 
 	time(&now);
@@ -9385,18 +11145,20 @@ static void print_quota(char *mnt, struct if_quotactl *qctl, int type,
 	if (qctl->qc_cmd == LUSTRE_Q_GETQUOTA || qctl->qc_cmd == Q_GETOQUOTA ||
 	    qctl->qc_cmd == LUSTRE_Q_GETQUOTAPOOL ||
 	    qctl->qc_cmd == LUSTRE_Q_GETDEFAULT ||
-	    qctl->qc_cmd == LUSTRE_Q_GETDEFAULT_POOL) {
+	    qctl->qc_cmd == LUSTRE_Q_GETDEFAULT_POOL ||
+	    qctl->qc_cmd == LUSTRE_Q_GETQUOTALQA) {
 		int bover = 0, iover = 0;
 		struct obd_dqblk *dqb = &qctl->qc_dqblk;
 		char numbuf[3][STRBUF_LEN + 2]; /* 2 for brackets or wildcard */
 		char timebuf[40];
 		char strbuf[STRBUF_LEN];
+		char *tmp;
 
 		dqb->dqb_btime &= LQUOTA_GRACE_MASK;
 		dqb->dqb_itime &= LQUOTA_GRACE_MASK;
 
 		if (dqb->dqb_bhardlimit &&
-		    lustre_stoqb(dqb->dqb_curspace) >= dqb->dqb_bhardlimit) {
+		    stoqb(dqb->dqb_curspace) >= dqb->dqb_bhardlimit) {
 			bover = 1;
 		} else if (dqb->dqb_bsoftlimit && dqb->dqb_btime) {
 			if (dqb->dqb_btime > now)
@@ -9423,19 +11185,40 @@ static void print_quota(char *mnt, struct if_quotactl *qctl, int type,
 			print_quota_val(mnt, 16, false, param);
 
 		if (param->qp_show_qid) {
-			name = NULL;
-			char id_buf[STRBUF_LEN];
+			char namebuf[DEF_PW_SIZE_MAX];
+			char *name = NULL;
+			size_t name_max;
+			int rc2 = 0;
+
+			name_max = getpw_size_max();
+			if (name_max > sizeof(namebuf))
+				name = malloc(name_max);
+			if (!name) {
+				name = namebuf;
+				name_max = sizeof(namebuf);
+			}
+
+			if (param->qp_show_qid_num) {
+				name[0] = '\0';
+				goto use_qid_value;
+			}
 
 			if (qctl->qc_type == USRQUOTA) {
-				uid2name(&name, qctl->qc_id);
+				rc2 = uid2name(name, name_max, qctl->qc_id);
 			} else if (qctl->qc_type == GRPQUOTA) {
-				gid2name(&name, qctl->qc_id);
+				rc2 = gid2name(name, name_max, qctl->qc_id);
+			} else if (qctl->qc_type == PRJQUOTA) {
+				rc2 = prjid2name(name, name_max, qctl->qc_id);
 			}
-			if (!name || name[0] == '\0'){
-				snprintf(id_buf, STRBUF_LEN, "%u", qctl->qc_id);
-				name = id_buf;
-			}
+
+use_qid_value:
+			if (rc2 || name[0] == '\0')
+				snprintf(name, sizeof(namebuf), "%u",
+					 qctl->qc_id);
+
 			print_quota_val(name, 10, false, param);
+			if (name != namebuf)
+				free(name);
 		}
 
 		if (param->qp_show_default)
@@ -9444,7 +11227,7 @@ static void print_quota(char *mnt, struct if_quotactl *qctl, int type,
 		else if (bover)
 			diff2str(dqb->dqb_btime, timebuf, now);
 
-		kbytes2str(lustre_stoqb(dqb->dqb_curspace),
+		kbytes2str(stoqb(dqb->dqb_curspace),
 			   strbuf, sizeof(strbuf), param->qp_human_readable);
 		if (rc == -EREMOTEIO)
 			sprintf(numbuf[0], "%s*", strbuf);
@@ -9510,6 +11293,7 @@ static void print_quota(char *mnt, struct if_quotactl *qctl, int type,
 		printf("\n");
 	} else if (qctl->qc_cmd == LUSTRE_Q_GETINFO ||
 		   qctl->qc_cmd == LUSTRE_Q_GETINFOPOOL ||
+		   qctl->qc_cmd == LUSTRE_Q_GETINFOLQA ||
 		   qctl->qc_cmd == Q_GETOINFO) {
 		char bgtimebuf[40];
 		char igtimebuf[40];
@@ -9530,7 +11314,8 @@ static void print_quota(char *mnt, struct if_quotactl *qctl, int type,
 
 static int tgt_name2index(const char *tgtname, unsigned int *idx)
 {
-	char *dash, *endp;
+	const char *dash;
+	char *endp;
 
 	/* format is "lustre-OST0001" */
 	dash = memchr(tgtname, '-', LUSTRE_MAXFSNAME + 1);
@@ -9591,6 +11376,8 @@ static int print_obd_quota(char *mnt, struct if_quotactl *qctl, int is_mdt,
 	}
 
 	for (i = 0; i < count; i++) {
+		char name[UUID_MAX+8];
+
 		if (qctl->qc_cmd == LUSTRE_Q_GETQUOTAPOOL) {
 			unsigned int index;
 
@@ -9618,8 +11405,6 @@ static int print_obd_quota(char *mnt, struct if_quotactl *qctl, int is_mdt,
 
 			/* inactive target */
 			if (rc == -ENODATA) {
-				char name[UUID_MAX+8];
-
 				snprintf(name, sizeof(name), "%s[inact]",
 					obd_uuid2str(&qctl->obd_uuid));
 				memset(&qctl->qc_dqinfo, 0,
@@ -9639,8 +11424,9 @@ static int print_obd_quota(char *mnt, struct if_quotactl *qctl, int is_mdt,
 			continue;
 		}
 
-		print_quota(obd_uuid2str(&qctl->obd_uuid), qctl,
-			    qctl->qc_valid, 0, param);
+		snprintf(name, sizeof(name), "%s",
+			 obd_uuid2str(&qctl->obd_uuid));
+		print_quota(name, qctl, qctl->qc_valid, 0, param);
 		*total += is_mdt ? qctl->qc_dqblk.dqb_ihardlimit :
 				   qctl->qc_dqblk.dqb_bhardlimit;
 	}
@@ -9659,16 +11445,6 @@ static int print_one_quota(char *mnt, char *name, struct if_quotactl *qctl,
 	char *obd_uuid = (char *)qctl->obd_uuid.uuid;
 	__u64 total_ialloc = 0, total_balloc = 0;
 	int inacc;
-
-	if (!param->qp_show_default && qctl->qc_id == 0) {
-		qctl->qc_dqblk.dqb_bhardlimit = 0;
-		qctl->qc_dqblk.dqb_bsoftlimit = 0;
-		qctl->qc_dqblk.dqb_ihardlimit = 0;
-		qctl->qc_dqblk.dqb_isoftlimit = 0;
-		qctl->qc_dqblk.dqb_btime = 0;
-		qctl->qc_dqblk.dqb_itime = 0;
-		qctl->qc_dqblk.dqb_valid |= QIF_LIMITS | QIF_TIMES;
-	}
 
 	if (qctl->qc_dqblk.dqb_valid & QIF_BTIME &&
 	    LQUOTA_FLAG(qctl->qc_dqblk.dqb_btime) & LQUOTA_FLAG_DEFAULT)
@@ -9689,12 +11465,17 @@ static int print_one_quota(char *mnt, char *name, struct if_quotactl *qctl,
 		((qctl->qc_dqblk.dqb_valid & (QIF_LIMITS|QIF_USAGE)) !=
 		 (QIF_LIMITS|QIF_USAGE));
 
+	inacc |= (qctl->qc_cmd == LUSTRE_Q_GETQUOTALQA &&
+		  !(qctl->qc_dqblk.dqb_valid & QIF_LIMITS));
+
 	print_quota(mnt, qctl, QC_GENERAL, rc, param);
+
 
 	if (!param->qp_show_qid && !param->qp_show_default &&
 	    param->qp_verbose && qctl->qc_valid == QC_GENERAL &&
 	    qctl->qc_cmd != LUSTRE_Q_GETINFO &&
-	    qctl->qc_cmd != LUSTRE_Q_GETINFOPOOL) {
+	    qctl->qc_cmd != LUSTRE_Q_GETINFOPOOL &&
+	    qctl->qc_cmd != LUSTRE_Q_GETINFOLQA) {
 		char strbuf[STRBUF_LEN];
 
 		rc1 = print_obd_quota(mnt, qctl, 1, param,
@@ -9765,6 +11546,10 @@ static int iter_all_quota(char *mnt, struct if_quotactl *qctl,
 		qctl_iter->qc_cmd = LUSTRE_Q_GETQUOTA;
 		cur += sizeof(struct if_quotactl);
 
+		/* Skip root quota entry unless --show-root is specified */
+		if (qctl_iter->qc_id == 0 && !param->qp_show_root)
+			continue;
+
 		/* Is no file created for this quota ID yet? */
 		if ((qctl_iter->qc_dqblk.dqb_valid & QIF_USAGE) != QIF_USAGE)
 			qctl_iter->qc_dqblk.dqb_valid |= QIF_USAGE;
@@ -9817,14 +11602,29 @@ static int lfs_project(int argc, char **argv)
 	int ret = 0, err = 0, c, i;
 	struct project_handle_control phc = { 0 };
 	enum lfs_project_ops_t op;
+	struct option long_opts[] = {
+	{ .val = '0',	.name = "print0",	.has_arg = no_argument },
+	{ .val = 'c',	.name = "check",	.has_arg = no_argument },
+	{ .val = 'C',	.name = "clear",	.has_arg = no_argument },
+	{ .val = 'd',	.name = "directory",	.has_arg = no_argument },
+	{ .val = 'k',	.name = "keep",		.has_arg = no_argument },
+	{ .val = 'p',	.name = "proj-inherit",	.has_arg = required_argument },
+	{ .val = 'r',	.name = "recursive",	.has_arg = no_argument },
+	{ .val = 's',	.name = "set-inherit",	.has_arg = no_argument },
+	{ .val = 's',	.name = "inherit",	.has_arg = no_argument },
+	};
 
 	phc.newline = true;
 	phc.assign_projid = false;
 	/* default action */
 	op = LFS_PROJECT_LIST;
 
-	while ((c = getopt(argc, argv, "p:cCsdkr0")) != -1) {
+	while ((c = getopt_long(argc, argv, "0cCdkp:rs",
+				long_opts, NULL)) != -1) {
 		switch (c) {
+		case '0':
+			phc.newline = false;
+			break;
 		case 'c':
 			if (op != LFS_PROJECT_LIST) {
 				fprintf(stderr,
@@ -9845,6 +11645,26 @@ static int lfs_project(int argc, char **argv)
 
 			op = LFS_PROJECT_CLEAR;
 			break;
+		case 'd':
+			phc.dironly = true;
+			break;
+		case 'k':
+			phc.keep_projid = true;
+			break;
+		case 'p':
+			if (name2projid(&phc.projid, optarg) &&
+			    str2quotaid(&phc.projid, optarg)) {
+				fprintf(stderr, "invalid project id '%s'\n",
+					optarg);
+				return CMD_HELP;
+			}
+
+			phc.assign_projid = true;
+
+			break;
+		case 'r':
+			phc.recursive = true;
+			break;
 		case 's':
 			if (op != LFS_PROJECT_LIST) {
 				fprintf(stderr,
@@ -9855,29 +11675,6 @@ static int lfs_project(int argc, char **argv)
 
 			phc.set_inherit = true;
 			op = LFS_PROJECT_SET;
-			break;
-		case 'd':
-			phc.dironly = true;
-			break;
-		case 'k':
-			phc.keep_projid = true;
-			break;
-		case 'r':
-			phc.recursive = true;
-			break;
-		case 'p':
-			if (str2quotaid(&phc.projid, optarg)) {
-				fprintf(stderr,
-					"Invalid project ID: %s\n",
-					optarg);
-				return CMD_HELP;
-			}
-
-			phc.assign_projid = true;
-
-			break;
-		case '0':
-			phc.newline = false;
 			break;
 		default:
 			fprintf(stderr, "%s: invalid option '%c'\n",
@@ -9978,11 +11775,12 @@ static int do_quota_op(char *mnt, struct if_quotactl *qctl,
 	struct if_quotactl *qctl_tmp;
 	char **poollist = NULL;
 	char *buf = NULL;
-	int poolcount, i, rc = 0;
+	int poolcount, extra, i, rc = 0;
 
+	extra = max(LOV_MAXPOOLNAME + 1, LQA_NAME_MAX + 1);
 	/* avoid modifying the original qctl */
-	qctl_tmp = malloc(sizeof(*qctl_tmp) + LOV_MAXPOOLNAME + 1);
-	memcpy(qctl_tmp, qctl, sizeof(*qctl_tmp) + LOV_MAXPOOLNAME + 1);
+	qctl_tmp = malloc(sizeof(*qctl_tmp) + extra);
+	memcpy(qctl_tmp, qctl, sizeof(*qctl_tmp) + extra);
 
 	if (qctl_tmp->qc_cmd == LUSTRE_Q_ITERQUOTA) {
 		rc = iter_all_quota(mnt, qctl_tmp, param);
@@ -10024,13 +11822,15 @@ out:
 static int lfs_quota(int argc, char **argv)
 {
 	struct quota_param param = {
-	.qp_valid = QC_GENERAL,
-	.qp_delim = "",
+		.qp_valid = QC_GENERAL,
+		.qp_delim = "",
 	};
 	struct if_quotactl *qctl;
 	char *obd_uuid, *endp, *name = NULL;
+	char namebuf[DEF_PW_SIZE_MAX];
+	size_t name_max;
 	__u32 start_qid = 0, end_qid = 0;
-	int c, qtype, rc = 0;
+	int c, qtype, qctl_len, rc = 0;
 	long idx = 0;
 	bool all = false;
 
@@ -10038,6 +11838,8 @@ static int lfs_quota(int argc, char **argv)
 	{ .val = 'a',	.name = "all",		.has_arg = required_argument },
 	{ .val = 'e',	.name = "end-qid",	.has_arg = required_argument },
 	{ .val = 'd',	.name = "delimiter",	.has_arg = required_argument },
+	{ .val = LFS_QUOTA_DEFAULT_OPT,
+			.name = "default",	.has_arg = no_argument },
 	{ .val = 'g',	.name = "group",	.has_arg = required_argument },
 	{ .val = 'G',	.name = "default-grp",	.has_arg = no_argument },
 	{ .val = 'h',	.name = "human-readable", .has_arg = no_argument },
@@ -10049,8 +11851,10 @@ static int lfs_quota(int argc, char **argv)
 	 */
 	{ .val = 'm',	.name = "mdt-index",	.has_arg = required_argument },
 	{ .val = 'm',	.name = "mdt",		.has_arg = required_argument },
+	{ .val = 'n',	.name = "num",		.has_arg = no_argument },
 	{ .val = 'o',	.name = "ost-index",	.has_arg = required_argument },
 	{ .val = 'o',	.name = "ost",		.has_arg = required_argument },
+	{ .val = LFS_LQA_OPT, .name = "lqa",	.has_arg = required_argument },
 	{ .val = LFS_POOL_OPT, .name = "pool",	.has_arg = optional_argument },
 	{ .val = 'p',	.name = "projid",	.has_arg = required_argument },
 	{ .val = 'P',	.name = "default-prj",	.has_arg = no_argument },
@@ -10108,17 +11912,28 @@ static int lfs_quota(int argc, char **argv)
 			.name = "igrace",	.has_arg = no_argument },
 	{ .val = LFS_QUOTA_IGRACE_OPT,
 			.name = "itime",	.has_arg = no_argument },
+	{ .val = LFS_QUOTA_SHOW_ROOT_OPT,
+			.name = "show-root",	.has_arg = no_argument },
 	{ .name = NULL } };
 
-	qctl = calloc(1, sizeof(*qctl) + LOV_MAXPOOLNAME + 1);
+	qctl_len = sizeof(*qctl) + max(LOV_MAXPOOLNAME + 1, LQA_NAME_MAX + 1);
+	qctl = calloc(1, qctl_len);
 	if (!qctl)
 		return -ENOMEM;
+
+	name_max = getpw_size_max();
+	if (name_max > sizeof(namebuf))
+		name = malloc(name_max);
+	if (!name) {
+		name = namebuf;
+		name_max = sizeof(namebuf);
+	}
 
 	qctl->qc_cmd = LUSTRE_Q_GETQUOTA;
 	qctl->qc_type = ALLQUOTA;
 	obd_uuid = (char *)qctl->obd_uuid.uuid;
 
-	while ((c = getopt_long(argc, argv, "abBe:gGhi:I:m:o:pPqs:tuUv",
+	while ((c = getopt_long(argc, argv, "abBe:gGhi:I:m:no:pPqs:tuUv",
 		long_opts, NULL)) != -1) {
 		switch (c) {
 		case 'a':
@@ -10151,6 +11966,9 @@ static int lfs_quota(int argc, char **argv)
 			}
 			end_qid = strtoul(optarg, NULL, 0);
 			break;
+		case LFS_QUOTA_DEFAULT_OPT:
+			param.qp_show_default = 1;
+			break;
 		case 'G':
 			param.qp_show_default = 1;
 			/* fallthrough */
@@ -10179,6 +11997,9 @@ static int lfs_quota(int argc, char **argv)
 			}
 			param.qp_valid = qctl->qc_valid = QC_MDTIDX;
 			qctl->qc_idx = idx;
+			break;
+		case 'n':
+			param.qp_show_qid_num = 1;
 			break;
 #if LUSTRE_VERSION_CODE < OBD_OCD_VERSION(2, 22, 53, 0)
 		case 'I':
@@ -10213,12 +12034,28 @@ static int lfs_quota(int argc, char **argv)
 		case 'p':
 			qtype = PRJQUOTA;
 			goto quota_type;
+		case LFS_LQA_OPT:
+			if (!param.qp_show_default ||
+			    qctl->qc_type == ALLQUOTA) {
+				fprintf(stderr, "Specify LQA quota type with -U,-G, or -P\n");
+				rc = CMD_HELP;
+				goto out;
+			}
+			if (lfs_lqaarg_insane(optarg)) {
+				rc = -1;
+				goto out;
+			}
+			snprintf(qctl->qc_lqaname, LQA_NAME_MAX + 1, "%s",
+				 optarg);
+			qctl->qc_cmd = LUSTRE_Q_GETQUOTALQA;
+			qctl->qc_id = 1;
+			break;
 		case LFS_POOL_OPT:
 			if ((!optarg) && (argv[optind] != NULL) &&
 				(argv[optind][0] != '-') &&
 				(argv[optind][0] != '/')) {
 				optarg = argv[optind++];
-				if (lfs_verify_poolarg(optarg)) {
+				if (lfs_poolarg_insane(optarg)) {
 					rc = -EINVAL;
 					goto out;
 				}
@@ -10294,6 +12131,9 @@ quota_type:
 		case LFS_QUOTA_IGRACE_OPT:
 			param.qp_detail |= QIF_ITIME;
 			break;
+		case LFS_QUOTA_SHOW_ROOT_OPT:
+			param.qp_show_root = 1;
+			break;
 		default:
 			fprintf(stderr, "%s quota: unrecognized option '%s'\n",
 				progname, argv[optind - 1]);
@@ -10304,6 +12144,13 @@ quota_type:
 
 	if (!param.qp_detail)
 		param.qp_detail = QIF_ALL_DETAIL;
+
+	if (param.qp_show_root && qctl->qc_cmd != LUSTRE_Q_ITERQUOTA) {
+		fprintf(stderr, "%s quota: --show-root must be used with -a\n",
+			progname);
+		rc = CMD_HELP;
+		goto out;
+	}
 
 	if (qctl->qc_cmd == LUSTRE_Q_ITERQUOTA) {
 		if (qctl->qc_type == ALLQUOTA) {
@@ -10326,42 +12173,46 @@ quota_type:
 	} else if (qctl->qc_type != ALLQUOTA &&
 		   (qctl->qc_cmd == LUSTRE_Q_GETQUOTA ||
 		    qctl->qc_cmd == LUSTRE_Q_GETQUOTAPOOL)) {
+		char *argname = "<unknown>";
+
 		if (!param.qp_show_default) {
-			if (optind + 1 > argc) {
+			if (optind >= argc) {
 				fprintf(stderr,
-					"%s quota: u/g-name is required\n",
+					"%s quota: u/g/p-name is required\n",
 					progname);
 				rc = CMD_HELP;
-				return rc;
+				goto out;
 			}
 
-			name = argv[optind++];
+			argname = argv[optind++];
 			switch (qctl->qc_type) {
 			case USRQUOTA:
-				rc = name2uid(&qctl->qc_id, name);
+				rc = name2uid(&qctl->qc_id, argname);
 				break;
 			case GRPQUOTA:
-				rc = name2gid(&qctl->qc_id, name);
+				rc = name2gid(&qctl->qc_id, argname);
 				break;
 			case PRJQUOTA:
-				rc = name2projid(&qctl->qc_id, name);
+				rc = name2projid(&qctl->qc_id, argname);
 				break;
 			default:
 				rc = -ENOTSUP;
 				break;
 			}
 		} else {
+			int cmd = qctl->qc_cmd;
+
 			qctl->qc_valid = QC_GENERAL;
-			qctl->qc_cmd = qctl->qc_cmd == LUSTRE_Q_GETQUOTAPOOL ?
-					LUSTRE_Q_GETDEFAULT_POOL :
-					LUSTRE_Q_GETDEFAULT;
-			qctl->qc_id = 0;
+			if (cmd != LUSTRE_Q_GETQUOTALQA)
+				qctl->qc_cmd = cmd == LUSTRE_Q_GETQUOTAPOOL ?
+					       LUSTRE_Q_GETDEFAULT_POOL :
+					       LUSTRE_Q_GETDEFAULT;
 		}
 
 		if (rc) {
-			if (str2quotaid(&qctl->qc_id, name)) {
+			if (str2quotaid(&qctl->qc_id, argname)) {
 				fprintf(stderr, "%s quota: invalid id '%s'\n",
-					progname, name);
+					progname, argname);
 				rc = CMD_HELP;
 				goto out;
 			}
@@ -10372,20 +12223,32 @@ quota_type:
 	}
 
 	do {
-		if (all) {
-			qctl->qc_valid = param.qp_valid;
-			if (qctl->qc_type == USRQUOTA) {
+		qctl->qc_valid = param.qp_valid;
+		switch (qctl->qc_type) {
+		case USRQUOTA:
+			if (all)
 				qctl->qc_id = geteuid();
-				rc = uid2name(&name, qctl->qc_id);
-			} else {
+			rc = uid2name(name, name_max, qctl->qc_id);
+			break;
+		case GRPQUOTA:
+			if (all)
 				qctl->qc_id = getegid();
-				rc = gid2name(&name, qctl->qc_id);
-				memset(&qctl->qc_dqblk, 0,
-				       sizeof(qctl->qc_dqblk));
-			}
-			if (rc)
-				name = "<unknown>";
+			rc = gid2name(name, name_max, qctl->qc_id);
+			break;
+		case PRJQUOTA:
+			if (all)
+				qctl->qc_id = geteuid();
+			rc = prjid2name(name, name_max, qctl->qc_id);
+			break;
+		default:
+			sprintf(name, "<unknown>");
+			/* will print root quota */
+			memset(&qctl->qc_dqblk, 0,
+			       sizeof(qctl->qc_dqblk));
+			break;
 		}
+		if (rc)
+			sprintf(name, "<unknown>");
 
 		print_quota_title(name, qctl, &param);
 
@@ -10414,7 +12277,10 @@ quota_type:
 		}
 	} while (all && ++qctl->qc_type <= GRPQUOTA);
 out:
+	if (name != namebuf)
+		free(name);
 	free(qctl);
+
 	return rc;
 }
 #endif /* HAVE_SYS_QUOTA_H! */
@@ -10548,11 +12414,16 @@ static int lfs_changelog(int argc, char **argv)
 	void *changelog_priv;
 	struct changelog_rec *rec;
 	long long startrec = 0, endrec = 0;
+	char *clid = NULL;
+	char *mask_str = NULL;
+	__u64 mask = 0;
 	char *mdd;
 	struct option long_opts[] = {
 		{ .val = 'f', .name = "follow", .has_arg = no_argument },
+		{ .val = 'm', .name = "mask", .has_arg = required_argument },
+		{ .val = 'u', .name = "user", .has_arg = required_argument },
 		{ .name = NULL } };
-	char short_opts[] = "f";
+	char short_opts[] = "fm:u:";
 	int rc, follow = 0;
 
 	while ((rc = getopt_long(argc, argv, short_opts,
@@ -10560,6 +12431,25 @@ static int lfs_changelog(int argc, char **argv)
 		switch (rc) {
 		case 'f':
 			follow++;
+			break;
+		case 'm':
+			mask_str = optarg;
+			/* convert mask string to numeric value */
+			mask = CHANGELOG_DEFMASK;
+			rc = llapi_convert_str2mask(mask_str,
+						    changelog_type2str,
+						    &mask, CHANGELOG_MINMASK,
+						    CHANGELOG_ALLMASK,
+						    CHANGELOG_DEFMASK);
+			if (rc != 0) {
+				llapi_error(LLAPI_MSG_ERROR, rc,
+					    "invalid changelog mask '%s'\n",
+					    mask_str);
+				return CMD_HELP;
+			}
+			break;
+		case 'u':
+			clid = optarg;
 			break;
 		default:
 			fprintf(stderr,
@@ -10597,13 +12487,23 @@ static int lfs_changelog(int argc, char **argv)
 		}
 	}
 
-	rc = llapi_changelog_start(&changelog_priv,
-				   CHANGELOG_FLAG_BLOCK |
-				   CHANGELOG_FLAG_JOBID |
-				   CHANGELOG_FLAG_NID_BE |
-				   CHANGELOG_FLAG_EXTRA_FLAGS |
-				   (follow ? CHANGELOG_FLAG_FOLLOW : 0),
-				   mdd, startrec);
+	if (clid)
+		rc = llapi_changelog_start_user(&changelog_priv,
+						CHANGELOG_FLAG_BLOCK |
+						CHANGELOG_FLAG_JOBID |
+						CHANGELOG_FLAG_NID_BE |
+						CHANGELOG_FLAG_EXTRA_FLAGS |
+						(follow ?
+						 CHANGELOG_FLAG_FOLLOW : 0),
+						mdd, clid, mask, startrec);
+	else
+		rc = llapi_changelog_start(&changelog_priv,
+					   CHANGELOG_FLAG_BLOCK |
+					   CHANGELOG_FLAG_JOBID |
+					   CHANGELOG_FLAG_NID_BE |
+					   CHANGELOG_FLAG_EXTRA_FLAGS |
+					   (follow ? CHANGELOG_FLAG_FOLLOW : 0),
+					   mdd, startrec);
 	if (rc < 0) {
 		fprintf(stderr, "%s changelog: cannot start changelog: %s\n",
 			progname, strerror(errno = -rc));
@@ -11295,6 +13195,13 @@ out_close:
 
 static int lfs_data_version(int argc, char **argv)
 {
+	struct option long_opts[] = {
+	{ .val = 'h',	.name = "help",		.has_arg = no_argument },
+	{ .val = 'n',	.name = "nosync",	.has_arg = no_argument },
+	{ .val = 'r',	.name = "read-lock",	.has_arg = no_argument },
+	{ .val = 's',	.name = "set-hsm",	.has_arg = no_argument },
+	{ .val = 'w',	.name = "write-lock",	.has_arg = no_argument },
+	{ .name = NULL } };
 	int data_version_flags = LL_DV_RD_FLUSH; /* Read by default */
 	__u64 data_version;
 	char *path;
@@ -11303,13 +13210,7 @@ static int lfs_data_version(int argc, char **argv)
 	int rc;
 	int c;
 
-	if (argc < 2) {
-		fprintf(stderr, "%s: FILE must be specified\n",
-			progname);
-		return CMD_HELP;
-	}
-
-	while ((c = getopt(argc, argv, "hnrws")) != -1) {
+	while ((c = getopt_long(argc, argv, "hnrsw", long_opts, NULL)) != -1) {
 		switch (c) {
 		case 'n':
 			data_version_flags = 0;
@@ -11317,11 +13218,11 @@ static int lfs_data_version(int argc, char **argv)
 		case 'r':
 			data_version_flags |= LL_DV_RD_FLUSH;
 			break;
-		case 'w':
-			data_version_flags |= LL_DV_WR_FLUSH;
-			break;
 		case 's':
 			hsm_sync = true;
+			break;
+		case 'w':
+			data_version_flags |= LL_DV_WR_FLUSH;
 			break;
 		default:
 			fprintf(stderr,
@@ -11333,7 +13234,7 @@ static int lfs_data_version(int argc, char **argv)
 		}
 	}
 	if (optind == argc) {
-		fprintf(stderr, "%s data_version: FILE must be specified\n",
+		fprintf(stderr, "%s data_version: FILENAME must be specified\n",
 			progname);
 		return CMD_HELP;
 	}
@@ -12502,32 +14403,190 @@ error:
 	return rc;
 }
 
-static inline
+/**
+ * Returns the number of components to resync, or negative error code
+ */
+static int lfs_mirror_force_resync(const char *fname,
+				   struct llapi_layout *layout,
+				   struct llapi_resync_comp *comp_array,
+				   __u16 *mirror_ids, int ids_nr)
+{
+	int idx = 0;
+	uint16_t source_mirror = 0;
+	int rc;
+
+	/* First pass: find a source mirror (not in target list) */
+	rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_FIRST);
+	if (rc < 0) {
+		fprintf(stderr, "%s: failed to position to first component: %s\n",
+			progname, strerror(-rc));
+		return rc;
+	}
+
+	while (rc == 0) {
+		uint32_t mirror_id, comp_flags;
+		int i, found = 0;
+
+		rc = llapi_layout_mirror_id_get(layout, &mirror_id);
+		if (rc < 0)
+			break;
+
+		/* Check if this mirror is in our target list */
+		for (i = 0; i < ids_nr; i++) {
+			if (mirror_ids[i] == mirror_id) {
+				found = 1;
+				break;
+			}
+		}
+
+		/* If not in target list, use as source */
+		if (!found) {
+			rc = llapi_layout_comp_flags_get(layout, &comp_flags);
+			if (rc == 0 && !(comp_flags & LCME_FL_STALE)) {
+				source_mirror = mirror_id;
+				break;
+			}
+		}
+
+		rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_NEXT);
+		if (rc < 0) {
+			rc = 0;
+			break;
+		}
+	}
+
+	if (source_mirror == 0) {
+		/* No non-target source found, use target mirror as source
+		 * and mark other mirrors as stale
+		 */
+		source_mirror = mirror_ids[0];
+		fprintf(stdout,
+			"%s: using target mirror %u as source (no other non-stale mirrors found).\n",
+			progname, source_mirror);
+	}
+
+	fprintf(stdout,
+		"%s: using mirror %u as source for force resync.\n",
+		progname, source_mirror);
+
+	/* Second pass: find components to mark as stale */
+	rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_FIRST);
+	if (rc < 0) {
+		fprintf(stderr, "%s: failed to position to first component: %s\n",
+			progname, strerror(-rc));
+		return rc;
+	}
+
+	while (idx < 1024) { /* comp_array size limit */
+		uint32_t mirror_id, comp_id;
+		uint64_t start, end;
+		int i, is_target = 0;
+
+		rc = llapi_layout_mirror_id_get(layout, &mirror_id);
+		if (rc < 0)
+			break;
+
+		/* Check if this mirror is in our target list */
+		for (i = 0; i < ids_nr; i++) {
+			if (mirror_ids[i] == mirror_id) {
+				is_target = 1;
+				break;
+			}
+		}
+
+		bool collect_this = false;
+
+		if (source_mirror == mirror_ids[0]) {
+			/* Target is source, collect non-target mirrors */
+			collect_this = !is_target;
+		} else {
+			/* Non-target is source, collect target mirrors */
+			collect_this = is_target;
+		}
+
+		if (collect_this) {
+			rc = llapi_layout_comp_id_get(layout, &comp_id);
+			if (rc < 0)
+				break;
+
+			rc = llapi_layout_comp_extent_get(layout, &start, &end);
+			if (rc < 0)
+				break;
+
+			comp_array[idx].lrc_mirror_id = mirror_id;
+			comp_array[idx].lrc_id = comp_id;
+			comp_array[idx].lrc_start = start;
+			comp_array[idx].lrc_end = end;
+			idx++;
+		}
+
+		rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_NEXT);
+		if (rc != 0) {
+			rc = 0;
+			break;
+		}
+	}
+
+	if (idx <= 0) {
+		fprintf(stderr,
+			"%s: no components found for specified mirrors.\n",
+			progname);
+		return -EINVAL;
+	}
+
+	/* Mark the collected components as stale */
+	int stale_count = 0;
+
+	for (int i = 0; i < idx; i++) {
+		rc = lfs_component_set((char *)fname, comp_array[i].lrc_id,
+				       NULL, LCME_FL_STALE, 0);
+		if (rc < 0) {
+			fprintf(stderr,
+				"%s: failed to set stale flag on component %u: %s\n",
+				progname, comp_array[i].lrc_id, strerror(-rc));
+			/* Continue with other components */
+		} else {
+			stale_count++;
+		}
+	}
+
+	fprintf(stdout,
+		"%s: marked %d components as stale for force resync.\n",
+		progname, stale_count);
+	fprintf(stdout,
+		"%s: proceeding with resync of %d components.\n",
+		progname, idx);
+
+	return idx; /* Return number of components to resync */
+}
+
 int lfs_mirror_resync_file(const char *fname, struct ll_ioc_lease *ioc,
 			   __u16 *mirror_ids, int ids_nr,
-			   long stats_interval_sec, long bandwidth_bytes_sec)
+			   long stats_interval_sec, long bandwidth_bytes_sec,
+			   bool force_resync)
 {
-	struct llapi_resync_comp comp_array[1024] = { { 0 } };
+	struct llapi_resync_comp stale_comp_array[1024] = { { 0 } };
 	struct llapi_layout *layout;
 	struct stat stbuf;
+	int stale_data_comp_count = 0;
+	int stale_ec_comp_count = 0;
 	uint32_t flr_state;
 	uint64_t start;
 	uint64_t end;
-	int comp_size = 0;
 	int idx;
 	int fd;
 	int rc;
 	int rc2;
 
 	if (stat(fname, &stbuf) < 0) {
-		fprintf(stderr, "%s: cannot stat file '%s': %s.\n",
-			progname, fname, strerror(errno));
+		fprintf(stderr, "%s: cannot stat file '%s': %s.\n", progname,
+			fname, strerror(errno));
 		rc = -errno;
 		goto error;
 	}
 	if (!S_ISREG(stbuf.st_mode)) {
-		fprintf(stderr, "%s: '%s' is not a regular file.\n",
-			progname, fname);
+		fprintf(stderr, "%s: '%s' is not a regular file.\n", progname,
+			fname);
 		rc = -EINVAL;
 		goto error;
 	}
@@ -12535,8 +14594,8 @@ int lfs_mirror_resync_file(const char *fname, struct ll_ioc_lease *ioc,
 	/* Allow mirror resync even without the key on encrypted files */
 	fd = open(fname, O_DIRECT | O_RDWR | O_CIPHERTEXT);
 	if (fd < 0) {
-		fprintf(stderr, "%s: cannot open '%s': %s.\n",
-			progname, fname, strerror(errno));
+		fprintf(stderr, "%s: cannot open '%s': %s.\n", progname, fname,
+			strerror(errno));
 		rc = -errno;
 		goto error;
 	}
@@ -12560,57 +14619,150 @@ int lfs_mirror_resync_file(const char *fname, struct ll_ioc_lease *ioc,
 	flr_state &= LCM_FL_FLR_MASK;
 	if (flr_state == LCM_FL_NONE) {
 		rc = -EINVAL;
-		fprintf(stderr, "%s: '%s' is not a FLR file.\n",
-			progname, fname);
+		fprintf(stderr, "%s: '%s' is not a FLR file.\n", progname,
+			fname);
 		goto free_layout;
 	}
 
-	/* get stale component info */
-	comp_size = llapi_mirror_find_stale(layout, comp_array,
-					    ARRAY_SIZE(comp_array),
-					    mirror_ids, ids_nr);
-	if (comp_size <= 0) {
-		rc = comp_size;
+	/* get stale component info for regular mirrors */
+	stale_data_comp_count = llapi_mirror_find_stale(
+		layout, stale_comp_array, ARRAY_SIZE(stale_comp_array),
+		mirror_ids, ids_nr);
+	if (stale_data_comp_count < 0) {
+		rc = stale_data_comp_count;
 		goto free_layout;
+	}
+
+	/* get stale component info for ec mirrors */
+	stale_ec_comp_count = llapi_ec_find_stale(
+		layout, &stale_comp_array[stale_data_comp_count],
+		ARRAY_SIZE(stale_comp_array) - stale_data_comp_count,
+		mirror_ids, ids_nr);
+	if (stale_ec_comp_count < 0) {
+		rc = stale_ec_comp_count;
+		goto free_layout;
+	}
+
+	if (stale_data_comp_count + stale_ec_comp_count == 0) {
+		if (force_resync && ids_nr > 0) {
+			stale_data_comp_count = lfs_mirror_force_resync(
+				fname, layout, stale_comp_array, mirror_ids,
+				ids_nr);
+			if (stale_data_comp_count < 0) {
+				rc = stale_data_comp_count;
+				goto free_layout;
+			}
+		} else if (force_resync) {
+			/* --force-resync requires --only option */
+			rc = -EINVAL;
+			fprintf(stderr,
+				"%s: --force-resync requires --only option to specify target mirrors.\n",
+				progname);
+			goto free_layout;
+		} else if (ids_nr > 0) {
+			/* --only specified but no stale components and
+			 * no --force-resync
+			 * Check if mirrors are consistent - if not, error
+			 */
+			rc = lfs_mirror_verify_file(fname, NULL, 0, 0, 0);
+			if (rc < 0) {
+				/* mirrors inconsistent but no stale flags */
+				fprintf(stderr,
+					"%s: mirrors are inconsistent but no stale components marked in '%s'. Use 'lfs mirror resync --only %d --force-resync' to force resync.\n",
+					progname, fname, mirror_ids[0]);
+				goto free_layout;
+			}
+			/* Mirrors are consistent - succeed as no-op */
+			rc = 0;
+			goto free_layout;
+		} else {
+			/* Normal resync with no stale components and no --only
+			 * Check if mirrors are consistent - if not, error
+			 */
+			rc = lfs_mirror_verify_file(fname, NULL, 0, 0, 0);
+			if (rc < 0) {
+				/* file has inconsistency but no stale flags */
+				fprintf(stderr,
+					"%s: mirrors are inconsistent but no stale components marked in '%s'. Use 'lfs mirror resync --only N --force-resync' to force resync specific mirrors.\n",
+					progname, fname);
+				goto free_layout;
+			}
+			/* Mirrors are consistent - succeed as no-op */
+			rc = 0;
+			goto free_layout;
+		}
 	}
 
 	ioc->lil_mode = LL_LEASE_WRLCK;
 	ioc->lil_flags = LL_LEASE_RESYNC;
 	rc = llapi_lease_set(fd, ioc);
 	if (rc < 0) {
-		if (rc == -EALREADY)
+		if (rc == -EALREADY) {
 			rc = 0;
-		else
+		} else {
 			fprintf(stderr,
-			    "%s: '%s' llapi_lease_get_ext resync failed: %s.\n",
+				"%s: '%s' llapi_lease_get_ext resync failed: %s.\n",
 				progname, fname, strerror(-rc));
-		goto free_layout;
+			goto free_layout;
+		}
 	}
 
+	/*
+	 * There are no data replicas to resync but there might be ec mirrors
+	 * that need to be re-synced.
+	 */
+	if (!stale_data_comp_count)
+		goto ec_resync;
+
 	/* get the read range [start, end) */
-	start = comp_array[0].lrc_start;
-	end = comp_array[0].lrc_end;
-	for (idx = 1; idx < comp_size; idx++) {
-		if (comp_array[idx].lrc_start < start)
-			start = comp_array[idx].lrc_start;
-		if (end < comp_array[idx].lrc_end)
-			end = comp_array[idx].lrc_end;
+	start = stale_comp_array[0].lrc_start;
+	end = stale_comp_array[0].lrc_end;
+	for (idx = 1; idx < stale_data_comp_count; idx++) {
+		if (stale_comp_array[idx].lrc_start < start)
+			start = stale_comp_array[idx].lrc_start;
+		if (end < stale_comp_array[idx].lrc_end)
+			end = stale_comp_array[idx].lrc_end;
 	}
 
 	rc = llapi_lease_check(fd);
 	if (rc != LL_LEASE_WRLCK) {
-		fprintf(stderr, "%s: '%s' lost lease lock.\n",
-			progname, fname);
+		fprintf(stderr, "%s: '%s' lost lease lock.\n", progname, fname);
 		goto free_layout;
 	}
 
-	rc = llapi_mirror_resync_many_params(fd, layout, comp_array, comp_size,
-					     start, end, stats_interval_sec,
+	rc = llapi_mirror_resync_many_params(fd, layout, stale_comp_array,
+					     stale_data_comp_count, start, end,
+					     stats_interval_sec,
 					     bandwidth_bytes_sec);
-	if (rc < 0)
-		llapi_error(LLAPI_MSG_ERROR, rc,
-			    "fail to mirror resync '%s'\n", fname);
 
+	/* If resync succeeded, manually set lrc_synced for all components */
+	if (rc == 0)
+		for (int i = 0; i < stale_data_comp_count; i++)
+			stale_comp_array[i].lrc_synced = 1;
+
+	if (rc < 0) {
+		llapi_error(LLAPI_MSG_ERROR, rc, "fail to mirror resync '%s'\n",
+			    fname);
+		goto free_layout;
+	}
+
+ec_resync:
+	/*
+	 * If we have stale ec comps then resync them, otherwise
+	 * skip to updating the timestamps and finishing the resync.
+	 */
+	if (!stale_ec_comp_count)
+		goto finish_resync;
+	rc = llapi_ec_resync_many_params(
+		fd, layout, &stale_comp_array[stale_data_comp_count],
+		stale_ec_comp_count, stats_interval_sec, bandwidth_bytes_sec);
+	if (rc < 0) {
+		llapi_error(LLAPI_MSG_ERROR, rc, "fail to ec resync '%s'\n",
+			    fname);
+		goto free_layout;
+	}
+
+finish_resync:
 	rc2 = migrate_set_timestamps(fd, &stbuf);
 	if (rc2 < 0) {
 		fprintf(stderr, "%s: '%s' cannot set timestamps: %s\n",
@@ -12624,9 +14776,11 @@ int lfs_mirror_resync_file(const char *fname, struct ll_ioc_lease *ioc,
 	ioc->lil_mode = LL_LEASE_UNLCK;
 	ioc->lil_flags = LL_LEASE_RESYNC_DONE;
 	ioc->lil_count = 0;
-	for (idx = 0; idx < comp_size; idx++) {
-		if (comp_array[idx].lrc_synced) {
-			ioc->lil_ids[ioc->lil_count] = comp_array[idx].lrc_id;
+	for (idx = 0; idx < stale_data_comp_count + stale_ec_comp_count;
+	     idx++) {
+		if (stale_comp_array[idx].lrc_synced) {
+			ioc->lil_ids[ioc->lil_count] =
+				stale_comp_array[idx].lrc_id;
 			ioc->lil_count++;
 		}
 	}
@@ -12642,9 +14796,8 @@ int lfs_mirror_resync_file(const char *fname, struct ll_ioc_lease *ioc,
 			rc = -EBUSY;
 		else
 			rc = rc2;
-		fprintf(stderr, "%s: resync file '%s' failed: %s.\n",
-			progname, fname,
-			rc2 == 0 ? "lost lease lock" : strerror(-rc2));
+		fprintf(stderr, "%s: resync file '%s' failed: %s.\n", progname,
+			fname, rc2 == 0 ? "lost lease lock" : strerror(-rc2));
 
 		llapi_lease_release(fd);
 		goto free_layout;
@@ -12663,12 +14816,11 @@ static inline int lfs_mirror_resync(int argc, char **argv)
 	struct option long_opts[] = {
 	{ .val = 'h',	.name = "help",		.has_arg = no_argument },
 	{ .val = 'o',	.name = "only",		.has_arg = required_argument },
-	{ .val = 'W',	.name = "bandwidth",	.has_arg = required_argument },
-	{ .val = LFS_STATS_OPT,
-			.name = "stats",	.has_arg = no_argument},
+	{ .val = 'W',  .name = "bandwidth-limit", .has_arg = required_argument},
+	{ .val = LFS_STATS_OPT, .name = "stats", .has_arg = no_argument},
 	{ .val = LFS_STATS_INTERVAL_OPT,
-			.name = "stats-interval",
-						.has_arg = required_argument},
+			.name = "stats-interval", .has_arg = required_argument},
+	{ .val = 'f',	.name = "force-resync", .has_arg = no_argument },
 	{ .name = NULL } };
 	struct ll_ioc_lease *ioc = NULL;
 	__u16 mirror_ids[128] = { 0 };
@@ -12678,8 +14830,9 @@ static inline int lfs_mirror_resync(int argc, char **argv)
 	int ids_nr = 0;
 	int c;
 	int rc = 0;
+	bool force_resync = false;
 
-	while ((c = getopt_long(argc, argv, "ho:W:", long_opts, NULL)) >= 0) {
+	while ((c = getopt_long(argc, argv, "ho:W:f", long_opts, NULL)) >= 0) {
 		char *end;
 		switch (c) {
 		case 'o':
@@ -12708,6 +14861,9 @@ static inline int lfs_mirror_resync(int argc, char **argv)
 			break;
 		case LFS_STATS_INTERVAL_OPT:
 			stats_interval_sec = strtol(optarg, &end, 0);
+			break;
+		case 'f':
+			force_resync = true;
 			break;
 		default:
 			fprintf(stderr, "%s: unrecognized option '%s'\n",
@@ -12752,7 +14908,7 @@ static inline int lfs_mirror_resync(int argc, char **argv)
 		rc = lfs_mirror_resync_file(argv[optind], ioc,
 					    mirror_ids, ids_nr,
 					    stats_interval_sec,
-					    bandwidth_bytes_sec);
+					    bandwidth_bytes_sec, force_resync);
 		/* ignore previous file's error, continue with next file */
 
 		/* reset ioc */
@@ -12989,7 +15145,7 @@ static inline int lfs_mirror_read(int argc, char **argv)
 	int outfd;
 	int c;
 	void *buf;
-	const size_t buflen = 4 << 20;
+	const size_t buflen = DEFAULT_IO_BUFLEN;
 	ssize_t page_size;
 	off_t pos;
 	struct option long_opts[] = {
@@ -13085,10 +15241,11 @@ static inline int lfs_mirror_read(int argc, char **argv)
 	/* allocate buffer */
 	rc = posix_memalign(&buf, page_size, buflen);
 	if (rc) {
-		fprintf(stderr, "%s %s: posix_memalign returns %d\n",
-				progname, argv[0], rc);
+		fprintf(stderr, "%s %s: posix_memalign() failed: %s\n",
+			progname, argv[0], strerror(rc));
 		goto close_outfd;
 	}
+	(void)mlock(buf, buflen);
 
 	pos = 0;
 	while (1) {
@@ -13139,6 +15296,7 @@ static inline int lfs_mirror_read(int argc, char **argv)
 	rc = 0;
 
 free_buf:
+	(void)munlock(buf, buflen);
 	free(buf);
 close_outfd:
 	if (outfile)
@@ -13159,7 +15317,7 @@ static inline int lfs_mirror_write(int argc, char **argv)
 	int inputfd;
 	int c;
 	void *buf;
-	const size_t buflen = 4 << 20;
+	const size_t buflen = DEFAULT_IO_BUFLEN;
 	off_t pos;
 	ssize_t page_size = sysconf(_SC_PAGESIZE);
 	struct ll_ioc_lease_id ioc;
@@ -13264,6 +15422,7 @@ static inline int lfs_mirror_write(int argc, char **argv)
 			progname, argv[0], rc);
 		goto close_inputfd;
 	}
+	(void)mlock(buf, buflen);
 
 	/* prepare target mirror components instantiation */
 	ioc.lil_mode = LL_LEASE_WRLCK;
@@ -13348,6 +15507,7 @@ static inline int lfs_mirror_write(int argc, char **argv)
 	rc = 0;
 
 free_buf:
+	(void)munlock(buf, buflen);
 	free(buf);
 close_inputfd:
 	if (inputfile)
@@ -13668,6 +15828,9 @@ void print_chunks(const char *fname, struct verify_chunk *chunks,
  * print_checksums() - Print CRC-32 checksum values.
  * @chunk: A chunk and its corresponding valid mirror ids.
  * @crc:   CRC-32 checksum values on the chunk for each valid mirror.
+ * @pos:   Start offset of the chunk.
+ * @len:   Length of the chunk.
+ * @layout: Mirror component layout.
  *
  * This function prints CRC-32 checksum values on @chunk for
  * each valid mirror that covers it.
@@ -13676,16 +15839,170 @@ void print_chunks(const char *fname, struct verify_chunk *chunks,
  */
 static inline
 void print_checksums(struct verify_chunk *chunk, unsigned long *crc,
-		     unsigned long long pos, unsigned long long len)
+		     unsigned long long pos, unsigned long long len,
+		     struct llapi_layout *layout)
 {
 	int i;
 
 	fprintf(stdout,
 		"CRC-32 checksum value for chunk "DEXT":\n", pos, pos + len);
-	for (i = 0; i < chunk->mirror_count; i++)
-		fprintf(stdout, "Mirror %u:\t%#lx\n",
-			chunk->mirror_id[i], crc[i]);
+	for (i = 0; i < chunk->mirror_count; i++) {
+		bool is_stale = false;
+
+		/* Check if this mirror is stale */
+		if (layout) {
+			int rc = llapi_layout_comp_use(layout,
+						   LLAPI_LAYOUT_COMP_USE_FIRST);
+
+			while (rc == 0) {
+				uint32_t mirror_id, comp_flags;
+
+				rc = llapi_layout_mirror_id_get(layout,
+								&mirror_id);
+				if (rc == 0 &&
+				    mirror_id == chunk->mirror_id[i]) {
+					rc = llapi_layout_comp_flags_get(layout,
+								   &comp_flags);
+
+					if (rc == 0 &&
+					    (comp_flags & LCME_FL_STALE))
+						is_stale = true;
+
+					break;
+				}
+				rc = llapi_layout_comp_use(layout,
+						    LLAPI_LAYOUT_COMP_USE_NEXT);
+				if (rc < 0)
+					break;
+			}
+		}
+
+		if (is_stale)
+			fprintf(stdout, "Mirror %u:\t%#lx (stale)\n",
+				chunk->mirror_id[i], crc[i]);
+		else
+			fprintf(stdout, "Mirror %u:\t%#lx\n",
+				chunk->mirror_id[i], crc[i]);
+	}
 	fprintf(stdout, "\n");
+}
+
+/**
+ * print_stale_mirrors() - Print stale mirrors with checksums.
+ * @fd:     File descriptor of the mirrored file.
+ * @layout: Mirror component layout.
+ * @file_size: Size of the file.
+ * @verbose: Verbose mode.
+ *
+ * This function finds stale mirrors and displays them with checksums
+ * in the same format as normal verification output.
+ *
+ * Return: number of stale mirrors found, or negative error code.
+ */
+static inline
+int print_stale_mirrors(int fd, struct llapi_layout *layout,
+			size_t file_size, int verbose)
+{
+	int stale_count = 0;
+	int rc = 0;
+	bool header_printed = false;
+
+	if (!layout)
+		goto check_only;
+
+	rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_FIRST);
+	while (rc == 0) {
+		uint32_t mirror_id, comp_flags;
+
+		rc = llapi_layout_mirror_id_get(layout, &mirror_id);
+		if (rc < 0)
+			break;
+
+		rc = llapi_layout_comp_flags_get(layout, &comp_flags);
+		if (rc < 0)
+			break;
+
+		if (comp_flags & LCME_FL_STALE) {
+			bool is_nosync = comp_flags & LCME_FL_NOSYNC;
+			const char *flag_str = is_nosync ?
+					       "nosync,stale" : "stale";
+
+			/* Print header only once */
+			if (!header_printed) {
+				fprintf(stdout,
+					"CRC-32 checksum value for chunk [0, 0x%lx):\n",
+					file_size);
+				header_printed = true;
+			}
+
+			/* Calculate and display checksum for stale mirror */
+			const size_t buflen = 4 * 1024 * 1024; /* 4M */
+			void *buf;
+			ssize_t bytes_read;
+			unsigned long crc;
+
+			if (posix_memalign(&buf, sysconf(_SC_PAGESIZE),
+					   buflen) == 0) {
+				bytes_read = llapi_mirror_read(fd,
+							       mirror_id, buf,
+							       MIN(buflen,
+								   file_size),
+							       0);
+				if (bytes_read > 0) {
+					crc = crc32(crc32(0L, Z_NULL, 0), buf,
+						    bytes_read);
+					fprintf(stdout,
+						"Mirror %u:\t%#lx (%s)\n",
+						mirror_id, crc, flag_str);
+				} else {
+					fprintf(stdout,
+						"Mirror %u:\t(%s - read error)\n",
+						mirror_id, flag_str);
+				}
+				free(buf);
+			} else {
+				fprintf(stdout,
+					"Mirror %u:\t(%s - alloc error)\n",
+					mirror_id, flag_str);
+			}
+			/* Only count non-nosync stale as errors */
+			if (!is_nosync)
+				stale_count++;
+		}
+
+		rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_NEXT);
+		if (rc < 0) {
+			rc = 0; /* End of components */
+			break;
+		}
+	}
+
+	if (header_printed)
+		fprintf(stdout, "\n");
+
+	return stale_count;
+
+check_only:
+	/* Just count stale mirrors without printing */
+	rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_FIRST);
+	while (rc == 0) {
+		uint32_t comp_flags;
+
+		rc = llapi_layout_comp_flags_get(layout, &comp_flags);
+		if (rc < 0)
+			break;
+
+		if (comp_flags & LCME_FL_STALE)
+			stale_count++;
+
+		rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_NEXT);
+		if (rc < 0) {
+			rc = 0; /* End of components */
+			break;
+		}
+	}
+
+	return stale_count;
 }
 
 /**
@@ -13733,18 +16050,20 @@ void filter_mirror_id(struct verify_chunk *chunks, int chunk_count,
 
 /**
  * lfs_mirror_prepare_chunk() - Find mirror chunks to be verified.
- * @layout:      Mirror component list.
- * @chunks:      Array of chunks.
- * @chunks_size: Array size of @chunks.
+ * @layout:        Mirror component list.
+ * @chunks:        Array of chunks.
+ * @chunks_size:   Array size of @chunks.
+ * @include_stale: Whether to include stale mirrors in chunks.
  *
  * This function scans the components in @layout from offset 0 to LUSTRE_EOF
  * to find out chunk segments and store them in @chunks array.
  *
  * The @mirror_id array in each element of @chunks will store the valid
- * mirror ids that cover the chunk. If a mirror component covering the
- * chunk has LCME_FL_STALE or LCME_FL_OFFLINE flag, then the mirror id
- * will not be stored into the @mirror_id array, and the chunk for that
- * mirror will not be verified.
+ * mirror ids that cover the chunk. If @include_stale is false and a mirror
+ * component covering the chunk has LCME_FL_STALE or LCME_FL_OFFLINE flag,
+ * then the mirror id will not be stored into the @mirror_id array, and the
+ * chunk for that mirror will not be verified. If @include_stale is true,
+ * stale mirrors will be included for verification.
  *
  * The @mirror_count in each element of @chunks will store the number of
  * mirror ids in @mirror_id array. If @mirror_count is 0, it indicates the
@@ -13774,7 +16093,7 @@ void filter_mirror_id(struct verify_chunk *chunks, int chunk_count,
 static inline
 int lfs_mirror_prepare_chunk(struct llapi_layout *layout,
 			     struct verify_chunk *chunks,
-			     size_t chunks_size)
+			     size_t chunks_size, bool include_stale)
 {
 	uint64_t start;
 	uint64_t end;
@@ -13822,7 +16141,17 @@ int lfs_mirror_prepare_chunk(struct llapi_layout *layout,
 				goto error;
 			}
 
-			if (flags & LCME_FL_STALE || flags & LCME_FL_OFFLINE)
+			/* Skip nosync components - they are intentionally
+			 * excluded from resync so should not be verified
+			 */
+			if (flags & LCME_FL_NOSYNC)
+				goto next;
+
+			if (flags & LCME_FL_PARITY)
+				goto next;
+
+			if (!include_stale && (flags & LCME_FL_STALE ||
+					       flags & LCME_FL_OFFLINE))
 				goto next;
 
 			rc = llapi_layout_mirror_id_get(layout, &mirror_id);
@@ -13880,6 +16209,7 @@ error:
  * @file_size: Size of the mirrored file.
  * @chunk:     A chunk and its corresponding valid mirror ids.
  * @verbose:   Verbose mode.
+ * @layout:    Mirror component layout.
  *
  * This function verifies a @chunk contains exactly the same data
  * ammong the mirrors that cover it.
@@ -13892,9 +16222,10 @@ error:
  */
 static inline
 int lfs_mirror_verify_chunk(int fd, size_t file_size,
-			    struct verify_chunk *chunk, int verbose)
+			    struct verify_chunk *chunk, int verbose,
+			    struct llapi_layout *layout)
 {
-	const size_t buflen = 4 * 1024 * 1024; /* 4M */
+	const size_t buflen = DEFAULT_IO_BUFLEN;
 	void *buf;
 	size_t page_size;
 	ssize_t bytes_read;
@@ -13918,6 +16249,7 @@ int lfs_mirror_verify_chunk(int fd, size_t file_size,
 	rc = posix_memalign(&buf, page_size, buflen);
 	if (rc) /* error code is returned directly */
 		return -rc;
+	(void)mlock(buf, buflen);
 
 	if (verbose > 1) {
 		fprintf(stdout, "Verifying chunk "DEXT" on mirror:",
@@ -13931,6 +16263,8 @@ int lfs_mirror_verify_chunk(int fd, size_t file_size,
 	count = MIN(chunk->chunk.e_end, file_size) - chunk->chunk.e_start;
 	pos = chunk->chunk.e_start;
 	while (bytes_done < count) {
+		bool print = false;
+
 		/* compute initial CRC-32 checksum */
 		crc = crc32(0L, Z_NULL, 0);
 		memset(crc_array, 0, sizeof(crc_array));
@@ -13938,11 +16272,12 @@ int lfs_mirror_verify_chunk(int fd, size_t file_size,
 		bytes_read = 0;
 		for (i = 0; i < chunk->mirror_count; i++) {
 			bytes_read = llapi_mirror_read(fd, chunk->mirror_id[i],
-						       buf, buflen, pos);
+						       buf, MIN(buflen, count),
+						       pos);
 			if (bytes_read < 0) {
 				rc = bytes_read;
 				fprintf(stderr,
-					"%s: failed to read data from mirror %u: %s.\n",
+					"%s: error reading from mirror %u: %s\n",
 					progname, chunk->mirror_id[i],
 					strerror(-rc));
 				goto error;
@@ -13952,22 +16287,24 @@ int lfs_mirror_verify_chunk(int fd, size_t file_size,
 			crc_array[i] = crc32(crc, buf, bytes_read);
 		}
 
-		if (verbose)
-			print_checksums(chunk, crc_array, pos, buflen);
 
 		/* compare CRC-32 checksum values */
 		for (i = 1; i < chunk->mirror_count; i++) {
 			if (crc_array[i] != crc_array[0]) {
-				rc = -EINVAL;
+				rc = -EUCLEAN;
 
 				fprintf(stderr,
-					"%s: chunk "DEXT" has different checksum value on mirror %u:%lx and mirror %u:%lx.\n",
+					"%s: chunk "DEXT" has different checksum value on mirror %u:%lx and mirror %u:%lx: %s\n",
 					progname, PEXT(&chunk->chunk),
 					chunk->mirror_id[0], crc_array[0],
-					chunk->mirror_id[i], crc_array[i]);
-				print_checksums(chunk, crc_array, pos, buflen);
+					chunk->mirror_id[i], crc_array[i],
+					strerror(-rc));
+				print = true;
 			}
 		}
+		if (verbose || print)
+			print_checksums(chunk, crc_array, pos, bytes_read,
+					layout);
 
 		pos += bytes_read;
 		bytes_done += bytes_read;
@@ -13982,8 +16319,440 @@ int lfs_mirror_verify_chunk(int fd, size_t file_size,
 	}
 
 error:
+	(void)munlock(buf, buflen);
 	free(buf);
 	return rc;
+}
+
+struct mirror_info {
+	uint32_t mirror_id;
+	uint32_t flags;
+	unsigned long checksum;
+	bool has_prefwr;
+	bool has_prefrd;
+};
+
+/**
+ * compare_mirror_checksums() - Compare checksums of all mirrors for a chunk.
+ * @fd:        File descriptor of the mirrored file.
+ * @chunk:     A chunk and its corresponding valid mirror ids.
+ * @mirrors:   Array to store mirror information including checksums.
+ * @mirror_count: Number of mirrors.
+ *
+ * This function reads data from each mirror and computes checksums to
+ * determine which mirrors have consistent vs inconsistent data.
+ *
+ * Return: 0 on success or a negative error code on failure.
+ */
+static int compare_mirror_checksums(int fd, struct verify_chunk *chunk,
+				    struct mirror_info *mirrors,
+				    int mirror_count)
+{
+	const size_t buflen = DEFAULT_IO_BUFLEN;
+	void *buf;
+	size_t page_size;
+	ssize_t bytes_read;
+	off_t pos;
+	unsigned long crc;
+	int i;
+	int rc = 0;
+
+	page_size = sysconf(_SC_PAGESIZE);
+	if (page_size < 0)
+		return -errno;
+
+	rc = posix_memalign(&buf, page_size, buflen);
+	if (rc)
+		return -rc;
+	(void)mlock(buf, buflen);
+
+	/* Read from each mirror and compute checksum */
+	pos = chunk->chunk.e_start;
+	crc = crc32(0L, Z_NULL, 0);
+
+	for (i = 0; i < mirror_count; i++) {
+		bytes_read = llapi_mirror_read(fd, mirrors[i].mirror_id,
+					       buf, MIN(buflen,
+					       chunk->chunk.e_end - pos), pos);
+		if (bytes_read < 0) {
+			rc = bytes_read;
+			fprintf(stderr,
+				"%s: error reading from mirror %u: %s\n",
+				progname, mirrors[i].mirror_id,
+				strerror(-rc));
+			goto out;
+		}
+
+		mirrors[i].checksum = crc32(crc, buf, bytes_read);
+	}
+
+out:
+	(void)munlock(buf, buflen);
+	free(buf);
+	return rc;
+}
+
+/**
+ * get_mirror_properties() - Get properties of all mirrors.
+ * @layout:    Mirror component layout.
+ * @mirrors:   Array to store mirror information.
+ * @max_mirrors: Maximum number of mirrors to process.
+ *
+ * This function iterates through all mirror components and extracts
+ * their properties including mirror IDs and preference flags.
+ *
+ * Return: Number of mirrors found or a negative error code on failure.
+ */
+static int get_mirror_properties(struct llapi_layout *layout,
+				 struct mirror_info *mirrors, int max_mirrors)
+{
+	int mirror_count = 0;
+	uint32_t mirror_id, flags;
+	int rc;
+
+	rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_FIRST);
+	if (rc < 0)
+		return rc;
+
+	do {
+		rc = llapi_layout_mirror_id_get(layout, &mirror_id);
+		if (rc < 0)
+			return rc;
+
+		rc = llapi_layout_comp_flags_get(layout, &flags);
+		if (rc < 0)
+			return rc;
+
+		/* Check if this mirror ID is already in our array */
+		int found = -1;
+
+		for (int i = 0; i < mirror_count; i++) {
+			if (mirrors[i].mirror_id == mirror_id) {
+				found = i;
+				break;
+			}
+		}
+
+		if (found == -1) {
+			if (mirror_count >= max_mirrors)
+				return -E2BIG;
+			found = mirror_count++;
+			mirrors[found].mirror_id = mirror_id;
+			mirrors[found].flags = 0;
+			mirrors[found].has_prefwr = false;
+			mirrors[found].has_prefrd = false;
+		}
+
+		mirrors[found].flags |= flags;
+		if (flags & LCME_FL_PREF_WR)
+			mirrors[found].has_prefwr = true;
+		if (flags & LCME_FL_PREF_RD)
+			mirrors[found].has_prefrd = true;
+
+		rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_NEXT);
+	} while (rc == 0);
+
+	return mirror_count;
+}
+
+/**
+ * auto_mark_stale_mirrors() - Intelligently mark inconsistent mirrors as stale.
+ * @fd:      File descriptor of the mirrored file.
+ * @layout:  Mirror component layout.
+ * @fname:   File name for error reporting.
+ * @verbose: Verbosity level for output.
+ *
+ * This function analyzes mirror inconsistencies and marks only the mirrors
+ * that should be stale based on intelligent heuristics:
+ * - For 2 mirrors with different checksums: mark non-prefwr mirror as stale
+ * - For multiple mirrors: mark mirrors that don't match the majority checksum
+ * - Use prefwr/prefrd flags as tie-breakers when determining majority
+ * - Only processes chunks where mirrors have different checksums
+ *
+ * Return: 0 on success or a negative error code on failure.
+ */
+static inline
+int auto_mark_stale_mirrors(int fd, struct llapi_layout *layout,
+			    const char *fname, int verbose)
+{
+	struct verify_chunk chunks_array[1024] = { };
+	struct mirror_info mirrors[LUSTRE_MIRROR_COUNT_MAX];
+	int chunk_count = 0;
+	int mirror_count;
+	int rc;
+
+	/* Get all mirror properties */
+	mirror_count = get_mirror_properties(layout, mirrors,
+					     LUSTRE_MIRROR_COUNT_MAX);
+	if (mirror_count < 0) {
+		fprintf(stderr,
+			"%s: failed to get mirror properties for '%s': %s\n",
+			progname, fname, strerror(-mirror_count));
+		return mirror_count;
+	}
+
+	if (mirror_count < 2) {
+		fprintf(stderr, "%s: file '%s' has less than 2 mirrors\n",
+			progname, fname);
+		return -EINVAL;
+	}
+
+	chunk_count = lfs_mirror_prepare_chunk(layout, chunks_array,
+					       ARRAY_SIZE(chunks_array),
+					       false);
+	if (chunk_count < 0) {
+		fprintf(stderr, "%s: failed to prepare chunks for '%s': %s\n",
+			progname, fname, strerror(-chunk_count));
+		return chunk_count;
+	}
+
+	/* For each chunk, compare mirror checksums */
+	for (int i = 0; i < chunk_count; i++) {
+		struct verify_chunk *chunk = &chunks_array[i];
+		unsigned long checksums[LUSTRE_MIRROR_COUNT_MAX];
+		int checksum_groups[LUSTRE_MIRROR_COUNT_MAX];
+		int group_counts[LUSTRE_MIRROR_COUNT_MAX] = {0};
+		int num_groups = 0;
+		int majority_group = -1;
+		int max_count = 0;
+
+		/* Compare checksums for this chunk */
+		rc = compare_mirror_checksums(fd, chunk, mirrors, mirror_count);
+		if (rc < 0) {
+			fprintf(stderr,
+				"%s: failed to compare checksums for '%s': %s\n",
+				progname, fname, strerror(-rc));
+			return rc;
+		}
+
+		/* Group mirrors by checksum */
+		for (int j = 0; j < mirror_count; j++) {
+			checksums[j] = mirrors[j].checksum;
+			checksum_groups[j] = -1;
+
+			/* Find existing group with same checksum */
+			for (int g = 0; g < num_groups; g++) {
+				for (int k = 0; k < j; k++) {
+					if (checksum_groups[k] == g &&
+					    checksums[k] == checksums[j]) {
+						checksum_groups[j] = g;
+						group_counts[g]++;
+						goto next_mirror;
+					}
+				}
+			}
+
+			/* Create new group if not found */
+			if (checksum_groups[j] == -1) {
+				checksum_groups[j] = num_groups;
+				group_counts[num_groups] = 1;
+				num_groups++;
+			}
+next_mirror:
+			continue;
+		}
+
+		/* Find majority group, with tie-breaking */
+		for (int g = 0; g < num_groups; g++) {
+			if (group_counts[g] > max_count) {
+				max_count = group_counts[g];
+				majority_group = g;
+			} else if (group_counts[g] == max_count &&
+				   max_count > 1) {
+				/* prefer group with prefwr mirrors */
+				bool current_has_prefwr = false;
+				bool candidate_has_prefwr = false;
+
+				/* Check if current majority group has
+				 * prefwr mirrors
+				 */
+				for (int k = 0; k < mirror_count; k++) {
+					if (checksum_groups[k] == majority_group &&
+					    mirrors[k].has_prefwr) {
+						current_has_prefwr = true;
+						break;
+					}
+				}
+
+				/* Check if candidate group has
+				 * prefwr mirrors
+				 */
+				for (int k = 0; k < mirror_count; k++) {
+					if (checksum_groups[k] == g &&
+					    mirrors[k].has_prefwr) {
+						candidate_has_prefwr = true;
+						break;
+					}
+				}
+
+				/* Prefer group with prefwr mirrors */
+				if (candidate_has_prefwr &&
+				    !current_has_prefwr) {
+					majority_group = g;
+				}
+			}
+		}
+
+		/* If all mirrors have same checksum, nothing to mark */
+		if (num_groups == 1)
+			continue;
+
+		/* Validate that we found a majority group */
+		if (majority_group == -1) {
+			fprintf(stderr,
+				"%s: failed to determine majority group for chunk %d in '%s'\n",
+				progname, i, fname);
+			return -EINVAL;
+		}
+
+		if (verbose > 1) {
+			printf("Found %d checksum groups for chunk %d, majority group %d has %d mirrors\n",
+			       num_groups, i, majority_group, max_count);
+		}
+
+		/* Special case for 2 mirrors with different checksums */
+		if (mirror_count == 2 && num_groups == 2) {
+			int prefwr_mirror = -1;
+			int non_prefwr_mirror = -1;
+
+			/* Find prefwr vs non-prefwr mirrors */
+			for (int j = 0; j < mirror_count; j++) {
+				if (mirrors[j].has_prefwr)
+					prefwr_mirror = j;
+				else
+					non_prefwr_mirror = j;
+			}
+
+			/* mark non-prefwr as stale */
+			if (prefwr_mirror >= 0 && non_prefwr_mirror >= 0) {
+				printf("Marking non-prefwr mirror %u as stale\n",
+				       mirrors[non_prefwr_mirror].mirror_id);
+
+				rc = lfs_component_set_by_mirror((char *)fname,
+					mirrors[non_prefwr_mirror].mirror_id,
+					LCME_FL_STALE, 0);
+				if (rc != 0) {
+					fprintf(stderr,
+						"%s: failed to mark mirror %u stale in '%s': %s\n",
+						progname,
+						mirrors[non_prefwr_mirror].mirror_id,
+						fname, strerror(-rc));
+					return rc;
+				}
+				continue;
+			}
+		}
+
+		/* Mark mirrors that don't match majority as stale */
+		for (int j = 0; j < mirror_count; j++) {
+			if (checksum_groups[j] != majority_group) {
+				/* This mirror is inconsistent, mark it stale */
+				printf("Marking mirror %u as stale (has_prefwr=%s)\n",
+				       mirrors[j].mirror_id,
+				       mirrors[j].has_prefwr ? "yes" : "no");
+
+				rc = lfs_component_set_by_mirror((char *)fname,
+					mirrors[j].mirror_id,
+					LCME_FL_STALE, 0);
+				if (rc != 0) {
+					fprintf(stderr,
+						"%s: failed to mark mirror %u stale in '%s': %s\n",
+						progname, mirrors[j].mirror_id,
+						fname, strerror(-rc));
+					return rc;
+				}
+			}
+		}
+	}
+
+	if (verbose > 0) {
+		printf("Successfully marked inconsistent mirrors as stale in '%s'\n",
+		       fname);
+	}
+	return 0;
+}
+
+/**
+ * lfs_mirror_prepare_ec() - Find EC parity components to be verified.
+ * @layout:      Mirror component list.
+ * @ecs:         Output array of EC parity component ids.
+ * @ecs_size:    Capacity of the @ecs array.
+ *
+ * Walks @layout and collects the ids of every EC parity component
+ * (LCME_FL_PARITY) that is eligible for verification. NOSYNC components are
+ * skipped silently; STALE parity components are treated as an error since
+ * their on-disk parities cannot be meaningfully compared against the data.
+ *
+ * Return: number of EC parity components written to @ecs on success, or a
+ * negative errno on failure.
+ */
+static inline int lfs_mirror_prepare_ec(struct llapi_layout *layout, __u32 *ecs,
+					size_t ecs_size)
+{
+	int i, rc;
+
+	memset(ecs, 0, sizeof(*ecs) * ecs_size);
+
+	rc = llapi_layout_comp_use(layout, LLAPI_LAYOUT_COMP_USE_FIRST);
+	if (rc < 0) {
+		fprintf(stderr,
+			"%s: move to the first layout component: %s.\n",
+			progname, strerror(errno));
+		goto error;
+	}
+
+	i = 0;
+	rc = 0;
+	while (rc == 0) {
+		uint32_t id, flags;
+
+		rc = llapi_layout_comp_flags_get(layout, &flags);
+		if (rc < 0) {
+			fprintf(stderr,
+				"%s: llapi_layout_comp_flags_get failed: %s.\n",
+				progname, strerror(errno));
+			goto error;
+		}
+
+		if (!(flags & LCME_FL_PARITY))
+			goto next;
+
+		/* Skip nosync components - they are intentionally kept stale */
+		if (flags & LCME_FL_NOSYNC)
+			goto next;
+
+		rc = llapi_layout_comp_id_get(layout, &id);
+		if (rc < 0) {
+			fprintf(stderr,
+				"%s: Failed to get component id.\n",
+				progname);
+			goto error;
+		}
+
+		if (flags & LCME_FL_STALE) {
+			rc = -ESTALE;
+			fprintf(stderr,
+				"%s: EC component 0x%x is stale.\n",
+				progname, id);
+			goto error;
+		}
+
+		ecs[i] = id;
+		i++;
+
+	next:
+		rc = llapi_layout_comp_use(layout,
+					   LLAPI_LAYOUT_COMP_USE_NEXT);
+		if (rc < 0) {
+			fprintf(stderr,
+				"%s: move to the next layout component: %s.\n",
+				progname, strerror(errno));
+			goto error;
+		}
+	}
+
+error:
+	return rc < 0 ? rc : i;
 }
 
 /**
@@ -14007,14 +16776,16 @@ error:
  */
 static inline
 int lfs_mirror_verify_file(const char *fname, __u16 *mirror_ids, int ids_nr,
-			   int verbose)
+			   int verbose, int stale)
 {
 	struct verify_chunk chunks_array[1024] = { };
+	__u32 ec_array[1024] = { };
 	struct llapi_layout *layout = NULL;
 	struct stat stbuf;
 	uint32_t flr_state;
 	int fd;
-	int chunk_count = 0;
+	int chunk_count;
+	int ec_count;
 	int idx = 0;
 	int rc = 0;
 	int rc1 = 0;
@@ -14088,7 +16859,8 @@ int lfs_mirror_verify_file(const char *fname, __u16 *mirror_ids, int ids_nr,
 
 	/* find out mirror chunks to be verified */
 	chunk_count = lfs_mirror_prepare_chunk(layout, chunks_array,
-					       ARRAY_SIZE(chunks_array));
+					       ARRAY_SIZE(chunks_array),
+					       ids_nr > 0);
 	if (chunk_count < 0) {
 		rc = chunk_count;
 		goto free_layout;
@@ -14100,6 +16872,16 @@ int lfs_mirror_verify_file(const char *fname, __u16 *mirror_ids, int ids_nr,
 
 	if (verbose > 2)
 		print_chunks(fname, chunks_array, chunk_count);
+
+	if (ids_nr <= 0) {
+		/* Check for and display stale mirrors */
+		rc1 = print_stale_mirrors(fd, layout, stbuf.st_size, verbose);
+		if (rc1 > 0) {
+			rc2 = -ESTALE;
+		} else if (rc1 < 0) {
+			rc2 = rc1;
+		}
+	}
 
 	for (idx = 0; idx < chunk_count; idx++) {
 		if (chunks_array[idx].chunk.e_start >= stbuf.st_size) {
@@ -14145,18 +16927,47 @@ int lfs_mirror_verify_file(const char *fname, __u16 *mirror_ids, int ids_nr,
 
 		/* verify one chunk */
 		rc1 = lfs_mirror_verify_chunk(fd, stbuf.st_size,
-					      &chunks_array[idx], verbose);
+					      &chunks_array[idx], verbose,
+					      layout);
 		if (rc1 < 0) {
 			rc2 = rc1;
-			if (!verbose) {
+			if (!verbose && !stale) {
 				rc = rc1;
 				goto free_layout;
 			}
 		}
 	}
 
-	if (rc2 < 0)
+	/* If stale marking is requested and there were verification errors,
+	 * try to automatically mark mirrors as stale
+	 */
+	if (stale && rc2 < 0) {
+		int mark_rc = auto_mark_stale_mirrors(fd, layout, fname,
+						      verbose);
+
+		if (mark_rc < 0) {
+			fprintf(stderr,
+				"%s: failed to auto-mark stale mirrors in '%s': %s\n",
+				progname, fname, strerror(-mark_rc));
+		} else {
+			rc2 = mark_rc;
+		}
+	}
+
+	if (rc2 < 0) {
 		rc = rc2;
+		goto free_layout;
+	}
+
+	/* find ec components to be verified */
+	ec_count = lfs_mirror_prepare_ec(layout, ec_array,
+					 ARRAY_SIZE(ec_array));
+	if (ec_count < 0) {
+		rc = ec_count;
+		goto free_layout;
+	}
+
+	rc = llapi_ec_verify_comps(fd, layout, ec_array, ec_count);
 
 free_layout:
 	llapi_layout_free(layout);
@@ -14182,6 +16993,7 @@ static inline int lfs_mirror_verify(int argc, char **argv)
 	__u16 mirror_ids[LUSTRE_MIRROR_COUNT_MAX] = { 0 };
 	int ids_nr = 0;
 	int c;
+	int stale = 0;
 	int verbose = 0;
 	int rc = 0;
 	int rc1 = 0;
@@ -14190,12 +17002,13 @@ static inline int lfs_mirror_verify(int argc, char **argv)
 	struct option long_opts[] = {
 	{ .val = 'h',	.name = "help",		.has_arg = no_argument },
 	{ .val = 'o',	.name = "only",		.has_arg = required_argument },
+	{ .val = 's',	.name = "stale",	.has_arg = no_argument},
 	{ .val = 'v',	.name = "verbose",	.has_arg = no_argument },
 	{ .name = NULL } };
 
 	snprintf(cmd, sizeof(cmd), "%s %s", progname, argv[0]);
 	progname = cmd;
-	while ((c = getopt_long(argc, argv, "ho:v", long_opts, NULL)) >= 0) {
+	while ((c = getopt_long(argc, argv, "ho:sv", long_opts, NULL)) >= 0) {
 		switch (c) {
 		case 'o':
 			rc = parse_mirror_ids(mirror_ids,
@@ -14215,6 +17028,9 @@ static inline int lfs_mirror_verify(int argc, char **argv)
 				rc = CMD_HELP;
 				goto error;
 			}
+			break;
+		case 's':
+			stale = 1;
 			break;
 		case 'v':
 			verbose++;
@@ -14252,7 +17068,7 @@ static inline int lfs_mirror_verify(int argc, char **argv)
 	rc = 0;
 	for (; optind < argc; optind++) {
 		rc1 = lfs_mirror_verify_file(argv[optind], mirror_ids, ids_nr,
-					     verbose);
+					     verbose, stale);
 		if (rc1 < 0)
 			rc = rc1;
 	}

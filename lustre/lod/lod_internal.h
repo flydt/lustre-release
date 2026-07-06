@@ -17,7 +17,6 @@
 #ifndef _LOD_INTERNAL_H
 #define _LOD_INTERNAL_H
 
-#include <libcfs/libcfs.h>
 #include <uapi/linux/lustre/lustre_cfg.h>
 #include <obd.h>
 #include <dt_object.h>
@@ -114,6 +113,8 @@ struct lod_device {
 
 	/* maximum EA size underlied OSD may have */
 	unsigned int	      lod_osd_max_easize;
+	/* maximum number of mirrors allowed */
+	unsigned int	      lod_mirror_count_max;
 	/* maximum size of MDT stripe for Data-on-MDT files. */
 	unsigned int          lod_dom_stripesize_max_kb;
 	/* current DOM default stripe size adjusted by threshold */
@@ -151,16 +152,24 @@ struct lod_device {
 };
 
 #define lod_ost_bitmap		lod_ost_descs.ltd_tgt_bitmap
+#define lod_ost_size		lod_ost_descs.ltd_tgts_size
 #define lod_ost_count		lod_ost_descs.ltd_lov_desc.ld_tgt_count
 #define lod_ost_active_count	lod_ost_descs.ltd_lov_desc.ld_active_tgt_count
 #define lod_remote_mdt_count	lod_mdt_descs.ltd_lmv_desc.ld_tgt_count
 
 struct lod_layout_component {
-	struct lu_extent	  llc_extent;
-	__u32			  llc_id;
-	__u32			  llc_flags;
-	__u32			  llc_magic;
-	__u64			  llc_timestamp; /* snapshot time */
+	struct lu_extent	llc_extent;
+	__u32			llc_id;
+	__u32			llc_flags;
+	__u32			llc_magic;
+	union {
+		__u64		llc_time_and_id;
+		struct {
+			__u64	llc_timestamp:48;
+			/* mirror link id for data and parity components */
+			__u16	llc_mirror_link_id;
+		};
+	};
 	union {
 		struct { /* plain layout V1/V3. */
 			__u32			  llc_pattern;
@@ -174,6 +183,9 @@ struct lod_layout_component {
 			struct lu_tgt_pool	  llc_ostlist;
 			struct dt_object	**llc_stripe;
 			__u32			 *llc_ost_indices;
+			/* EC component */
+			__u8			  llc_dstripe_count;
+			__u8			  llc_cstripe_count;
 		};
 		struct { /* Foreign mirror layout component */
 			__u32			  llc_length;
@@ -217,7 +229,8 @@ enum layout_verify_flags {
 struct lod_mirror_entry {
 	__u16	lme_stale:1,
 		lme_prefer:1,
-		lme_hsm:1;
+		lme_hsm:1,
+		lme_parity:1;
 	/* mirror id */
 	__u16	lme_id;
 	/* preference */
@@ -251,7 +264,7 @@ struct lod_object {
 		/* directory stripe (LMV) */
 		struct {
 			/* Slave stripe count for striped directory. */
-			__u16		ldo_dir_stripe_count;
+			__s16		ldo_dir_stripe_count;
 			/* How many stripes allocated for a striped directory */
 			__u16		ldo_dir_stripes_allocated;
 			__u32		ldo_dir_stripe_offset;
@@ -392,8 +405,7 @@ struct lod_it {
 #define LOD_OBJS_INTRANS 4
 struct lod_thread_info {
 	/* per-thread buffer for LOV EA, may be vmalloc'd */
-	void			       *lti_ea_store;
-	__u32				lti_ea_store_size;
+	struct lu_buf                   lti_ea_buf;
 	/* per-thread buffer for LMV EA */
 	struct lu_buf			lti_buf;
 	struct ost_id			lti_ostid;
@@ -427,6 +439,9 @@ struct lod_thread_info {
 	struct lod_object *lti_obj[LOD_OBJS_INTRANS];
 	__u32 lti_gen[LOD_OBJS_INTRANS];
 };
+
+#define lti_ea_store		lti_ea_buf.lb_buf
+#define lti_ea_store_size	lti_ea_buf.lb_len
 
 /**
  * \retval	0 object's layout hasn't changed in the transaction

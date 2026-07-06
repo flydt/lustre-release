@@ -23,6 +23,10 @@ esac
 AS_IF([test -z "$LDISKFS_SERIES"], [
 AS_IF([test x$RHEL_KERNEL = xyes], [
 	case $RHEL_RELEASE_NO in
+	101)    LDISKFS_SERIES="6.12-rhel10.1.series"   ;;
+	100)    LDISKFS_SERIES="6.12-rhel10.0.series"   ;;
+	97)     LDISKFS_SERIES="5.14-rhel9.7.series"    ;;
+	96)     LDISKFS_SERIES="5.14-rhel9.6.series"    ;;
 	95)     LDISKFS_SERIES="5.14-rhel9.5.series"    ;;
 	94)     LDISKFS_SERIES="5.14-rhel9.4.series"
 		AS_VERSION_COMPARE([$RHEL_RELEASE_STR],[427.42.1],
@@ -98,6 +102,8 @@ AS_IF([test x$RHEL_KERNEL = xyes], [
 	    ])
 ], [test x$UBUNTU_KERNEL = xyes], [
         BASEVER=$(echo $LINUXRELEASE | cut -d'-' -f1)
+	AS_VERSION_COMPARE([$BASEVER],[7.0.0],[
+	AS_VERSION_COMPARE([$BASEVER],[6.15.0],[
 	AS_VERSION_COMPARE([$BASEVER],[6.11.0],[
 	AS_VERSION_COMPARE([$BASEVER],[6.10.0],[
 	AS_VERSION_COMPARE([$BASEVER],[6.8.0],[
@@ -170,8 +176,11 @@ AS_IF([test x$RHEL_KERNEL = xyes], [
 		AS_IF(
 			[test -z "$KPLEV"], [
 				AC_MSG_WARN([Failed to determine Kernel patch level. Assume latest.])
-				LDISKFS_SERIES="6.8.0-45-ubuntu24.series"
+				LDISKFS_SERIES="6.8.0-106-ubuntu24.series"
 			],
+			[test $KPLEV -ge 106], [LDISKFS_SERIES="6.8.0-106-ubuntu24.series"],
+			[test $KPLEV -ge 100], [LDISKFS_SERIES="6.8.0-100-ubuntu24.series"],
+			[test $KPLEV -ge 90], [LDISKFS_SERIES="6.8.0-90-ubuntu24.series"],
 			[test $KPLEV -ge 44], [LDISKFS_SERIES="6.8.0-45-ubuntu24.series"],
 			[LDISKFS_SERIES="6.7-ml.series"]
 		)
@@ -180,7 +189,21 @@ AS_IF([test x$RHEL_KERNEL = xyes], [
 	[LDISKFS_SERIES="6.10-ml.series"],
 	[LDISKFS_SERIES="6.10-ml.series"])],
 	[LDISKFS_SERIES="6.11-ml.series"],
-	[LDISKFS_SERIES="6.11-ml.series"])
+	[LDISKFS_SERIES="6.11-ml.series"])],
+	[LDISKFS_SERIES="7.0.0-14-ubuntu26.series"],
+	[LDISKFS_SERIES="7.0.0-14-ubuntu26.series"])],
+	[
+		KPLEV=$(echo $LINUXRELEASE | cut -d'-' -f2)
+		AS_IF(
+			[test -z "$KPLEV"], [
+				AC_MSG_WARN([Failed to determine Kernel patch level. Assume latest.])
+				LDISKFS_SERIES="7.0.0-14-ubuntu26.series"
+			],
+			[test $KPLEV -ge 14], [LDISKFS_SERIES="7.0.0-14-ubuntu26.series"],
+			[LDISKFS_SERIES="7.0-ml.series"]
+		)
+	],
+	[LDISKFS_SERIES="7.0-ml.series"])
 ], [test x$OPENEULER_KERNEL = xyes], [
 	case $OPENEULER_VERSION_NO in
 	2203.0) LDISKFS_SERIES="5.10.0-oe2203.series" ;;
@@ -206,23 +229,23 @@ AS_IF([test -z "$LDISKFS_SERIES"],
 	AS_VERSION_COMPARE([$LINUXRELEASE],[6.6.0], [
 		LDISKFS_SERIES="6.1.38-ml.series"], [
 		LDISKFS_SERIES="6.6-ml.series"], [
-	AS_VERSION_COMPARE([$LINUXRELEASE],[6.7.0], [
+	AS_VERSION_COMPARE([$LINUXRELEASE],[6.12.0], [
 		LDISKFS_SERIES="6.6-ml.series"], [
-		LDISKFS_SERIES="6.7-ml.series"], [
-	AS_VERSION_COMPARE([$LINUXRELEASE],[6.10.0], [
-		LDISKFS_SERIES="6.7-ml.series"], [
-		LDISKFS_SERIES="6.10-ml.series"], [
-	AS_VERSION_COMPARE([$LINUXRELEASE],[6.10.5], [
-		LDISKFS_SERIES="6.10-ml.series"], [
-		LDISKFS_SERIES="6.11-ml.series"], [
-		LDISKFS_SERIES="6.11-ml.series"]
-	)] # 6.11
-	)] # 6.10
-	)] # 6.7
-	)] # 6.6
-	)] # 6.1
-	)] # 5.10
-	)] # 5.4 LTS
+		LDISKFS_SERIES="6.12-ml.series"], [
+	AS_VERSION_COMPARE([$LINUXRELEASE],[6.18.0], [
+		LDISKFS_SERIES="6.12-ml.series"], [
+		LDISKFS_SERIES="6.18-ml.series"], [
+	AS_VERSION_COMPARE([$LINUXRELEASE],[6.19.0], [
+		LDISKFS_SERIES="6.18-ml.series"], [
+		LDISKFS_SERIES="7.0-ml.series"], [
+		LDISKFS_SERIES="7.0-ml.series"]
+	)] # 7.0 - stable
+	)] # 6.18 - LTS (6.18)
+	)] # 6.12 - LTS
+	)] # 6.6  - LTS
+	)] # 6.1  - LTS
+	)] # 5.10 - LTS
+	)] # 5.4  - LTS
 	)],
 [])
 AS_IF([test -z "$LDISKFS_SERIES"],
@@ -402,6 +425,32 @@ AC_DEFUN([LB_LDISKFS_IGET_EA_INODE], [
 			['EXT4_IGET_EA_INODE' exists])
 	])
 ]) # LB_LDISKFS_IGET_EA_INODE
+
+#
+# LB_LDISKFS_DIR_REC_LEN_WITH_DIR
+#
+# Newer kernels (since v5.12-rc4-7-g471fbbea7ff7) have ext4_dir_rec_len() with
+# a dir (inode) argument to properly account for hashed directory entries on
+# casefolded+encrypted dirs
+#
+AC_DEFUN([LB_SRC_LDISKFS_DIR_REC_LEN_WITH_DIR], [
+	LB2_LINUX_TEST_SRC([ext4_dir_rec_len_with_dir], [
+		#include <linux/fs.h>
+		#include "$EXT4_SRC_DIR/ext4.h"
+	],[
+		unsigned int rec_len;
+		struct ext4_dir_entry_2 de = {0};
+		rec_len = ext4_dir_rec_len((__u32)0, NULL);
+		(void)rec_len;
+	],[-Werror])
+])
+AC_DEFUN([LB_LDISKFS_DIR_REC_LEN_WITH_DIR], [
+	LB2_MSG_LINUX_TEST_RESULT([if ext4_dir_rec_len takes a dir argument],
+	[ext4_dir_rec_len_with_dir], [
+		AC_DEFINE(LDISKFS_DIR_REC_LEN_WITH_DIR, 1,
+			[ext4_dir_rec_len takes a dir argument])
+	])
+]) # LB_LDISKFS_DIR_REC_LEN_WITH_DIR
 
 #
 # LDISKFS_AC_PATCH_PROGRAM
@@ -592,6 +641,44 @@ EXTRA_KCFLAGS="$tmp_flags"
 ]) # LB_EXT4_JOURNAL_GET_WRITE_ACCESS_4A
 
 #
+# LB_EXT4_JOURNAL_GET_CREATE_ACCESS_4A
+#
+# Linux v5.14-rc2-19-g188c299e2a26
+#    ext4: Support for checksumming from journal triggers
+#
+AC_DEFUN([LB_EXT4_JOURNAL_GET_CREATE_ACCESS_4A], [
+tmp_flags="$EXTRA_KCFLAGS"
+EXTRA_KCFLAGS="-Werror"
+LB_CHECK_COMPILE([if jbd2_journal_get_max_txn_bufs is available],
+ext4_journal_get_create_access, [
+	#include <linux/fs.h>
+	#include "$EXT4_SRC_DIR/ext4.h"
+	#include "$EXT4_SRC_DIR/ext4_jbd2.h"
+
+	int __ext4_journal_get_create_access(const char *where, unsigned int line,
+				    handle_t *handle,
+				    struct super_block *sb,
+				    struct buffer_head *bh,
+				    enum ext4_journal_trigger_type trigger_type)
+	{
+		return 0;
+	}
+],[
+	handle_t *handle = NULL;
+	struct super_block *sb = NULL;
+	struct buffer_head *bh = NULL;
+	enum ext4_journal_trigger_type trigger_type = EXT4_JTR_NONE;
+	int err = ext4_journal_get_create_access(handle, sb, bh, trigger_type);
+
+	(void)err;
+],[
+	AC_DEFINE(HAVE_EXT4_JOURNAL_GET_CREATE_ACCESS_4ARGS, 1,
+		[ext4_journal_get_create_access() has 4 arguments])
+])
+EXTRA_KCFLAGS="$tmp_flags"
+]) # LB_EXT4_JOURNAL_GET_CREATE_ACCESS_4A
+
+#
 # LB_HAVE_INODE_LOCK_SHARED
 #
 AC_DEFUN([LB_HAVE_INODE_LOCK_SHARED], [
@@ -607,23 +694,6 @@ inode_lock_shared, [
 		[inode_lock_shared() defined])
 ])
 ]) # LB_HAVE_INODE_LOCK_SHARED
-
-#
-# LB_HAVE_INODE_IVERSION
-#
-AC_DEFUN([LB_HAVE_INODE_IVERSION], [
-LB_CHECK_COMPILE([if iversion primitives defined],
-inode_set_iversion, [
-	#include <linux/iversion.h>
-],[
-	struct inode i;
-
-	inode_set_iversion(&i, 0);
-],[
-	AC_DEFINE(HAVE_INODE_IVERSION, 1,
-		[iversion primitives defined])
-])
-]) # LB_HAVE_INODE_IVERSION
 
 #
 # LB_CONFIG_LDISKFS
@@ -670,8 +740,8 @@ AS_IF([test x$enable_ldiskfs != xno],[
 	LDISKFS_AC_PATCH_PROGRAM
 	LB_EXT4_INC_DEC_COUNT_2ARGS
 	LB_EXT4_JOURNAL_GET_WRITE_ACCESS_4A
+	LB_EXT4_JOURNAL_GET_CREATE_ACCESS_4A
 	LB_HAVE_INODE_LOCK_SHARED
-	LB_HAVE_INODE_IVERSION
 	AC_DEFINE(CONFIG_LDISKFS_FS_POSIX_ACL, 1, [posix acls for ldiskfs])
 	AC_DEFINE(CONFIG_LDISKFS_FS_SECURITY, 1, [fs security for ldiskfs])
 	AC_DEFINE(CONFIG_LDISKFS_FS_XATTR, 1, [extened attributes for ldiskfs])
@@ -696,11 +766,13 @@ AC_DEFUN([LB_KABI_LDISKFS], [AS_IF([test x$enable_ldiskfs != xno],[
 		LB_SRC_LDISKFS_JOURNAL_ENSURE_CREDITS
 		LB_SRC_LDISKFS_IGET_HAS_FLAGS_ARG
 		LB_SRC_LDISKFS_IGET_EA_INODE
+		LB_SRC_LDISKFS_DIR_REC_LEN_WITH_DIR
 		LB_SRC_LDISKFS_FIND_ENTRY_LOCKED_EXISTS
 		LB_SRC_LDISKFSFS_DIRHASH_WANTS_DIR
 		LB_SRC_JBD2_H_TOTAL_CREDITS
 		LB_SRC_JBD2_JOURNAL_GET_MAX_TXN_BUFS
 		LB2_SRC_CHECK_CONFIG_IM([FS_ENCRYPTION])
+		LB2_SRC_CHECK_CONFIG_IM([FS_VERITY])
 	])
 	AC_DEFUN([LB_EXT4_LDISKFS_CHECKS], [
 		LB_EXT4_BREAD_4ARGS
@@ -709,15 +781,20 @@ AC_DEFUN([LB_KABI_LDISKFS], [AS_IF([test x$enable_ldiskfs != xno],[
 		LB_LDISKFS_JOURNAL_ENSURE_CREDITS
 		LB_LDISKFS_IGET_HAS_FLAGS_ARG
 		LB_LDISKFS_IGET_EA_INODE
+		LB_LDISKFS_DIR_REC_LEN_WITH_DIR
 		LB_LDISKFS_FIND_ENTRY_LOCKED_EXISTS
 		LB_LDISKFSFS_DIRHASH_WANTS_DIR
 		LB_JBD2_H_TOTAL_CREDITS
 		LB_JBD2_JOURNAL_GET_MAX_TXN_BUFS
 		LB2_TEST_CHECK_CONFIG_IM([FS_ENCRYPTION], [
 			EXT4_CRYPTO=],[
-			EXT4_CRYPTO='%/crypto.c'])
+			EXT4_CRYPTO='crypto.c'])
+		LB2_TEST_CHECK_CONFIG_IM([FS_VERITY], [
+			EXT4_VERITY=],[
+			EXT4_VERITY='verity.c'])
 	])
 	AC_SUBST(EXT4_CRYPTO)
+	AC_SUBST(EXT4_VERITY)
 ])])
 
 #

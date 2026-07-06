@@ -19,11 +19,13 @@
 #else
 #include <stdarg.h>
 #endif
-#include <libcfs/libcfs.h>
-#include <uapi/linux/lustre/lustre_idl.h>
 #include <linux/percpu_counter.h>
 #include <linux/rhashtable.h>
 #include <linux/ctype.h>
+#include <lustre_compat.h>
+
+#include <obd_support.h>
+#include <uapi/linux/lustre/lustre_idl.h>
 
 struct seq_file;
 struct proc_dir_entry;
@@ -387,6 +389,77 @@ struct lu_device_type_operations {
 	void (*ldto_stop)(struct lu_device_type *t);
 };
 
+static inline struct lu_device *ldto_device_alloc(const struct lu_env *env,
+						  struct lu_device_type *ldt,
+						  struct lustre_cfg *lcfg)
+{
+	const struct lu_device_type_operations *ldto;
+	struct lu_device *lu;
+
+	LASSERT(ldt);
+	ldto = ldt->ldt_ops;
+	LASSERT(ldto);
+
+	if (ldto->ldto_device_alloc)
+		return ldto->ldto_device_alloc(env, ldt, lcfg);
+
+	OBD_ALLOC_PTR(lu);
+	if (!lu)
+		return ERR_PTR(-ENOMEM);
+
+	return lu;
+}
+
+static inline struct lu_device *ldto_device_free(const struct lu_env *env,
+						 struct lu_device *lu)
+{
+	const struct lu_device_type_operations *ldto;
+
+	LASSERT(lu);
+	LASSERT(lu->ld_type);
+	ldto = lu->ld_type->ldt_ops;
+	LASSERT(ldto);
+
+	if (ldto->ldto_device_free)
+		return ldto->ldto_device_free(env, lu);
+
+	OBD_FREE_PTR(lu);
+	return NULL;
+}
+
+static inline int ldto_device_init(const struct lu_env *env,
+				   struct lu_device *lu, const char *name,
+				   struct lu_device *lu2)
+{
+	const struct lu_device_type_operations *ldto;
+
+	LASSERT(lu);
+	LASSERT(lu->ld_type);
+	ldto = lu->ld_type->ldt_ops;
+	LASSERT(ldto);
+
+	if (ldto->ldto_device_init)
+		return ldto->ldto_device_init(env, lu, name, lu2);
+
+	return 0;
+}
+
+static inline struct lu_device *ldto_device_fini(const struct lu_env *env,
+						 struct lu_device *lu)
+{
+	const struct lu_device_type_operations *ldto;
+
+	LASSERT(lu);
+	LASSERT(lu->ld_type);
+	ldto = lu->ld_type->ldt_ops;
+	LASSERT(ldto);
+
+	if (ldto->ldto_device_fini)
+		return ldto->ldto_device_fini(env, lu);
+
+	return NULL;
+}
+
 static inline int lu_device_is_md(const struct lu_device *d)
 {
 	return ergo(d != NULL, d->ld_type->ldt_tags & LU_DEVICE_MD);
@@ -468,16 +541,20 @@ enum lu_object_header_flags {
 	 * as last reference to it is released. This flag cannot be cleared
 	 * once set.
 	 */
-	LU_OBJECT_HEARD_BANSHEE = 0,
-	/*
+	LU_OBJECT_HEARD_BANSHEE = BIT(0),
+	/**
 	 * Mark this object has already been taken out of cache.
 	 */
-	LU_OBJECT_UNHASHED	= 1,
-	/*
+	LU_OBJECT_UNHASHED	= BIT(1),
+	/**
 	 * Object is initialized, when object is found in cache, it may not be
 	 * intialized yet, the object allocator will initialize it.
 	 */
-	LU_OBJECT_INITED	= 2,
+	LU_OBJECT_INITED	= BIT(2),
+	/**
+	 * Direct object free
+	 */
+	LU_OBJECT_DFREE		= BIT(3),
 };
 
 enum lu_object_header_attr {
@@ -596,6 +673,9 @@ struct lu_site {
 	struct lu_target	*ls_tgt;
 	/* Number of objects in lsb_lru_lists - used for shrinking */
 	struct percpu_counter   ls_lru_len_counter;
+	/** delayed free */
+	atomic_t		ls_free_done;
+	wait_queue_head_t	ls_freeq;
 };
 
 wait_queue_head_t *
@@ -659,17 +739,26 @@ static inline int lu_object_is_inited(const struct lu_object_header *h)
 	return test_bit(LU_OBJECT_INITED, &h->loh_flags);
 }
 
+/* Return true if object should free without delay */
+static inline int lu_object_is_dfree(const struct lu_object_header *h)
+{
+	return test_bit(LU_OBJECT_DFREE, &h->loh_flags);
+}
+
 void lu_object_put(const struct lu_env *env, struct lu_object *o);
 void lu_object_put_nocache(const struct lu_env *env, struct lu_object *o);
 void lu_object_unhash(const struct lu_env *env, struct lu_object *o);
 int lu_site_purge_objects(const struct lu_env *env, struct lu_site *s, int nr,
 			  int canblock);
 
+void lu_site_limit(const struct lu_env *env, struct lu_site *s, u64 limit);
+
 static inline int lu_site_purge(const struct lu_env *env, struct lu_site *s,
 				int nr)
 {
 	return lu_site_purge_objects(env, s, nr, 1);
 }
+void lu_objects_destroy_delayed(void);
 
 void lu_site_print(const struct lu_env *env, struct lu_site *s, atomic_t *ref,
 		   int msg_flags, lu_printer_t printer);
@@ -798,14 +887,14 @@ struct lu_rdpg {
 	__u32                   rp_attrs;
 	/** pointers to pages */
 	union {
-		struct page	**rp_pages;
+		struct folio   **rp_folios;
 		void		*rp_data;
 	};
 };
 
 /* for dt_index_walk / mdd_readpage */
 void *rdpg_page_get(const struct lu_rdpg *rdpg, unsigned int index);
-void rdpg_page_put(const struct lu_rdpg *rdpg, unsigned int index);
+void rdpg_page_put(const struct lu_rdpg *rdpg, unsigned int index, void *kaddr);
 
 enum lu_xattr_flags {
 	LU_XATTR_REPLACE = BIT(0),
@@ -906,6 +995,8 @@ enum lu_context_tag {
 	LCT_LOCAL		= BIT(7),
 	/* session for server thread */
 	LCT_SERVER_SESSION	= BIT(8),
+	/* lc_values have been initialized */
+	LCT_CL_INIT		= BIT(9),
 	/*
 	 * Set when at least one of keys, having values in this context has
 	 * non-NULL lu_context_key::lct_exit() method. This is used to
@@ -1414,6 +1505,7 @@ void lu_buf_alloc(struct lu_buf *buf, size_t size);
 void lu_buf_realloc(struct lu_buf *buf, size_t size);
 
 int lu_buf_check_and_grow(struct lu_buf *buf, size_t len);
+int lu_buf_check_and_shrink(struct lu_buf *buf, size_t len);
 struct lu_buf *lu_buf_check_and_alloc(struct lu_buf *buf, size_t len);
 
 extern __u32 lu_context_tags_default;
@@ -1459,7 +1551,7 @@ enum lq_flag {
 	LQ_SF_PROGRESS,      /* statfs op in progress */
 };
 
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 /* round-robin QoS data for LOD/LMV */
 struct lu_qos_rr {
 	spinlock_t		 lqr_alloc;	/* protect allocation index */
@@ -1476,7 +1568,7 @@ static inline void lu_qos_rr_init(struct lu_qos_rr *lqr)
 	set_bit(LQ_DIRTY, &lqr->lqr_flags);
 }
 
-#endif /* HAVE_SERVER_SUPPORT */
+#endif /* CONFIG_LUSTRE_FS_SERVER */
 
 /* QoS data per MDS/OSS */
 struct lu_svr_qos {
@@ -1561,7 +1653,7 @@ struct lu_qos {
 	__u32			 lq_active_svr_count;
 	unsigned int		 lq_prio_free;   /* priority for free space */
 	unsigned int		 lq_threshold_rr;/* priority for rr */
-#ifdef HAVE_SERVER_SUPPORT
+#ifdef CONFIG_LUSTRE_FS_SERVER
 	struct lu_qos_rr	 lq_rr;          /* round robin qos data */
 #endif
 	unsigned long		 lq_flags;

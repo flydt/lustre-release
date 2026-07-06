@@ -16,7 +16,6 @@
  * Author: Oleg Drokin <oleg.drokin@sun.com>
  */
 
-#include <libcfs/libcfs.h>
 #include <obd_class.h>
 #include <obd_support.h>
 #include <obd.h>
@@ -51,7 +50,7 @@ blkcnt_t dirty_cnt(struct inode *inode)
 	void *results[1];
 
 	if (inode->i_mapping != NULL)
-		cnt += radix_tree_gang_lookup_tag(&inode->i_mapping->page_tree,
+		cnt += radix_tree_gang_lookup_tag(&inode->i_mapping->i_pages,
 						  results, 0, 1,
 						  PAGECACHE_TAG_DIRTY);
 	if (cnt == 0 && atomic_read(&vob->vob_mmap_cnt) > 0)
@@ -158,7 +157,7 @@ int cl_io_get(struct inode *inode, struct lu_env **envout,
 	return result;
 }
 
-int cl_glimpse_size0(struct inode *inode, int agl)
+int __cl_glimpse_size(struct inode *inode, int agl)
 {
 	/*
 	 * We don't need ast_flags argument to cl_glimpse_size(), because

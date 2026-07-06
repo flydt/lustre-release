@@ -215,7 +215,7 @@ sa_alloc(struct dentry *parent, struct ll_statahead_info *sai, __u64 index,
 	dname = (char *)entry + sizeof(struct sa_entry);
 	memcpy(dname, name, len);
 	dname[len] = 0;
-	entry->se_qstr.hash = ll_full_name_hash(parent, name, len);
+	entry->se_qstr.hash = full_name_hash(parent, name, len);
 	entry->se_qstr.len = len;
 	entry->se_qstr.name = dname;
 
@@ -1191,7 +1191,7 @@ static int ll_statahead_by_list(struct ll_statahead_info *sai,
 	struct ll_inode_info *lli = ll_i2info(dir);
 	struct ll_sb_info *sbi = ll_i2sbi(dir);
 	struct md_op_data *op_data;
-	struct page *page = NULL;
+	struct folio *folio = NULL;
 	bool is_hash64 = test_bit(LL_SBI_64BIT_HASH, sbi->ll_flags);
 	__u64 pos = 0;
 	int first = 0;
@@ -1214,6 +1214,8 @@ static int ll_statahead_by_list(struct ll_statahead_info *sai,
 		struct lu_dirpage *dp;
 		struct lu_dirent *ent;
 		struct md_op_data *ret;
+		void *kaddr = NULL;
+		u32 flags;
 
 		ret = ll_prep_md_op_data(op_data, dir, dir, NULL, 0, 0,
 					 LUSTRE_OPC_ANY, dir);
@@ -1222,18 +1224,18 @@ static int ll_statahead_by_list(struct ll_statahead_info *sai,
 			break;
 		}
 
-		page = ll_get_dir_page(dir, op_data, pos, is_hash64, NULL);
+		folio = ll_get_dir_folio(dir, op_data, pos, is_hash64, NULL);
 		ll_unlock_md_op_lsm(op_data);
-		if (IS_ERR(page)) {
-			rc = PTR_ERR(page);
+		if (IS_ERR(folio)) {
+			rc = PTR_ERR(folio);
 			CDEBUG(D_READA,
 			       "error reading dir "DFID" at %llu /%llu stat_pid = %u: rc = %d\n",
 			       PFID(ll_inode2fid(dir)), pos, sai->sai_index,
 			       lli->lli_stat_pid, rc);
 			break;
 		}
-
-		dp = page_address(page);
+		kaddr = ll_kmap_local_folio(folio, 0);
+		dp = kaddr;
 		for (ent = lu_dirent_start(dp);
 		     /* matches smp_store_release() in ll_deauthorize_statahead() */
 		     ent != NULL && smp_load_acquire(&sai->sai_task) &&
@@ -1357,8 +1359,12 @@ static int ll_statahead_by_list(struct ll_statahead_info *sai,
 		}
 
 		pos = le64_to_cpu(dp->ldp_hash_end);
-		ll_release_page(dir, page,
-				le32_to_cpu(dp->ldp_flags) & LDF_COLLIDE);
+		flags = le32_to_cpu(dp->ldp_flags);
+		if (kaddr) {
+			ll_kunmap_local(kaddr);
+			kaddr = NULL;
+		}
+		ll_release_dir_folio(dir, folio, flags & LDF_COLLIDE);
 
 		if (sa_low_hit(sai)) {
 			rc = -EFAULT;
@@ -1757,10 +1763,10 @@ enum {
 /* file is first dirent under @dir */
 static int is_first_dirent(struct inode *dir, struct dentry *dentry)
 {
-	struct qstr *target = &dentry->d_name;
+	const struct qstr *target = &dentry->d_name;
 	struct md_op_data *op_data;
 	int dot_de;
-	struct page *page = NULL;
+	struct folio *folio = NULL;
 	int rc = LS_NOT_FIRST_DE;
 	__u64 pos = 0;
 	struct ll_sb_info *sbi = ll_i2sbi(dir);
@@ -1785,16 +1791,16 @@ static int is_first_dirent(struct inode *dir, struct dentry *dentry)
 	 *FIXME choose the start offset of the readdir
 	 */
 
-	page = ll_get_dir_page(dir, op_data, 0, is_hash64, NULL);
+	folio = ll_get_dir_folio(dir, op_data, 0, is_hash64, NULL);
 
 	while (1) {
 		struct lu_dirpage *dp;
 		struct lu_dirent  *ent;
 
-		if (IS_ERR(page)) {
+		if (IS_ERR(folio)) {
 			struct ll_inode_info *lli = ll_i2info(dir);
 
-			rc = PTR_ERR(page);
+			rc = PTR_ERR(folio);
 			CERROR("%s: reading dir "DFID" at %llu stat_pid = %u : rc = %d\n",
 			       ll_i2sbi(dir)->ll_fsname,
 			       PFID(ll_inode2fid(dir)), pos,
@@ -1802,7 +1808,7 @@ static int is_first_dirent(struct inode *dir, struct dentry *dentry)
 			break;
 		}
 
-		dp = page_address(page);
+		dp = kmap_local_folio(folio, 0);
 		for (ent = lu_dirent_start(dp); ent != NULL;
 		     ent = lu_dirent_next(ent)) {
 			__u64 hash;
@@ -1811,7 +1817,7 @@ static int is_first_dirent(struct inode *dir, struct dentry *dentry)
 
 			hash = le64_to_cpu(ent->lde_hash);
 			/*
-			 * The ll_get_dir_page() can return any page containing
+			 * The ll_get_dir_folio() can return any page containing
 			 * the given hash which may be not the start hash.
 			 */
 			if (unlikely(hash < pos))
@@ -1870,7 +1876,8 @@ static int is_first_dirent(struct inode *dir, struct dentry *dentry)
 			else
 				rc = LS_FIRST_DOT_DE;
 
-			ll_release_page(dir, page, false);
+			kunmap_local(dp);
+			ll_release_dir_folio(dir, folio, false);
 			GOTO(out, rc);
 		}
 		pos = le64_to_cpu(dp->ldp_hash_end);
@@ -1878,17 +1885,20 @@ static int is_first_dirent(struct inode *dir, struct dentry *dentry)
 			/*
 			 * End of directory reached.
 			 */
-			ll_release_page(dir, page, false);
+			kunmap_local(dp);
+			ll_release_dir_folio(dir, folio, false);
 			GOTO(out, rc);
 		} else {
+			u32 flags = le32_to_cpu(dp->ldp_flags);
+
 			/*
 			 * chain is exhausted
 			 * Normal case: continue to the next page.
 			 */
-			ll_release_page(dir, page, le32_to_cpu(dp->ldp_flags) &
-					      LDF_COLLIDE);
-			page = ll_get_dir_page(dir, op_data, pos, is_hash64,
-						NULL);
+			kunmap_local(dp);
+			ll_release_dir_folio(dir, folio, flags & LDF_COLLIDE);
+			folio = ll_get_dir_folio(dir, op_data, pos, is_hash64,
+						 NULL);
 		}
 	}
 	EXIT;
@@ -2173,7 +2183,7 @@ sa_pattern_fname_detect(struct inode *dir, struct dentry *dchild)
 {
 	struct ll_inode_info *lli = ll_i2info(dir);
 	struct ll_sb_info *sbi = ll_i2sbi(dir);
-	struct qstr *dname = &dchild->d_name;
+	const struct qstr *dname = &dchild->d_name;
 	const unsigned char *name = dname->name;
 	bool rc = false;
 	int i;
@@ -2331,7 +2341,7 @@ static int start_statahead_thread(struct inode *dir, struct dentry *dentry,
 	sai->sai_pid = current->pid;
 
 	if (lli->lli_sa_pattern & LSA_PATTERN_FNAME) {
-		struct qstr *dname = &dentry->d_name;
+		const struct qstr *dname = &dentry->d_name;
 		const unsigned char *name = dname->name;
 		long num;
 		int i;
@@ -2756,7 +2766,7 @@ void ll_statahead_enter(struct inode *dir, struct dentry *dchild)
 {
 	struct ll_inode_info *lli = ll_i2info(dir);
 	struct ll_sb_info *sbi = ll_i2sbi(dir);
-	struct qstr *dname = &dchild->d_name;
+	const struct qstr *dname = &dchild->d_name;
 
 	if (sbi->ll_sa_max == 0)
 		return;

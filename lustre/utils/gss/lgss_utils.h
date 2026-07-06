@@ -51,6 +51,7 @@
 #define LGSS_SVC_MDS_STR        "lustre_mds"
 #define LGSS_SVC_OSS_STR        "lustre_oss"
 #define LGSS_SVC_HOST_STR       "host"
+#define LGSS_SVC_ROLE_STR       "lustre_role"
 #define LGSS_USR_ROOT_STR       "lustre_root"
 
 typedef enum {
@@ -159,6 +160,7 @@ struct lgss_cred {
 	uint32_t		lc_tgt_svc;
 	char			lc_svc_type;
 	char			*lc_tgt_uuid;
+	char			*lc_cluuid;
 
 	struct lgss_mech_type	*lc_mech;
 	void			*lc_mech_cred;

@@ -31,7 +31,8 @@ static ssize_t active_show(struct kobject *kobj, struct attribute *attr,
 	ssize_t len;
 
 	with_imp_locked(obd, imp, len)
-		len = sprintf(buf, "%d\n", !imp->imp_deactive);
+		len = scnprintf(buf, PAGE_SIZE, "%d\n",
+				!test_bit(IMPF_DEACTIVE, imp->imp_flags));
 	return len;
 }
 
@@ -53,7 +54,7 @@ static ssize_t active_store(struct kobject *kobj, struct attribute *attr,
 	if (rc)
 		return rc;
 	/* opposite senses */
-	if (imp->imp_deactive == val)
+	if (test_bit(IMPF_DEACTIVE, imp->imp_flags) == val)
 		rc = ptlrpc_set_import_active(imp, val);
 	else
 		CDEBUG(D_CONFIG, "activate %u: ignoring repeat request\n",
@@ -135,6 +136,8 @@ static ssize_t max_mod_rpcs_in_flight_store(struct kobject *kobj,
 LUSTRE_RW_ATTR(max_mod_rpcs_in_flight);
 
 LUSTRE_RW_ATTR(max_pages_per_rpc);
+LUSTRE_RW_ATTR(max_mb_per_rpc_read);
+LUSTRE_RW_ATTR(max_mb_per_rpc_write);
 
 static ssize_t max_dirty_mb_show(struct kobject *kobj,
 				 struct attribute *attr,
@@ -165,7 +168,7 @@ static ssize_t max_dirty_mb_store(struct kobject *kobj,
 
 	pages_number = round_up(pages_number, 1024 * 1024) >> PAGE_SHIFT;
 	if (pages_number >= MiB_TO_PAGES(OSC_MAX_DIRTY_MB_MAX) ||
-	    pages_number > cfs_totalram_pages() / 4) /* 1/4 of RAM */
+	    pages_number > compat_totalram_pages() / 4) /* 1/4 of RAM */
 		return -ERANGE;
 
 	spin_lock(&cli->cl_loi_list_lock);
@@ -294,7 +297,7 @@ mdc_cached_mb_seq_write(struct file *file, const char __user *buffer,
 
 		env = cl_env_get(&refcheck);
 		if (!IS_ERR(env)) {
-			(void)osc_lru_shrink(env, cli, rc, true);
+			(void)osc_lru_shrink(env, cli, rc, true, NULL);
 			cl_env_put(env, &refcheck);
 		}
 	}
@@ -418,9 +421,9 @@ static int mdc_rpc_stats_seq_show(struct seq_file *seq, void *v)
 	seq_printf(seq, "pending read pages:   %d\n",
 		   atomic_read(&cli->cl_pending_r_pages));
 
-	seq_printf(seq, "\n\t\t\tread\t\t\twrite\n");
-	seq_printf(seq, "pages per rpc         rpcs   %% cum %% |");
-	seq_printf(seq, "       rpcs   %% cum %%\n");
+	seq_puts(seq, "\n\t\t\tread\t\t\twrite\n");
+	seq_puts(seq, "pages per rpc         rpcs   %% cum %% |");
+	seq_puts(seq, "       rpcs   %% cum %%\n");
 
 	read_tot = lprocfs_oh_sum(&cli->cl_read_page_hist);
 	write_tot = lprocfs_oh_sum(&cli->cl_write_page_hist);
@@ -442,9 +445,9 @@ static int mdc_rpc_stats_seq_show(struct seq_file *seq, void *v)
 			break;
 	}
 
-	seq_printf(seq, "\n\t\t\tread\t\t\twrite\n");
-	seq_printf(seq, "rpcs in flight        rpcs   %% cum %% |");
-	seq_printf(seq, "       rpcs   %% cum %%\n");
+	seq_puts(seq, "\n\t\t\tread\t\t\twrite\n");
+	seq_puts(seq, "rpcs in flight        rpcs   %% cum %% |");
+	seq_puts(seq, "       rpcs   %% cum %%\n");
 
 	read_tot = lprocfs_oh_sum(&cli->cl_read_rpc_hist);
 	write_tot = lprocfs_oh_sum(&cli->cl_write_rpc_hist);
@@ -464,9 +467,9 @@ static int mdc_rpc_stats_seq_show(struct seq_file *seq, void *v)
 			break;
 	}
 
-	seq_printf(seq, "\n\t\t\tread\t\t\twrite\n");
-	seq_printf(seq, "offset                rpcs   %% cum %% |");
-	seq_printf(seq, "       rpcs   %% cum %%\n");
+	seq_puts(seq, "\n\t\t\tread\t\t\twrite\n");
+	seq_puts(seq, "offset                rpcs   %% cum %% |");
+	seq_puts(seq, "       rpcs   %% cum %%\n");
 
 	read_tot = lprocfs_oh_sum(&cli->cl_read_offset_hist);
 	write_tot = lprocfs_oh_sum(&cli->cl_write_offset_hist);
@@ -516,7 +519,7 @@ static int mdc_batch_stats_seq_show(struct seq_file *seq, void *v)
 
 	lprocfs_stats_header(seq, ktime_get_real(), cli->cl_batch_stats_init,
 			     25, ":", true, "");
-	seq_printf(seq, "subreqs per batch   batches   %% cum %%\n");
+	seq_puts(seq, "subreqs per batch   batches   %% cum %%\n");
 	tot = lprocfs_oh_sum(&cli->cl_batch_rpc_hist);
 	cum = 0;
 
@@ -569,7 +572,7 @@ LDEBUGFS_SEQ_FOPS_RO_TYPE(mdc, timeouts);
 LDEBUGFS_SEQ_FOPS_RO_TYPE(mdc, state);
 LDEBUGFS_SEQ_FOPS_RW_TYPE(mdc, import);
 
-struct ldebugfs_vars ldebugfs_mdc_obd_vars[] = {
+static struct ldebugfs_vars ldebugfs_mdc_obd_vars[] = {
 	{ .name	=	"connect_flags",
 	  .fops	=	&mdc_connect_flags_fops	},
 	{ .name	=	"mds_server_uuid",
@@ -616,6 +619,42 @@ static ssize_t cur_dirty_grant_bytes_show(struct kobject *kobj,
 	return scnprintf(buf, PAGE_SIZE, "%lu\n", cli->cl_dirty_grant);
 }
 LUSTRE_RO_ATTR(cur_dirty_grant_bytes);
+
+static ssize_t cur_grant_bytes_show(struct kobject *kobj,
+				    struct attribute *attr,
+				    char *buf)
+{
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
+	struct client_obd *cli = &obd->u.cli;
+
+	return scnprintf(buf, PAGE_SIZE, "%lu\n", cli->cl_avail_grant);
+}
+
+static ssize_t cur_grant_bytes_store(struct kobject *kobj,
+				     struct attribute *attr,
+				     const char *buffer,
+				     size_t count)
+{
+	struct obd_device *obd = container_of(kobj, struct obd_device,
+					      obd_kset.kobj);
+	struct client_obd *cli = &obd->u.cli;
+	u64 val;
+	int rc;
+
+	rc = sysfs_memparse(buffer, count, &val, "MiB");
+	if (rc < 0)
+		return rc;
+
+	/* this is only for shrinking grant */
+	if (val >= cli->cl_avail_grant)
+		return 0;
+
+	/* grant shrinking to be implemented later */
+
+	return count;
+}
+LUSTRE_RW_ATTR(cur_grant_bytes);
 
 static ssize_t grant_shrink_show(struct kobject *kobj, struct attribute *attr,
 				 char *buf)
@@ -699,6 +738,7 @@ LUSTRE_OBD_UINT_PARAM_ATTR(at_min);
 LUSTRE_OBD_UINT_PARAM_ATTR(at_max);
 LUSTRE_OBD_UINT_PARAM_ATTR(at_history);
 LUSTRE_OBD_UINT_PARAM_ATTR(at_unhealthy_factor);
+LUSTRE_OBD_UINT_PARAM_ATTR(ldlm_enqueue_min);
 
 static struct attribute *mdc_attrs[] = {
 	&lustre_attr_active.attr,
@@ -708,6 +748,8 @@ static struct attribute *mdc_attrs[] = {
 	&lustre_attr_max_rpcs_in_flight.attr,
 	&lustre_attr_max_mod_rpcs_in_flight.attr,
 	&lustre_attr_max_pages_per_rpc.attr,
+	&lustre_attr_max_mb_per_rpc_read.attr,
+	&lustre_attr_max_mb_per_rpc_write.attr,
 	&lustre_attr_max_dirty_mb.attr,
 	&lustre_attr_mds_conn_uuid.attr,
 	&lustre_attr_conn_uuid.attr,
@@ -717,22 +759,24 @@ static struct attribute *mdc_attrs[] = {
 	&lustre_attr_grant_shrink_interval.attr,
 	&lustre_attr_cur_lost_grant_bytes.attr,
 	&lustre_attr_cur_dirty_grant_bytes.attr,
+	&lustre_attr_cur_grant_bytes.attr,
 	&lustre_attr_dom_min_repsize.attr,
 	&lustre_attr_lsom.attr,
 	&lustre_attr_at_max.attr,
 	&lustre_attr_at_min.attr,
 	&lustre_attr_at_history.attr,
 	&lustre_attr_at_unhealthy_factor.attr,
+	&lustre_attr_ldlm_enqueue_min.attr,
 	NULL,
 };
 
-KOBJ_ATTRIBUTE_GROUPS(mdc); /* creates mdc_groups */
+ATTRIBUTE_GROUPS(mdc); /* creates mdc_groups */
 
 int mdc_tunables_init(struct obd_device *obd)
 {
 	int rc;
 
-	obd->obd_ktype.default_groups = KOBJ_ATTR_GROUPS(mdc);
+	obd->obd_ktype.default_groups = mdc_groups;
 	obd->obd_debugfs_vars = ldebugfs_mdc_obd_vars;
 
 	rc = lprocfs_obd_setup(obd, false);

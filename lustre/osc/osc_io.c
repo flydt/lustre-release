@@ -24,17 +24,9 @@
 #include <linux/falloc.h>
 
 #include "osc_internal.h"
-#include <lnet/lnet_rdma.h>
+#include <linux/lnet/lnet_rdma.h>
 
-/** \addtogroup osc
- *  @{
- */
-
-/*****************************************************************************
- *
- * io operations.
- *
- */
+/* IO operations */
 
 static void osc_io_fini(const struct lu_env *env, const struct cl_io_slice *io)
 {
@@ -43,19 +35,17 @@ static void osc_io_fini(const struct lu_env *env, const struct cl_io_slice *io)
 void osc_read_ahead_release(const struct lu_env *env, struct cl_read_ahead *ra)
 {
 	struct ldlm_lock *dlmlock = ra->cra_dlmlock;
-	struct osc_io *oio = ra->cra_oio;
 	struct lustre_handle lockh;
 
-	oio->oi_is_readahead = 0;
 	ldlm_lock2handle(dlmlock, &lockh);
 	ldlm_lock_decref(&lockh, LCK_PR);
 	ldlm_lock_put(dlmlock);
 }
 EXPORT_SYMBOL(osc_read_ahead_release);
 
-static int osc_io_read_ahead(const struct lu_env *env,
-			     const struct cl_io_slice *ios,
-			     pgoff_t start, struct cl_read_ahead *ra)
+static int osc_io_read_ahead_prep(const struct lu_env *env,
+				  const struct cl_io_slice *ios,
+				  pgoff_t start, struct cl_read_ahead *ra)
 {
 	struct osc_object *osc = cl2osc(ios->cis_obj);
 	struct osc_io *oio = cl2osc_io(env, ios);
@@ -68,6 +58,7 @@ static int osc_io_read_ahead(const struct lu_env *env,
 	dlmlock = osc_dlmlock_at_pgoff(env, osc, start, 0);
 	if (dlmlock != NULL) {
 		struct lov_oinfo *oinfo = osc->oo_oinfo;
+		pgoff_t lock_end_idx;
 
 		LASSERT(dlmlock->l_ast_data == osc);
 		if (dlmlock->l_req_mode != LCK_PR) {
@@ -78,17 +69,13 @@ static int osc_io_read_ahead(const struct lu_env *env,
 			ldlm_lock_decref(&lockh, dlmlock->l_req_mode);
 		}
 
-		ra->cra_rpc_pages = osc_cli(osc)->cl_max_pages_per_rpc;
-		ra->cra_end_idx =
-			dlmlock->l_policy_data.l_extent.end >> PAGE_SHIFT;
+		ra->cra_rpc_pages = osc_cli(osc)->cl_max_pages_per_rpc_read;
+		lock_end_idx = dlmlock->l_policy_data.l_extent.end >> PAGE_SHIFT;
+		/* restrict RA to lock end or EOF */
+		ra->cra_end_idx = min_t(pgoff_t, lock_end_idx,
+					(oinfo->loi_kms - 1) >> PAGE_SHIFT);
 		ra->cra_release = osc_read_ahead_release;
 		ra->cra_dlmlock = dlmlock;
-		ra->cra_oio = oio;
-		if (ra->cra_end_idx != CL_PAGE_EOF)
-			ra->cra_contention = true;
-		ra->cra_end_idx = min_t(pgoff_t,
-					ra->cra_end_idx,
-					(oinfo->loi_kms - 1) >> PAGE_SHIFT);
 		result = 0;
 	}
 
@@ -96,26 +83,37 @@ static int osc_io_read_ahead(const struct lu_env *env,
 }
 
 /**
+ * osc_io_submit() - Iterates over pages and prepares each page for IO
+ * @env: lustre execution environment
+ * @io: client I/O
+ * @ios: OSC specific I/O data
+ * @crt: Request type (Read/Write)
+ * @queue: Queue holding processed and already processed pages
+ *
  * An implementation of cl_io_operations::cio_io_submit() method for osc
  * layer. Iterates over pages in the in-queue, prepares each for io by calling
  * cl_page_prep() and then either submits them through osc_io_submit_page()
  * or, if page is already submitted, changes osc flags through
  * osc_set_async_flags().
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 int osc_io_submit(const struct lu_env *env, struct cl_io *io,
 		  const struct cl_io_slice *ios, enum cl_req_type crt,
 		  struct cl_2queue *queue)
 {
-	struct cl_page	  *page;
-	struct cl_page	  *tmp;
-	struct cl_io	  *top_io = cl_io_top(io);
-	struct client_obd *cli  = NULL;
-	struct osc_object *osc  = NULL;	/* to keep gcc happy */
-	struct osc_page	  *opg;
+	struct cl_io *top_io = cl_io_top(io);
+	struct client_obd *cli = NULL;
+	struct osc_object *osc = NULL; /* to keep gcc happy */
+	struct cl_page *page;
+	struct osc_page *opg;
+	struct cl_page *tmp;
 	LIST_HEAD(list);
 
-	struct cl_page_list *qin      = &queue->c2_qin;
-	struct cl_page_list *qout     = &queue->c2_qout;
+	struct cl_page_list *qin = &queue->c2_qin;
+	struct cl_page_list *qout = &queue->c2_qout;
 	unsigned int queued = 0;
 	int result = 0;
 	int brw_flags;
@@ -131,7 +129,8 @@ int osc_io_submit(const struct lu_env *env, struct cl_io *io,
 
 	osc = cl2osc(ios->cis_obj);
 	cli = osc_cli(osc);
-	max_pages = cli->cl_max_pages_per_rpc;
+	max_pages = crt == CRT_READ ? cli->cl_max_pages_per_rpc_read :
+				      cli->cl_max_pages_per_rpc_write;
 	ppc_bits = cli->cl_chunkbits - PAGE_SHIFT;
 	ppc = 1 << ppc_bits;
 
@@ -148,12 +147,12 @@ int osc_io_submit(const struct lu_env *env, struct cl_io *io,
 	if (lnet_is_rdma_only_page(page->cp_vmpage))
 		brw_flags |= OBD_BRW_RDMA_ONLY;
 
-        /*
-         * NOTE: here @page is a top-level page. This is done to avoid
-         *       creation of sub-page-list.
-         */
-        cl_page_list_for_each_safe(page, tmp, qin) {
-                struct osc_async_page *oap;
+	/*
+	 * NOTE: here @page is a top-level page. This is done to avoid
+	 *       creation of sub-page-list.
+	 */
+	cl_page_list_for_each_safe(page, tmp, qin) {
+		struct osc_async_page *oap;
 
 		LASSERT(top_io != NULL);
 
@@ -164,9 +163,9 @@ int osc_io_submit(const struct lu_env *env, struct cl_io *io,
 		    !list_empty(&oap->oap_rpc_item)) {
 			CDEBUG(D_CACHE, "Busy oap %p page %p for submit.\n",
 			       oap, opg);
-                        result = -EBUSY;
-                        break;
-                }
+			result = -EBUSY;
+			break;
+		}
 
 		if (!dio) {
 			result = cl_page_prep(env, top_io, page, crt);
@@ -185,7 +184,8 @@ int osc_io_submit(const struct lu_env *env, struct cl_io *io,
 		}
 
 		if (!dio)
-			oap->oap_async_flags = ASYNC_URGENT|ASYNC_READY|ASYNC_COUNT_STABLE;
+			oap->oap_async_flags = ASYNC_URGENT|ASYNC_READY|
+						ASYNC_COUNT_STABLE;
 
 		osc_page_submit(env, opg, crt, brw_flags);
 		list_add_tail(&oap->oap_pending_item, &list);
@@ -242,7 +242,122 @@ int osc_io_submit(const struct lu_env *env, struct cl_io *io,
 }
 EXPORT_SYMBOL(osc_io_submit);
 
+int osc_dio_submit(const struct lu_env *env, struct cl_io *io,
+		   const struct cl_io_slice *ios, enum cl_req_type crt,
+		   struct cl_dio_pages *cdp)
+{
+	struct osc_object *osc  = cl2osc(ios->cis_obj);
+	struct cl_io	  *top_io = cl_io_top(io);
+	struct client_obd *cli  = osc_cli(osc);
+	struct page	  *vmpage;
+	LIST_HEAD(list);
+	/* pages per chunk bits */
+	unsigned int ppc_bits = cli->cl_chunkbits - PAGE_SHIFT;
+	unsigned int max_pages = crt == CRT_READ ?
+				 cli->cl_max_pages_per_rpc_read :
+				 cli->cl_max_pages_per_rpc_write;
+	unsigned int ppc = 1 << ppc_bits;
+	unsigned int total_queued = 0;
+	unsigned int queued = 0;
+	bool sync_queue = false;
+	int result = 0;
+	int brw_flags;
+	int from = -1;
+	int to = -1;
+	int i = 0;
+
+	CDEBUG(D_CACHE|D_READA, "%u %d\n", cdp->cdp_page_count, crt);
+
+	brw_flags = osc_io_srvlock(cl2osc_io(env, ios)) ? OBD_BRW_SRVLOCK : 0;
+	brw_flags |= crt == CRT_WRITE ? OBD_BRW_WRITE : OBD_BRW_READ;
+	if (crt == CRT_READ && ios->cis_io->ci_ndelay)
+		brw_flags |= OBD_BRW_NDELAY;
+
+	vmpage = cdp->cdp_pages[0];
+	brw_flags |= OBD_BRW_NOCACHE;
+	if (lnet_is_rdma_only_page(vmpage))
+		brw_flags |= OBD_BRW_RDMA_ONLY;
+
+	/*
+	 * NOTE: here @page is a top-level page. This is done to avoid
+	 *       creation of sub-page-list.
+	 */
+	for (i = 0; i < cdp->cdp_page_count; i++) {
+		struct cl_page *page = cdp->cdp_cl_pages[i];
+		struct osc_async_page *oap;
+		struct osc_page	  *opg;
+
+		LASSERT(top_io != NULL);
+
+		opg = osc_cl_page_osc(page, osc);
+		oap = &opg->ops_oap;
+		if (from == -1)
+			from = i;
+
+		osc_page_submit(env, opg, crt, brw_flags);
+		list_add_tail(&oap->oap_pending_item, &list);
+
+		queued++;
+		total_queued++;
+		if (queued == max_pages) {
+			sync_queue = true;
+		} else if (crt == CRT_WRITE) {
+			unsigned int next_chunks;
+			unsigned int chunks;
+
+			chunks = (queued + ppc - 1) >> ppc_bits;
+			/* chunk number if add another page */
+			next_chunks = (queued + ppc) >> ppc_bits;
+
+			/* next page will excceed write chunk limit */
+			if (chunks == osc_max_write_chunks(cli) &&
+			    next_chunks > chunks)
+				sync_queue = true;
+		}
+
+		to = i;
+		if (sync_queue) {
+			result = osc_queue_dio_pages(env, top_io, osc, cdp,
+						     &list, from, to,
+						     brw_flags);
+			if (result < 0)
+				break;
+			from = -1;
+			queued = 0;
+			sync_queue = false;
+		}
+	}
+
+	if (queued > 0) {
+		LASSERT(to != -1);
+		result = osc_queue_dio_pages(env, top_io, osc, cdp, &list,
+					     from, to, brw_flags);
+	}
+
+	/* Update c/mtime for sync write. LU-7310 */
+	if (crt == CRT_WRITE && total_queued > 0 && result == 0) {
+		struct cl_attr *attr = &osc_env_info(env)->oti_attr;
+		struct cl_object *obj   = ios->cis_obj;
+
+		cl_object_attr_lock(obj);
+		attr->cat_mtime = attr->cat_ctime = ktime_get_real_seconds();
+		cl_object_attr_update(env, obj, attr, CAT_MTIME | CAT_CTIME);
+		cl_object_attr_unlock(obj);
+	}
+
+	CDEBUG(D_INFO, "%d/%u %d\n", total_queued, cdp->cdp_page_count,
+	       result);
+	return total_queued > 0 ? 0 : result;
+}
+EXPORT_SYMBOL(osc_dio_submit);
+
 /**
+ * osc_page_touch_at() - Update attributes when modifying specific page,
+ * @env: lustre execution environment
+ * @obj: Pointer to cl_object
+ * @idx: start offset
+ * @to: size of @idx
+ *
  * This is called to update the attributes when modifying a specific page,
  * both when making new pages and when doing updates to existing cached pages.
  *
@@ -285,7 +400,7 @@ void osc_page_touch_at(const struct lu_env *env, struct cl_object *obj,
 int osc_io_commit_async(const struct lu_env *env,
 			const struct cl_io_slice *ios,
 			struct cl_page_list *qin, int from, int to,
-			cl_commit_cbt cb)
+			cl_commit_cbt cb, enum cl_io_priority prio)
 {
 	struct cl_io *io = ios->cis_io;
 	struct osc_io *oio = cl2osc_io(env, ios);
@@ -313,7 +428,7 @@ int osc_io_commit_async(const struct lu_env *env,
 		}
 	}
 
-	ll_folio_batch_init(fbatch, 0);
+	ll_folio_batch_init(fbatch);
 
 	while (qin->pl_nr > 0) {
 		struct osc_async_page *oap;
@@ -363,8 +478,8 @@ int osc_io_commit_async(const struct lu_env *env,
 	/* for sync write, kernel will wait for this page to be flushed before
 	 * osc_io_end() is called, so release it earlier.
 	 * for mkwrite(), it's known there is no further pages. */
-	if (cl_io_is_sync_write(io) && oio->oi_active != NULL) {
-		osc_extent_release(env, oio->oi_active);
+	if (cl_io_is_sync_write(io) && oio->oi_active) {
+		osc_extent_release(env, oio->oi_active, prio);
 		oio->oi_active = NULL;
 	}
 
@@ -374,12 +489,13 @@ int osc_io_commit_async(const struct lu_env *env,
 EXPORT_SYMBOL(osc_io_commit_async);
 
 void osc_io_extent_release(const struct lu_env *env,
-			   const struct cl_io_slice *ios)
+			   const struct cl_io_slice *ios,
+			   enum cl_io_priority prio)
 {
 	struct osc_io *oio = cl2osc_io(env, ios);
 
 	if (oio->oi_active != NULL) {
-		osc_extent_release(env, oio->oi_active);
+		osc_extent_release(env, oio->oi_active, prio);
 		oio->oi_active = NULL;
 	}
 }
@@ -387,7 +503,8 @@ EXPORT_SYMBOL(osc_io_extent_release);
 
 static bool osc_import_not_healthy(struct obd_import *imp)
 {
-	return imp->imp_invalid || imp->imp_deactive ||
+	return test_bit(IMPF_INVALID, imp->imp_flags) ||
+	       test_bit(IMPF_DEACTIVE, imp->imp_flags) ||
 	       !(imp->imp_state == LUSTRE_IMP_FULL ||
 		 imp->imp_state == LUSTRE_IMP_IDLE);
 }
@@ -409,7 +526,7 @@ int osc_io_iter_init(const struct lu_env *env, const struct cl_io_slice *ios)
 	if (ios->cis_io->ci_type == CIT_READ && ios->cis_io->ci_ndelay &&
 	    !ios->cis_io->ci_tried_all_mirrors && osc_import_not_healthy(imp)) {
 		rc = -EAGAIN;
-	} else if (likely(!imp->imp_invalid)) {
+	} else if (likely(!test_bit(IMPF_INVALID, imp->imp_flags))) {
 		atomic_inc(&osc->oo_nr_ios);
 		oio->oi_is_active = 1;
 		rc = 0;
@@ -489,7 +606,15 @@ static int osc_async_upcall(void *a, int rc)
 }
 
 /**
- * Checks that there are no pages being written in the extent being truncated.
+ * trunc_check_cb() - Checks that there are no pages being written in the
+ *                    extent being truncated.
+ * @env: lustre execution environment
+ * @io: Pointer to the cl_io struct.
+ * @pvec: Array of osc_page struct to check.
+ * @count: number of osc_page struct in pvec.
+ * @cbdata: This isstart of the truncated extent.
+ *
+ * Returns Always returns %true
  */
 static bool trunc_check_cb(const struct lu_env *env, struct cl_io *io,
 			   void **pvec, int count, void *cbdata)
@@ -526,19 +651,25 @@ static void osc_trunc_check(const struct lu_env *env, struct cl_io *io,
 	start = size >> PAGE_SHIFT;
 	partial = (start << PAGE_SHIFT) < size;
 
-        /*
-         * Complain if there are pages in the truncated region.
-         */
+	/* Complain if there are pages in the truncated region. */
 	osc_page_gang_lookup(env, io, cl2osc(clob),
 				start + partial, CL_PAGE_EOF,
 				trunc_check_cb, (void *)&size);
 }
 
 /**
- * Flush affected pages prior punch.
+ * osc_punch_start() - Flush affected pages prior punch.
+ * @env: lustre execution environment
+ * @io: Pointer to the client I/O struct
+ * @obj: Pointer to the cl_object (this is the respective file)
+ *
  * We shouldn't discard them locally first because that could be data loss
  * if server doesn't support fallocate punch, we also need these data to be
  * flushed first to prevent re-ordering with the punch
+ *
+ * * Return:
+ * * %0 on success.
+ * * %negative on error
  */
 int osc_punch_start(const struct lu_env *env, struct cl_io *io,
 		    struct cl_object *obj)
@@ -549,7 +680,8 @@ int osc_punch_start(const struct lu_env *env, struct cl_io *io,
 	int rc;
 
 	ENTRY;
-	rc = osc_cache_writeback_range(env, osc, pg_start, pg_end, 1, 0);
+	rc = osc_cache_writeback_range(env, osc, pg_start, pg_end, 1, 0,
+				       IO_PRIO_NORMAL);
 	if (rc < 0)
 		RETURN(rc);
 
@@ -613,7 +745,7 @@ static int osc_io_setattr_start(const struct lu_env *env,
 				attr->cat_atime = lvb->lvb_atime;
 				cl_valid |= CAT_ATIME;
 			}
-			if (ia_xvalid & OP_XVALID_CTIME_SET) {
+			if (ia_avalid & ATTR_CTIME_SET) {
 				attr->cat_ctime = lvb->lvb_ctime;
 				cl_valid |= CAT_CTIME;
 			}
@@ -969,9 +1101,16 @@ static int osc_io_fsync_start(const struct lu_env *env,
 	if (fio->fi_mode == CL_FSYNC_RECLAIM) {
 		struct client_obd *cli = osc_cli(osc);
 
-		if (!atomic_long_read(&cli->cl_unstable_count)) {
-			/* Stop flush when there are no unstable pages? */
-			CDEBUG(D_CACHE, "unstable count is zero\n");
+		if (!atomic_read(&osc->oo_nr_ios) &&
+		    !atomic_read(&osc->oo_nr_writes) &&
+		    !atomic_long_read(&cli->cl_unstable_count)) {
+			/*
+			 * No active I/O, no dirty pages needing to write and
+			 * no unstable pages needing to commit.
+			 */
+			CDEBUG(D_CACHE,
+			       "%s: unstable/dirty counts are both zero\n",
+			       cli_name(cli));
 			RETURN(0);
 		}
 	}
@@ -980,7 +1119,8 @@ static int osc_io_fsync_start(const struct lu_env *env,
 		end = CL_PAGE_EOF;
 
 	result = osc_cache_writeback_range(env, osc, start, end, 0,
-					   fio->fi_mode == CL_FSYNC_DISCARD);
+					   fio->fi_mode == CL_FSYNC_DISCARD,
+					   fio->fi_prio);
 	if (result < 0 && fio->fi_mode == CL_FSYNC_DISCARD) {
 		CDEBUG(D_CACHE,
 		       "%s: ignore error %d on discarding "DFID":[%lu-%lu]\n",
@@ -1121,7 +1261,7 @@ void osc_io_end(const struct lu_env *env, const struct cl_io_slice *slice)
 	struct osc_io *oio = cl2osc_io(env, slice);
 
 	if (oio->oi_active) {
-		osc_extent_release(env, oio->oi_active);
+		osc_extent_release(env, oio->oi_active, IO_PRIO_NORMAL);
 		oio->oi_active = NULL;
 	}
 }
@@ -1329,18 +1469,15 @@ static const struct cl_io_operations osc_io_ops = {
 			.cio_fini   = osc_io_fini
 		}
 	},
-	.cio_read_ahead		    = osc_io_read_ahead,
-	.cio_lru_reserve	    = osc_io_lru_reserve,
-	.cio_submit                 = osc_io_submit,
-	.cio_commit_async           = osc_io_commit_async,
-	.cio_extent_release         = osc_io_extent_release
+	.cio_read_ahead_prep	= osc_io_read_ahead_prep,
+	.cio_lru_reserve	= osc_io_lru_reserve,
+	.cio_submit		= osc_io_submit,
+	.cio_dio_submit		= osc_dio_submit,
+	.cio_commit_async	= osc_io_commit_async,
+	.cio_extent_release	= osc_io_extent_release
 };
 
-/*****************************************************************************
- *
- * Transfer operations.
- *
- */
+/* Transfer operations. */
 
 int osc_io_init(const struct lu_env *env,
                 struct cl_object *obj, struct cl_io *io)
@@ -1357,5 +1494,3 @@ int osc_io_init(const struct lu_env *env,
 
 	return 0;
 }
-
-/** @} osc */

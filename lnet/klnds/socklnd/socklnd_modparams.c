@@ -12,15 +12,9 @@
 
 #include "socklnd.h"
 
-#include <linux/kvm_host.h>
-#if defined(__x86_64__) || defined(__i386__)
-#include <asm/hypervisor.h>
-#endif
-#ifdef HAVE_ETHTOOL_LINK_SETTINGS
-#include <linux/inetdevice.h>
+#include <lustre_compat/linux/inetdevice.h>
 #include <linux/ethtool.h>
 #include <net/addrconf.h>
-#endif
 
 #define CURRENT_LND_VERSION 1
 
@@ -87,7 +81,7 @@ static int rx_buffer_size = DEFAULT_BUFFER_SIZE;
 module_param(rx_buffer_size, int, 0644);
 MODULE_PARM_DESC(rx_buffer_size, "socket rx buffer size (0 for system default)");
 
-static int nagle = 0;
+static int nagle;
 module_param(nagle, int, 0644);
 MODULE_PARM_DESC(nagle, "enable NAGLE?");
 
@@ -112,15 +106,15 @@ static int keepalive_intvl = 5;
 module_param(keepalive_intvl, int, 0644);
 MODULE_PARM_DESC(keepalive_intvl, "seconds between probes");
 
-static int enable_csum = 0;
+static int enable_csum;
 module_param(enable_csum, int, 0644);
 MODULE_PARM_DESC(enable_csum, "enable check sum");
 
-static int inject_csum_error = 0;
+static int inject_csum_error;
 module_param(inject_csum_error, int, 0644);
 MODULE_PARM_DESC(inject_csum_error, "set non-zero to inject a checksum error");
 
-static int enable_irq_affinity = 0;
+static int enable_irq_affinity;
 module_param(enable_irq_affinity, int, 0644);
 MODULE_PARM_DESC(enable_irq_affinity, "enable IRQ affinity");
 
@@ -132,7 +126,7 @@ static unsigned int zc_min_payload = (16 << 10);
 module_param(zc_min_payload, int, 0644);
 MODULE_PARM_DESC(zc_min_payload, "minimum payload size to zero copy");
 
-static unsigned int zc_recv = 0;
+static unsigned int zc_recv;
 module_param(zc_recv, int, 0644);
 MODULE_PARM_DESC(zc_recv, "enable ZC recv for Chelsio driver");
 
@@ -166,8 +160,7 @@ MODULE_PARM_DESC(protocol, "protocol version");
 #endif
 
 static int tos = -1;
-static int param_set_tos(const char *val, cfs_kernel_param_arg_t *kp);
-#ifdef HAVE_KERNEL_PARAM_OPS
+static int param_set_tos(const char *val, const struct kernel_param *kp);
 static const struct kernel_param_ops param_ops_tos = {
 	.set = param_set_tos,
 	.get = param_get_int,
@@ -176,26 +169,12 @@ static const struct kernel_param_ops param_ops_tos = {
 #define param_check_tos(name, p) \
 	__param_check(name, p, int)
 module_param(tos, tos, 0444);
-#else
-module_param_call(tos, param_set_tos, param_get_int, &tos, 0444);
-#endif
 MODULE_PARM_DESC(tos, "Set the type of service (=-1 to disable)");
-
-static inline bool is_native_host(void)
-{
-#ifdef HAVE_HYPERVISOR_IS_TYPE
-	return hypervisor_is_type(X86_HYPER_NATIVE);
-#elif defined(__x86_64__) || defined(__i386__)
-	return x86_hyper == NULL;
-#else
-	return true;
-#endif
-}
 
 struct ksock_tunables ksocknal_tunables;
 struct lnet_ioctl_config_socklnd_tunables ksock_default_tunables;
 
-static int param_set_tos(const char *val, cfs_kernel_param_arg_t *kp)
+static int param_set_tos(const char *val, const struct kernel_param *kp)
 {
 	int rc, t;
 
@@ -214,7 +193,6 @@ static int param_set_tos(const char *val, cfs_kernel_param_arg_t *kp)
 	return 0;
 }
 
-#ifdef HAVE_ETHTOOL_LINK_SETTINGS
 static int ksocklnd_ni_get_eth_intf_speed(struct lnet_ni *ni)
 {
 	struct net_device *dev;
@@ -229,7 +207,7 @@ static int ksocklnd_ni_get_eth_intf_speed(struct lnet_ni *ni)
 
 	rtnl_lock();
 	for_each_netdev(ni->ni_net_ns, dev) {
-		int flags = dev_get_flags(dev);
+		int flags = netif_get_flags(dev);
 		struct in_device *in_dev;
 
 		if (flags & IFF_LOOPBACK) /* skip the loopback IF */
@@ -307,20 +285,18 @@ static int ksocklnd_speed2cpp(int speed)
 	 */
 	return ilog2(speed/1000) / 2 + 1;
 }
-#endif
 
-static int ksocklnd_lookup_conns_per_peer(struct lnet_ni *ni)
+int ksocklnd_lookup_conns_per_peer(struct lnet_ni *ni)
 {
-	int cpp = 1;
-#ifdef HAVE_ETHTOOL_LINK_SETTINGS
 	int speed = ksocklnd_ni_get_eth_intf_speed(ni);
+	int cpp = 1;
 
 	if (ni->ni_interface)
 		CDEBUG(D_NET, "intf %s speed %d\n", ni->ni_interface, speed);
 
 	if (speed > 0)
 		cpp = ksocklnd_speed2cpp(speed);
-#endif
+
 	return cpp;
 }
 
@@ -365,10 +341,8 @@ int ksocknal_tunables_init(void)
 	ksocknal_tunables.ksnd_conns_per_peer     = &conns_per_peer;
 
 	if (enable_irq_affinity) {
-		CWARN("irq_affinity is removed from socklnd because modern "
-		      "computer always has fast CPUs and more cores than "
-		      "# NICs, although you still can set irq_affinity by "
-		      "another way, please check manual for details.\n");
+		CWARN("irq_affinity is removed from socklnd because modern computer always has fast CPUs and more cores than "
+		      "# NICs, although you still can set irq_affinity by another way, please check manual for details.\n");
 	}
 	ksocknal_tunables.ksnd_irq_affinity       = &enable_irq_affinity;
 
@@ -384,31 +358,17 @@ int ksocknal_tunables_init(void)
 	if (*ksocknal_tunables.ksnd_zc_min_payload < (2 << 10))
 		*ksocknal_tunables.ksnd_zc_min_payload = (2 << 10);
 
-	/* When on a hypervisor set the minimum zero copy size
-	 * above the maximum payload size
-	 */
-	if (!is_native_host())
-		*ksocknal_tunables.ksnd_zc_min_payload = (16 << 20) + 1;
-
 	return 0;
 }
 
-void ksocknal_tunables_setup(struct lnet_ni *ni)
+void ksocknal_tunables_setup(struct lnet_lnd_tunables *lnd_tunables,
+			     struct lnet_ioctl_config_lnd_cmn_tunables *net_tunables)
 {
 	struct lnet_ioctl_config_socklnd_tunables *tunables;
-	struct lnet_ioctl_config_lnd_cmn_tunables *net_tunables;
 
-	/* If no tunables specified, setup default tunables */
-	if (!ni->ni_lnd_tunables_set)
-		memcpy(&ni->ni_lnd_tunables.lnd_tun_u.lnd_sock,
-		       &ksock_default_tunables, sizeof(*tunables));
-
-	tunables = &ni->ni_lnd_tunables.lnd_tun_u.lnd_sock;
-
+	tunables = &lnd_tunables->lnd_tun_u.lnd_sock;
 	/* Current API version */
 	tunables->lnd_version = CURRENT_LND_VERSION;
-
-	net_tunables = &ni->ni_net->net_tunables;
 
 	if (net_tunables->lct_peer_timeout == -1)
 		net_tunables->lct_peer_timeout =
@@ -430,10 +390,6 @@ void ksocknal_tunables_setup(struct lnet_ni *ni)
 	if (net_tunables->lct_peer_rtr_credits == -1)
 		net_tunables->lct_peer_rtr_credits =
 			*ksocknal_tunables.ksnd_peerrtrcredits;
-
-	if (!tunables->lnd_conns_per_peer)
-		tunables->lnd_conns_per_peer =
-			ksocklnd_lookup_conns_per_peer(ni);
 
 	if (tunables->lnd_tos < 0)
 		tunables->lnd_tos = tos;

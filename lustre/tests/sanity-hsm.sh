@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 #
 # Run select tests by setting ONLY, or as arguments to the script.
 # Skip specific tests by setting EXCEPT.
@@ -417,7 +417,7 @@ wait_all_done() {
 
 	local cmd="$LCTL get_param -n $HSM_PARAM.actions"
 	[[ -n $fid ]] && cmd+=" | grep '$fid'"
-	cmd+=" | egrep 'WAITING|STARTED'"
+	cmd+=" | grep -E 'WAITING|STARTED'"
 
 	wait_update_facet --verbose mds1 "$cmd" "" $timeout ||
 		error "requests did not complete"
@@ -501,17 +501,75 @@ check_agent_unregistered() {
 	done
 }
 
+get_agent_mntpnt() {
+	local agent=${1:-$(facet_active_host $SINGLEAGT)}
+	local -a ct_cmd
+
+	ct_cmd=( $(do_rpc_nodes $agent \
+		pgrep --pidfile=$HSMTOOL_PID_FILE --list-full hsmtool) ) ||
+		return $?
+
+	# last parameter on  copytool cmd-line.
+	[[ -n "${ct_cmd[-1]}" ]] || return 1
+	echo ${ct_cmd[-1]}
+}
+
 get_agent_uuid() {
 	local agent=${1:-$(facet_active_host $SINGLEAGT)}
+	local mntpnt
 
-	# Lustre mount-point is mandatory and last parameter on
-	# copytool cmd-line.
-	local mntpnt=$(do_rpc_nodes $agent \
-			pgrep --pidfile=$HSMTOOL_PID_FILE --list-full hsmtool |
-		       awk '{print $NF}')
-	[ -n "$mntpnt" ] || error "Found no Agent or with no mount-point "\
-				  "parameter"
+	# Lustre mount-point is mandatory
+	mntpnt=$(get_agent_mntpnt $agent) ||
+		error "Found no Agent or with no mount-point parameter"
+
 	do_rpc_nodes $agent get_client_uuid $mntpnt | cut -d' ' -f2
+}
+
+evict_agent() {
+	local uuid=$1
+	local -i mdtidx;
+
+	for ((mdtidx = 0; mdtidx < MDSCOUNT; mdtidx++)); do
+		local facet=mds$(($mdtidx + 1))
+		local prefix=${MDT_PREFIX}${mdtidx}
+
+		do_facet $facet "$LCTL set_param $prefix.evict_client=$uuid"
+	done
+}
+
+declare -A saved_agent_instances
+
+disconnect_agent_node() {
+	local agent=${1:-$(facet_active_host $SINGLEAGT)}
+	local mntpnt
+
+	mntpnt=$(get_agent_mntpnt $agent) ||
+		error "Found no Agent or with no mount-point parameter"
+
+	local instance=$(do_node $agent $LFS getname -i $mntpnt)
+	saved_agent_instances[$agent]=$instance
+
+	local uuid=$(get_agent_uuid $agent)
+	local mdc_agt="$FSNAME-MDT*-mdc-$instance"
+
+	do_node $agent $LCTL set_param mdc.$mdc_agt.active=0
+	stack_trap "do_node $agent $LCTL set_param mdc.$mdc_agt.active=1"
+
+	# manually disconnect the agent client from the mdts
+	evict_agent $uuid
+}
+
+reconnect_agent_node() {
+	local agent=${1:-$(facet_active_host $SINGLEAGT)}
+	local instance=${saved_agent_instances[$agent]}
+
+	[[ -n "$instance" ]] ||
+		error "agent was not previously disconnected"
+
+	local mdc_agt="$FSNAME-MDT*-mdc-$instance"
+	do_node $agent $LCTL set_param mdc.$mdc_agt.active=1
+
+	wait_clients_import_ready "$agent" mds1
 }
 
 # initiate variables
@@ -1014,7 +1072,7 @@ test_11a() {
 	echo -n "Verifying released pattern: "
 	local PTRN=$($LFS getstripe -L $f)
 	echo $PTRN
-	[[ $PTRN == released ]] || error "Is not released"
+	[[ $PTRN =~ released ]] || error "Is not released"
 	local fid=$(path2fid $f)
 	echo "Verifying new fid $fid in archive"
 
@@ -1115,6 +1173,7 @@ test_12c() {
 	local f=$DIR/$tdir/$tfile
 	mkdir_on_mdt0 $DIR/$tdir
 	$LFS setstripe -c 2 "$f"
+	stack_trap "rm -rf $DIR/$tdir"
 	local fid=$(create_file "$f" 1M 5)
 
 	local FILE_CRC=$(md5sum $f)
@@ -1595,6 +1654,7 @@ test_15() {
 	copytool setup
 
 	mkdir_on_mdt0 $DIR/$tdir
+	stack_trap "rm -rf $DIR/$tdir"
 
 	# archive files
 	local f=$DIR/$tdir/$tfile
@@ -1650,6 +1710,7 @@ test_16() {
 
 	mkdir_on_mdt0 $DIR/$tdir
 	local f=$DIR/$tdir/$tfile
+	stack_trap "rm -f $ref $f"
 	local fid=$(copy_file $ref $f)
 	rm $ref
 	local start=$(date +%s)
@@ -2751,6 +2812,7 @@ test_31a() {
 
 	create_archive_file $tdir/$tfile
 	local f=$DIR/$tdir/$tfile
+	stack_trap "rm -f $f"
 	copytool import $tdir/$tfile $f
 	local fid=$($LFS path2fid $f)
 	copytool setup
@@ -2770,6 +2832,7 @@ test_31b() {
 
 	local f=$DIR/$tdir/$tfile
 	local fid=$(create_file "$f" 1MB 39)
+	stack_trap "rm -f $f"
 
 	$LFS hsm_archive --archive $HSM_ARCHIVE_NUMBER $f
 	wait_request_state $fid ARCHIVE SUCCEED
@@ -2789,6 +2852,7 @@ test_31c() {
 
 	local f=$DIR/$tdir/$tfile
 	local fid=$(create_file "$f" 1M 39)
+	stack_trap "rm -f $f"
 
 	$LFS hsm_archive --archive $HSM_ARCHIVE_NUMBER $f
 	wait_request_state $fid ARCHIVE SUCCEED
@@ -2981,6 +3045,7 @@ test_40() {
 	local p=""
 	local fid=""
 	local max_requests=$(get_hsm_param max_requests)
+	local huge_num=$((2**60))
 
 	stack_trap "set_hsm_param max_requests $max_requests" EXIT
 	# Increase the number of HSM request that can be performed in
@@ -2988,7 +3053,18 @@ test_40() {
 	# also limits the number of requests per seconds that can be
 	# performed, so we pick a decent number. But we also need to keep
 	# that number low because the copytool has no rate limit and will
-	# fail some requests if if gets too many at once.
+	# fail some requests if it gets too many at once.
+	if (( $MDS1_VERSION >= $(version_code v2_16_56-40) )); then
+		set_hsm_param max_requests $huge_num &&
+			error "set max_requests=$huge_num should failed" ||
+			echo "set max_requests=$huge_num failed with $?"
+
+		tmp_reqs=$(get_hsm_param max_requests)
+		(( $tmp_reqs < $huge_num && $tmp_reqs > $max_requests )) ||
+			error "Should set max_requests to be a reasonable value"
+		do_facet mds1 "dmesg | tail -n 5 | grep 'to set HSM max_requests='" ||
+			true
+	fi
 	set_hsm_param max_requests 300
 
 	for i in $(seq 1 $file_count); do
@@ -3047,6 +3123,7 @@ test_50() {
 	local dir=$DIR/$tdir
 	local batch_max=50
 
+	stack_trap "set_hsm_param max_requests $(get_hsm_param max_requests)"
 	set_hsm_param max_requests 1000000
 	mkdir $dir || error "mkdir $dir failed"
 	df -i $MOUNT
@@ -3655,6 +3732,8 @@ double_verify_reset_hsm_param() {
 	local val=$(get_hsm_param $p)
 	local save=$val
 	local val2=$(($val * 2))
+
+	stack_trap "set_hsm_param $p $save"
 	set_hsm_param $p $val2
 	val=$(get_hsm_param $p)
 	[[ $val == $val2 ]] ||
@@ -3671,6 +3750,9 @@ double_verify_reset_hsm_param() {
 }
 
 test_100() {
+	(( MDS1_VERSION >= $(version_code v2_16_56-53-g39f1380c20) )) ||
+		skip "need mds >= 2.16.56.53 for max_requests fix"
+
 	double_verify_reset_hsm_param loop_period
 	double_verify_reset_hsm_param grace_delay
 	double_verify_reset_hsm_param active_request_timeout
@@ -3791,6 +3873,9 @@ test_104() {
 run_test 104 "Copy tool data field"
 
 test_105() {
+	(( MDS1_VERSION >= $(version_code v2_16_56-53-g39f1380c20) )) ||
+		skip "need mds >= 2.16.56.53 for max_requests fix"
+
 	local max_requests=$(get_hsm_param max_requests)
 	mkdir_on_mdt0 $DIR/$tdir
 	local i=""
@@ -3820,7 +3905,7 @@ test_105() {
 }
 run_test 105 "Restart of coordinator"
 
-test_106() {
+test_106a() {
 	# test needs a running copytool
 	copytool setup
 
@@ -3839,7 +3924,51 @@ test_106() {
 	uuid=$(get_agent_uuid $(facet_active_host $SINGLEAGT))
 	check_agent_registered $uuid
 }
-run_test 106 "Copytool register/unregister"
+run_test 106a "Copytool register/unregister"
+
+test_106b() {
+	# test needs a running copytool
+	copytool setup
+
+	local uuid=$(get_agent_uuid)
+
+	check_agent_registered $uuid
+
+	search_copytools || error "No copytool found"
+
+	kill_copytools "" KILL
+	wait_copytools || error "Copytool failed to stop"
+
+	check_agent_unregistered $uuid
+
+	copytool setup
+	check_agent_registered $uuid
+}
+run_test 106b "Unregister agent after a copytool crash"
+
+test_106c() {
+
+	(( MDS1_VERSION >= $(version_code v2_16_58-105) )) ||
+		skip "need MDS version at least v2_16_58-105"
+
+	# test needs a running copytool
+	copytool setup
+
+	local uuid=$(get_agent_uuid)
+
+	check_agent_registered $uuid
+
+	search_copytools || error "No copytool found"
+
+	# disconnect the client agent
+	disconnect_agent_node
+	check_agent_unregistered $uuid
+
+	# reconnect the client agent
+	reconnect_agent_node
+	check_agent_registered $uuid
+}
+run_test 106c "Unregister copytool on client eviction"
 
 test_107() {
 	[ "$CLIENTONLY" ] && skip "CLIENTONLY mode" && return
@@ -4899,6 +5028,60 @@ test_255()
 }
 run_test 255 "Copytool registration wakes the coordinator up"
 
+test_256() {
+	(( MDSCOUNT >= 2 )) || skip "needs DNE (>= 2 MDTs)"
+
+	# Pick a victim client other than the test runner. The bug crashes the
+	# kernel on whichever node runs the copytool register; running it on a
+	# separate node lets us detect the panic from the runner.
+	local victim=${CLIENT2:-}
+	[[ -n "$victim" ]] || skip "needs a second client to safely panic-test"
+
+	do_node $victim "command -v lhsmtool_posix >/dev/null" ||
+		skip "lhsmtool_posix not on $victim"
+
+	# Drive ENXIO on MDT0001 by shutting down its coordinator while
+	# MDT0000 stays enabled. On a buggy build, lmv_hsm_ct_register's error
+	# path double-fputs the kuc pipe and the victim panics on the next
+	# close().  hsm_control=disabled is *not* sufficient to trigger the
+	# bug — shutdown (no coordinator service running) is what makes the
+	# per-MDT register ioctl return -ENXIO.
+	local saved
+	saved=$(do_facet mds2 "$LCTL get_param -n \
+		mdt.$FSNAME-MDT0001.hsm_control")
+	stack_trap "do_facet mds2 $LCTL set_param \
+		mdt.$FSNAME-MDT0001.hsm_control=$saved" EXIT
+
+	do_facet mds1 "$LCTL set_param \
+		mdt.$FSNAME-MDT0000.hsm_control=enabled"
+	do_facet mds2 "$LCTL set_param \
+		mdt.$FSNAME-MDT0001.hsm_control=shutdown"
+
+	# PID 1's birth time resets on reboot, so we can detect a panic+reboot
+	# from the runner without needing kdump.
+	local boot_before
+	boot_before=$(do_node $victim "stat -c %Y /proc/1")
+
+	local archive=/tmp/sanity-hsm-256-$$
+	do_node $victim "mkdir -p $archive; \
+		timeout 5 lhsmtool_posix --archive=1 --hsm-root $archive \
+			$MOUNT >/dev/null 2>&1 ; \
+		rm -rf $archive" || true
+
+	# Give any panic+reboot time to take effect (panic=10 on the kernel
+	# command line means the panic itself takes 10s before init reboot).
+	sleep 20
+
+	local boot_after
+	boot_after=$(do_node $victim "stat -c %Y /proc/1" 2>/dev/null ||
+		echo "unreachable")
+
+	[[ "$boot_before" == "$boot_after" ]] ||
+		error "$victim rebooted ($boot_before -> $boot_after) — \
+lmv_hsm_ct_register kuc pipe double-fput (LU-20311)"
+}
+run_test 256 "HSM copytool register on DNE with stopped MDT must not panic"
+
 # tests 260[a-c] rely on the parsing of the copytool's log file, they might
 # break in the future because of that.
 test_260a()
@@ -5800,20 +5983,22 @@ run_test 411 "hsm_ops rbac role"
 
 test_500()
 {
-	[ "$MDS1_VERSION" -lt $(version_code 2.6.92) ] &&
-		skip "HSM migrate is not supported"
+	local bitmap_opt=""
+
+	(( $MDS1_VERSION >= $(version_code 2.6.92-47-g1fe3ae8dab) )) ||
+		skip "need MDS >= 2.6.92.47 for HSM migrate support"
 
 	test_mkdir -p $DIR/$tdir
 
-	if [ "$CLIENT_VERSION" -lt $(version_code 2.11.56) ] ||
-	     [ "$MDS1_VERSION" -lt $(version_code 2.11.56) ];
-	then
-		llapi_hsm_test -d $DIR/$tdir -b ||
-			error "One llapi HSM test failed"
-	else
-		llapi_hsm_test -d $DIR/$tdir ||
-			error "One llapi HSM test failed"
-	fi
+	(( $CLIENT_VERSION >= $(version_code 2.11.56-179-g3bfb6107ba) &&
+	   $MDS1_VERSION >= $(version_code 2.11.56-179-g3bfb6107ba) )) ||
+		bitmap_opt="-b"
+
+	(( $MDS1_VERSION >= $(version_code 2.14.50-142-gf684172237) )) ||
+		SKIP500+=" -s 113"
+
+	llapi_hsm_test -d $DIR/$tdir $bitmap_opt $SKIP500 ||
+		error "llapi HSM testing failed"
 }
 run_test 500 "various LLAPI HSM tests"
 
@@ -6192,8 +6377,8 @@ test_607a()
 	local f="$d/$tfile"
 	local fid
 
-	(( MDS1_VERSION >= $(version_code 2.15.60) )) ||
-		skip "need MDS version at least 2.15.60"
+	(( MDS1_VERSION >= $(version_code v2_15_61-80-g94d02e5774) )) ||
+		skip "need MDS >= 2.15.61.80 for non-blocking migrate release"
 
 	(( OSTCOUNT >= 2 )) || skip_env "needs >= 2 OSTs"
 
@@ -6208,12 +6393,12 @@ test_607a()
 		error "could not migrate file to OST 1"
 
 	$LFS hsm_release "$f" ||
-		error "could not release file after non blocking migrate"
+		error "could not release file after non-blocking migrate"
 	$LFS hsm_restore "$f" ||
-		error "could not restore file after non blocking migrate"
+		error "could not restore file after non-blocking migrate"
 	wait_request_state $fid RESTORE SUCCEED
 }
-run_test 607a "release a file that was migrated after being archived"
+run_test 607a "release file migrated after archive (non-blocking migrate)"
 
 test_607b()
 {
@@ -6224,8 +6409,8 @@ test_607b()
 	local new_hsm
 	local fid
 
-	(( MDS1_VERSION >= $(version_code 2.15.60) )) ||
-		skip "need MDS version at least 2.15.60"
+	(( MDS1_VERSION >= $(version_code v2_15_61-80-g94d02e5774) )) ||
+		skip "need MDS >= 2.15.61.80 for non-blocking migrate release"
 
 	(( OSTCOUNT >= 2 )) || skip_env "needs >= 2 OSTs"
 
@@ -6244,16 +6429,13 @@ test_607b()
 	echo 10 >> "$f"
 
 	old_hsm=$(get_hsm_xattr_sha "$f")
-	$LFS migrate -n -i 1 "$f" ||
-		error "could not migrate file to OST 1"
+	$LFS migrate -n -i 1 "$f" || error "could not migrate file to OST 1"
 
 	$LFS hsm_state "$f" | grep dirty || error "dirty flag not found"
 
 	new_hsm=$(get_hsm_xattr_sha "$f")
-	[ "$old_hsm" != "$new_hsm" ] &&
+	[[ "$old_hsm" == "$new_hsm" ]] ||
 		 error "migrate should not modify data version of dirty files"
-
-	return 0
 }
 run_test 607b "Migrate should not change the HSM attribute of dirty files"
 
@@ -6264,8 +6446,8 @@ test_607c()
 	local fid1 fid2 fid3
 	local nbr_dirty
 
-	(( MDS1_VERSION >= $(version_code 2.15.60) )) ||
-		skip "need MDS version at least 2.15.60"
+	(( MDS1_VERSION >= $(version_code v2_15_61-80-g94d02e5774) )) ||
+		skip "need MDS >= 2.15.61.80 for non-blocking migrate release"
 
 	mkdir_on_mdt0 $d
 	fid1=$(create_small_file "$f-1")
@@ -6291,9 +6473,64 @@ test_607c()
 
 	nbr_dirty=$($LFS hsm_state "$f-1" "$f-3" | grep -c 'dirty')
 	((nbr_dirty == 2)) || error "dirty flag should be set on $f-1 and $f-3"
-
 }
 run_test 607c "'lfs swap_layouts' should set dirty flag on HSM file"
+
+test_607d()
+{
+	(( MDS1_VERSION >= $(version_code v2_17_50-193) )) ||
+		skip "need MDS >= 2.17.50 to avoid dirty on empty file"
+
+	(( OSTCOUNT >= 2 )) || skip_env "needs >= 2 OSTs"
+
+	mkdir_on_mdt0 $DIR/$tdir
+
+	local f=$DIR/$tdir/$tfile
+	local fid=$(create_empty_file "$f")
+
+	copytool setup
+
+	$LFS hsm_archive "$f" || error "could not archive file"
+	wait_request_state $fid ARCHIVE SUCCEED
+
+	$LFS migrate -n -i 1 "$f" ||
+		error "could not migrate file to OST 1"
+
+	! ( $LFS hsm_state "$f" | grep dirty ) || error "dirty flag found"
+
+	$LFS hsm_release "$f" ||
+		error "could not release file after non blocking migrate"
+	$LFS hsm_restore "$f" ||
+		error "could not restore file after non blocking migrate"
+	wait_request_state $fid RESTORE SUCCEED
+}
+run_test 607d "Migrate should not set HSM dirty flag for an empty file"
+
+test_607e()
+{
+	local d="$DIR/$tdir"
+	local f="$DIR/$tdir/$tfile"
+	local fid
+
+	(( MDS1_VERSION >= $(version_code 2.17.50.192) )) ||
+		skip "need MDS >= 2.17.50.192 for non-blocking migrate release"
+
+	(( OSTCOUNT >= 2 )) || skip_env "needs >= 2 OSTs"
+
+	fid=$(test_hsm_migrate_init "$d" "$f" | tail -1)
+
+	copytool setup
+
+	$LFS hsm_archive "$f" || error "could not archive file"
+	wait_request_state $fid ARCHIVE SUCCEED
+
+	$LFS migrate -b -i 1 "$f" || error "could not migrate file to OST 1"
+
+	$LFS hsm_release "$f" || error "could not release file after migrate"
+	$LFS hsm_restore "$f" || error "could not restore file after migrate"
+	wait_request_state $fid RESTORE SUCCEED
+}
+run_test 607e "release file migrated after archive (blocking migrate)"
 
 complete_test $SECONDS
 check_and_cleanup_lustre

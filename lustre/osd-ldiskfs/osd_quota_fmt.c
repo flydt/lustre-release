@@ -36,7 +36,16 @@ static inline void freedqbuf(dqbuf_t buf)
 }
 
 /**
- * Read the \a blk into \a buf.
+ * quota_read_blk() - Read the @blk into @buf.
+ * @env: Lustre environment
+ * @obj: OSD object
+ * @type: quota type
+ * @blk: Block number
+ * @buf: Pointer to buffer of read quota block [out]
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static ssize_t quota_read_blk(const struct lu_env *env,
 			      struct osd_object *obj,
@@ -62,32 +71,42 @@ static ssize_t quota_read_blk(const struct lu_env *env,
 }
 
 /**
- * Find entry in block by given \a dqid in the leaf block \a blk
+ * find_block_dqentry() - Find entry in block by given @dqid in the leaf block
+ *                        @blk
+ * @env: Lustre environment
+ * @obj: OSD object
+ * @type: quota type
+ * @dqid: Quota ID
+ * @blk: Block number
+ * @it: Quota valid entry [out]
  *
- * \retval +ve, the offset of the entry in file
- * \retval   0, entry not found
- * \retval -ve, unexpected failure
+ * Return:
+ * * %positive the offset of the entry in file
+ * * %0 entry not found
+ * * %negative unexpected failure
  */
 static loff_t find_block_dqentry(const struct lu_env *env,
 				 struct osd_object *obj, int type,
 				 qid_t dqid, uint blk,
 				 struct osd_it_quota *it)
 {
-	dqbuf_t				 buf = getdqbuf();
-	loff_t				 ret;
-	int				 i;
-	struct lustre_disk_dqblk_v2	*ddquot;
-	int				 dqblk_sz;
+	dqbuf_t buf;
+	struct lustre_disk_dqblk_v2 *ddquot;
+	int dqblk_sz;
+	loff_t ret;
+	int i;
 
 	ENTRY;
 
+	buf = getdqbuf();
 	ddquot = (struct lustre_disk_dqblk_v2 *)GETENTRIES(buf);
 	dqblk_sz = sizeof(struct lustre_disk_dqblk_v2);
 	if (!buf)
 		RETURN(-ENOMEM);
 	ret = quota_read_blk(env, obj, type, blk, buf);
 	if (ret < 0) {
-		CERROR("Can't read quota tree block %u.\n", blk);
+		CERROR("%s: cannot read quota tree block %u: rc = %lld\n",
+		       osd_obj2dev(obj)->od_svname, blk, ret);
 		GOTO(out_buf, ret);
 	}
 
@@ -125,28 +144,39 @@ out_buf:
 }
 
 /**
- * Find entry for given \a dqid in the tree block \a blk
+ * find_tree_dqentry() - Find entry for given @dqid in the tree block @blk
+ * @env: Lustre environment
+ * @obj: OSD object
+ * @type: quota type
+ * @dqid: Quota ID
+ * @blk: Block number
+ * @depth: Quota depth
+ * @it: Quota valid entry [out]
  *
- * \retval +ve, the offset of the entry in file
- * \retval   0, entry not found
- * \retval -ve, unexpected failure
+ * Return:
+ * * %positive offset of the entry in file
+ * * %0 entry not found
+ * * %negative unexpected failure
  */
 loff_t find_tree_dqentry(const struct lu_env *env,
 			 struct osd_object *obj, int type,
 			 qid_t dqid, uint blk, int depth,
 			 struct osd_it_quota *it)
 {
-	dqbuf_t	 buf = getdqbuf();
-	loff_t	 ret;
-	u32	*ref = (u32 *) buf;
+	dqbuf_t buf;
+	loff_t ret;
+	u32 *ref;
 
 	ENTRY;
 
+	buf = getdqbuf();
 	if (!buf)
 		RETURN(-ENOMEM);
+	ref = (u32 *)buf;
 	ret = quota_read_blk(env, obj, type, blk, buf);
 	if (ret < 0) {
-		CERROR("Can't read quota tree block %u.\n", blk);
+		CERROR("%s: cannot read quota tree block %u: rc = %lld\n",
+		       osd_obj2dev(obj)->od_svname, blk, ret);
 		GOTO(out_buf, ret);
 	}
 	ret = 0;
@@ -171,25 +201,32 @@ out_buf:
 }
 
 /**
- * Search from \a index within the leaf block \a blk, and fill the \a it with
- * the first valid entry.
+ * walk_block_dqentry() - Search from @index within the leaf block @blk, and
+ *                        fill the @it with the first valid entry.
+ * @env: Lustre environment
+ * @obj: OSD object
+ * @type: quota type
+ * @blk: Block number
+ * @index: Start index
+ * @it: Quota valid entry [out]
  *
- * \retval +ve, no valid entry found
- * \retval   0, entry found
- * \retval -ve, unexpected failure
+ * Return:
+ * * %positive no valid entry found
+ * * %0 entry found
+ * * %negative on unexpected failure
  */
 int walk_block_dqentry(const struct lu_env *env, struct osd_object *obj,
 		       int type, uint blk, uint index,
 		       struct osd_it_quota *it)
 {
-	dqbuf_t				 buf;
-	loff_t				 ret = 0;
-	struct lustre_disk_dqdbheader	*dqhead;
-	int				 i, dqblk_sz;
-	struct lustre_disk_dqblk_v2	*ddquot;
-	struct osd_quota_leaf		*leaf;
-	ENTRY;
+	struct lustre_disk_dqdbheader *dqhead;
+	int i, dqblk_sz;
+	struct lustre_disk_dqblk_v2 *ddquot;
+	struct osd_quota_leaf *leaf;
+	dqbuf_t buf;
+	loff_t ret = 0;
 
+	ENTRY;
 	/* check if the leaf block has been processed before */
 	list_for_each_entry(leaf, &it->oiq_list, oql_link) {
 		if (leaf->oql_blk == blk)
@@ -203,7 +240,8 @@ int walk_block_dqentry(const struct lu_env *env, struct osd_object *obj,
 		RETURN(-ENOMEM);
 	ret = quota_read_blk(env, obj, type, blk, buf);
 	if (ret < 0) {
-		CERROR("Can't read quota tree block %u.\n", blk);
+		CERROR("%s: cannot read quota tree block %u: rc = %lld\n",
+		       osd_obj2dev(obj)->od_svname, blk, ret);
 		GOTO(out_buf, ret);
 	}
 	ret = 1;
@@ -235,28 +273,39 @@ out_buf:
 }
 
 /**
- * Search from \a index within the tree block \a blk, and fill the \a it
- * with the first valid entry.
+ * walk_tree_dqentry() - Search from @index within the tree block @blk, and
+ *                       fill the @it with the first valid entry.
+ * @env: Lustre environment
+ * @obj: OSD object
+ * @type: quota type
+ * @blk: Block number
+ * @depth: Quota depth
+ * @index: Start index
+ * @it: Quota valid entry [out]
  *
- * \retval +ve, no valid entry found
- * \retval   0, entry found
- * \retval -ve, unexpected failure
+ * Return:
+ * * %positive no valid entry found
+ * * %0 entry found
+ * * %negative unexpected failure
  */
 int walk_tree_dqentry(const struct lu_env *env, struct osd_object *obj,
 		      int type, uint blk, int depth, uint index,
 		      struct osd_it_quota *it)
 {
-	dqbuf_t	 buf = getdqbuf();
-	loff_t	 ret;
-	u32	*ref = (u32 *) buf;
+	dqbuf_t	buf;
+	loff_t ret;
+	u32 *ref;
 
 	ENTRY;
 
+	buf = getdqbuf();
 	if (!buf)
 		RETURN(-ENOMEM);
+	ref = (u32 *)buf;
 	ret = quota_read_blk(env, obj, type, blk, buf);
 	if (ret < 0) {
-		CERROR("Can't read quota tree block %u.\n", blk);
+		CERROR("%s: cannot read quota tree block %u: rc = %lld\n",
+		       osd_obj2dev(obj)->od_svname, blk, ret);
 		goto out_buf;
 	}
 	ret = 1;

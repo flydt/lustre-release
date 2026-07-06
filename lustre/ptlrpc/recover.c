@@ -14,8 +14,9 @@
  */
 
 #define DEBUG_SUBSYSTEM S_RPC
+
 #include <linux/list.h>
-#include <libcfs/libcfs.h>
+
 #include <obd_support.h>
 #include <lustre_ha.h>
 #include <lustre_net.h>
@@ -26,7 +27,7 @@
 
 #include "ptlrpc_internal.h"
 
-/**
+/*
  * Identify what request from replay list needs to be replayed next
  * (based on what we have already replayed) and send it to server.
  */
@@ -58,7 +59,7 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 
 		/* The last request on committed_list hasn't been replayed */
 		if (req->rq_transno > last_transno) {
-			if (!imp->imp_resend_replay ||
+			if (!test_bit(IMPF_RESEND_REPLAY, imp->imp_flags) ||
 			    imp->imp_replay_cursor == &imp->imp_committed_list)
 				imp->imp_replay_cursor =
 					imp->imp_replay_cursor->next;
@@ -103,7 +104,7 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 	 * If, however, the last sent transno has been committed then we
 	 * continue replay from the next request.
 	 */
-	if (req != NULL && imp->imp_resend_replay)
+	if (req != NULL && test_bit(IMPF_RESEND_REPLAY, imp->imp_flags))
 		lustre_msg_add_flags(req->rq_reqmsg, MSG_RESENT);
 
 	/* ptlrpc_prepare_replay() may fail to add the reqeust into unreplied
@@ -113,12 +114,14 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 	 */
 	if (req != NULL && list_empty(&req->rq_unreplied_list)) {
 		DEBUG_REQ(D_HA, req, "resend_replay=%d, last_transno=%llu",
-			  imp->imp_resend_replay, last_transno);
+			  test_bit(IMPF_RESEND_REPLAY, imp->imp_flags),
+			  last_transno);
 		ptlrpc_add_unreplied(req);
 		imp->imp_known_replied_xid = ptlrpc_known_replied_xid(imp);
 	}
 
-	imp->imp_resend_replay = 0;
+	clear_bit(IMPF_RESEND_REPLAY, imp->imp_flags);
+	smp_mb__after_atomic();
 	spin_unlock(&imp->imp_lock);
 
 	if (req != NULL) {
@@ -135,7 +138,7 @@ int ptlrpc_replay_next(struct obd_import *imp, int *inflight)
 	RETURN(rc);
 }
 
-/**
+/*
  * Schedule resending of request on sending_list. This is done after
  * we completed replaying of requests and locks.
  */
@@ -175,7 +178,7 @@ int ptlrpc_resend(struct obd_import *imp)
 	RETURN(0);
 }
 
-/**
+/*
  * Go through all requests in delayed list and wake their threads
  * for resending
  */
@@ -199,11 +202,11 @@ void ptlrpc_request_handle_notconn(struct ptlrpc_request *failed_req)
 	ENTRY;
 	CDEBUG(D_HA, "import %s of %s@%s abruptly disconnected: reconnecting\n",
 		imp->imp_obd->obd_name, obd2cli_tgt(imp->imp_obd),
-		imp->imp_connection->c_remote_uuid.uuid);
+		libcfs_nidstr(&imp->imp_connection->c_peer.nid));
 
 	if (ptlrpc_set_import_discon(imp, conn, true)) {
 		/* to control recovery via lctl {disable|enable}_recovery */
-		if (imp->imp_deactive == 0)
+		if (!test_bit(IMPF_DEACTIVE, imp->imp_flags))
 			ptlrpc_connect_import(imp);
 	}
 
@@ -219,11 +222,18 @@ void ptlrpc_request_handle_notconn(struct ptlrpc_request *failed_req)
 }
 
 /**
- * Administratively active/deactive a client.
+ * ptlrpc_set_import_active() - Administratively active/deactive a client.
+ * @imp: import object
+ * @active: flag to activate(1) or de-activate(0)
+ *
  * This should only be called by the ioctl interface, currently
  *  - the lctl deactivate and activate commands
  *  - echo 0/1 >> /proc/osc/XXX/active
  *  - client umount -f (ll_umount_begin)
+ *
+ * Returns:
+ * * %0 on successful activation/deactivation
+ * * %negative on failure
  */
 int ptlrpc_set_import_active(struct obd_import *imp, int active)
 {
@@ -239,12 +249,10 @@ int ptlrpc_set_import_active(struct obd_import *imp, int active)
 			      obd2cli_tgt(imp->imp_obd));
 
 		/* set before invalidate to avoid messages about imp_inval
-		 * set without imp_deactive in ptlrpc_import_delay_req
+		 * set without IMPF_DEACTIVE in ptlrpc_import_delay_req
 		 */
-		spin_lock(&imp->imp_lock);
-		imp->imp_deactive = 1;
-		spin_unlock(&imp->imp_lock);
-
+		set_bit(IMPF_DEACTIVE, imp->imp_flags);
+		smp_mb__after_atomic();
 		obd_import_event(imp->imp_obd, imp, IMP_EVENT_DEACTIVATE);
 
 		ptlrpc_invalidate_import(imp);
@@ -255,9 +263,7 @@ int ptlrpc_set_import_active(struct obd_import *imp, int active)
 		CDEBUG(D_HA, "setting import %s VALID\n",
 		       obd2cli_tgt(imp->imp_obd));
 
-		spin_lock(&imp->imp_lock);
-		imp->imp_deactive = 0;
-		spin_unlock(&imp->imp_lock);
+		clear_bit(IMPF_DEACTIVE, imp->imp_flags);
 		obd_import_event(imp->imp_obd, imp, IMP_EVENT_ACTIVATE);
 
 		rc = ptlrpc_recover_import(imp, NULL, 0);
@@ -276,7 +282,7 @@ bool ptlrpc_import_in_recovery_disconnect(struct obd_import *imp,
 	if (imp->imp_state < LUSTRE_IMP_DISCON ||
 	    (!disconnect_is_recovery && imp->imp_state == LUSTRE_IMP_DISCON) ||
 	    imp->imp_state >= LUSTRE_IMP_FULL ||
-	    imp->imp_obd->obd_no_recov)
+	    test_bit(OBDF_NO_RECOV, imp->imp_obd->obd_flags))
 		in_recovery = false;
 	spin_unlock(&imp->imp_lock);
 
@@ -290,7 +296,8 @@ int ptlrpc_recover_import(struct obd_import *imp, char *new_uuid, int async)
 
 	ENTRY;
 	spin_lock(&imp->imp_lock);
-	if (imp->imp_state == LUSTRE_IMP_NEW || imp->imp_deactive ||
+	if (imp->imp_state == LUSTRE_IMP_NEW ||
+	    test_bit(IMPF_DEACTIVE, imp->imp_flags) ||
 	    atomic_read(&imp->imp_inval_count))
 		rc = -EINVAL;
 	spin_unlock(&imp->imp_lock);

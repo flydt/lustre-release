@@ -52,7 +52,7 @@ static void *lprocfs_quota_seq_start(struct seq_file *p, loff_t *pos)
 		return NULL;
 
 	offset--;
-	/* move on to the the last processed entry */
+	/* move on to the last processed entry */
 	iops = &lqp->lqp_obj->do_index_ops->dio_it;
 	it = lqp->lqp_it;
 	rc = iops->load(&lqp->lqp_env, it, lqp->lqp_cookie);
@@ -156,7 +156,6 @@ static inline const char *oid2name(__u32 oid)
 		return "grp_accounting";
 	case ACCT_PROJECT_OID:
 		return "prj_accounting";
-		break;
 	default:
 		return "unknown_accounting";
 	}
@@ -184,7 +183,7 @@ static int lprocfs_quota_seq_show(struct seq_file *p, void *v)
 
 	LASSERT(lqp);
 	if (lqp->lqp_obj == NULL) {
-		seq_printf(p, "not supported\n");
+		seq_puts(p, "not supported\n");
 		return 0;
 	}
 
@@ -205,7 +204,7 @@ static int lprocfs_quota_seq_show(struct seq_file *p, void *v)
 				   RES_NAME(rtype), qtype_name(qtype));
 		} else if (fid_seq(fid) == FID_SEQ_LOCAL_NAME) {
 			/* global index copy object */
-			seq_printf(p, "global_index_copy:\n");
+			seq_puts(p, "global_index_copy:\n");
 		} else {
 			return -ENOTSUPP;
 		}
@@ -234,7 +233,7 @@ static int lprocfs_quota_seq_show(struct seq_file *p, void *v)
 	if (fid_is_acct(fid))
 		seq_printf(p, "  %-8s { inodes: %12llu, kbytes: %12llu }\n",
 			   "usage:", ((struct lquota_acct_rec *)rec)->ispace,
-			   toqb(((struct lquota_acct_rec *)rec)->bspace));
+			   stoqb(((struct lquota_acct_rec *)rec)->bspace));
 	else if (fid_seq(fid) == FID_SEQ_QUOTA_GLB ||
 		 fid_seq(fid) == FID_SEQ_LOCAL_NAME)
 		seq_printf(p, "  %-8s { hard: %12llu, soft: %12llu, granted: %12llu, time: %15llu }\n",

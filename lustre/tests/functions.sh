@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 
 # functions used by other scripts
 
@@ -839,7 +839,7 @@ run_write_append_truncate() {
 
 	chmod 0777 $testdir
 
-	local cmd="$WRITE_APPEND_TRUNCATE -n $write_REP $file"
+	local cmd="$WRITE_APPEND_TRUNCATE -n $write_REP -u $file"
 
 	echo "+ $cmd"
 	mpi_run ${MACHINEFILE_OPTION} ${MACHINEFILE} \
@@ -1104,7 +1104,7 @@ run_rr_alloc() {
 	(( create_count <= max_create_count )) ||
 		create_count=$((max_create_count / 2))
 
-	local mdts=$(comma_list $(mdts_nodes))
+	local mdts=$(mdts_nodes)
 
 	do_nodes $mdts "$LCTL set_param lod.*.qos_threshold_rr=100 \
 		osp.*.create_count=$create_count"

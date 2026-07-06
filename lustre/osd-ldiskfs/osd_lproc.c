@@ -89,7 +89,7 @@ static int osd_stats_init(struct osd_device *osd)
 	int result = -ENOMEM;
 
 	ENTRY;
-	scnprintf(param, sizeof(param), "osd-zfs.%s.stats", osd_name(osd));
+	scnprintf(param, sizeof(param), "osd-ldiskfs.%s.stats", osd_name(osd));
 	osd->od_stats = ldebugfs_stats_alloc(LPROC_OSD_LAST, param,
 					     osd->od_dt_dev.dd_debugfs_entry,
 					     0);
@@ -127,6 +127,9 @@ static int osd_stats_init(struct osd_device *osd)
 
 	ldebugfs_register_brw_stats(osd->od_dt_dev.dd_debugfs_entry,
 				    &osd->od_brw_stats);
+	/* only for osd-ldiskfs until osd-zfs is fixed, then merge into above */
+	ldebugfs_register_io_latency_stats(osd->od_dt_dev.dd_debugfs_entry,
+					   &osd->od_brw_stats);
 
 #if LUSTRE_VERSION_CODE < OBD_OCD_VERSION(2, 17, 53, 0)
 	osd_symlink_brw_stats(osd);
@@ -323,16 +326,22 @@ LUSTRE_RW_ATTR(fallocate_zero_blocks);
 static ssize_t force_sync_store(struct kobject *kobj, struct attribute *attr,
 				const char *buffer, size_t count)
 {
-	struct dt_device *dt = container_of(kobj, struct dt_device, dd_kobj);
+	struct dt_device *dt = container_of(kobj, struct dt_device,
+					    dd_kobj);
 	struct osd_device *osd = osd_dt_dev(dt);
+	struct lu_env env;
 	int rc;
 
 	LASSERT(osd);
 	if (unlikely(!osd->od_mnt))
 		return -EINPROGRESS;
 
-	flush_workqueue(LDISKFS_SB(osd_sb(osd_dt_dev(dt)))->s_misc_wq);
-	rc = dt_sync(NULL, dt);
+	rc = lu_env_init(&env, LCT_LOCAL);
+	if (rc)
+		return rc;
+
+	rc = dt_sync(&env, dt);
+	lu_env_fini(&env);
 
 	return rc == 0 ? count : rc;
 }
@@ -668,6 +677,50 @@ static ssize_t writethrough_max_io_mb_store(struct kobject *kobj,
 }
 LUSTRE_RW_ATTR(writethrough_max_io_mb);
 
+static ssize_t inflight_io_log2_show(struct kobject *kobj,
+					  struct attribute *attr, char *buf)
+{
+	struct dt_device *dt = container_of(kobj, struct dt_device,
+					    dd_kobj);
+	struct osd_device *osd = osd_dt_dev(dt);
+
+	LASSERT(osd != NULL);
+	if (unlikely(osd->od_mnt == NULL))
+		return -EINPROGRESS;
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+			 osd->od_brw_stats.bs_inflight_io_log2);
+}
+
+static ssize_t inflight_io_log2_store(struct kobject *kobj,
+					   struct attribute *attr,
+					   const char *buffer, size_t count)
+{
+	struct dt_device *dt = container_of(kobj, struct dt_device,
+					    dd_kobj);
+	struct osd_device *osd = osd_dt_dev(dt);
+	struct brw_stats *brw_stats = &osd->od_brw_stats;
+	bool val;
+	int rc;
+
+	LASSERT(osd != NULL);
+	if (unlikely(osd->od_mnt == NULL))
+		return -EINPROGRESS;
+
+	rc = kstrtobool(buffer, &val);
+	if (rc)
+		return rc;
+
+	if (brw_stats->bs_inflight_io_log2 != val) {
+		brw_stats->bs_inflight_io_log2 = val;
+		/* Clear stats on change to avoid mixed histogram data */
+		lprocfs_oh_clear_pcpu(&brw_stats->bs_hist[BRW_R_RPC_HIST]);
+		lprocfs_oh_clear_pcpu(&brw_stats->bs_hist[BRW_W_RPC_HIST]);
+	}
+	return count;
+}
+LUSTRE_RW_ATTR(inflight_io_log2);
+
 #if LUSTRE_VERSION_CODE < OBD_OCD_VERSION(3, 0, 52, 0)
 static ssize_t index_in_idif_show(struct kobject *kobj, struct attribute *attr,
 				  char *buf)
@@ -807,7 +860,7 @@ static ssize_t extents_dense_store(struct kobject *kobj, struct attribute *attr,
 LUSTRE_RW_ATTR(extents_dense);
 #endif
 
-struct ldebugfs_vars ldebugfs_osd_obd_vars[] = {
+static struct ldebugfs_vars ldebugfs_osd_obd_vars[] = {
 	{ .name =	"oi_scrub",
 	  .fops =	&ldiskfs_osd_oi_scrub_fops      },
 	{ NULL }
@@ -834,10 +887,11 @@ static struct attribute *ldiskfs_attrs[] = {
 	&lustre_attr_readcache_max_filesize.attr,
 	&lustre_attr_readcache_max_io_mb.attr,
 	&lustre_attr_writethrough_max_io_mb.attr,
+	&lustre_attr_inflight_io_log2.attr,
 	NULL,
 };
 
-KOBJ_ATTRIBUTE_GROUPS(ldiskfs); /* creates ldiskfs_groups from ldiskfs_attrs */
+ATTRIBUTE_GROUPS(ldiskfs); /* creates ldiskfs_groups from ldiskfs_attrs */
 
 int osd_procfs_init(struct osd_device *osd, const char *name)
 {
@@ -859,7 +913,7 @@ int osd_procfs_init(struct osd_device *osd, const char *name)
 	/* put reference taken by class_search_type */
 	kobject_put(&type->typ_kobj);
 
-	osd->od_dt_dev.dd_ktype.default_groups = KOBJ_ATTR_GROUPS(ldiskfs);
+	osd->od_dt_dev.dd_ktype.default_groups = ldiskfs_groups;
 	rc = dt_tunables_init(&osd->od_dt_dev, type, name,
 			      ldebugfs_osd_obd_vars);
 	if (rc) {
@@ -876,8 +930,7 @@ int osd_procfs_init(struct osd_device *osd, const char *name)
 					      NULL, &osd->od_dt_dev);
 	if (IS_ERR(osd->od_proc_entry)) {
 		rc = PTR_ERR(osd->od_proc_entry);
-		CERROR("Error %d setting up lprocfs for %s\n",
-		       rc, name);
+		CERROR("%s: lprocfs_register() failed: rc = %d\n", name, rc);
 		osd->od_proc_entry = NULL;
 		GOTO(out, rc);
 	}
@@ -891,15 +944,14 @@ out:
 	return rc;
 }
 
-int osd_procfs_fini(struct osd_device *osd)
+void osd_procfs_fini(struct osd_device *osd)
 {
-	lprocfs_fini_brw_stats(&osd->od_brw_stats);
-
-	if (osd->od_stats)
-		lprocfs_stats_free(&osd->od_stats);
-
 	if (osd->od_proc_entry)
 		lprocfs_remove(&osd->od_proc_entry);
 
-	return dt_tunables_fini(&osd->od_dt_dev);
+	dt_tunables_fini(&osd->od_dt_dev);
+
+	lprocfs_fini_brw_stats(&osd->od_brw_stats);
+	if (osd->od_stats)
+		lprocfs_stats_free(&osd->od_stats);
 }

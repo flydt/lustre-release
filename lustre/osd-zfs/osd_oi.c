@@ -19,7 +19,6 @@
 
 #define DEBUG_SUBSYSTEM S_OSD
 
-#include <libcfs/libcfs.h>
 #include <obd_support.h>
 #include <lustre_net.h>
 #include <obd.h>
@@ -98,7 +97,16 @@ static char *oid2name(const unsigned long oid)
 }
 
 /**
- * Lookup an existing OI by the given name.
+ * osd_oi_lookup() - Lookup an existing OI by the given name.
+ * @env: Lustre environment
+ * @o: OSD device
+ * @parent: Parent directory
+ * @name: Lookup an existing OI by the given name
+ * @oi: OI populated after lookup [out]
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int
 osd_oi_lookup(const struct lu_env *env, struct osd_device *o,
@@ -167,7 +175,7 @@ static int osd_obj_create(const struct lu_env *env, struct osd_device *o,
 	dmu_tx_hold_bonus(tx, parent);
 	dmu_tx_hold_zap(tx, parent, TRUE, name);
 	dmu_tx_hold_sa_create(tx, ZFS_SA_BASE_ATTR_SIZE);
-	rc = -dmu_tx_assign(tx, TXG_WAIT);
+	rc = -dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (rc) {
 		dmu_tx_abort(tx);
 		GOTO(out, rc);
@@ -176,7 +184,9 @@ static int osd_obj_create(const struct lu_env *env, struct osd_device *o,
 	if (isdir)
 		oid = osd_zap_create_flags(o->od_os, 0, ZAP_FLAG_HASH64,
 					   DMU_OT_DIRECTORY_CONTENTS,
-					   14, DN_MAX_INDBLKSHIFT, 0, tx);
+					   o->od_fzap_blockshift,
+					   DN_MAX_INDBLKSHIFT,
+					   0, tx);
 	else
 		oid = osd_dmu_object_alloc(o->od_os, DMU_OTN_UINT8_METADATA,
 					   0, 0, tx);
@@ -237,7 +247,7 @@ static int osd_oi_destroy(const struct lu_env *env, struct osd_device *o,
 	dmu_tx_mark_netfree(tx);
 	dmu_tx_hold_free(tx, oid, 0, DMU_OBJECT_END);
 	osd_tx_hold_zap(tx, oid, rootdn, FALSE, NULL);
-	rc = -dmu_tx_assign(tx, TXG_WAIT);
+	rc = -dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (rc) {
 		dmu_tx_abort(tx);
 		GOTO(out, rc);
@@ -299,8 +309,18 @@ int osd_obj_find_or_create(const struct lu_env *env, struct osd_device *o,
 }
 
 /**
+ * osd_fld_lookup() - Lookup the target index/flags of the fid
+ * @env: Lustre environment
+ * @osd: OSD device
+ * @seq: Sequence to look up
+ * @range: Lookup result [out]
+ *
  * Lookup the target index/flags of the fid, so it will know where
  * the object is located (tgt index) and it is MDT or OST object.
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 int osd_fld_lookup(const struct lu_env *env, struct osd_device *osd,
 		   u64 seq, struct lu_seq_range *range)
@@ -681,7 +701,10 @@ int osd_fid_lookup(const struct lu_env *env, struct osd_device *dev,
 }
 
 /**
- * Close an entry in a specific slot.
+ * osd_oi_remove_table() - Close an entry in a specific slot.
+ * @env: Lustre environment
+ * @o: OSD device
+ * @key: Index to remove OI
  */
 static void
 osd_oi_remove_table(const struct lu_env *env, struct osd_device *o, int key)
@@ -700,7 +723,15 @@ osd_oi_remove_table(const struct lu_env *env, struct osd_device *o, int key)
 }
 
 /**
- * Allocate and open a new entry in the specified unused slot.
+ * osd_oi_add_table() - Allocate & open a new entry in the specified unused slot
+ * @env: Lustre environment
+ * @o: OSD device
+ * @name: Lookup an existing OI by the given name
+ * @key: Index to allocate new OI
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int
 osd_oi_add_table(const struct lu_env *env, struct osd_device *o,
@@ -728,8 +759,10 @@ osd_oi_add_table(const struct lu_env *env, struct osd_device *o,
 	return 0;
 }
 
-/**
- * Depopulate the OI table.
+/*
+ * osd_oi_close_table() - Depopulate the OI table.
+ * @env: Lustre environment
+ * @o: OSD device
  */
 static void
 osd_oi_close_table(const struct lu_env *env, struct osd_device *o)
@@ -741,7 +774,14 @@ osd_oi_close_table(const struct lu_env *env, struct osd_device *o)
 }
 
 /**
- * Populate the OI table based.
+ * osd_oi_open_table() - Populate the OI table based.
+ * @env: Lustre environment
+ * @o: OSD device
+ * @count: Number of OI in system
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int
 osd_oi_open_table(const struct lu_env *env, struct osd_device *o, int count)
@@ -763,7 +803,14 @@ osd_oi_open_table(const struct lu_env *env, struct osd_device *o, int count)
 }
 
 /**
- * Determine if the type and number of OIs used by this file system.
+ * osd_oi_probe() - Determine if the type and number of OIs used by this file
+ *                  system.
+ * @env: Lustre environment
+ * @o: OSD device
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int osd_oi_probe(const struct lu_env *env, struct osd_device *o)
 {
@@ -821,7 +868,14 @@ static void osd_ost_seq_fini(const struct lu_env *env, struct osd_device *osd)
 }
 
 /**
- * Create /O subdirectory to map legacy OST objects for compatibility.
+ * osd_oi_init_compat() - Create /O subdirectory to map legacy OST objects for
+ *                        compatibility.
+ * @env: Lustre environment
+ * @o: OSD device
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 static int
 osd_oi_init_compat(const struct lu_env *env, struct osd_device *o)
@@ -874,7 +928,14 @@ osd_oi_init_remote_parent(const struct lu_env *env, struct osd_device *o)
 }
 
 /**
- * Initialize the OIs by either opening or creating them as needed.
+ * osd_oi_init() - Initialize OIs by either opening or creating them as needed.
+ * @env: Lustre environment
+ * @o: OSD device
+ * @reset: %False open existing else create
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 int osd_oi_init(const struct lu_env *env, struct osd_device *o, bool reset)
 {
@@ -1073,12 +1134,19 @@ static struct osd_idmap_cache *osd_idc_add(const struct lu_env *env,
 }
 
 /**
- * Lookup mapping for the given fid in the cache
+ * osd_idc_find_or_init() - Lookup mapping for the given fid in the cache
+ * @env: Lustre environment
+ * @osd: OSD device
+ * @fid: FID to lookup for mapping
  *
  * Initialize a new one if not found. the initialization checks whether
  * the object is local or remote. for the local objects, OI is used to
  * learn dnode#. the function is used when the caller has no information
  * about the object, e.g. at dt_insert().
+ *
+ * Return:
+ * * %0 on success
+ * * %negative on failure
  */
 struct osd_idmap_cache *osd_idc_find_or_init(const struct lu_env *env,
 					     struct osd_device *osd,
